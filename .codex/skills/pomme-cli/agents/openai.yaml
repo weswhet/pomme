@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pomme CLI"
+  short_description: "Use and validate the pomme macOS VM CLI in this repository."
+  default_prompt: "Use the repo-local pomme CLI workflow to build, test, run, and operate pomme."

@@ -1,0 +1,3477 @@
+import CryptoKit
+import Darwin
+import Foundation
+import Security
+@preconcurrency import Virtualization
+
+private enum PommeLogContext {
+    @TaskLocal static var sink: (@Sendable (String) -> Void)?
+}
+
+private enum PommeProvisioningCredentialReference {
+    /// This account is intentionally fixed. The VM UUID is the Keychain
+    /// service scope, so callers cannot select an arbitrary credential.
+    static let agentAccount = "agent-token"
+}
+
+/// Inputs which are safe to persist next to a provisioning journal. The
+/// journal itself deliberately contains neither credentials nor mutable
+/// transport configuration; this companion record retains only a fixed
+/// non-secret Keychain account reference for a resumed operation.
+struct PommeProvisioningInput: Codable, Sendable {
+    static let schema = 1
+
+    let schema: Int
+    let restoreImagePath: String
+    let memorySizeBytes: UInt64
+    let diskSizeBytes: UInt64
+    let hardwareModelData: Data
+    let machineIdentifierData: Data
+    let agentCredentialAccount: String
+    /// The APFS startup volume-group identity is discovered in Recovery. It
+    /// is optional during initial planning and is persisted only in the
+    /// companion input/metadata records, never in the signed journal or plan.
+    let startupVolumeGroupUUID: UUID?
+
+    init(
+        restoreImagePath: String,
+        memorySizeBytes: UInt64,
+        diskSizeBytes: UInt64,
+        hardwareModelData: Data,
+        machineIdentifierData: Data,
+        agentCredentialAccount: String = PommeProvisioningCredentialReference.agentAccount,
+        startupVolumeGroupUUID: UUID? = nil
+    ) {
+        schema = Self.schema
+        self.restoreImagePath = restoreImagePath
+        self.memorySizeBytes = memorySizeBytes
+        self.diskSizeBytes = diskSizeBytes
+        self.hardwareModelData = hardwareModelData
+        self.machineIdentifierData = machineIdentifierData
+        self.agentCredentialAccount = agentCredentialAccount
+        self.startupVolumeGroupUUID = startupVolumeGroupUUID
+    }
+
+    func validate(for plan: PommeProvisioningPlan) throws {
+        guard schema == Self.schema,
+              URL(fileURLWithPath: restoreImagePath).standardizedFileURL.path == restoreImagePath,
+              !restoreImagePath.isEmpty,
+              memorySizeBytes > 0,
+              diskSizeBytes > 0,
+              hardwareModelData.isEmpty == false,
+              machineIdentifierData.isEmpty == false,
+              agentCredentialAccount == PommeProvisioningCredentialReference.agentAccount,
+              plan.vm.bundlePath.hasPrefix("/")
+        else { throw PommeProvisioningError.invalidPlan }
+    }
+
+    func settingStartupVolumeGroupUUID(_ value: UUID?) -> Self {
+        .init(
+            restoreImagePath: restoreImagePath,
+            memorySizeBytes: memorySizeBytes,
+            diskSizeBytes: diskSizeBytes,
+            hardwareModelData: hardwareModelData,
+            machineIdentifierData: machineIdentifierData,
+            agentCredentialAccount: agentCredentialAccount,
+            startupVolumeGroupUUID: value
+        )
+    }
+}
+
+/// Non-secret identity exposed to the request-bound Recovery factory. The
+/// durable VM UUID comes from the immutable provisioning plan; the APFS group
+/// is optional until Recovery has observed and recorded it.
+struct PommeProvisioningRuntimeMetadata: Codable, Equatable, Sendable {
+    let vmUUID: UUID
+    let startupVolumeGroupUUID: UUID?
+}
+
+private final class PommeRetainedRuntime: @unchecked Sendable {
+    let runtime: PommeVMRuntime
+    let coordinator: PommeAgentVSOCKCoordinator?
+    let mode: BootMode
+
+    init(runtime: PommeVMRuntime, coordinator: PommeAgentVSOCKCoordinator?, mode: BootMode) {
+        self.runtime = runtime
+        self.coordinator = coordinator
+        self.mode = mode
+    }
+
+    func stop() async throws {
+        do {
+            try await runtime.stop()
+        } catch {
+            coordinator?.teardown()
+            await runtime.teardown()
+            throw error
+        }
+        coordinator?.teardown()
+        await runtime.teardown()
+    }
+}
+
+/// Owns the exact in-process Recovery VM and request staging resources.  The
+/// value is unchecked-Sendable because every Virtualization access is
+/// confined to `queue`; callers receive only closed proof methods.
+private final class PommeLiveRecoveryRuntimeResources: @unchecked Sendable {
+    let vm: VZVirtualMachine
+    let configuration: VZVirtualMachineConfiguration
+    let queue: DispatchQueue
+    let runtime: PommeVMRuntime
+    let coordinator: PommeAgentVSOCKCoordinator
+    let staging: PommeRecoveryStaging
+    let request: PommeRecoverySessionRequest
+
+    init(
+        vm: VZVirtualMachine,
+        configuration: VZVirtualMachineConfiguration,
+        queue: DispatchQueue,
+        runtime: PommeVMRuntime,
+        coordinator: PommeAgentVSOCKCoordinator,
+        staging: PommeRecoveryStaging,
+        request: PommeRecoverySessionRequest
+    ) {
+        self.vm = vm
+        self.configuration = configuration
+        self.queue = queue
+        self.runtime = runtime
+        self.coordinator = coordinator
+        self.staging = staging
+        self.request = request
+    }
+
+    func isRunningRecovery() -> Bool {
+        queue.sync { vm.state == .running }
+    }
+
+    func hasExactBootstrapAttachment() -> Bool {
+        queue.sync {
+            let matches = vm.directorySharingDevices
+                .compactMap { $0 as? VZVirtioFileSystemDevice }
+                .filter { $0.tag == PommeRecoveryStagingBuilder.tag(for: request.requestID) }
+            return matches.count == 1 && matches[0].share != nil
+        }
+    }
+
+    func clearHostStaging() throws {
+        try staging.clearShare(from: vm, on: queue)
+        try staging.removeHostArtifacts()
+    }
+
+    func stopReapAndClean() async throws -> PommeRecoveryRuntimeCleanup {
+        coordinator.teardown()
+
+        var firstError: Error?
+        do { try await runtime.stop() }
+        catch { firstError = error }
+
+        let stopped = queue.sync { vm.state == .stopped }
+        var shareDetached = false
+        do {
+            try staging.clearShare(from: vm, on: queue)
+            shareDetached = true
+        } catch {
+            if firstError == nil { firstError = error }
+        }
+
+        var stagingRemoved = false
+        do {
+            try staging.removeHostArtifacts()
+            stagingRemoved = true
+        } catch {
+            if firstError == nil { firstError = error }
+        }
+
+        if let firstError { throw firstError }
+        return .init(
+            shareDetached: shareDetached,
+            helperStoppedAndReaped: stopped,
+            stagingArtifactsRemoved: stagingRemoved,
+            sensitiveFramesCleared: true,
+            unknownStateRejected: stopped && shareDetached && stagingRemoved
+        )
+    }
+}
+
+/// Captures and stops the pre-operation VM exactly once, then delegates only
+/// the requested final-state transition.  `PommeRecoverySession` resolves
+/// `.previous` before calling this port and remains the sole policy owner.
+private actor PommeLiveRecoveryVMStatePort: PommeRecoveryVMPort {
+    typealias Capture = @Sendable () async throws -> PommeRecoveryRunState
+    typealias Request = @Sendable (VMFinalState, PommeRecoveryRunState) async throws -> Void
+    typealias Prove = @Sendable (VMFinalState, PommeRecoveryRunState) async throws -> Bool
+
+    private let captureEffect: Capture
+    private let requestEffect: Request
+    private let proveEffect: Prove
+    private var captured: PommeRecoveryRunState?
+
+    init(
+        capture: @escaping Capture,
+        request: @escaping Request,
+        prove: @escaping Prove
+    ) {
+        captureEffect = capture
+        requestEffect = request
+        proveEffect = prove
+    }
+
+    func captureState() async throws -> PommeRecoveryRunState {
+        guard captured == nil else { throw PommeRecoverySessionError.invalidLifecycle }
+        let state = try await captureEffect()
+        captured = state
+        return state
+    }
+
+    func requestFinalState(_ state: VMFinalState) async throws {
+        guard state != .previous, let captured else {
+            throw PommeRecoverySessionError.finalStateUnverified
+        }
+        try await requestEffect(state, captured)
+    }
+
+    func proveFinalState(_ state: VMFinalState) async throws -> Bool {
+        guard state != .previous, let captured else {
+            throw PommeRecoverySessionError.finalStateUnverified
+        }
+        return try await proveEffect(state, captured)
+    }
+}
+
+/// Small host-side primitives shared by the command layer and the VM runtime.
+/// The command tree owns policy; this type only performs bounded, typed work
+/// and reports unavailable integrations without mutating a VM implicitly.
+struct PommeCore {
+    /// Minimum persistent-agent operations required before a provisioned VM
+    /// may be considered usable. Recovery installation and normal-boot
+    /// verification intentionally share this exact policy.
+    static let requiredProvisioningAgentCapabilities: Set<String> = [
+        "process.start",
+        "file.open",
+        "mdm.enrollment",
+        "maintenance"
+    ]
+
+    static func supportsProvisioningAgentCapabilities(_ capabilities: [String]) -> Bool {
+        Set(capabilities).isSuperset(of: requiredProvisioningAgentCapabilities)
+    }
+
+    private static let provisioningEffectsLock = NSLock()
+    nonisolated(unsafe) private static var installedProvisioningEffects: PommeProvisioningEffects?
+    private static let provisioningRecoveryAdapterLock = NSLock()
+    nonisolated(unsafe) private static var provisioningRecoveryAdapter: (@Sendable (PommeProvisioningPlan, PommeProvisioningFinalState) async throws -> String)?
+    private static let retainedRuntimeLock = NSLock()
+    nonisolated(unsafe) private static var retainedRuntimes: [String: PommeRetainedRuntime] = [:]
+
+    /// Replace only the external effects.  Planning, journal ordering,
+    /// ownership checks, and failure retention remain Core-owned.  Tests and
+    /// a host-specific Virtualization adapter can inject deterministic effects
+    /// without changing the public command contract.
+    static func installProvisioningEffects(_ effects: PommeProvisioningEffects) {
+        provisioningEffectsLock.lock()
+        installedProvisioningEffects = effects
+        provisioningEffectsLock.unlock()
+    }
+
+    /// Returns the immutable VM identity and the optional APFS startup
+    /// volume-group identity recorded by a Recovery integration. The helper
+    /// deliberately reads only public metadata; credentials remain confined
+    /// to the private provisioning-input companion file.
+    static func provisioningRuntimeMetadata(
+        for plan: PommeProvisioningPlan
+    ) throws -> PommeProvisioningRuntimeMetadata {
+        try plan.validate()
+        let bundle = BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
+        guard bundle.rootURL.standardizedFileURL.path == plan.vm.bundlePath else {
+            throw PommeProvisioningError.ownershipMismatch
+        }
+        let metadata = try metadataPayload(bundle: bundle)
+        guard let rawVMUUID = metadata[Constants.vmUUIDMetadataKey] as? String,
+              let metadataVMUUID = UUID(uuidString: rawVMUUID),
+              metadataVMUUID == plan.vm.uuid,
+              rawVMUUID.lowercased() == plan.vm.uuid.uuidString.lowercased()
+        else { throw PommeProvisioningError.ownershipMismatch }
+
+        let startupVolumeGroupUUID: UUID?
+        if let rawGroup = metadata["startupVolumeGroupUUID"] {
+            guard let value = rawGroup as? String,
+                  let group = UUID(uuidString: value),
+                  value.lowercased() == group.uuidString.lowercased()
+            else { throw PommeProvisioningError.invalidPlan }
+            startupVolumeGroupUUID = group
+        } else {
+            startupVolumeGroupUUID = nil
+        }
+        return .init(vmUUID: plan.vm.uuid, startupVolumeGroupUUID: startupVolumeGroupUUID)
+    }
+
+    /// Persist a Recovery-observed APFS startup volume-group identity without
+    /// changing the immutable plan or signed journal. Repeating the same
+    /// observation is idempotent; a different identity is an ownership error.
+    static func persistProvisioningStartupVolumeGroup(
+        _ volumeGroupUUID: UUID,
+        for plan: PommeProvisioningPlan
+    ) throws {
+        let current = try provisioningRuntimeMetadata(for: plan)
+        if let existing = current.startupVolumeGroupUUID {
+            guard existing == volumeGroupUUID else { throw PommeProvisioningError.ownershipMismatch }
+            return
+        }
+        let bundle = BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
+        var metadata = try metadataPayload(bundle: bundle)
+        metadata["startupVolumeGroupUUID"] = volumeGroupUUID.uuidString.lowercased()
+        try writeMetadataPayload(metadata, bundle: bundle)
+    }
+
+    /// Installs the request-bound Recovery adapter used by the two provisioning
+    /// phases that must run outside normal macOS.  The closure is deliberately
+    /// typed to the immutable plan and final state; it cannot select a
+    /// different VM, role, or transport.  Until the host supplies this adapter
+    /// those phases fail closed after their journal intent is committed.
+    static func installProvisioningRecoveryAdapter(
+        _ adapter: (@Sendable (PommeProvisioningPlan, PommeProvisioningFinalState) async throws -> String)?
+    ) {
+        provisioningRecoveryAdapterLock.lock()
+        provisioningRecoveryAdapter = adapter
+        provisioningRecoveryAdapterLock.unlock()
+    }
+
+    private static func currentProvisioningRecoveryAdapter() -> (@Sendable (PommeProvisioningPlan, PommeProvisioningFinalState) async throws -> String)? {
+        provisioningRecoveryAdapterLock.lock()
+        defer { provisioningRecoveryAdapterLock.unlock() }
+        return provisioningRecoveryAdapter
+    }
+
+    /// Production composition for every request-bound Recovery operation.
+    /// Constructing the factory is side-effect free; VM state, credentials,
+    /// staging, and Virtualization objects are resolved afresh for one exact
+    /// invocation only after the command layer has acquired the VM lease.
+    static func makeLiveRecoveryIntegrationFactory() -> PommeRecoveryIntegrationFactory {
+        PommeLiveRecoveryIntegration.factory(
+            dependencies: .init(
+                resolveVM: { reference in
+                    let plan = try loadOwnedProvisioningPlan(reference: reference)
+                    let metadata = try provisioningRuntimeMetadata(for: plan)
+                    return try .init(
+                        ownership: plan.vm,
+                        targetVolumeGroupUUID: metadata.startupVolumeGroupUUID
+                    )
+                },
+                resolveExecutable: { _ in
+                    let identity = try runningExecutableIdentity()
+                    return try .init(url: identity.url, sha256: identity.sha256)
+                },
+                makeRuntime: { reference, request, recoveryConfiguration, launcher in
+                    try await makeLiveRecoveryRuntime(
+                        reference: reference,
+                        request: request,
+                        recoveryConfiguration: recoveryConfiguration,
+                        launcher: launcher
+                    )
+                },
+                stagingParent: { _ in try liveRecoveryStagingParent() },
+                recoveryProfileEvidence: { reference in
+                    try await liveRecoveryProfileEvidence(reference: reference)
+                },
+                persistentAgentSecret: { reference in
+                    let plan = try loadOwnedProvisioningPlan(reference: reference)
+                    return try existingProvisioningAgentCredential(for: plan)
+                },
+                resolveInstallMode: { reference, payload in
+                    let requested = try JSONDecoder().decode(PommeProvisioningPlan.self, from: payload)
+                    let installed = try loadOwnedProvisioningPlan(reference: reference)
+                    guard requested == installed else {
+                        throw PommeLiveRecoveryIntegration.Error.ownershipMismatch
+                    }
+                    return try provisioningRuntimeMetadata(for: installed).startupVolumeGroupUUID == nil
+                        ? .initial
+                        : .repair
+                }
+            )
+        )
+    }
+
+    static func expectedProvisionedAgentDigest(reference: VMReference) throws -> String {
+        try loadOwnedProvisioningPlan(reference: reference).normalAgent.executableDigest
+    }
+
+    static func stableVMRunState(reference: VMReference) throws -> VMRunStateSnapshot {
+        switch try liveRecoveryRunState(from: vmStatusPayload(reference: reference)) {
+        case .stopped: return .stopped
+        case .running(let mode): return .running(mode)
+        case .paused(let mode): return .paused(previousBootMode: mode)
+        }
+    }
+
+    static func restoreStableVMRunState(
+        _ desired: VMRunStateSnapshot,
+        reference: VMReference
+    ) async throws {
+        let finalState: VMFinalState
+        let captured: PommeRecoveryRunState
+        switch desired {
+        case .stopped:
+            finalState = .stopped
+            captured = .stopped
+        case .running(let mode):
+            finalState = mode == .normal ? .normal : .recovery
+            captured = .running(mode)
+        case .paused(let mode):
+            finalState = .paused
+            captured = .paused(previousBootMode: mode)
+        }
+        try await requestLiveRecoveryFinalState(
+            finalState,
+            captured: captured,
+            reference: reference
+        )
+    }
+
+    static func provesStableVMRunState(
+        _ desired: VMRunStateSnapshot,
+        reference: VMReference
+    ) throws -> Bool {
+        try stableVMRunState(reference: reference) == desired
+    }
+
+    private static func makeLiveRecoveryRuntime(
+        reference: VMReference,
+        request: PommeRecoverySessionRequest,
+        recoveryConfiguration: PommeRecoveryRuntimeConfiguration,
+        launcher: PommeLiveRecoveryIntegration.Launcher
+    ) async throws -> PommeLiveRecoveryIntegration.Runtime {
+        let plan = try loadOwnedProvisioningPlan(reference: reference)
+        guard request.vmUUID == plan.vm.uuid,
+              request.requestID == launcher.sessionID,
+              request.vmUUID == launcher.vmID,
+              request.listenerPort == launcher.listenerPort,
+              recoveryConfiguration.request == request,
+              recoveryConfiguration.staging.request == request
+        else { throw PommeLiveRecoveryIntegration.Error.requestBindingRejected }
+
+        // Capture and stop before constructing any VZ object backed by this
+        // VM's auxiliary storage. The session receives this immutable capture
+        // and remains the sole owner of the requested final-state policy.
+        let capturedState = try await captureAndStopForLiveRecovery(reference: reference)
+        do {
+        try await waitForLiveRecoveryAuxiliaryStorageRelease(
+            at: reference.bundle.auxiliaryStorageURL
+        )
+
+        // Load the one-shot token through an owner-only, no-follow descriptor
+        // before the guest is started. The coordinator retains only the
+        // normalized in-memory value and never reopens staging after detach.
+        let recoverySecret = try readLiveRecoveryCredential(
+            from: recoveryConfiguration.staging
+        )
+        let expectedRole: PommeAgentVSOCKRole
+        switch PommeRecoveryListenerPort(rawValue: request.listenerPort) {
+        case .bootstrap: expectedRole = .recoveryBootstrap
+        case .operation: expectedRole = .recoveryRuntime
+        case nil: throw PommeLiveRecoveryIntegration.Error.requestBindingRejected
+        }
+        let binding = PommeAgentVSOCKBinding(
+            vmID: request.vmUUID,
+            sessionID: request.requestID
+        )
+
+        let configuration = try makeProvisioningVMConfiguration(
+            for: plan,
+            recoveryConfiguration: recoveryConfiguration
+        )
+        let queue = DispatchQueue(
+            label: "com.github.weswhet.pomme.recovery-runtime.\(request.requestID.uuidString.lowercased())"
+        )
+        let vm = VZVirtualMachine(configuration: configuration, queue: queue)
+        guard let socketDevice = queue.sync(execute: {
+            vm.socketDevices.first as? VZVirtioSocketDevice
+        }) else {
+            throw PommeLiveRecoveryIntegration.Error.runtimeRejected
+        }
+        let coordinator = PommeAgentVSOCKCoordinator(
+            socketDevice: socketDevice,
+            queue: queue,
+            secretProvider: { role in
+                guard role == expectedRole else { throw PommeAgentVSOCKError.invalidBinding }
+                return recoverySecret
+            },
+            bindingProvider: { role in
+                guard role == expectedRole else { throw PommeAgentVSOCKError.invalidBinding }
+                return binding
+            },
+            exchangeTimeout: Constants.agentRoundTripTimeout
+        )
+        let bundle = reference.bundle
+        let vmRuntime = PommeVMRuntime(
+            vm: vm,
+            configuration: configuration,
+            queue: queue,
+            saveStateURL: bundle.saveStateURL,
+            snapshotsURL: bundle.snapshotsURL,
+            requiredSnapshotRestoreURL: bundle.requiredSnapshotRestoreURL,
+            agentProvider: coordinator,
+            bootMode: .recovery
+        )
+        let resources = PommeLiveRecoveryRuntimeResources(
+            vm: vm,
+            configuration: configuration,
+            queue: queue,
+            runtime: vmRuntime,
+            coordinator: coordinator,
+            staging: recoveryConfiguration.staging,
+            request: request
+        )
+        let vmPort = PommeLiveRecoveryVMStatePort(
+            capture: {
+                capturedState
+            },
+            request: { finalState, captured in
+                try await requestLiveRecoveryFinalState(
+                    finalState,
+                    captured: captured,
+                    reference: reference
+                )
+            },
+            prove: { finalState, captured in
+                try await proveLiveRecoveryFinalState(
+                    finalState,
+                    captured: captured,
+                    reference: reference
+                )
+            }
+        )
+        let effects = PommeRecoveryRuntimeEffects(
+            verifyVMIdentity: {
+                request.vmUUID == plan.vm.uuid
+                    && plan.vm.bundlePath == reference.standardizedPath
+            },
+            startRecovery: { try await resources.runtime.start() },
+            verifyRecoveryBoot: { resources.isRunningRecovery() },
+            helperIsAlive: { resources.isRunningRecovery() },
+            verifyBootstrapAttachment: { resources.hasExactBootstrapAttachment() },
+            stopReapAndClean: { try await resources.stopReapAndClean() }
+        )
+        let terminal = PommeRecoveryVirtualizationKeyboardPort(
+            backend: VirtualizationPrivateHeadlessBackend(
+                virtualMachine: vm,
+                configuration: configuration,
+                queue: queue
+            ),
+            timeout: Constants.defaultRecoveryAgentTimeout
+        )
+        return .init(
+            coordinator: coordinator,
+            vmPort: vmPort,
+            effects: effects,
+            terminalPort: terminal,
+            clearHostStagingBeforeOperation: {
+                try resources.clearHostStaging()
+            },
+            verifySessionBinding: { candidate in
+                candidate == request
+                    && binding.vmID == candidate.vmUUID.uuidString.lowercased()
+                    && binding.sessionID == candidate.requestID.uuidString.lowercased()
+            },
+            restoreCapturedState: {
+                try await restoreCapturedLiveRecoveryState(
+                    capturedState,
+                    reference: reference
+                )
+            }
+        )
+        } catch {
+            try await restoreCapturedLiveRecoveryState(
+                capturedState,
+                reference: reference
+            )
+            throw error
+        }
+    }
+
+    private static func restoreCapturedLiveRecoveryState(
+        _ captured: PommeRecoveryRunState,
+        reference: VMReference
+    ) async throws {
+        let finalState: VMFinalState
+        switch captured {
+        case .stopped: finalState = .stopped
+        case .running(.normal): finalState = .normal
+        case .running(.recovery): finalState = .recovery
+        case .paused: finalState = .paused
+        }
+        try await requestLiveRecoveryFinalState(
+            finalState,
+            captured: captured,
+            reference: reference
+        )
+        guard try await proveLiveRecoveryFinalState(
+            finalState,
+            captured: captured,
+            reference: reference
+        ) else { throw PommeRecoverySessionError.finalStateUnverified }
+    }
+
+    private static func loadOwnedProvisioningPlan(
+        reference: VMReference
+    ) throws -> PommeProvisioningPlan {
+        let bundle = reference.bundle
+        let keyURL = provisioningKeyURL(bundle: bundle)
+        guard isRegularFile(keyURL),
+              isRegularFile(provisioningJournalURL(bundle: bundle))
+        else { throw PommeProvisioningError.ownershipMismatch }
+        let key = try Data(contentsOf: keyURL, options: .mappedIfSafe)
+        guard key.count >= 32 else { throw PommeProvisioningError.integrityFailure }
+        let signer = try PommeProvisioningJournalSigner(key: key)
+        let journal = try provisioningRepository(
+            bundleURL: bundle.rootURL,
+            signer: signer
+        ).load()
+        try journal.plan.validate()
+        guard journal.plan.vm.bundlePath == reference.standardizedPath,
+              reference.name == nil || journal.plan.vm.name == reference.name
+        else { throw PommeProvisioningError.ownershipMismatch }
+        let ownershipData = try Data(
+            contentsOf: provisioningOwnershipURL(bundle: bundle),
+            options: .mappedIfSafe
+        )
+        guard try JSONDecoder().decode(PommeVMOwnership.self, from: ownershipData) == journal.plan.vm else {
+            throw PommeProvisioningError.ownershipMismatch
+        }
+        return journal.plan
+    }
+
+    private static func liveRecoveryProfileEvidence(
+        reference: VMReference
+    ) async throws -> PommeRecoveryProfileEvidence {
+        let plan = try loadOwnedProvisioningPlan(reference: reference)
+        guard plan.profile == .tahoe,
+              plan.restore.version == PommeRecoveryProfileSelector.tahoe2660Build25G72.version,
+              plan.restore.build == PommeRecoveryProfileSelector.tahoe2660Build25G72.build,
+              plan.display == .required,
+              try await verifyProvisioningOwnership(plan.vm) == plan.vm
+        else { throw PommeRecoveryInputQualificationError.unsupportedBuild }
+        try VirtualizationPrivateABIPreflight.validateRuntime()
+        return .init(
+            build: .tahoe2660Build25G72,
+            locale: .english,
+            geometry: .pixels1280x800,
+            privateHostABI: .qualifiedRecoveryInputV1,
+            manifestHash: .tahoe2660Build25G72,
+            ownership: .verified
+        )
+    }
+
+    private static func liveRecoveryStagingParent() throws -> URL {
+        let parent = try applicationSupportRoot()
+            .appendingPathComponent("RecoveryStaging", isDirectory: true)
+            .standardizedFileURL
+        try FileManager.default.createDirectory(
+            at: parent,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: NSNumber(value: 0o700)]
+        )
+        guard chmod(parent.path, mode_t(0o700)) == 0 else {
+            throw PommeRecoveryStagingError.unsafeParent
+        }
+        var info = stat()
+        guard lstat(parent.path, &info) == 0,
+              info.st_uid == geteuid(),
+              info.st_mode & S_IFMT == S_IFDIR,
+              info.st_mode & 0o777 == 0o700,
+              parent.path == parent.resolvingSymlinksInPath().standardizedFileURL.path
+        else { throw PommeRecoveryStagingError.unsafeParent }
+        return parent
+    }
+
+    private static func readLiveRecoveryCredential(
+        from staging: PommeRecoveryStaging
+    ) throws -> String {
+        let name = PommeRecoveryArtifactNames.credential
+        let rootFD = Darwin.open(
+            staging.rootURL.path,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard rootFD >= 0 else { throw PommeLiveRecoveryIntegration.Error.credentialRejected }
+        defer { _ = Darwin.close(rootFD) }
+
+        let descriptor = openat(rootFD, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw PommeLiveRecoveryIntegration.Error.credentialRejected }
+        defer { _ = Darwin.close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0,
+              info.st_uid == geteuid(),
+              info.st_mode & S_IFMT == S_IFREG,
+              info.st_mode & 0o777 == 0o400,
+              info.st_nlink == 1,
+              info.st_size > 0,
+              info.st_size <= 4_096
+        else { throw PommeLiveRecoveryIntegration.Error.credentialRejected }
+
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: Int(info.st_size))
+        while data.count < Int(info.st_size) {
+            let count = buffer.withUnsafeMutableBytes { bytes in
+                Darwin.read(
+                    descriptor,
+                    bytes.baseAddress,
+                    min(bytes.count, Int(info.st_size) - data.count)
+                )
+            }
+            if count < 0, errno == EINTR { continue }
+            guard count > 0 else { throw PommeLiveRecoveryIntegration.Error.credentialRejected }
+            data.append(contentsOf: buffer.prefix(count))
+        }
+        guard data.count == Int(info.st_size),
+              let raw = String(data: data, encoding: .utf8)
+        else { throw PommeLiveRecoveryIntegration.Error.credentialRejected }
+        do { return try PommeAgentAuthentication.normalized(raw) }
+        catch { throw PommeLiveRecoveryIntegration.Error.credentialRejected }
+    }
+
+    private static func provisioningEffects(
+        firstBootLease: VMBundleMutationLease
+    ) -> PommeProvisioningEffects {
+        provisioningEffectsLock.lock()
+        defer { provisioningEffectsLock.unlock() }
+        if let installedProvisioningEffects {
+            return installedProvisioningEffects
+        }
+        return makeLiveProvisioningEffects(firstBootLease: firstBootLease)
+    }
+
+    // MARK: Public argument and output helpers
+
+    static func normalizedPublicArguments(_ arguments: [String]) -> [String] {
+        arguments
+    }
+
+    static func absoluteHostPath(_ path: String) -> String {
+        let url = URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
+        return url.standardizedFileURL.path
+    }
+
+    static func stringValue(_ value: Any?) -> String {
+        switch value {
+        case let value as String:
+            return value
+        case let value as CustomStringConvertible:
+            return value.description
+        case nil, is NSNull:
+            return ""
+        default:
+            return ""
+        }
+    }
+
+    static func hostExitCode(from object: [String: Any], default defaultCode: Int32 = 1) -> Int32 {
+        if let value = object["hostExitCode"] as? Int { return Int32(value) }
+        if let value = object["hostExitCode"] as? Int32 { return value }
+        if let value = object["hostExitCode"] as? NSNumber { return value.int32Value }
+        if let value = object["exitCode"] as? NSNumber { return value.int32Value }
+        return defaultCode
+    }
+
+    static func log(_ message: String) {
+        let safe = message
+            .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+            .joined(separator: " ")
+        if let sink = PommeLogContext.sink {
+            sink(safe)
+            return
+        }
+        fputs("[\(Date().pommeISO8601String)] \(safe)\n", stderr)
+        fflush(stderr)
+    }
+
+    static func withLogSink<Result: Sendable>(
+        _ sink: @escaping @Sendable (String) -> Void,
+        operation: @escaping @Sendable () async throws -> Result
+    ) async rethrows -> Result {
+        try await PommeLogContext.$sink.withValue(sink) {
+            try await operation()
+        }
+    }
+
+    // MARK: Virtualization queue boundaries
+
+    static func start(_ vm: VZVirtualMachine, on queue: DispatchQueue) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            let vm = QueueConfined(value: vm)
+            queue.async {
+                vm.value.start { result in
+                    continuation.resume(with: result)
+                }
+            }
+        }
+    }
+
+    static func start(
+        _ vm: VZVirtualMachine,
+        options: VZVirtualMachineStartOptions,
+        on queue: DispatchQueue
+    ) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let vm = QueueConfined(value: vm)
+            let options = QueueConfined(value: options)
+            queue.async {
+                vm.value.start(options: options.value) { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
+                }
+            }
+        }
+    }
+
+    static func pause(_ vm: VZVirtualMachine, on queue: DispatchQueue) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            let vm = QueueConfined(value: vm)
+            queue.async {
+                vm.value.pause { result in
+                    continuation.resume(with: result)
+                }
+            }
+        }
+    }
+
+    static func resume(_ vm: VZVirtualMachine, on queue: DispatchQueue) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            let vm = QueueConfined(value: vm)
+            queue.async {
+                vm.value.resume { result in
+                    continuation.resume(with: result)
+                }
+            }
+        }
+    }
+
+    static func stop(_ vm: VZVirtualMachine, on queue: DispatchQueue) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let vm = QueueConfined(value: vm)
+            queue.async {
+                vm.value.stop { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
+                }
+            }
+        }
+    }
+
+    static func requestStop(_ vm: VZVirtualMachine, on queue: DispatchQueue) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let vm = QueueConfined(value: vm)
+            queue.async {
+                do {
+                    try vm.value.requestStop()
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    static func forceStop(_ vm: VZVirtualMachine, on queue: DispatchQueue) async throws {
+        try await stop(vm, on: queue)
+    }
+
+    static func saveMachineState(_ vm: VZVirtualMachine, to url: URL, on queue: DispatchQueue) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let vm = QueueConfined(value: vm)
+            let url = QueueConfined(value: url)
+            queue.async {
+                vm.value.saveMachineStateTo(url: url.value) { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
+                }
+            }
+        }
+    }
+
+    static func restoreMachineState(_ vm: VZVirtualMachine, from url: URL, on queue: DispatchQueue) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let vm = QueueConfined(value: vm)
+            let url = QueueConfined(value: url)
+            queue.async {
+                vm.value.restoreMachineStateFrom(url: url.value) { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
+                }
+            }
+        }
+    }
+
+    static func state(of vm: VZVirtualMachine, on queue: DispatchQueue) async -> VZVirtualMachine.State {
+        await withCheckedContinuation { continuation in
+            let vm = QueueConfined(value: vm)
+            queue.async { continuation.resume(returning: vm.value.state) }
+        }
+    }
+
+    static func canPause(_ vm: VZVirtualMachine, on queue: DispatchQueue) async -> Bool {
+        await withCheckedContinuation { continuation in
+            let vm = QueueConfined(value: vm)
+            queue.async { continuation.resume(returning: vm.value.canPause) }
+        }
+    }
+
+    static func canResume(_ vm: VZVirtualMachine, on queue: DispatchQueue) async -> Bool {
+        await withCheckedContinuation { continuation in
+            let vm = QueueConfined(value: vm)
+            queue.async { continuation.resume(returning: vm.value.canResume) }
+        }
+    }
+
+    static func canRequestStop(_ vm: VZVirtualMachine, on queue: DispatchQueue) async -> Bool {
+        await withCheckedContinuation { continuation in
+            let vm = QueueConfined(value: vm)
+            queue.async { continuation.resume(returning: vm.value.canRequestStop) }
+        }
+    }
+
+    static func stableVMMACAddress(machineIdentifierData: Data) -> String {
+        var octets = Array(SHA256.hash(data: machineIdentifierData).prefix(6))
+        octets[0] = (octets[0] & 0b1111_1100) | 0b0000_0010
+        return octets.map { String(format: "%02x", $0) }.joined(separator: ":")
+    }
+
+    // MARK: Pomme control protocol bridge
+
+    static func sendControlObject(_ payload: [String: Any], bundle: BundleLayout) throws -> [String: Any] {
+        let command = try controlCommand(from: payload)
+        var body = payload.filter { key, _ in
+            !["type", "command", "operation", "id", "streaming"].contains(key)
+        }
+        if command == "agent.perform" {
+            guard let operation = payload["operation"] as? String,
+                  operation != command
+            else { throw RunnerError.invalidControlCommand(command) }
+            body["operation"] = operation
+        }
+        let requestPayload = body.isEmpty ? nil : try JSONValue(any: body)
+        let record = try runtimeRecord(for: bundle)
+        let identity = PommeRuntimeIdentity(
+            socketPath: record.socketPath,
+            pid: record.pid,
+            startedAt: record.startedAt
+        )
+        let result = try PommeControlSocketClient(identity: identity).send(
+            PommeControlRequest(command: command, payload: requestPayload)
+        )
+        guard let object = result.objectValue else {
+            return ["ok": true, "response": result.publicValue, "hostExitCode": 0]
+        }
+        var output = object.mapValues(\.publicValue)
+        output["ok"] = output["ok"] as? Bool ?? true
+        output["hostExitCode"] = output["hostExitCode"] ?? 0
+        return output
+    }
+
+    static func controlCommandPayload(
+        _ command: PommeLifecycleCommand,
+        reference: VMReference
+    ) throws -> [String: Any] {
+        let payload = try sendControlObject(["command": command.rawValue], bundle: reference.bundle)
+        var result = payload
+        result["operation"] = command.rawValue
+        if let name = reference.name { result["name"] = name }
+        result["bundlePath"] = reference.bundle.rootURL.path
+        return result
+    }
+
+    private static func controlCommand(from payload: [String: Any]) throws -> String {
+        let candidate = (payload["command"] as? String) ?? (payload["operation"] as? String)
+        guard let candidate, ["pause", "resume", "stop", "force-stop", "status", "inspect", "snapshot-save", "agent.perform"].contains(candidate) else {
+            throw RunnerError.invalidControlCommand(candidate ?? "")
+        }
+        return candidate
+    }
+
+    private static func runtimeRecord(for bundle: BundleLayout) throws -> PommeRuntimeRecord {
+        let directory = try runtimeDirectory(create: false)
+        let expectedPath = bundle.rootURL.standardizedFileURL.path
+        let urls = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        for url in urls where url.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: url),
+                  let record = try? JSONDecoder().decode(PommeRuntimeRecord.self, from: data),
+                  URL(fileURLWithPath: record.bundlePath).standardizedFileURL.path == expectedPath else { continue }
+            return record
+        }
+        throw RunnerError.noRunningVM(bundle.pommeSocketURL)
+    }
+
+    // MARK: Status and inspection
+
+    static func listVMsPayload() throws -> [String: Any] {
+        let directory = try vmStoreDirectory(create: false)
+        guard FileManager.default.fileExists(atPath: directory.path) else {
+            return ["ok": true, "vms": []]
+        }
+        let urls = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+        let entries = try urls.compactMap { url -> [String: Any]? in
+            guard url.pathExtension == "bundle",
+                  (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { return nil }
+            let name = url.deletingPathExtension().lastPathComponent
+            guard (try? validateVMName(name)) != nil else { return nil }
+            let reference = VMReference(name: name, bundle: BundleLayout(rootURL: url))
+            return try vmStatusPayload(reference: reference)
+        }.sorted { stringValue($0["name"]) < stringValue($1["name"]) }
+        return ["ok": true, "vms": entries]
+    }
+
+    static func vmStatusPayload(reference: VMReference) throws -> [String: Any] {
+        do {
+            var payload = try sendControlObject(["command": "status"], bundle: reference.bundle)
+            payload["name"] = reference.name ?? stringValue(payload["name"])
+            payload["bundlePath"] = reference.bundle.rootURL.path
+            if payload["guestAgent"] == nil {
+                payload["guestAgent"] = guestAgentPayload(.offline(role: .normal))
+            }
+            return payload
+        } catch RunnerError.noRunningVM {
+            var payload = offlineStatusPayload(bundle: reference.bundle)
+            if let name = reference.name { payload["name"] = name }
+            return payload
+        }
+    }
+
+    static func vmInspectPayload(reference: VMReference) throws -> [String: Any] {
+        var payload: [String: Any]
+        do {
+            payload = try sendControlObject(["command": "inspect"], bundle: reference.bundle)
+        } catch RunnerError.noRunningVM {
+            payload = offlineStatusPayload(bundle: reference.bundle)
+        }
+        payload["name"] = reference.name ?? stringValue(payload["name"])
+        payload["bundlePath"] = reference.bundle.rootURL.path
+        if let metadata = try? metadataPayload(bundle: reference.bundle) { payload["metadata"] = metadata }
+        if payload["guestAgent"] == nil { payload["guestAgent"] = guestAgentPayload(.offline(role: .normal)) }
+        return payload
+    }
+
+    static func vmHealthPayload(reference: VMReference) throws -> [String: Any] {
+        let status = try vmStatusPayload(reference: reference)
+        let running = status["helperRunning"] as? Bool == true
+        let agent = status["guestAgent"] as? [String: Any]
+        let connected = agent?["connection"] as? String == GuestAgentStatusV1.ConnectionState.connected.rawValue
+        return [
+            "ok": running && connected,
+            "healthy": running && connected,
+            "hostExitCode": running && connected ? 0 : 1,
+            "name": reference.name as Any,
+            "checks": [
+                ["name": "helper", "ok": running],
+                ["name": "guestAgent", "ok": connected]
+            ],
+            "guestAgent": agent ?? guestAgentPayload(.offline(role: .normal))
+        ]
+    }
+
+    static func vmCapabilitiesPayload(reference: VMReference) throws -> [String: Any] {
+        let status = try vmStatusPayload(reference: reference)
+        let agent = status["guestAgent"] as? [String: Any] ?? guestAgentPayload(.offline(role: .normal))
+        return [
+            "ok": status["ok"] as? Bool ?? false,
+            "name": reference.name as Any,
+            "guestAgent": agent,
+            "capabilities": agent["capabilities"] ?? [],
+            "hostExitCode": status["ok"] as? Bool == true ? 0 : 1
+        ]
+    }
+
+    private static func offlineStatusPayload(bundle: BundleLayout) -> [String: Any] {
+        var payload: [String: Any] = [
+            "ok": true,
+            "helperRunning": false,
+            "vmState": "stopped",
+            "bootMode": "none",
+            "bundlePath": bundle.rootURL.path,
+            "pommeSocket": bundle.pommeSocketURL.path,
+            "guestAgent": guestAgentPayload(.offline(role: .normal)),
+            "jobs": []
+        ]
+        if let metadata = try? metadataPayload(bundle: bundle) { payload["metadata"] = metadata }
+        return payload
+    }
+
+    private static func guestAgentPayload(_ status: GuestAgentStatusV1) -> [String: Any] {
+        [
+            "connection": status.connection.rawValue,
+            "role": status.role.rawValue,
+            "protocolVersion": status.protocolVersion.map { $0 as Any } ?? NSNull(),
+            "executableDigest": status.executableDigest.map { $0 as Any } ?? NSNull(),
+            "capabilities": status.capabilities,
+            "updateState": status.updateState.rawValue
+        ]
+    }
+
+    // MARK: Destructive lifecycle and creation integration
+
+    static func destroyVMPayload(reference: VMReference, confirmation: String?) throws -> [String: Any] {
+        guard let name = reference.name else { throw RunnerError.vmDestroyRequiresNamedVM }
+        guard confirmation == nil || confirmation == name else {
+            throw RunnerError.vmDestroyConfirmationMismatch(name)
+        }
+        guard FileManager.default.fileExists(atPath: reference.bundle.rootURL.path) else {
+            throw RunnerError.namedVMNotFound(name)
+        }
+        if (try? runtimeRecord(for: reference.bundle)) != nil {
+            throw RunnerError.virtualMachineState("Stop the VM before deleting it.")
+        }
+        let credentialUUID = vmUUID(for: reference.bundle).flatMap(UUID.init(uuidString:))
+        try FileManager.default.removeItem(at: reference.bundle.rootURL)
+        if let credentialUUID {
+            // Delete only the credential bound to this exact Pomme VM UUID;
+            // an absent item is an idempotent cleanup success.
+            try removeProvisioningAgentCredential(
+                vmUUID: credentialUUID,
+                account: PommeProvisioningCredentialReference.agentAccount
+            )
+        }
+        return ["ok": true, "operation": "delete", "name": name, "hostExitCode": 0]
+    }
+
+    static func createVMPayload(
+        arguments: CLIOptions,
+        reference: VMReference,
+        lease: VMBundleMutationLease
+    ) async throws -> [String: Any] {
+        try await createProvisioningPayload(
+            config: nil,
+            arguments: arguments,
+            reference: reference,
+            lease: lease
+        )
+    }
+
+    static func createConfiguredVMPayload(
+        config: VMCreationConfigV1,
+        arguments: CLIOptions,
+        reference: VMReference,
+        lease: VMBundleMutationLease
+    ) async throws -> [String: Any] {
+        try await createProvisioningPayload(
+            config: config,
+            arguments: arguments,
+            reference: reference,
+            lease: lease
+        )
+    }
+
+    static func stopAndStartPayload(
+        reference: VMReference,
+        bootMode: BootMode,
+        user _: String?,
+        password _: String?,
+        bootstrapOptions _: SIPBootstrapOptions,
+        timeout: TimeInterval,
+        recoveryAgentEnabled _: Bool = true,
+        debug _: Bool = false
+    ) throws -> [String: Any] {
+        guard timeout > 0 else {
+            throw RunnerError.virtualMachineState("Pomme lifecycle timeout must be greater than zero.")
+        }
+        return try startRuntimeInBackground(reference: reference, bootMode: bootMode, timeout: timeout)
+    }
+
+    static func startRequiredSnapshotRestorePayload(reference: VMReference) throws -> [String: Any] {
+        try controlCommandPayload(.resume, reference: reference)
+    }
+
+    static func runInternalHelper(bundlePath: String, name: String?, bootMode: BootMode) async throws {
+        try await runForegroundRuntime(
+            reference: VMReference(name: name, bundle: BundleLayout(rootURL: URL(fileURLWithPath: bundlePath))),
+            bootMode: bootMode
+        )
+    }
+
+    /// Entry point used by the private runtime process.  The argument grammar
+    /// is intentionally closed and has no public aliases.
+    static func runInternalHelper(arguments: [String]) async -> Int32 {
+        do {
+            let values = try parseRuntimeArguments(arguments)
+            try await runInternalHelper(
+                bundlePath: values.bundlePath,
+                name: values.name,
+                bootMode: values.bootMode
+            )
+            return 0
+        } catch {
+            log("Pomme runtime failed: \(error.localizedDescription)")
+            return 1
+        }
+    }
+
+    // MARK: Durable provisioning
+
+    private struct ProvisioningPreparation: Sendable {
+        let plan: PommeProvisioningPlan
+        let input: PommeProvisioningInput
+        let signer: PommeProvisioningJournalSigner
+        let restoreImage: URL
+    }
+
+    private static func createProvisioningPayload(
+        config: VMCreationConfigV1?,
+        arguments: CLIOptions,
+        reference: VMReference,
+        lease: VMBundleMutationLease
+    ) async throws -> [String: Any] {
+        guard let name = reference.name else {
+            throw RunnerError.missingVMNameForCreate
+        }
+        guard lease.validates(name: name) else {
+            throw VMBundleMutationLease.Error.invalidScope(name: name)
+        }
+        guard !FileManager.default.fileExists(atPath: reference.bundle.rootURL.path) else {
+            throw RunnerError.hostCommandFailed(
+                "A managed VM named \(name) already exists. Delete it explicitly before creating a replacement."
+            )
+        }
+
+        // All catalog, profile, image, hardware, and immutable identity checks
+        // happen before the bundle is touched.  An unknown build or profile
+        // therefore cannot leave a partial VM behind.
+        let preparation = try await prepareProvisioning(
+            config: config,
+            arguments: arguments,
+            reference: reference
+        )
+        let repository = try provisioningRepository(
+            bundleURL: reference.bundle.rootURL,
+            signer: preparation.signer
+        )
+        let orchestrator = PommeProvisioningOrchestrator(
+            signer: preparation.signer,
+            repository: repository,
+            effects: provisioningEffects(firstBootLease: lease)
+        )
+
+        do {
+            // The empty bundle is the durable journal anchor.  It is retained
+            // on every failure; only the installer phase is allowed to create
+            // Virtualization state after the journal exists.
+            if FileManager.default.fileExists(atPath: reference.bundle.rootURL.path) {
+                var isDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(
+                    atPath: reference.bundle.rootURL.path,
+                    isDirectory: &isDirectory
+                ), isDirectory.boolValue else {
+                    throw RunnerError.hostCommandFailed("The Pomme VM bundle path is not a directory.")
+                }
+            } else {
+                try FileManager.default.createDirectory(
+                    at: reference.bundle.rootURL,
+                    withIntermediateDirectories: false,
+                    attributes: [.posixPermissions: 0o700]
+                )
+            }
+            try writeProvisioningPreparation(preparation, bundle: reference.bundle)
+            try await orchestrator.start(preparation.plan)
+        } catch {
+            // Never delete a failed VM or its journal.  The caller can resume
+            // the exact plan after correcting the external integration.
+            throw error
+        }
+
+        var payload: [String: Any] = [
+            "ok": true,
+            "operation": "vm-create",
+            "hostExitCode": 0,
+            "name": name,
+            "bundlePath": reference.bundle.rootURL.path,
+            "restoreImage": preparation.restoreImage.path,
+            "provisioning": [
+                "schema": PommeProvisioningPlan.schemaVersion,
+                "planDigest": preparation.plan.digest,
+                "finalState": preparation.plan.finalState.rawValue,
+                "journal": provisioningJournalURL(bundle: reference.bundle).path
+            ]
+        ]
+        if let metadata = try? metadataPayload(bundle: reference.bundle) {
+            payload["metadata"] = metadata
+        }
+        return payload
+    }
+
+    private static func prepareProvisioning(
+        config: VMCreationConfigV1?,
+        arguments: CLIOptions,
+        reference: VMReference
+    ) async throws -> ProvisioningPreparation {
+        let restoreImageURL = try await resolveCreateRestoreImageURL(arguments)
+        guard FileManager.default.fileExists(atPath: restoreImageURL.path) else {
+            throw RunnerError.hostCommandFailed("The restore image does not exist: \(restoreImageURL.path)")
+        }
+        let canonicalRestoreImage = restoreImageURL.resolvingSymlinksInPath().standardizedFileURL
+        let restoreImage = try await loadRestoreImage(from: canonicalRestoreImage)
+        let version = "\(restoreImage.operatingSystemVersion.majorVersion).\(restoreImage.operatingSystemVersion.minorVersion).\(restoreImage.operatingSystemVersion.patchVersion)"
+        let build = restoreImage.buildVersion
+        let profileDescriptor = try PommeRecoveryProfileSelector.descriptor(version: version, build: build)
+        guard profileDescriptor.qualification == .accepted else {
+            throw PommeRecoveryProfileSelectionError.externallyPending(profileID: profileDescriptor.id)
+        }
+        guard profileDescriptor == PommeRecoveryProfileSelector.tahoe2660Build25G72 else {
+            throw PommeRecoveryProfileSelectionError.unsupportedRestoreIdentity(version: version, build: build)
+        }
+        guard let requirements = restoreImage.mostFeaturefulSupportedConfiguration else {
+            throw RunnerError.noSupportedConfiguration
+        }
+
+        let memory = arguments.sizeOptions.memorySizeBytes
+        try validateMemorySize(memory, requirements: requirements)
+        let disk = arguments.sizeOptions.diskSizeBytes
+        guard disk > 0 else {
+            throw RunnerError.invalidSize(flag: "--disk-size", value: String(disk))
+        }
+        let imageDigest = try sha256File(canonicalRestoreImage)
+        let vmUUID = UUID()
+        let ownership = try PommeVMOwnership(
+            name: try validateVMName(reference.name ?? ""),
+            uuid: vmUUID,
+            bundlePath: reference.bundle.rootURL.standardizedFileURL.path
+        )
+        let executable = try runningExecutableIdentity()
+        let profile = PommeRecoveryProfileContract.tahoe
+        let normalAgent = try PommeAgentIdentity(
+            identifier: PommeAgentInstall.label,
+            executableDigest: executable.sha256,
+            role: .normal
+        )
+        let recoveryAgent = try PommeAgentIdentity(
+            identifier: "com.github.weswhet.pomme.recovery",
+            executableDigest: executable.sha256,
+            role: .recovery
+        )
+        let finalState: PommeProvisioningFinalState
+        if let configBoot = config?.boot {
+            finalState = provisioningFinalState(configBoot)
+        } else if arguments.start {
+            finalState = arguments.bootMode == .normal ? .normalRunning : .recoveryRunning
+        } else {
+            finalState = .stopped
+        }
+        let plan = try PommeProvisioningPlan(
+            vm: ownership,
+            restore: .init(version: version, build: build, restoreImageDigest: imageDigest),
+            display: .required,
+            profile: profile,
+            normalAgent: normalAgent,
+            recoveryAgent: recoveryAgent,
+            finalState: finalState
+        )
+        let machineIdentifierData = VZMacMachineIdentifier().dataRepresentation
+        let input = PommeProvisioningInput(
+            restoreImagePath: canonicalRestoreImage.path,
+            memorySizeBytes: memory,
+            diskSizeBytes: disk,
+            hardwareModelData: requirements.hardwareModel.dataRepresentation,
+            machineIdentifierData: machineIdentifierData,
+            agentCredentialAccount: PommeProvisioningCredentialReference.agentAccount
+        )
+        try input.validate(for: plan)
+        let signer = try provisioningSigner(bundleURL: reference.bundle.rootURL)
+        return .init(plan: plan, input: input, signer: signer, restoreImage: canonicalRestoreImage)
+    }
+
+    private static func provisioningFinalState(_ mode: VMCreationConfigV1.BootMode) -> PommeProvisioningFinalState {
+        switch mode {
+        case .none: .stopped
+        case .normal: .normalRunning
+        case .recovery: .recoveryRunning
+        }
+    }
+
+    private static func makeLiveProvisioningEffects(
+        firstBootLease: VMBundleMutationLease
+    ) -> PommeProvisioningEffects {
+        .init(
+            verifyOwnership: { expected in try await verifyProvisioningOwnership(expected) },
+            install: { plan in try await installProvisioningVM(plan) },
+            displayOnlyFirstNormalBoot: { plan in
+                guard firstBootLease.validates(name: plan.vm.name) else {
+                    throw PommeProvisioningError.ownershipMismatch
+                }
+                return try await displayOnlyFirstNormalBoot(plan, lease: firstBootLease)
+            },
+            installRecoveryAgent: { plan in try await installRecoveryAgent(plan) },
+            verifyNormalAgent: { plan in try await verifyNormalAgent(plan) },
+            restoreFinalState: { plan in try await restoreProvisioningFinalState(plan) },
+            recoveryRepair: { plan, state in try await repairProvisioningAgent(plan, finalState: state) }
+        )
+    }
+
+    private static func resolveCreateRestoreImageURL(_ arguments: CLIOptions) async throws -> URL {
+        if let path = arguments.restoreImagePath {
+            let url = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
+            guard isRegularFile(url) else {
+                throw RunnerError.hostCommandFailed("The restore image does not exist: \(url.path)")
+            }
+            return url
+        }
+        let selection = arguments.restoreImageVersionSelection ?? "latest"
+        return try await downloadIPSWFirmware(
+            selection: selection,
+            deviceIdentifier: arguments.ipswDeviceIdentifier
+        ).url
+    }
+
+    private static func loadRestoreImage(from url: URL) async throws -> VZMacOSRestoreImage {
+        try await withCheckedThrowingContinuation { continuation in
+            VZMacOSRestoreImage.load(from: url) { result in
+                switch result {
+                case .success(let image): continuation.resume(returning: image)
+                case .failure(let error): continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private static func validateMemorySize(
+        _ memorySizeBytes: UInt64,
+        requirements: VZMacOSConfigurationRequirements?
+    ) throws {
+        let minimum = VZVirtualMachineConfiguration.minimumAllowedMemorySize
+        let maximum = VZVirtualMachineConfiguration.maximumAllowedMemorySize
+        guard memorySizeBytes >= minimum, memorySizeBytes <= maximum else {
+            throw RunnerError.memoryOutsideHostLimits(
+                requested: memorySizeBytes,
+                minimum: minimum,
+                maximum: maximum
+            )
+        }
+        if let requirements, memorySizeBytes < requirements.minimumSupportedMemorySize {
+            throw RunnerError.memoryBelowGuestMinimum(
+                requested: memorySizeBytes,
+                minimum: requirements.minimumSupportedMemorySize
+            )
+        }
+    }
+
+    private static func sha256File(_ url: URL) throws -> String {
+        let descriptor = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else { try throwPOSIX("open") }
+        defer { Darwin.close(descriptor) }
+        var hasher = SHA256()
+        var buffer = [UInt8](repeating: 0, count: 1024 * 1024)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { bytes in
+                Darwin.read(descriptor, bytes.baseAddress, bytes.count)
+            }
+            if count < 0 { try throwPOSIX("read") }
+            if count == 0 { break }
+            hasher.update(data: Data(buffer.prefix(count)))
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func isRegularFile(_ url: URL) -> Bool {
+        var info = stat()
+        return lstat(url.path, &info) == 0
+            && info.st_mode & S_IFMT == S_IFREG
+            && info.st_nlink == 1
+    }
+
+    private static func randomAgentSecret() throws -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            throw RunnerError.hostCommandFailed("Pomme could not create the VM agent credential.")
+        }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// SecItem calls are blocking IPC. Keep all persistent-agent credential
+    /// access on one private serial queue rather than the caller's/UI thread.
+    private static let provisioningCredentialQueue = DispatchQueue(
+        label: "com.github.weswhet.pomme.provisioning-credential"
+    )
+
+    /// The only Keychain primary key used for a persistent Pomme agent. The
+    /// UUID-scoped service prevents two VM bundles from sharing a credential.
+    private static func provisioningCredentialQuery(
+        vmUUID: UUID,
+        account: String,
+        returnData: Bool = false
+    ) -> [String: Any] {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: pommeCredentialService(forUUID: vmUUID.uuidString),
+            kSecAttrAccount as String: account,
+            kSecUseDataProtectionKeychain as String: true
+        ]
+        if returnData {
+            query[kSecMatchLimit as String] = kSecMatchLimitOne
+            query[kSecReturnData as String] = true
+        }
+        return query
+    }
+
+    private static func normalizedProvisioningAgentCredential(_ data: Data) throws -> String {
+        guard let value = String(data: data, encoding: .utf8) else {
+            throw RunnerError.keychainError("The Pomme agent credential is not valid UTF-8.")
+        }
+        do {
+            return try PommeAgentAuthentication.normalized(value)
+        } catch {
+            throw RunnerError.keychainError("The Pomme agent credential has an invalid format.")
+        }
+    }
+
+    private static func loadProvisioningAgentCredential(
+        vmUUID: UUID,
+        account: String
+    ) throws -> String {
+        try provisioningCredentialQueue.sync {
+            var result: CFTypeRef?
+            let status = SecItemCopyMatching(
+                provisioningCredentialQuery(vmUUID: vmUUID, account: account, returnData: true) as CFDictionary,
+                &result
+            )
+            switch status {
+            case errSecSuccess:
+                guard let data = result as? Data else {
+                    throw RunnerError.keychainError("The Pomme agent credential returned unexpected data.")
+                }
+                return try normalizedProvisioningAgentCredential(data)
+            case errSecItemNotFound:
+                throw RunnerError.keychainError("The Pomme agent credential is unavailable.")
+            case errSecInteractionNotAllowed:
+                throw RunnerError.keychainError("The Pomme agent credential is unavailable while the Keychain is locked.")
+            default:
+                throw RunnerError.keychainError(
+                    "Could not read the Pomme agent credential: " + securityErrorMessage(status)
+                )
+            }
+        }
+    }
+
+    /// Returns the UUID-scoped persistent-agent credential, creating it only
+    /// after the Recovery-install phase has journaled its intent. The secret
+    /// is never returned to public output and is not Codable.
+    static func provisioningAgentCredential(for plan: PommeProvisioningPlan) throws -> String {
+        let input = try loadProvisioningInput(for: plan)
+        let vmUUID = plan.vm.uuid
+        let account = input.agentCredentialAccount
+        let generated = try randomAgentSecret()
+        return try provisioningCredentialQueue.sync {
+            var result: CFTypeRef?
+            let lookupStatus = SecItemCopyMatching(
+                provisioningCredentialQuery(vmUUID: vmUUID, account: account, returnData: true) as CFDictionary,
+                &result
+            )
+            switch lookupStatus {
+            case errSecSuccess:
+                guard let data = result as? Data else {
+                    throw RunnerError.keychainError("The Pomme agent credential returned unexpected data.")
+                }
+                return try normalizedProvisioningAgentCredential(data)
+            case errSecItemNotFound:
+                break
+            case errSecInteractionNotAllowed:
+                throw RunnerError.keychainError("The Pomme agent credential is unavailable while the Keychain is locked.")
+            default:
+                    throw RunnerError.keychainError(
+                        "Could not read the Pomme agent credential: " + securityErrorMessage(lookupStatus)
+                    )
+            }
+
+            let value = Data(generated.utf8)
+            var addQuery = provisioningCredentialQuery(vmUUID: vmUUID, account: account)
+            addQuery[kSecValueData as String] = value
+            addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+            switch addStatus {
+            case errSecSuccess:
+                return generated
+            case errSecDuplicateItem:
+                // Another Pomme process won the create race. Re-read and use
+                // that stable credential; replacing it would invalidate an
+                // already-running persistent agent and concurrent sessions.
+                var duplicateResult: CFTypeRef?
+                let duplicateStatus = SecItemCopyMatching(
+                    provisioningCredentialQuery(
+                        vmUUID: vmUUID,
+                        account: account,
+                        returnData: true
+                    ) as CFDictionary,
+                    &duplicateResult
+                )
+                switch duplicateStatus {
+                case errSecSuccess:
+                    guard let data = duplicateResult as? Data else {
+                        throw RunnerError.keychainError("The Pomme agent credential returned unexpected data.")
+                    }
+                    return try normalizedProvisioningAgentCredential(data)
+                case errSecInteractionNotAllowed:
+                    throw RunnerError.keychainError("The Pomme agent credential is unavailable while the Keychain is locked.")
+                default:
+                    throw RunnerError.keychainError(
+                        "Could not read the concurrently created Pomme agent credential: "
+                            + securityErrorMessage(duplicateStatus)
+                    )
+                }
+            case errSecInteractionNotAllowed:
+                throw RunnerError.keychainError("The Pomme agent credential cannot be stored while the Keychain is locked.")
+            default:
+                throw RunnerError.keychainError(
+                    "Could not store the Pomme agent credential: " + securityErrorMessage(addStatus)
+                )
+            }
+        }
+    }
+
+    /// Reads the existing credential without creating or replacing it. Normal
+    /// agent authentication uses this strict path so a missing credential
+    /// cannot be mistaken for a successful Recovery installation.
+    private static func existingProvisioningAgentCredential(
+        for plan: PommeProvisioningPlan
+    ) throws -> String {
+        let input = try loadProvisioningInput(for: plan)
+        return try loadProvisioningAgentCredential(
+            vmUUID: plan.vm.uuid,
+            account: input.agentCredentialAccount
+        )
+    }
+
+    /// Remove exactly one UUID-scoped persistent-agent credential. Not-found is
+    /// an idempotent cleanup success; every other OSStatus is surfaced.
+    static func removeProvisioningAgentCredential(for plan: PommeProvisioningPlan) throws {
+        try plan.validate()
+        try removeProvisioningAgentCredential(
+            vmUUID: plan.vm.uuid,
+            account: PommeProvisioningCredentialReference.agentAccount
+        )
+    }
+
+    private static func removeProvisioningAgentCredential(
+        vmUUID: UUID,
+        account: String
+    ) throws {
+        try provisioningCredentialQueue.sync {
+            let status = SecItemDelete(
+                provisioningCredentialQuery(
+                    vmUUID: vmUUID,
+                    account: account
+                ) as CFDictionary
+            )
+            switch status {
+            case errSecSuccess, errSecItemNotFound:
+                return
+            case errSecInteractionNotAllowed:
+                throw RunnerError.keychainError("The Pomme agent credential cannot be removed while the Keychain is locked.")
+            default:
+                throw RunnerError.keychainError(
+                    "Could not remove the Pomme agent credential: " + securityErrorMessage(status)
+                )
+            }
+        }
+    }
+
+    private static func provisioningRoot(bundle: BundleLayout) -> URL {
+        bundle.rootURL.appendingPathComponent(".pomme", isDirectory: true)
+    }
+
+    private static func provisioningInputURL(bundle: BundleLayout) -> URL {
+        provisioningRoot(bundle: bundle).appendingPathComponent("input-v1.json")
+    }
+
+    private static func provisioningOwnershipURL(bundle: BundleLayout) -> URL {
+        provisioningRoot(bundle: bundle).appendingPathComponent("ownership-v1.json")
+    }
+
+    private static func provisioningKeyURL(bundle: BundleLayout) -> URL {
+        provisioningRoot(bundle: bundle).appendingPathComponent("journal.key")
+    }
+
+    private static func provisioningHighWaterURL(bundle: BundleLayout) -> URL {
+        provisioningRoot(bundle: bundle).appendingPathComponent("generation")
+    }
+
+    private static func provisioningJournalURL(bundle: BundleLayout) -> URL {
+        provisioningRoot(bundle: bundle).appendingPathComponent("provisioning-v1.json")
+    }
+
+    private static func provisioningSigner(bundleURL: URL) throws -> PommeProvisioningJournalSigner {
+        let root = bundleURL.appendingPathComponent(".pomme", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let keyURL = root.appendingPathComponent("journal.key")
+        let key: Data
+        if isRegularFile(keyURL) {
+            key = try Data(contentsOf: keyURL, options: .mappedIfSafe)
+            guard key.count >= 32 else { throw PommeProvisioningError.integrityFailure }
+        } else {
+            var generated = Data(count: 32)
+            let result = generated.withUnsafeMutableBytes { buffer in
+                SecRandomCopyBytes(kSecRandomDefault, buffer.count, buffer.baseAddress!)
+            }
+            guard result == errSecSuccess else { throw PommeProvisioningError.integrityFailure }
+            try writePrivate(generated, to: keyURL)
+            key = generated
+        }
+        return try PommeProvisioningJournalSigner(key: key)
+    }
+
+    private static func provisioningRepository(
+        bundleURL: URL,
+        signer: PommeProvisioningJournalSigner
+    ) throws -> PommeProvisioningFileJournalRepository {
+        let bundle = BundleLayout(rootURL: bundleURL)
+        let highWaterURL = provisioningHighWaterURL(bundle: bundle)
+        return .init(
+            bundleURL: bundleURL,
+            signer: signer,
+            loadHighWater: {
+                guard let data = try? Data(contentsOf: highWaterURL),
+                      let value = UInt64(String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+                else { return 0 }
+                return value
+            },
+            advanceHighWater: { previous, next in
+                let current: UInt64
+                if let data = try? Data(contentsOf: highWaterURL),
+                   let value = UInt64(String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    current = value
+                } else {
+                    current = 0
+                }
+                guard current == previous, next > previous else {
+                    throw PommeProvisioningError.generationFailure
+                }
+                try writePrivate(Data(String(next).utf8), to: highWaterURL)
+            }
+        )
+    }
+
+    private static func writeProvisioningPreparation(
+        _ preparation: ProvisioningPreparation,
+        bundle: BundleLayout
+    ) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        try writePrivate(try encoder.encode(preparation.plan.vm), to: provisioningOwnershipURL(bundle: bundle))
+        try writePrivate(try encoder.encode(preparation.input), to: provisioningInputURL(bundle: bundle))
+    }
+
+    private static func loadProvisioningInput(for plan: PommeProvisioningPlan) throws -> PommeProvisioningInput {
+        let bundle = BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
+        let data = try Data(contentsOf: provisioningInputURL(bundle: bundle), options: .mappedIfSafe)
+        let input = try JSONDecoder().decode(PommeProvisioningInput.self, from: data)
+        try input.validate(for: plan)
+        guard isRegularFile(URL(fileURLWithPath: input.restoreImagePath)) else {
+            throw RunnerError.hostCommandFailed("The restore image for the Pomme provisioning plan is unavailable.")
+        }
+        return input
+    }
+
+    private static func verifyProvisioningOwnership(_ expected: PommeVMOwnership) async throws -> PommeVMOwnership {
+        let bundle = BundleLayout(rootURL: URL(fileURLWithPath: expected.bundlePath))
+        guard isRegularFile(provisioningOwnershipURL(bundle: bundle)) else {
+            throw PommeProvisioningError.ownershipMismatch
+        }
+        let data = try Data(contentsOf: provisioningOwnershipURL(bundle: bundle), options: .mappedIfSafe)
+        let actual = try JSONDecoder().decode(PommeVMOwnership.self, from: data)
+        guard actual == expected else { throw PommeProvisioningError.ownershipMismatch }
+        return actual
+    }
+
+    private static func writePrivate(_ data: Data, to url: URL) throws {
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let temporary = directory.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString)")
+        guard FileManager.default.createFile(atPath: temporary.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
+            throw RunnerError.hostCommandFailed("Pomme could not persist provisioning state.")
+        }
+        do {
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temporary.path)
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.replaceItemAt(url, withItemAt: temporary)
+            } else {
+                try FileManager.default.moveItem(at: temporary, to: url)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: temporary)
+            throw error
+        }
+    }
+
+    private static func installProvisioningVM(_ plan: PommeProvisioningPlan) async throws -> String {
+        let bundle = BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
+        let input = try loadProvisioningInput(for: plan)
+        let imageURL = URL(fileURLWithPath: input.restoreImagePath)
+        let image = try await loadRestoreImage(from: imageURL)
+        let version = "\(image.operatingSystemVersion.majorVersion).\(image.operatingSystemVersion.minorVersion).\(image.operatingSystemVersion.patchVersion)"
+        guard image.buildVersion == plan.restore.build, version == plan.restore.version else {
+            throw PommeProvisioningError.invalidPlan
+        }
+        guard let requirements = image.mostFeaturefulSupportedConfiguration,
+              requirements.hardwareModel.dataRepresentation == input.hardwareModelData
+        else { throw PommeProvisioningError.invalidPlan }
+        try validateMemorySize(input.memorySizeBytes, requirements: requirements)
+
+        let hardwareModel: VZMacHardwareModel
+        guard let restoredHardwareModel = VZMacHardwareModel(dataRepresentation: input.hardwareModelData),
+              restoredHardwareModel.isSupported
+        else { throw RunnerError.invalidHardwareModel }
+        hardwareModel = restoredHardwareModel
+        guard let machineIdentifier = VZMacMachineIdentifier(dataRepresentation: input.machineIdentifierData) else {
+            throw RunnerError.invalidMachineIdentifier
+        }
+
+        try persistExactData(input.hardwareModelData, at: bundle.hardwareModelURL)
+        try persistExactData(input.machineIdentifierData, at: bundle.machineIdentifierURL)
+        if let existingSize = fileSize(bundle.diskImageURL) {
+            guard existingSize == Int64(input.diskSizeBytes) else {
+                throw PommeProvisioningError.ownershipMismatch
+            }
+        } else {
+            try bundle.createDiskImage(size: input.diskSizeBytes)
+        }
+
+        var metadata = (try? metadataPayload(bundle: bundle)) ?? [:]
+        metadata[Constants.vmUUIDMetadataKey] = plan.vm.uuid.uuidString.lowercased()
+        metadata["memorySize"] = input.memorySizeBytes
+        metadata["diskSize"] = input.diskSizeBytes
+        metadata["buildVersion"] = plan.restore.build
+        metadata["osVersion"] = plan.restore.version
+        metadata["locale"] = plan.display.locale
+        metadata["displayWidth"] = plan.display.width
+        metadata["displayHeight"] = plan.display.height
+        metadata["provisioningPlanDigest"] = plan.digest
+        metadata["guestAgent"] = [
+            "identifier": plan.normalAgent.identifier,
+            "protocolVersion": plan.normalAgent.protocolVersion,
+            "executableDigest": plan.normalAgent.executableDigest
+        ]
+        try writeMetadataPayload(metadata, bundle: bundle)
+
+        let auxiliaryStorage: VZMacAuxiliaryStorage
+        if FileManager.default.fileExists(atPath: bundle.auxiliaryStorageURL.path) {
+            auxiliaryStorage = VZMacAuxiliaryStorage(url: bundle.auxiliaryStorageURL)
+        } else {
+            auxiliaryStorage = try VZMacAuxiliaryStorage(
+                creatingStorageAt: bundle.auxiliaryStorageURL,
+                hardwareModel: hardwareModel,
+                options: []
+            )
+        }
+        let queue = DispatchQueue(label: "com.github.weswhet.pomme.install")
+        let configuration = try makeRuntimeConfiguration(
+            bundle: bundle,
+            hardwareModel: hardwareModel,
+            machineIdentifier: machineIdentifier,
+            auxiliaryStorage: auxiliaryStorage,
+            memorySizeBytes: input.memorySizeBytes
+        )
+        let installer = queue.sync {
+            let vm = VZVirtualMachine(configuration: configuration, queue: queue)
+            return VZMacOSInstaller(virtualMachine: vm, restoringFromImageAt: imageURL)
+        }
+        let observation = installer.progress.observe(\.fractionCompleted, options: [.initial, .new]) { progress, _ in
+            log("Pomme install progress: \(Int(progress.fractionCompleted * 100))%")
+        }
+        defer { observation.invalidate() }
+        try await install(installer, on: queue)
+        return try receiptDigest("install", plan: plan, bundle: bundle)
+    }
+
+    private static func persistExactData(_ data: Data, at url: URL) throws {
+        if isRegularFile(url) {
+            guard try Data(contentsOf: url, options: .mappedIfSafe) == data else {
+                throw PommeProvisioningError.ownershipMismatch
+            }
+            return
+        }
+        try writePrivate(data, to: url)
+    }
+
+    private static func install(_ installer: VZMacOSInstaller, on queue: DispatchQueue) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let installer = QueueConfined(value: installer)
+            queue.async {
+                installer.value.install { result in
+                    continuation.resume(with: result)
+                }
+            }
+        }
+    }
+
+    private static func receiptDigest(_ phase: String, plan: PommeProvisioningPlan, bundle: BundleLayout) throws -> String {
+        var data = Data(phase.utf8)
+        data.append(contentsOf: plan.digest.utf8)
+        if let metadata = try? metadataPayload(bundle: bundle),
+           let encoded = try? JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]) {
+            data.append(encoded)
+        }
+        return PommeProvisioningDigest.sha256(data)
+    }
+
+    private static func displayOnlyFirstNormalBoot(
+        _ plan: PommeProvisioningPlan,
+        lease: VMBundleMutationLease
+    ) async throws -> String {
+        let executable = try runningExecutableIdentity()
+        guard executable.sha256 == plan.normalAgent.executableDigest,
+              executable.sha256 == plan.recoveryAgent.executableDigest
+        else { throw PommeFirstBootProcessError.identityRejected }
+        let bundleIdentity = try PommeFirstBootProcessIsolation.makeBundleIdentity(
+            bundlePath: plan.vm.bundlePath,
+            name: plan.vm.name
+        )
+        let request = try PommeFirstBootProcessRequest(
+            bundlePath: plan.vm.bundlePath,
+            vmName: plan.vm.name,
+            vmUUID: plan.vm.uuid.uuidString.lowercased(),
+            executableSHA256: executable.sha256,
+            bundleIdentity: bundleIdentity,
+            nonce: UUID().uuidString.lowercased(),
+            timeout: Constants.defaultRecoveryAgentTimeout
+        )
+        log("Pomme first normal boot milestone: isolatedSupervisorStarting.")
+        let receipt = try await PommeFirstBootProcessIsolation.run(
+            request: request,
+            lease: lease,
+            executableURL: executable.url
+        )
+        log("Pomme first normal boot milestone: isolatedProcessGroupReaped.")
+        return try receiptDigest(
+            "display-only-first-normal-boot-\(receipt.stableObservationCount)-\(receipt.reconstructionCount)",
+            plan: plan,
+            bundle: BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
+        )
+    }
+
+    /// Hidden VM-owning worker used only by `PommeFirstBootProcessIsolation`.
+    /// Its intermediate supervisor must prove worker/descendant exit before
+    /// the public CLI can reap that supervisor and proceed to Recovery.
+    static func runFirstBootProcessChild(
+        _ request: PommeFirstBootProcessRequest
+    ) async -> Int32 {
+        await PommeFirstBootProcessIsolation.runChild(request: request) {
+            let bundle = BundleLayout(
+                rootURL: URL(fileURLWithPath: request.bundlePath).standardizedFileURL
+            )
+            let signer = try provisioningSigner(bundleURL: bundle.rootURL)
+            let repository = try provisioningRepository(
+                bundleURL: bundle.rootURL,
+                signer: signer
+            )
+            let journal = try repository.load()
+            guard journal.plan.vm.name == request.vmName,
+                  journal.plan.vm.uuid.uuidString.lowercased() == request.vmUUID,
+                  journal.plan.vm.bundlePath == request.bundlePath,
+                  journal.plan.normalAgent.executableDigest == request.executableSHA256,
+                  journal.plan.recoveryAgent.executableDigest == request.executableSHA256,
+                  journal.events.last?.kind == .intent,
+                  journal.events.last?.phase == .displayOnlyFirstNormalBoot,
+                  try PommeFirstBootProcessIsolation.makeBundleIdentity(
+                    bundlePath: request.bundlePath,
+                    name: request.vmName
+                  ) == request.bundleIdentity,
+                  try await verifyProvisioningOwnership(journal.plan.vm) == journal.plan.vm
+            else { throw PommeFirstBootProcessError.identityRejected }
+            return try await runFirstBootBarrier(journal.plan, timeout: request.timeout)
+        }
+    }
+
+    private static func runFirstBootBarrier(
+        _ plan: PommeProvisioningPlan,
+        timeout: TimeInterval
+    ) async throws -> PommeFirstBootReceipt {
+        let barrier = PommeFirstBootBarrier(dependencies: .init(
+            makeAttempt: { try await makeFirstBootAttempt(plan) }
+        ))
+        let receipt = try await barrier.run(
+            timeout: timeout
+        )
+        guard receipt.setupAssistantSurfaceProven,
+              receipt.stableObservationCount >= PommeFirstBootBarrier.requiredStableObservations,
+              receipt.reconstructionCount <= 1,
+              receipt.stoppedStateProven
+        else { throw PommeProvisioningError.phaseFailed(.displayOnlyFirstNormalBoot) }
+        return receipt
+    }
+
+    /// Constructs one listener-free, display-only first-boot attempt. The
+    /// barrier owns the sole bounded reconstruction policy; this factory does
+    /// not start the VM and retains no attempt after the barrier releases it.
+    private static func makeFirstBootAttempt(
+        _ plan: PommeProvisioningPlan
+    ) async throws -> PommeFirstBootAttempt {
+        let bundle = BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
+        let input = try loadProvisioningInput(for: plan)
+        let hardwareModel = try loadHardwareModel(input.hardwareModelData)
+        guard hardwareModel.isSupported else { throw RunnerError.unsupportedHardwareModel }
+        guard let machineIdentifier = VZMacMachineIdentifier(
+            dataRepresentation: input.machineIdentifierData
+        ) else { throw RunnerError.invalidMachineIdentifier }
+        let auxiliaryStorage = VZMacAuxiliaryStorage(url: bundle.auxiliaryStorageURL)
+        let queue = DispatchQueue(
+            label: "com.github.weswhet.pomme.first-normal-boot.\(UUID().uuidString.lowercased())"
+        )
+        let configuration = try makeRuntimeConfiguration(
+            bundle: bundle,
+            hardwareModel: hardwareModel,
+            machineIdentifier: machineIdentifier,
+            auxiliaryStorage: auxiliaryStorage,
+            memorySizeBytes: input.memorySizeBytes
+        )
+        let vm = VZVirtualMachine(configuration: configuration, queue: queue)
+        let confinedVM = QueueConfined(value: vm)
+        let backend = VirtualizationPrivateHeadlessBackend(
+            virtualMachine: vm,
+            configuration: configuration,
+            queue: queue
+        )
+
+        return .init(
+            startNormal: { completion in
+                // Submit the VZ start before returning to the lifecycle
+                // callback bridge. Its timeout cannot then race ahead,
+                // observe this attempt as stopped, and reconstruct while an
+                // old start remains queued behind cleanup.
+                queue.sync {
+                    let options = VZMacOSVirtualMachineStartOptions()
+                    options.startUpFromMacOSRecovery = false
+                    confinedVM.value.start(options: options, completionHandler: completion)
+                }
+            },
+            stopNormal: { completion in
+                queue.async {
+                    switch confinedVM.value.state {
+                    case .stopped:
+                        completion(nil)
+                    case .running, .paused:
+                        confinedVM.value.stop(completionHandler: completion)
+                    default:
+                        completion(PommeFirstBootBarrierError.cleanupFailed)
+                    }
+                }
+            },
+            observe: {
+                let image: CGImage
+                do {
+                    image = try await backend.captureImage(timeout: 30)
+                } catch {
+                    if VirtualizationPrivateHeadlessBackend.isTransientCaptureFailure(error) {
+                        throw PommeFirstBootObservationError.displayUnavailable
+                    }
+                    throw PommeFirstBootObservationError.recognitionFailed
+                }
+                do {
+                    let lines = try SettingsAIOCRRecognizer().recognizeRecovery(
+                        image: image,
+                        displaySize: VirtualizationPrivateHeadlessBackend.displaySize
+                    )
+                    return PommeFirstBootObservation.fromOCR(
+                        width: image.width,
+                        height: image.height,
+                        lines: lines
+                    )
+                } catch {
+                    throw PommeFirstBootObservationError.recognitionFailed
+                }
+            },
+            cleanupState: {
+                switch await state(of: confinedVM.value, on: queue) {
+                case .stopped: .stopped
+                case .running, .paused: .stoppable
+                case .starting, .pausing, .resuming, .stopping: .transitioning
+                case .error: .stoppable
+                @unknown default: .transitioning
+                }
+            }
+        )
+    }
+
+    /// Recovery installation is an injectable, request-bound boundary:
+    /// callers provide the signed executable, one-shot credential, staging,
+    /// and Recovery ports through the installed adapter.  The default
+    /// adapter refuses the phase after the intent is durable, preserving the
+    /// exact VM/journal for a configured Recovery integration.
+    private static func installRecoveryAgent(_ plan: PommeProvisioningPlan) async throws -> String {
+        try await stopRetainedRuntime(for: plan.vm.bundlePath)
+        guard let adapter = currentProvisioningRecoveryAdapter() else {
+            throw PommeProvisioningError.unavailableIntegration("request-bound Recovery agent installation")
+        }
+        // The Recovery installer receives this credential through the
+        // request-bound application adapter. Ensure it exists before entering
+        // Recovery, but never copy it into the plan, journal, or staging
+        // metadata. A failed phase keeps the exact VM/journal and this
+        // UUID-scoped Keychain item available for an explicit resume/repair.
+        _ = try provisioningAgentCredential(for: plan)
+        // Recovery installation must leave the exact VM stopped. Normal-agent
+        // verification and the plan's requested final state are separate
+        // subsequent journal phases; collapsing them here can make a failed
+        // bootstrap look complete and can boot an unverified agent.
+        return try await adapter(plan, .stopped)
+    }
+
+    private static func verifyNormalAgent(_ plan: PommeProvisioningPlan) async throws -> String {
+        try await stopRetainedRuntime(for: plan.vm.bundlePath)
+        let retained = try await startProvisioningRuntime(plan: plan, mode: .normal, attachAgent: true)
+        retainRuntime(retained, for: plan.vm.bundlePath)
+        guard let coordinator = retained.coordinator else {
+            throw PommeProvisioningError.unavailableIntegration("persistent PommeAgent connection")
+        }
+        let deadline = Date().addingTimeInterval(Constants.defaultRecoveryAgentTimeout)
+        while true {
+            let status = await coordinator.status()
+            if status.connection == .connected,
+               status.role == .normal,
+               status.protocolVersion == plan.normalAgent.protocolVersion,
+               status.executableDigest == plan.normalAgent.executableDigest,
+               supportsProvisioningAgentCapabilities(status.capabilities) {
+                break
+            }
+            guard Date() < deadline else {
+                throw PommeProvisioningError.phaseFailed(.verifyNormalAgent)
+            }
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return try receiptDigest("verify-normal-agent", plan: plan, bundle: BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath)))
+    }
+
+    private static func restoreProvisioningFinalState(_ plan: PommeProvisioningPlan) async throws -> String {
+        try await restoreProvisioningState(plan, finalState: plan.finalState)
+    }
+
+    private static func restoreProvisioningState(
+        _ plan: PommeProvisioningPlan,
+        finalState: PommeProvisioningFinalState
+    ) async throws -> String {
+        try await stopRetainedRuntime(for: plan.vm.bundlePath)
+        let reference = VMReference(
+            name: plan.vm.name,
+            bundle: BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
+        )
+        let observed: PommeRecoveryRunState
+        switch finalState {
+        case .stopped:
+            observed = try liveRecoveryRunState(from: vmStatusPayload(reference: reference))
+        case .normalRunning:
+            let retained = try await startProvisioningRuntime(plan: plan, mode: .normal, attachAgent: true)
+            retainRuntime(retained, for: plan.vm.bundlePath)
+            observed = try liveRecoveryRunState(from: await retained.runtime.statusPayload(
+                bundle: reference.bundle,
+                inspect: false
+            ))
+        case .recoveryRunning:
+            // An ordinary final-state Recovery boot is display/lifecycle only.
+            // The durable normal token and every Pomme listener are forbidden
+            // outside a request-bound PommeRecoverySession.
+            let retained = try await startProvisioningRuntime(plan: plan, mode: .recovery, attachAgent: false)
+            retainRuntime(retained, for: plan.vm.bundlePath)
+            observed = try liveRecoveryRunState(from: await retained.runtime.statusPayload(
+                bundle: reference.bundle,
+                inspect: false
+            ))
+        }
+        switch (finalState, observed) {
+        case (.stopped, .stopped),
+             (.normalRunning, .running(.normal)),
+             (.recoveryRunning, .running(.recovery)):
+            break
+        default:
+            throw PommeRecoverySessionError.finalStateUnverified
+        }
+        return try receiptDigest("restore-final-state", plan: plan, bundle: BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath)))
+    }
+
+    private static func repairProvisioningAgent(
+        _ plan: PommeProvisioningPlan,
+        finalState: PommeProvisioningFinalState
+    ) async throws -> String {
+        // A repair is deliberately Recovery-only.  The adapter constructs a
+        // request-bound PommeRecoverySession; no normal agent is accepted as
+        // a repair authority.
+        guard let adapter = currentProvisioningRecoveryAdapter() else {
+            throw PommeProvisioningError.unavailableIntegration("authenticated Recovery agent repair")
+        }
+        let primary: Result<String, Error>
+        do {
+            // Installation ends stopped so normal-agent verification cannot be
+            // skipped by a requested stopped/Recovery final state.
+            let installationReceipt = try await adapter(plan, .stopped)
+            let verificationReceipt = try await verifyNormalAgent(plan)
+            primary = .success(PommeProvisioningDigest.sha256(
+                Data((installationReceipt + verificationReceipt).utf8)
+            ))
+        } catch {
+            primary = .failure(error)
+        }
+
+        // Repair owns final-state restoration even when installation or
+        // verification fails; success is reported only after both the agent
+        // and the requested lifecycle state are proven.
+        _ = try await restoreProvisioningState(plan, finalState: finalState)
+        return try primary.get()
+    }
+
+    private static func startProvisioningRuntime(
+        plan: PommeProvisioningPlan,
+        mode: BootMode,
+        attachAgent: Bool
+    ) async throws -> PommeRetainedRuntime {
+        let bundle = BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
+        let input = try loadProvisioningInput(for: plan)
+        let hardwareModel = try loadHardwareModel(input.hardwareModelData)
+        guard hardwareModel.isSupported else { throw RunnerError.unsupportedHardwareModel }
+        guard let machineIdentifier = VZMacMachineIdentifier(dataRepresentation: input.machineIdentifierData) else {
+            throw RunnerError.invalidMachineIdentifier
+        }
+        let auxiliaryStorage = VZMacAuxiliaryStorage(url: bundle.auxiliaryStorageURL)
+        let queue = DispatchQueue(label: "com.github.weswhet.pomme.runtime")
+        let configuration = try makeRuntimeConfiguration(
+            bundle: bundle,
+            hardwareModel: hardwareModel,
+            machineIdentifier: machineIdentifier,
+            auxiliaryStorage: auxiliaryStorage,
+            memorySizeBytes: input.memorySizeBytes
+        )
+        let vm = VZVirtualMachine(configuration: configuration, queue: queue)
+        let coordinator: PommeAgentVSOCKCoordinator?
+        if attachAgent {
+            guard let socketDevice = queue.sync(execute: { vm.socketDevices.first as? VZVirtioSocketDevice }) else {
+                throw RunnerError.hostCommandFailed("Pomme could not attach the VM agent socket.")
+            }
+            let provider = PommeAgentVSOCKCoordinator(
+                socketDevice: socketDevice,
+                queue: queue,
+                secretProvider: { _ in
+                    try existingProvisioningAgentCredential(for: plan)
+                }
+            )
+            switch mode {
+            case .normal: try provider.attachNormal()
+            case .recovery: try provider.attachRecoveryRuntime()
+            }
+            coordinator = provider
+        } else {
+            coordinator = nil
+        }
+        let runtime = PommeVMRuntime(
+            vm: vm,
+            configuration: configuration,
+            queue: queue,
+            saveStateURL: bundle.saveStateURL,
+            snapshotsURL: bundle.snapshotsURL,
+            requiredSnapshotRestoreURL: bundle.requiredSnapshotRestoreURL,
+            agentProvider: coordinator,
+            bootMode: mode
+        )
+        do {
+            try await runtime.start()
+        } catch {
+            coordinator?.teardown()
+            await runtime.teardown()
+            throw error
+        }
+        return .init(runtime: runtime, coordinator: coordinator, mode: mode)
+    }
+
+    /// Build the exact Pomme VM configuration for one immutable provisioning
+    /// plan. A request-bound Recovery configuration, when supplied, is
+    /// applied before this method returns so callers can construct
+    /// `VZVirtualMachine` only after the exclusive staging share is attached.
+    /// No credential-bearing input is returned by this hook.
+    static func makeProvisioningVMConfiguration(
+        for plan: PommeProvisioningPlan,
+        recoveryConfiguration: PommeRecoveryRuntimeConfiguration? = nil
+    ) throws -> VZVirtualMachineConfiguration {
+        let bundle = BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
+        let input = try loadProvisioningInput(for: plan)
+        let hardwareModel = try loadHardwareModel(input.hardwareModelData)
+        guard hardwareModel.isSupported else { throw RunnerError.unsupportedHardwareModel }
+        guard let machineIdentifier = VZMacMachineIdentifier(dataRepresentation: input.machineIdentifierData) else {
+            throw RunnerError.invalidMachineIdentifier
+        }
+        let auxiliaryStorage = VZMacAuxiliaryStorage(url: bundle.auxiliaryStorageURL)
+        return try makeRuntimeConfiguration(
+            bundle: bundle,
+            hardwareModel: hardwareModel,
+            machineIdentifier: machineIdentifier,
+            auxiliaryStorage: auxiliaryStorage,
+            memorySizeBytes: input.memorySizeBytes,
+            recoveryConfiguration: recoveryConfiguration
+        )
+    }
+
+    private static func loadHardwareModel(_ data: Data) throws -> VZMacHardwareModel {
+        guard let model = VZMacHardwareModel(dataRepresentation: data) else {
+            throw RunnerError.invalidHardwareModel
+        }
+        return model
+    }
+
+    private static func retainRuntime(_ runtime: PommeRetainedRuntime, for bundlePath: String) {
+        retainedRuntimeLock.lock()
+        retainedRuntimes[bundlePath] = runtime
+        retainedRuntimeLock.unlock()
+    }
+
+    private static func retainedRuntime(for bundlePath: String) -> PommeRetainedRuntime? {
+        retainedRuntimeLock.lock()
+        defer { retainedRuntimeLock.unlock() }
+        return retainedRuntimes[bundlePath]
+    }
+
+    private static func removeRetainedRuntime(for bundlePath: String) -> PommeRetainedRuntime? {
+        retainedRuntimeLock.lock()
+        defer { retainedRuntimeLock.unlock() }
+        return retainedRuntimes.removeValue(forKey: bundlePath)
+    }
+
+    private static func stopRetainedRuntime(for bundlePath: String) async throws {
+        guard let runtime = removeRetainedRuntime(for: bundlePath) else { return }
+        try await runtime.stop()
+    }
+
+    private static func makeRuntimeConfiguration(
+        bundle: BundleLayout,
+        hardwareModel: VZMacHardwareModel,
+        machineIdentifier: VZMacMachineIdentifier,
+        auxiliaryStorage: VZMacAuxiliaryStorage,
+        memorySizeBytes: UInt64,
+        recoveryConfiguration: PommeRecoveryRuntimeConfiguration? = nil
+    ) throws -> VZVirtualMachineConfiguration {
+        let platform = VZMacPlatformConfiguration()
+        platform.hardwareModel = hardwareModel
+        platform.machineIdentifier = machineIdentifier
+        platform.auxiliaryStorage = auxiliaryStorage
+
+        let disk = try VZDiskImageStorageDeviceAttachment(url: bundle.diskImageURL, readOnly: false)
+        let block = VZVirtioBlockDeviceConfiguration(attachment: disk)
+        let network = VZVirtioNetworkDeviceConfiguration()
+        network.attachment = VZNATNetworkDeviceAttachment()
+        let machineData = try Data(contentsOf: bundle.machineIdentifierURL, options: .mappedIfSafe)
+        guard let mac = VZMACAddress(string: stableVMMACAddress(machineIdentifierData: machineData)) else {
+            throw RunnerError.hostCommandFailed("Pomme could not derive a stable VM network address.")
+        }
+        network.macAddress = mac
+
+        let graphics = VZMacGraphicsDeviceConfiguration()
+        graphics.displays = [
+            VZMacGraphicsDisplayConfiguration(widthInPixels: 1280, heightInPixels: 800, pixelsPerInch: 80)
+        ]
+        let configuration = VZVirtualMachineConfiguration()
+        configuration.platform = platform
+        configuration.bootLoader = VZMacOSBootLoader()
+        configuration.cpuCount = min(
+            max(4, VZVirtualMachineConfiguration.minimumAllowedCPUCount),
+            VZVirtualMachineConfiguration.maximumAllowedCPUCount
+        )
+        configuration.memorySize = memorySizeBytes
+        configuration.storageDevices = [block]
+        configuration.networkDevices = [network]
+        configuration.socketDevices = [VZVirtioSocketDeviceConfiguration()]
+        configuration.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
+        configuration.keyboards = [VZMacKeyboardConfiguration(), VZUSBKeyboardConfiguration()]
+        configuration.pointingDevices = [VZMacTrackpadConfiguration(), VZUSBScreenCoordinatePointingDeviceConfiguration()]
+        configuration.graphicsDevices = [graphics]
+        if let recoveryConfiguration {
+            try recoveryConfiguration.apply(to: configuration)
+            try recoveryConfiguration.requireApplied()
+        }
+        try configuration.validate()
+        return configuration
+    }
+
+    private static func captureAndStopForLiveRecovery(
+        reference: VMReference
+    ) async throws -> PommeRecoveryRunState {
+        let payload: [String: Any]
+        if let retained = retainedRuntime(for: reference.standardizedPath) {
+            payload = await retained.runtime.statusPayload(
+                bundle: reference.bundle,
+                inspect: false
+            )
+        } else {
+            payload = try vmStatusPayload(reference: reference)
+        }
+        let state = try liveRecoveryRunState(from: payload)
+        try await stopForLiveRecovery(reference: reference)
+        guard try liveRecoveryRunState(
+            from: vmStatusPayload(reference: reference)
+        ) == .stopped else {
+            throw PommeRecoverySessionError.finalStateUnverified
+        }
+        return state
+    }
+
+    private static func stopForLiveRecovery(reference: VMReference) async throws {
+        try await stopRetainedRuntime(for: reference.standardizedPath)
+        do {
+            _ = try sendControlObject(
+                ["command": PommeLifecycleCommand.stop.rawValue],
+                bundle: reference.bundle
+            )
+        } catch RunnerError.noRunningVM {
+            return
+        }
+
+        let deadline = Date().addingTimeInterval(Constants.gracefulStopTimeoutSeconds)
+        while Date() < deadline {
+            if (try? runtimeRecord(for: reference.bundle)) == nil { return }
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        guard (try? runtimeRecord(for: reference.bundle)) == nil else {
+            throw RunnerError.virtualMachineState(
+                "The Pomme VM helper did not stop before Recovery."
+            )
+        }
+    }
+
+    /// A helper can report stopped just before Virtualization releases its
+    /// auxiliary-storage descriptor. Permit one contained wait, then fail
+    /// closed. Every VZ object is still constructed only after this proof, so
+    /// no failed VM instance is ever retried.
+    static func waitForLiveRecoveryAuxiliaryStorageRelease(
+        at url: URL,
+        maxRetries: Int = 1,
+        retryDelayNanoseconds: UInt64 = 2_000_000_000,
+        hasConflict: @escaping @Sendable (URL) -> Bool = liveRecoveryAuxiliaryStorageHasConflictingLock,
+        sleep: @escaping @Sendable (UInt64) async throws -> Void = {
+            try await Task.sleep(nanoseconds: $0)
+        }
+    ) async throws {
+        let retryBudget = max(0, maxRetries)
+        var retries = 0
+        while hasConflict(url) {
+            guard retries < retryBudget else {
+                throw PommeLiveRecoveryIntegration.Error.runtimeRejected
+            }
+            retries += 1
+            log(
+                "Pomme Recovery bootstrap milestone: auxiliaryStorageReleaseWait "
+                    + "\(retries)/\(retryBudget)."
+            )
+            if retryDelayNanoseconds > 0 {
+                try await sleep(retryDelayNanoseconds)
+            }
+        }
+    }
+
+    static func liveRecoveryAuxiliaryStorageHasConflictingLock(_ url: URL) -> Bool {
+        let descriptor = Darwin.open(
+            url.path,
+            O_RDWR | O_NOFOLLOW | O_CLOEXEC
+        )
+        // This is a security proof, not a best-effort contention hint.  Any
+        // inability to open or validate the exact auxiliary-storage inode is
+        // indistinguishable from a conflicting owner and therefore fails
+        // closed through the bounded wait above.
+        guard descriptor >= 0 else { return true }
+        defer { _ = Darwin.close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0,
+              info.st_mode & S_IFMT == S_IFREG,
+              info.st_uid == geteuid(),
+              info.st_nlink == 1,
+              info.st_mode & 0o022 == 0
+        else { return true }
+        if flock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+            _ = flock(descriptor, LOCK_UN)
+            return false
+        }
+        return true
+    }
+
+    private static func requestLiveRecoveryFinalState(
+        _ state: VMFinalState,
+        captured: PommeRecoveryRunState,
+        reference: VMReference
+    ) async throws {
+        switch state {
+        case .stopped:
+            try await stopForLiveRecovery(reference: reference)
+        case .normal:
+            _ = try startRuntimeInBackground(
+                reference: reference,
+                bootMode: .normal,
+                timeout: Constants.defaultRecoveryAgentTimeout
+            )
+        case .recovery:
+            _ = try startRuntimeInBackground(
+                reference: reference,
+                bootMode: .recovery,
+                timeout: Constants.defaultRecoveryAgentTimeout
+            )
+        case .paused:
+            guard case .paused(let previousMode) = captured else {
+                throw PommeRecoverySessionError.finalStateUnverified
+            }
+            _ = try startRuntimeInBackground(
+                reference: reference,
+                bootMode: previousMode,
+                timeout: Constants.defaultRecoveryAgentTimeout
+            )
+            _ = try sendControlObject(
+                ["command": PommeLifecycleCommand.pause.rawValue],
+                bundle: reference.bundle
+            )
+        case .previous:
+            throw PommeRecoverySessionError.finalStateUnverified
+        }
+    }
+
+    private static func proveLiveRecoveryFinalState(
+        _ state: VMFinalState,
+        captured: PommeRecoveryRunState,
+        reference: VMReference
+    ) async throws -> Bool {
+        _ = captured
+        let observed = try liveRecoveryRunState(
+            from: vmStatusPayload(reference: reference)
+        )
+        switch (state, observed) {
+        case (.stopped, .stopped),
+             (.normal, .running(.normal)),
+             (.recovery, .running(.recovery)):
+            return true
+        case (.paused, .paused(let observedMode)):
+            guard case .paused(let expectedMode) = captured else { return false }
+            return observedMode == expectedMode
+        default:
+            return false
+        }
+    }
+
+    private static func liveRecoveryRunState(
+        from payload: [String: Any]
+    ) throws -> PommeRecoveryRunState {
+        let helperRunning = payload["helperRunning"] as? Bool == true
+        let state = stringValue(payload["vmState"])
+        if !helperRunning, state == "stopped" { return .stopped }
+        guard helperRunning,
+              let mode = BootMode(rawValue: stringValue(payload["bootMode"]))
+        else {
+            throw RunnerError.virtualMachineState(
+                "The Pomme VM is not in a stable lifecycle state."
+            )
+        }
+        switch state {
+        case "running": return .running(mode)
+        case "paused": return .paused(previousBootMode: mode)
+        default:
+            throw RunnerError.virtualMachineState(
+                "The Pomme VM is not in a stable lifecycle state."
+            )
+        }
+    }
+
+    private struct RuntimeArguments: Sendable {
+        let bundlePath: String
+        let name: String?
+        let bootMode: BootMode
+    }
+
+    private static func parseRuntimeArguments(_ arguments: [String]) throws -> RuntimeArguments {
+        guard arguments.first == "--pomme-runtime" else {
+            throw RunnerError.invalidControlCommand(arguments.first ?? "")
+        }
+        var bundlePath: String?
+        var name: String?
+        var bootMode: BootMode = .normal
+        var index = 1
+        while index < arguments.count {
+            switch arguments[index] {
+            case "--bundle":
+                guard index + 1 < arguments.count, bundlePath == nil else { throw RunnerError.usage }
+                bundlePath = arguments[index + 1]
+                index += 2
+            case "--name":
+                guard index + 1 < arguments.count, name == nil else { throw RunnerError.usage }
+                name = arguments[index + 1]
+                index += 2
+            case "--mode":
+                guard index + 1 < arguments.count, let parsed = BootMode(rawValue: arguments[index + 1]) else { throw RunnerError.usage }
+                bootMode = parsed
+                index += 2
+            default:
+                throw RunnerError.usage
+            }
+        }
+        guard let bundlePath, !bundlePath.isEmpty else { throw RunnerError.usage }
+        let canonical = URL(fileURLWithPath: bundlePath).standardizedFileURL.path
+        guard canonical == bundlePath else { throw RunnerError.usage }
+        if let name { _ = try validateVMName(name) }
+        return .init(bundlePath: bundlePath, name: name, bootMode: bootMode)
+    }
+
+    private static func startRuntimeInBackground(
+        reference: VMReference,
+        bootMode: BootMode,
+        timeout: TimeInterval
+    ) throws -> [String: Any] {
+        let bundle = reference.bundle
+        if let existing = try? runtimeRecord(for: bundle) {
+            var status = try sendControlObject(["command": "status"], bundle: bundle)
+            let runningMode = stringValue(status["bootMode"])
+            guard runningMode == bootMode.rawValue else {
+                throw RunnerError.virtualMachineState(
+                    "\(reference.displayName) is already running in \(runningMode) boot mode. Stop it before starting \(bootMode.rawValue) boot mode."
+                )
+            }
+            status["reused"] = true
+            status["pid"] = Int(existing.pid)
+            return status
+        }
+        try bundle.validateForRun()
+        let executable = try runningExecutableIdentity().url
+        let logHandle: FileHandle
+        if !FileManager.default.fileExists(atPath: bundle.helperLogURL.path) {
+            FileManager.default.createFile(atPath: bundle.helperLogURL.path, contents: nil)
+        }
+        logHandle = try FileHandle(forWritingTo: bundle.helperLogURL)
+        try logHandle.truncate(atOffset: 0)
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = [
+            "--pomme-runtime", "--bundle", bundle.rootURL.path,
+            "--mode", bootMode.rawValue
+        ] + (reference.name.map { ["--name", $0] } ?? [])
+        process.currentDirectoryURL = bundle.rootURL
+        process.standardInput = FileHandle(forReadingAtPath: "/dev/null")
+        process.standardOutput = logHandle
+        process.standardError = logHandle
+        try process.run()
+        try waitForRuntime(process: process, bundle: bundle, timeout: timeout)
+        try? logHandle.close()
+        let status = try sendControlObject(["command": "status"], bundle: bundle)
+        var payload = status
+        payload["operation"] = bootMode == .normal ? "start-normal" : "start-recovery"
+        payload["name"] = reference.name as Any
+        payload["pid"] = Int(process.processIdentifier)
+        payload["hostExitCode"] = 0
+        return payload
+    }
+
+    private static func waitForRuntime(process: Process, bundle: BundleLayout, timeout: TimeInterval) throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            guard process.isRunning else {
+                process.waitUntilExit()
+                throw RunnerError.backgroundStartFailed(status: process.terminationStatus, logURL: bundle.helperLogURL)
+            }
+            if (try? sendControlObject(["command": "status"], bundle: bundle)) != nil { return }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        throw RunnerError.backgroundStartTimedOut(pid: process.processIdentifier, logURL: bundle.helperLogURL)
+    }
+
+    private static func runForegroundRuntime(reference: VMReference, bootMode: BootMode) async throws {
+        guard VZVirtualMachine.isSupported else { throw RunnerError.unsupportedHost }
+        let bundle = reference.bundle
+        try bundle.validateForRun()
+        let signer = try provisioningSigner(bundleURL: bundle.rootURL)
+        let repository = try provisioningRepository(bundleURL: bundle.rootURL, signer: signer)
+        let plan = try repository.load().plan
+        guard plan.vm.bundlePath == bundle.rootURL.standardizedFileURL.path,
+              plan.vm.name == (reference.name ?? plan.vm.name)
+        else { throw PommeProvisioningError.ownershipMismatch }
+        // Recovery boots are lifecycle/UI sessions only. Recovery listeners
+        // are installed by the request-bound integration, never by an
+        // ordinary final-state runtime and never with the durable token.
+        let retained = try await startProvisioningRuntime(
+            plan: plan,
+            mode: bootMode,
+            attachAgent: bootMode == .normal
+        )
+        let exitSignal = ExitSignal()
+        let server = PommeControlServer(
+            socketURL: bundle.pommeSocketURL,
+            streamHandler: { request, stream in
+                await runtimeStreamResponse(request, stream: stream, runtime: retained.runtime)
+            },
+            handler: { request in
+                await runtimeControlResponse(request, runtime: retained.runtime, exitSignal: exitSignal, bundle: bundle)
+            }
+        )
+        try server.start()
+        let recordURL = try writeRuntimeRecord(name: reference.name, bundle: bundle)
+        defer {
+            server.stop()
+            retained.coordinator?.teardown()
+            Task {
+                await retained.runtime.teardown()
+                try? FileManager.default.removeItem(at: recordURL)
+            }
+        }
+        await exitSignal.wait()
+    }
+
+    private static func runtimeRecordURL(for bundle: BundleLayout) throws -> URL {
+        try runtimeDirectory().appendingPathComponent(
+            "\(stableIdentifier(for: bundle.rootURL.standardizedFileURL.path)).json"
+        )
+    }
+
+    private static func writeRuntimeRecord(name: String?, bundle: BundleLayout) throws -> URL {
+        let record = PommeRuntimeRecord(
+            id: UUID().uuidString.lowercased(),
+            name: name,
+            bundlePath: bundle.rootURL.standardizedFileURL.path,
+            socketPath: bundle.pommeSocketURL.path,
+            pid: Darwin.getpid(),
+            startedAt: Date().pommeISO8601String
+        )
+        let url = try runtimeRecordURL(for: bundle)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try writePrivate(try encoder.encode(record), to: url)
+        return url
+    }
+
+    private static func runtimeControlResponse(
+        _ request: PommeVMControlRequest,
+        runtime: PommeVMRuntime,
+        exitSignal: ExitSignal,
+        bundle: BundleLayout
+    ) async -> String {
+        do {
+            switch request {
+            case .lifecycle(let command):
+                switch command {
+                case .pause: try await runtime.pause()
+                case .resume: try await runtime.resume()
+                case .stop, .forceStop:
+                    await exitSignal.beginExitHold()
+                    do {
+                        if command == .forceStop { try await runtime.forceStopNow() } else { try await runtime.stop() }
+                        await exitSignal.endExitHold()
+                        await exitSignal.requestExit()
+                    } catch {
+                        await exitSignal.endExitHold()
+                        throw error
+                    }
+                }
+                return try jsonLine(["ok": true, "operation": command.rawValue, "hostExitCode": 0])
+            case .snapshotSave:
+                throw RunnerError.controlCapabilityUnavailable("snapshot-save")
+            case .status:
+                return try jsonLine(await runtime.statusPayload(bundle: bundle, inspect: false))
+            case .inspect:
+                return try jsonLine(await runtime.statusPayload(bundle: bundle, inspect: true))
+            case .agentPerform(let request, _):
+                let result = try await runtime.performGuestOperationCorrelated(request.operation, payload: request.payload)
+                return try correlatedResultJSON(result)
+            }
+        } catch {
+            return (try? jsonLine(["ok": false, "error": error.localizedDescription, "hostExitCode": 1]))
+                ?? "{\"ok\":false,\"hostExitCode\":1}"
+        }
+    }
+
+    private static func runtimeStreamResponse(
+        _ request: PommeVMControlRequest,
+        stream: PommeControlStreamSession,
+        runtime: PommeVMRuntime
+    ) async -> String {
+        guard case .agentPerform(let operation, _) = request else {
+            return "ERROR Pomme control streaming is limited to agent.perform."
+        }
+        do {
+            let result = try await runtime.performGuestOperationCorrelated(operation.operation, payload: operation.payload)
+            guard let jobText = result.result.objectValue?["jobID"]?.stringValue,
+                  let jobID = UUID(uuidString: jobText)
+            else { return try correlatedResultJSON(result) }
+            while true {
+                let frame = try stream.receive()
+                let data = try frame.decodedData()
+                let guestStream: PommeAgentProtocol.Stream
+                switch frame.stream {
+                case .stdin: guestStream = frame.eof == true ? .eof : .stdin
+                case .resize: guestStream = .resize
+                case .signal: guestStream = .signal
+                case .cancellation: guestStream = .eof
+                case .stdout, .stderr, .progress: continue
+                }
+                let forwarded = try await runtime.sendGuestStream(
+                    jobID: jobID,
+                    stream: guestStream,
+                    requestID: frame.id,
+                    data: data,
+                    dimensions: dimensions(from: frame.payload),
+                    signal: signal(from: frame.payload)
+                )
+                try sendControlFrames(forwarded, through: stream)
+                if frame.eof == true || frame.stream == .cancellation { break }
+            }
+            return try correlatedResultJSON(result)
+        } catch {
+            return (try? jsonLine(["ok": false, "error": error.localizedDescription, "hostExitCode": 1]))
+                ?? "{\"ok\":false,\"hostExitCode\":1}"
+        }
+    }
+
+    private static func correlatedResultJSON(_ result: PommeAgentCorrelatedResult) throws -> String {
+        let frames = result.streamFrames.map(agentStreamPayload)
+        return try jsonLine([
+            "ok": true,
+            "requestID": result.requestID.uuidString.lowercased(),
+            "result": result.result.publicValue,
+            "streamFrames": frames,
+            "hostExitCode": 0
+        ])
+    }
+
+    private static func agentStreamPayload(_ frame: PommeAgentJobStreamFrame) -> [String: Any] {
+        var payload: [String: Any] = [
+            "jobID": frame.jobID.uuidString.lowercased(),
+            "requestID": frame.frame.requestID.uuidString.lowercased(),
+            "stream": frame.frame.stream.rawValue
+        ]
+        if let data = frame.frame.data { payload["dataBase64"] = data.base64EncodedString() }
+        if let dimensions = frame.frame.dimensions {
+            payload["columns"] = dimensions.columns
+            payload["rows"] = dimensions.rows
+        }
+        if let signal = frame.frame.signal { payload["signal"] = signal }
+        return payload
+    }
+
+    private static func sendControlFrames(
+        _ frames: [PommeAgentJobStreamFrame],
+        through stream: PommeControlStreamSession
+    ) throws {
+        for frame in frames {
+            let controlStream: PommeControlStreamFrame.Stream
+            let eof: Bool?
+            let payload: JSONValue?
+            switch frame.frame.stream {
+            case .stdout: controlStream = .stdout; eof = nil; payload = nil
+            case .stderr: controlStream = .stderr; eof = nil; payload = nil
+            case .eof: controlStream = .stdout; eof = true; payload = nil
+            case .exit:
+                controlStream = .progress
+                eof = nil
+                payload = .object(["jobID": .string(frame.jobID.uuidString.lowercased()), "stream": .string("exit")])
+            case .stdin, .resize, .signal: continue
+            }
+            try stream.send(stream: controlStream, data: frame.frame.data, payload: payload, eof: eof)
+        }
+    }
+
+    private static func dimensions(from payload: JSONValue?) -> (columns: Int, rows: Int)? {
+        guard let object = payload?.objectValue,
+              case .integer(let columns)? = object["columns"],
+              case .integer(let rows)? = object["rows"],
+              let columns = Int(exactly: columns), let rows = Int(exactly: rows)
+        else { return nil }
+        return (columns, rows)
+    }
+
+    private static func signal(from payload: JSONValue?) -> Int32? {
+        guard let object = payload?.objectValue,
+              case .integer(let value)? = object["signal"] else { return nil }
+        return Int32(exactly: value)
+    }
+
+    static func resumeProvisioning(
+        name: String,
+        lease: VMBundleMutationLease
+    ) async throws -> PommeOperationResult {
+        guard lease.validates(name: name) else {
+            throw VMBundleMutationLease.Error.invalidScope(name: name)
+        }
+        let reference = try namedVMReference(name, requireExists: true)
+        let signer = try provisioningSigner(bundleURL: reference.bundle.rootURL)
+        let repository = try provisioningRepository(bundleURL: reference.bundle.rootURL, signer: signer)
+        let journal = try repository.load()
+        guard journal.plan.vm.name == name,
+              journal.plan.vm.bundlePath == reference.bundle.rootURL.standardizedFileURL.path
+        else { throw PommeProvisioningError.ownershipMismatch }
+        let orchestrator = PommeProvisioningOrchestrator(
+            signer: signer,
+            repository: repository,
+            effects: provisioningEffects(firstBootLease: lease)
+        )
+        try await orchestrator.resume(expectedPlan: journal.plan)
+        let payload: [String: Any] = [
+            "ok": true,
+            "operation": "create-resume",
+            "name": name,
+            "bundlePath": reference.bundle.rootURL.path,
+            "provisioning": [
+                "planDigest": journal.plan.digest,
+                "finalState": journal.plan.finalState.rawValue,
+                "journal": provisioningJournalURL(bundle: reference.bundle).path
+            ],
+            "hostExitCode": 0
+        ]
+        return PommeOperationResult(
+            title: "Resume Create",
+            vmName: name,
+            ok: true,
+            hostExitCode: 0,
+            text: "OK resumed Pomme provisioning for \(name).",
+            payload: payload
+        )
+    }
+
+    static func provisioningAgentStatus(name: String) async throws -> PommeAgentClosedStatus {
+        let reference = try namedVMReference(name, requireExists: true)
+        let payload = try vmStatusPayload(reference: reference)
+        let agent = payload["guestAgent"] as? [String: Any]
+        let connection = GuestAgentStatusV1.ConnectionState(rawValue: stringValue(agent?["connection"])) == .connected
+            ? PommeAgentClosedStatus.Connection.connected
+            : .disconnected
+        let role = PommeProvisioningAgentRole(rawValue: stringValue(agent?["role"])) ?? .normal
+        return .init(
+            connection: connection,
+            role: role,
+            protocolVersion: Int(agent?["protocolVersion"] as? Int ?? 1),
+            executableDigest: stringValue(agent?["executableDigest"]),
+            capabilities: agent?["capabilities"] as? [String] ?? [],
+            updateState: stringValue(agent?["updateState"])
+        )
+    }
+
+    static func repairProvisioning(
+        name: String,
+        finalState: PommeAgentRepairFinalState,
+        lease: VMBundleMutationLease
+    ) async throws -> PommeOperationResult {
+        guard lease.validates(name: name) else {
+            throw VMBundleMutationLease.Error.invalidScope(name: name)
+        }
+        let reference = try namedVMReference(name, requireExists: true)
+        let signer = try provisioningSigner(bundleURL: reference.bundle.rootURL)
+        let repository = try provisioningRepository(bundleURL: reference.bundle.rootURL, signer: signer)
+        let journal = try repository.load()
+        let state: PommeProvisioningFinalState
+        switch finalState {
+        case .previous:
+            // `previous` is the state observed immediately before this
+            // repair invocation, not the create plan's desired end state.
+            // The latter is often `.normalRunning` even when a failed
+            // bootstrap left the VM stopped.
+            state = try capturedProvisioningFinalState(reference: reference)
+        }
+
+        let effects = provisioningEffects(firstBootLease: lease)
+        let ownership = try await effects.verifyOwnership(journal.plan.vm)
+        guard ownership == journal.plan.vm else {
+            throw PommeProvisioningError.ownershipMismatch
+        }
+        guard let next = try PommeProvisioningCoordinator.nextPhase(in: journal),
+              next.phase == .installRecoveryAgent
+        else {
+            throw PommeProvisioningError.unexpectedEvent
+        }
+
+        // Repair is an external Recovery effect too: journal its intent before
+        // starting it, then reconcile the failed phase with a receipt on
+        // success. This makes a subsequent resume continue with verification
+        // instead of repeating agent installation.
+        let intent = try PommeProvisioningCoordinator.appendingIntent(
+            to: journal,
+            phase: next.phase,
+            attempt: next.attempt,
+            signer: signer
+        )
+        try repository.commit(intent, replacing: journal.generation)
+        do {
+            let receipt = try await effects.recoveryRepair(intent.plan, state)
+            guard PommeProvisioningDigest.isSHA256(receipt) else {
+                throw PommeProvisioningError.phaseFailed(.installRecoveryAgent)
+            }
+            let completed = try PommeProvisioningCoordinator.appendingResult(
+                to: intent,
+                kind: .receipt,
+                phase: next.phase,
+                attempt: next.attempt,
+                receiptDigest: receipt,
+                signer: signer
+            )
+            try repository.commit(completed, replacing: intent.generation)
+        } catch {
+            let digest = PommeProvisioningDigest.sha256(Data(String(describing: error).utf8))
+            let failed = try PommeProvisioningCoordinator.appendingResult(
+                to: intent,
+                kind: .failure,
+                phase: next.phase,
+                attempt: next.attempt,
+                receiptDigest: digest,
+                signer: signer
+            )
+            try repository.commit(failed, replacing: intent.generation)
+            throw PommeProvisioningError.phaseFailed(.installRecoveryAgent)
+        }
+        let payload: [String: Any] = [
+            "ok": true,
+            "operation": "agent-repair",
+            "name": name,
+            "finalState": state.rawValue,
+            "journalReconciled": true,
+            "role": PommeProvisioningAgentRole.recovery.rawValue,
+            "hostExitCode": 0
+        ]
+        return PommeOperationResult(
+            title: "Agent Repair",
+            vmName: name,
+            ok: true,
+            hostExitCode: 0,
+            text: "OK repaired the Pomme agent through Recovery for \(name).",
+            payload: payload
+        )
+    }
+
+    /// Convert a status snapshot into the only final-state vocabulary that an
+    /// agent-repair request can safely carry. Transient and paused states are
+    /// rejected rather than silently changing the caller's requested prior
+    /// state; a future paused-state repair must add an explicit journal/schema
+    /// representation first.
+    static func capturedProvisioningFinalState(
+        from status: [String: Any]
+    ) throws -> PommeProvisioningFinalState {
+        guard let helperRunning = status["helperRunning"] as? Bool else {
+            throw RunnerError.virtualMachineState("Pomme could not capture the VM run state before agent repair.")
+        }
+        guard helperRunning else { return .stopped }
+
+        let vmState = stringValue(status["vmState"])
+        if vmState == "stopped" { return .stopped }
+        guard vmState == "running" else {
+            throw RunnerError.virtualMachineState("Pomme could not capture a stable VM run state before agent repair.")
+        }
+        switch BootMode(rawValue: stringValue(status["bootMode"])) {
+        case .normal: return .normalRunning
+        case .recovery: return .recoveryRunning
+        case nil:
+            throw RunnerError.virtualMachineState("Pomme could not identify the VM boot mode before agent repair.")
+        }
+    }
+
+    private static func capturedProvisioningFinalState(
+        reference: VMReference
+    ) throws -> PommeProvisioningFinalState {
+        try capturedProvisioningFinalState(from: vmStatusPayload(reference: reference))
+    }
+
+    static func requireDeletionStopSucceeded(_ payload: [String: Any]) throws {
+        guard payload["ok"] as? Bool == true else {
+            throw RunnerError.hostCommandFailed(
+                "Refusing VM deletion because its helper did not stop cleanly."
+            )
+        }
+    }
+
+    enum RequiredSnapshotRestoreStartupError: Error, Equatable, LocalizedError {
+        case invalidPollingConfiguration
+        case helperExited(pid: Int32, lastObservation: String)
+        case timedOut(pid: Int32, lastObservation: String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidPollingConfiguration:
+                "Snapshot restore polling requires a nonnegative timeout and positive interval."
+            case let .helperExited(pid, lastObservation):
+                "Snapshot restore helper pid \(pid) exited before reaching paused normal state. Last observation: \(lastObservation)"
+            case let .timedOut(pid, lastObservation):
+                "Timed out waiting for snapshot restore helper pid \(pid) to reach paused normal state. Last observation: \(lastObservation)"
+            }
+        }
+    }
+
+    static func waitForRequiredSnapshotRestorePausedNormal(
+        helperPID: Int32,
+        timeout: TimeInterval = 30,
+        pollInterval: TimeInterval = 0.25,
+        helperIsRunning: () -> Bool,
+        pollStatus: () throws -> [String: Any],
+        now: () -> Date = Date.init,
+        sleep: (TimeInterval) -> Void = Thread.sleep
+    ) throws -> [String: Any] {
+        guard timeout >= 0, pollInterval > 0 else {
+            throw RequiredSnapshotRestoreStartupError.invalidPollingConfiguration
+        }
+
+        let deadline = now().addingTimeInterval(timeout)
+        var lastObservation = "no control status received"
+        while true {
+            guard helperIsRunning() else {
+                throw RequiredSnapshotRestoreStartupError.helperExited(
+                    pid: helperPID,
+                    lastObservation: lastObservation
+                )
+            }
+            do {
+                let status = try pollStatus()
+                let vmState = status["vmState"] as? String ?? "unknown"
+                let bootMode = status["bootMode"] as? String ?? "unknown"
+                let helperRunning = (status["helperRunning"] as? Bool).map(String.init) ?? "unknown"
+                lastObservation = "vmState=\(vmState) bootMode=\(bootMode) helperRunning=\(helperRunning)"
+                if vmState == "paused", bootMode == BootMode.normal.rawValue {
+                    return status
+                }
+            } catch {
+                lastObservation = "control error: \(error.localizedDescription)"
+            }
+            let current = now()
+            guard current < deadline else {
+                throw RequiredSnapshotRestoreStartupError.timedOut(
+                    pid: helperPID,
+                    lastObservation: lastObservation
+                )
+            }
+            sleep(min(pollInterval, deadline.timeIntervalSince(current)))
+        }
+    }
+
+    // MARK: Restore-image discovery
+
+    /// The only version normalization accepted at the catalog boundary is a
+    /// missing patch component whose value would be zero. In particular,
+    /// this intentionally does not use a general semantic-version parser:
+    /// `26.6.0.0`, `26.6.1`, and `26.06` must not silently select Tahoe.
+    static func ipswVersionMatches(_ selection: String, catalogVersion: String) -> Bool {
+        let requested = selection.trimmingCharacters(in: .whitespacesAndNewlines)
+        let catalog = catalogVersion.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !requested.isEmpty, !catalog.isEmpty else { return false }
+        if requested.caseInsensitiveCompare(catalog) == .orderedSame { return true }
+
+        let requestedComponents = requested.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        let catalogComponents = catalog.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        guard requestedComponents.allSatisfy({ $0.allSatisfy(\.isNumber) }),
+              catalogComponents.allSatisfy({ $0.allSatisfy(\.isNumber) })
+        else { return false }
+
+        if requestedComponents.count == 2,
+           catalogComponents.count == 3,
+           catalogComponents[2] == "0" {
+            return requestedComponents[0] == catalogComponents[0]
+                && requestedComponents[1] == catalogComponents[1]
+        }
+        if requestedComponents.count == 3,
+           requestedComponents[2] == "0",
+           catalogComponents.count == 2 {
+            return requestedComponents[0] == catalogComponents[0]
+                && requestedComponents[1] == catalogComponents[1]
+        }
+        return false
+    }
+
+    enum IPSWDownloadResponseDecision: Equatable, Sendable {
+        case overwrite
+        case append
+    }
+
+    enum IPSWDownloadResponseError: Error, Equatable, LocalizedError, Sendable {
+        case unsupportedStatus(Int)
+        case unexpectedPartialResponse
+        case missingContentRange
+        case invalidContentRange
+        case contentRangeOffsetMismatch(expected: Int64, actual: Int64)
+        case contentRangeSizeMismatch(expected: Int64, actual: Int64)
+
+        var errorDescription: String? {
+            switch self {
+            case let .unsupportedStatus(status):
+                "The restore-image server returned HTTP \(status)."
+            case .unexpectedPartialResponse:
+                "The restore-image server returned a partial response for a fresh download."
+            case .missingContentRange:
+                "The restore-image server omitted Content-Range for a resumed download."
+            case .invalidContentRange:
+                "The restore-image server returned an invalid Content-Range header."
+            case let .contentRangeOffsetMismatch(expected, actual):
+                "The restore-image server resumed at byte \(actual), expected byte \(expected)."
+            case let .contentRangeSizeMismatch(expected, actual):
+                "The restore-image server advertised \(actual) bytes, expected \(expected)."
+            }
+        }
+    }
+
+    /// Decide whether a response can replace or extend the adjacent partial
+    /// file. A server returning 200 after ignoring a Range request is safe to
+    /// handle by replacing the partial file; a 206 response is appendable only
+    /// when its Content-Range starts at the requested offset and advertises the
+    /// expected total size.
+    static func ipswDownloadResponseDecision(
+        statusCode: Int,
+        requestedOffset: Int64,
+        contentRange: String?,
+        expectedSize: Int64
+    ) throws -> IPSWDownloadResponseDecision {
+        guard expectedSize > 0 else { throw IPSWDownloadResponseError.invalidContentRange }
+        switch statusCode {
+        case 200:
+            return .overwrite
+        case 206:
+            guard requestedOffset > 0 else {
+                throw IPSWDownloadResponseError.unexpectedPartialResponse
+            }
+            guard let contentRange else {
+                throw IPSWDownloadResponseError.missingContentRange
+            }
+            guard let parsed = parseIPSWContentRange(contentRange) else {
+                throw IPSWDownloadResponseError.invalidContentRange
+            }
+            guard parsed.start == requestedOffset else {
+                throw IPSWDownloadResponseError.contentRangeOffsetMismatch(
+                    expected: requestedOffset,
+                    actual: parsed.start
+                )
+            }
+            guard parsed.total == expectedSize else {
+                throw IPSWDownloadResponseError.contentRangeSizeMismatch(
+                    expected: expectedSize,
+                    actual: parsed.total
+                )
+            }
+            return .append
+        default:
+            throw IPSWDownloadResponseError.unsupportedStatus(statusCode)
+        }
+    }
+
+    static func resolveIPSWFirmware(selection: String, deviceIdentifier: String?) async throws -> IPSWMEFirmware {
+        let device = try deviceIdentifier ?? hostModelIdentifier()
+        let response = try await fetchIPSWMEDevice(identifier: device)
+        return try selectIPSWFirmware(response.firmwares, selection: selection)
+    }
+
+    static func listIPSWFirmwares(
+        deviceIdentifier: String?,
+        limit: Int?
+    ) async throws -> (device: IPSWMEDeviceResponse, firmwares: [IPSWMEFirmware]) {
+        let device = try deviceIdentifier ?? hostModelIdentifier()
+        let response = try await fetchIPSWMEDevice(identifier: device)
+        let firmwares = limit.map { Array(response.firmwares.prefix($0)) } ?? response.firmwares
+        return (response, firmwares)
+    }
+
+    static func downloadIPSWFirmware(
+        selection: String,
+        deviceIdentifier: String?
+    ) async throws -> (firmware: IPSWMEFirmware, url: URL) {
+        let firmware = try await resolveIPSWFirmware(selection: selection, deviceIdentifier: deviceIdentifier)
+        let url = try await downloadFirmware(firmware, resume: true)
+        return (firmware, url)
+    }
+
+    private static func fetchIPSWMEDevice(identifier: String) async throws -> IPSWMEDeviceResponse {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "api.ipsw.me"
+        components.path = "/v4/device/\(identifier)"
+        components.queryItems = [URLQueryItem(name: "type", value: "ipsw")]
+        guard let url = components.url else {
+            throw RunnerError.hostCommandFailed("Could not build restore-image catalog URL.")
+        }
+        let session = makeIPSWURLSession()
+        defer { session.invalidateAndCancel() }
+        let (data, response) = try await session.data(from: url)
+        if let response = response as? HTTPURLResponse, !(200..<300).contains(response.statusCode) {
+            throw RunnerError.downloadFailed(statusCode: response.statusCode)
+        }
+        do {
+            return try JSONDecoder().decode(IPSWMEDeviceResponse.self, from: data)
+        } catch {
+            throw RunnerError.hostCommandFailed("The restore-image catalog returned invalid JSON.")
+        }
+    }
+
+    static func selectIPSWFirmware(_ firmwares: [IPSWMEFirmware], selection: String) throws -> IPSWMEFirmware {
+        let value = selection.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { throw RunnerError.hostCommandFailed("A restore-image version is required.") }
+        let signedFirmwares = firmwares.filter { $0.signed == true }
+        if value.caseInsensitiveCompare("latest") == .orderedSame,
+           let firmware = signedFirmwares.first {
+            return firmware
+        }
+        if let firmware = signedFirmwares.first(where: {
+            ipswVersionMatches(value, catalogVersion: $0.version)
+                || $0.buildid.caseInsensitiveCompare(value) == .orderedSame
+        }) {
+            return firmware
+        }
+        throw RunnerError.hostCommandFailed("No signed restore image matched \(value).")
+    }
+
+    private static func downloadFirmware(_ firmware: IPSWMEFirmware, resume: Bool) async throws -> URL {
+        guard firmware.signed == true else {
+            throw RunnerError.hostCommandFailed("Refusing to download an unsigned restore image.")
+        }
+        guard let expectedSize = firmware.filesize, expectedSize > 0 else {
+            throw RunnerError.hostCommandFailed("The restore-image catalog did not provide a valid expected size.")
+        }
+        guard let remoteURL = URL(string: firmware.url), remoteURL.scheme?.hasPrefix("http") == true else {
+            throw RunnerError.hostCommandFailed("The restore-image catalog returned an invalid URL.")
+        }
+        let directory = try applicationSupportRoot().appendingPathComponent(Constants.restoreImageDirectoryName, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fileName = remoteURL.lastPathComponent.isEmpty
+            ? "macOS-\(firmware.version)-\(firmware.buildid).ipsw"
+            : remoteURL.lastPathComponent
+        let destination = directory.appendingPathComponent(fileName)
+        let partial = directory.appendingPathComponent(".\(fileName).part")
+        let fileManager = FileManager.default
+        if fileSize(destination) == expectedSize {
+            // A completed destination wins; remove only the deterministic
+            // temporary file owned by this download operation.
+            try? fileManager.removeItem(at: partial)
+            return destination
+        }
+
+        // Older interrupted downloads may have left bytes at the final name.
+        // Move that known file beside the destination so all future writes are
+        // resumable and the final name is published only after size validation.
+        if let currentDestinationSize = fileSize(destination), currentDestinationSize > 0,
+           !fileManager.fileExists(atPath: partial.path) {
+            try fileManager.moveItem(at: destination, to: partial)
+        }
+        if fileSize(partial) == expectedSize {
+            if fileManager.fileExists(atPath: destination.path) {
+                try fileManager.replaceItemAt(destination, withItemAt: partial)
+            } else {
+                try fileManager.moveItem(at: partial, to: destination)
+            }
+            try? fileManager.removeItem(at: partial)
+            return destination
+        }
+        if let partialSize = fileSize(partial), partialSize > expectedSize {
+            try fileManager.removeItem(at: partial)
+        }
+
+        var request = URLRequest(url: remoteURL)
+        var offset: Int64 = 0
+        if resume, let current = fileSize(partial), current > 0 {
+            offset = current
+            request.setValue("bytes=\(current)-", forHTTPHeaderField: "Range")
+        }
+
+        let session = makeIPSWURLSession()
+        defer { session.invalidateAndCancel() }
+
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw RunnerError.hostCommandFailed("The restore-image server returned a non-HTTP response.")
+        }
+        let decision: IPSWDownloadResponseDecision
+        do {
+            decision = try ipswDownloadResponseDecision(
+                statusCode: http.statusCode,
+                requestedOffset: offset,
+                contentRange: http.value(forHTTPHeaderField: "Content-Range"),
+                expectedSize: expectedSize
+            )
+        } catch let error as IPSWDownloadResponseError {
+            if case let .unsupportedStatus(status) = error {
+                throw RunnerError.downloadFailed(statusCode: status)
+            }
+            throw RunnerError.hostCommandFailed(error.localizedDescription)
+        }
+
+        guard fileManager.createFile(
+            atPath: partial.path,
+            contents: nil,
+            attributes: [.posixPermissions: 0o600]
+        ) || fileManager.fileExists(atPath: partial.path) else {
+            throw RunnerError.hostCommandFailed("Could not create the restore-image temporary file.")
+        }
+        let handle = try FileHandle(forWritingTo: partial)
+        do {
+            if decision == .overwrite {
+                try handle.truncate(atOffset: 0)
+            } else {
+                _ = try handle.seekToEnd()
+            }
+            var chunk = Data()
+            chunk.reserveCapacity(64 * 1024)
+            for try await byte in bytes {
+                chunk.append(byte)
+                if chunk.count == 64 * 1024 {
+                    try handle.write(contentsOf: chunk)
+                    chunk.removeAll(keepingCapacity: true)
+                }
+            }
+            if !chunk.isEmpty {
+                try handle.write(contentsOf: chunk)
+            }
+            try handle.synchronize()
+            try handle.close()
+        } catch {
+            try? handle.close()
+            // Keep the adjacent partial file for a subsequent Range request.
+            throw error
+        }
+
+        guard fileSize(partial) == expectedSize else {
+            throw RunnerError.hostCommandFailed("The restore-image size did not match catalog metadata.")
+        }
+        if fileManager.fileExists(atPath: destination.path) {
+            try fileManager.replaceItemAt(destination, withItemAt: partial)
+        } else {
+            try fileManager.moveItem(at: partial, to: destination)
+        }
+        // `partial` is normally consumed by move/replace; this cleanup also
+        // handles platform implementations that leave a temporary inode.
+        try? fileManager.removeItem(at: partial)
+        return destination
+    }
+
+    private static func parseIPSWContentRange(_ value: String) -> (start: Int64, end: Int64, total: Int64)? {
+        let fields = value.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+        guard fields.count == 2, fields[0].caseInsensitiveCompare("bytes") == .orderedSame else { return nil }
+        let rangeAndTotal = fields[1].split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+        guard rangeAndTotal.count == 2, let total = Int64(rangeAndTotal[1]), total > 0 else { return nil }
+        let bounds = rangeAndTotal[0].split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+        guard bounds.count == 2,
+              let start = Int64(bounds[0]),
+              let end = Int64(bounds[1]),
+              start >= 0,
+              end >= start,
+              end < total
+        else { return nil }
+        return (start, end, total)
+    }
+
+    private static func makeIPSWURLSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 120
+        configuration.timeoutIntervalForResource = 24 * 60 * 60
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }
+
+    private static func fileSize(_ url: URL) -> Int64? {
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey]), let size = values.fileSize else { return nil }
+        return Int64(size)
+    }
+
+    private static func hostModelIdentifier() throws -> String {
+        var size = 0
+        guard sysctlbyname("hw.model", nil, &size, nil, 0) == 0, size > 0 else {
+            throw RunnerError.hostCommandFailed("Could not determine the host model identifier.")
+        }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("hw.model", &buffer, &size, nil, 0) == 0 else {
+            throw RunnerError.hostCommandFailed("Could not determine the host model identifier.")
+        }
+        return String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
+
+    // MARK: Executable identity
+
+    static func runningExecutableIdentity() throws -> (url: URL, sha256: String) {
+        let url = URL(fileURLWithPath: CommandLine.arguments.first ?? PommeAgentInstall.executable).resolvingSymlinksInPath()
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return (url, digest)
+    }
+}

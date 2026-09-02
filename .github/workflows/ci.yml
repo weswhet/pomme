@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Build and test Pomme
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Resolve packages
+        run: >-
+          xcodebuild -resolvePackageDependencies
+          -project pomme.xcodeproj
+          -scheme pomme
+
+      - name: Build and test
+        run: >-
+          xcodebuild test
+          -project pomme.xcodeproj
+          -scheme pomme
+          -configuration Release
+          -destination 'platform=macOS,arch=arm64'
+          -parallel-testing-enabled NO
+          -derivedDataPath "$RUNNER_TEMP/pomme-derived-data"
+          CODE_SIGNING_ALLOWED=NO
+
+      - name: Verify public CLI contract
+        run: >-
+          Tests/PommeCLIIntegrationTests.sh
+          --runner "$RUNNER_TEMP/pomme-derived-data/Build/Products/Release/pomme"
+          --no-build
+
+      - name: Audit product identity
+        run: Tests/PommeIdentifierAudit.sh
+
+      - name: Verify package identity
+        run: Tests/PackagingIdentity.sh
