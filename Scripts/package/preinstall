@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+# Files outside the Pomme package payload intentionally remain untouched.
+exit 0

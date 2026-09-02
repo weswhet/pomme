@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+[ -x /usr/local/bin/pomme ]
+/usr/bin/codesign --verify --strict /usr/local/bin/pomme
+exit 0

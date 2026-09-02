@@ -1,0 +1,383 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		8BA100012DF7000000000001 /* ArgumentParser in Frameworks */ = {isa = PBXBuildFile; productRef = 8BA100032DF7000000000001 /* ArgumentParser */; };
+		8BA200012F10000000000001 /* Yams in Frameworks */ = {isa = PBXBuildFile; productRef = 8BA200032F10000000000001 /* Yams */; };
+		8BA200042F10000000000001 /* TOML in Frameworks */ = {isa = PBXBuildFile; productRef = 8BA200062F10000000000001 /* TOML */; };
+		8BT100012F20000000000001 /* ArgumentParser in Frameworks */ = {isa = PBXBuildFile; productRef = 8BA100032DF7000000000001 /* ArgumentParser */; };
+		8BT100022F20000000000001 /* Yams in Frameworks */ = {isa = PBXBuildFile; productRef = 8BA200032F10000000000001 /* Yams */; };
+		8BT100032F20000000000001 /* TOML in Frameworks */ = {isa = PBXBuildFile; productRef = 8BA200062F10000000000001 /* TOML */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		8B1F00012DF3000000000001 /* pomme */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = pomme; sourceTree = BUILT_PRODUCTS_DIR; };
+		8BT100042F20000000000001 /* PommeCLITests.xctest */ = {isa = PBXFileReference; explicitFileType = "wrapper.cfbundle"; includeInIndex = 0; path = PommeCLITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		8B1F00002DF3000000000001 /* Tools */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Tools;
+			sourceTree = "<group>";
+		};
+		8B1F00092E01000000000001 /* Sources/PommeCLI */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/PommeCLI;
+			sourceTree = "<group>";
+		};
+		8B90D1BC2DEE373300FBD189 /* Config */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Config;
+			sourceTree = "<group>";
+		};
+		8BT100052F20000000000001 /* Tests/PommeCLITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Tests/PommeCLITests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		8B1F00032DF3000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8BA100012DF7000000000001 /* ArgumentParser in Frameworks */,
+				8BA200012F10000000000001 /* Yams in Frameworks */,
+				8BA200042F10000000000001 /* TOML in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		8BT100062F20000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8BT100012F20000000000001 /* ArgumentParser in Frameworks */,
+				8BT100022F20000000000001 /* Yams in Frameworks */,
+				8BT100032F20000000000001 /* TOML in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		8B90D1462DEDD44A00FBD189 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		8BC265532DEDD3F400F279A4 = {
+			isa = PBXGroup;
+			children = (
+				8B90D1BC2DEE373300FBD189 /* Config */,
+				8B1F00002DF3000000000001 /* Tools */,
+				8B1F00092E01000000000001 /* Sources/PommeCLI */,
+				8BT100052F20000000000001 /* Tests/PommeCLITests */,
+				8B90D1462DEDD44A00FBD189 /* Frameworks */,
+				8BC2655D2DEDD3F400F279A4 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		8BC2655D2DEDD3F400F279A4 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				8B1F00012DF3000000000001 /* pomme */,
+				8BT100042F20000000000001 /* PommeCLITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		8B1F00052DF3000000000001 /* pomme */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8B1F00082DF3000000000001 /* Build configuration list for PBXNativeTarget "pomme" */;
+			buildPhases = (
+				8B1F00022DF3000000000001 /* Sources */,
+				8B1F00032DF3000000000001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				8B1F00002DF3000000000001 /* Tools */,
+				8B1F00092E01000000000001 /* Sources/PommeCLI */,
+			);
+			name = pomme;
+			packageProductDependencies = (
+				8BA100032DF7000000000001 /* ArgumentParser */,
+				8BA200032F10000000000001 /* Yams */,
+				8BA200062F10000000000001 /* TOML */,
+			);
+			productName = pomme;
+			productReference = 8B1F00012DF3000000000001 /* pomme */;
+			productType = "com.apple.product-type.tool";
+		};
+		8BT100072F20000000000001 /* PommeCLITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8BT1000A2F20000000000001 /* Build configuration list for PBXNativeTarget "PommeCLITests" */;
+			buildPhases = (
+				8BT100082F20000000000001 /* Sources */,
+				8BT100062F20000000000001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				8B1F00092E01000000000001 /* Sources/PommeCLI */,
+				8BT100052F20000000000001 /* Tests/PommeCLITests */,
+			);
+			name = PommeCLITests;
+			packageProductDependencies = (
+				8BA100032DF7000000000001 /* ArgumentParser */,
+				8BA200032F10000000000001 /* Yams */,
+				8BA200062F10000000000001 /* TOML */,
+			);
+			productName = PommeCLITests;
+			productReference = 8BT100042F20000000000001 /* PommeCLITests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		8BC265542DEDD3F400F279A4 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1630;
+				LastUpgradeCheck = 1630;
+				ORGANIZATIONNAME = "$(ORGANIZATION_NAME)";
+				TargetAttributes = {
+					8B1F00052DF3000000000001 = {
+						CreatedOnToolsVersion = 16.3;
+					};
+					8BT100072F20000000000001 = {
+						CreatedOnToolsVersion = 16.3;
+					};
+				};
+			};
+			buildConfigurationList = 8BC265572DEDD3F400F279A4 /* Build configuration list for PBXProject "pomme" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 8BC265532DEDD3F400F279A4;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				8BA100022DF7000000000001 /* XCRemoteSwiftPackageReference "swift-argument-parser" */,
+				8BA200022F10000000000001 /* XCRemoteSwiftPackageReference "Yams" */,
+				8BA200052F10000000000001 /* XCRemoteSwiftPackageReference "swift-toml" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 8BC2655D2DEDD3F400F279A4 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				8B1F00052DF3000000000001 /* pomme */,
+				8BT100072F20000000000001 /* PommeCLITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		8B1F00022DF3000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		8BT100082F20000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		8B1F00062DF3000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReferenceAnchor = 8B90D1BC2DEE373300FBD189 /* Config */;
+			baseConfigurationReferenceRelativePath = Debug.xcconfig;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+				CODE_SIGN_STYLE = Manual;
+				DEVELOPMENT_TEAM = "";
+				"DEVELOPMENT_TEAM[sdk=macosx*]" = 2D8XQ77EBQ;
+				GENERATE_INFOPLIST_FILE = NO;
+				PRODUCT_BUNDLE_IDENTIFIER = com.github.weswhet.pomme;
+				PRODUCT_DISPLAY_NAME = pomme;
+				PRODUCT_NAME = pomme;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		8B1F00072DF3000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReferenceAnchor = 8B90D1BC2DEE373300FBD189 /* Config */;
+			baseConfigurationReferenceRelativePath = Release.xcconfig;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Developer ID Application";
+				CODE_SIGN_STYLE = Manual;
+				DEVELOPMENT_TEAM = "";
+				"DEVELOPMENT_TEAM[sdk=macosx*]" = 2D8XQ77EBQ;
+				GENERATE_INFOPLIST_FILE = NO;
+				PRODUCT_BUNDLE_IDENTIFIER = com.github.weswhet.pomme;
+				PRODUCT_DISPLAY_NAME = pomme;
+				PRODUCT_NAME = pomme;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		8BC2657C2DEDD3F500F279A4 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		8BC2657D2DEDD3F500F279A4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		8BT1000B2F20000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.github.weswhet.PommeCLITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "";
+			};
+			name = Debug;
+		};
+		8BT1000C2F20000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.github.weswhet.PommeCLITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		8B1F00082DF3000000000001 /* Build configuration list for PBXNativeTarget "pomme" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8B1F00062DF3000000000001 /* Debug */,
+				8B1F00072DF3000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		8BC265572DEDD3F400F279A4 /* Build configuration list for PBXProject "pomme" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8BC2657C2DEDD3F500F279A4 /* Debug */,
+				8BC2657D2DEDD3F500F279A4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		8BT1000A2F20000000000001 /* Build configuration list for PBXNativeTarget "PommeCLITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8BT1000B2F20000000000001 /* Debug */,
+				8BT1000C2F20000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		8BA100022DF7000000000001 /* XCRemoteSwiftPackageReference "swift-argument-parser" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-argument-parser.git";
+			requirement = {
+				kind = exactVersion;
+				version = 1.7.1;
+			};
+		};
+		8BA200022F10000000000001 /* XCRemoteSwiftPackageReference "Yams" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/jpsim/Yams.git";
+			requirement = {
+				kind = exactVersion;
+				version = 6.2.2;
+			};
+		};
+		8BA200052F10000000000001 /* XCRemoteSwiftPackageReference "swift-toml" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/mattt/swift-toml.git";
+			requirement = {
+				kind = exactVersion;
+				version = 2.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		8BA100032DF7000000000001 /* ArgumentParser */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8BA100022DF7000000000001 /* XCRemoteSwiftPackageReference "swift-argument-parser" */;
+			productName = ArgumentParser;
+		};
+		8BA200032F10000000000001 /* Yams */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8BA200022F10000000000001 /* XCRemoteSwiftPackageReference "Yams" */;
+			productName = Yams;
+		};
+		8BA200062F10000000000001 /* TOML */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8BA200052F10000000000001 /* XCRemoteSwiftPackageReference "swift-toml" */;
+			productName = TOML;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 8BC265542DEDD3F400F279A4 /* Project object */;
+}
