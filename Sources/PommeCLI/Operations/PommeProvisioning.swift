@@ -39,7 +39,7 @@ struct PommeProvisioningPlan: Codable, Equatable, Sendable {
         guard schema == Self.schemaVersion,
               restore.isExact,
               display == .required,
-              profile.isAccepted(for: restore, display: display),
+              profile.isUsable(for: restore, display: display),
               normalAgent.role == .normal,
               recoveryAgent.role == .recovery,
               normalAgent.identifier != recoveryAgent.identifier
@@ -117,9 +117,14 @@ struct PommeAgentIdentity: Codable, Equatable, Sendable {
 }
 
 /// The profile is closed here so planning cannot make a VM mutable before its
-/// UI profile is accepted.  Sequoia remains represented but release-gated.
+/// UI profile is selected. Reviewed Tahoe remains accepted; every other
+/// descriptor is explicitly experimental and carries no review record.
 struct PommeRecoveryProfileContract: Codable, Equatable, Sendable {
-    enum Qualification: String, Codable, Equatable, Sendable { case accepted, externallyPending }
+    enum Qualification: String, Codable, Equatable, Sendable {
+        case accepted
+        case externallyPending
+        case experimental
+    }
 
     let identifier: String
     let version: String
@@ -142,12 +147,89 @@ struct PommeRecoveryProfileContract: Codable, Equatable, Sendable {
         reviewDigest: "6b8a6d0bf6710e7c10ee85f9af8a48a8e9fc073552cc8094a494172b7420b1e6"
     )
 
-    func isAccepted(for restore: PommeRestoreIdentity, display: PommeDisplayContract) -> Bool {
-        guard qualification == .accepted, display == .required,
-              version == restore.version, build == restore.build,
-              PommeProvisioningDigest.isSHA256(reviewDigest)
+    /// Returns whether this contract is usable for the exact immutable restore
+    /// and display identity. Experimental contracts are usable for bounded
+    /// attempts only when they are the deterministic descriptor for that
+    /// identity and have no review digest.
+    func isUsable(for restore: PommeRestoreIdentity, display: PommeDisplayContract) -> Bool {
+        guard display == .required,
+              version == restore.version,
+              build == restore.build
         else { return false }
-        return self == Self.tahoe
+
+        switch qualification {
+        case .accepted:
+            // Equality keeps the reviewed record closed: a caller cannot
+            // forge acceptance by copying the Tahoe shape with a new build or
+            // by supplying a different review digest.
+            return self == Self.tahoe
+        case .experimental:
+            guard reviewDigest.isEmpty,
+                  let descriptor = try? PommeRecoveryProfileSelector.descriptor(
+                      version: restore.version,
+                      build: restore.build
+                  ),
+                  descriptor.qualification == .experimental,
+                  descriptor.id == identifier,
+                  descriptor.version == version,
+                  descriptor.build == build
+            else { return false }
+            return true
+        case .externallyPending:
+            // Kept solely so old encoded values decode. Pending records are
+            // never usable as a durable plan; callers may convert a pending
+            // descriptor through init(descriptor:), which deliberately emits
+            // an explicit experimental contract with an empty review digest.
+            return false
+        }
+    }
+
+    /// Backwards-compatible spelling for callers that only need the reviewed
+    /// Tahoe qualification. Experimental contracts are usable but are not
+    /// accepted/reviewed records.
+    func isAccepted(for restore: PommeRestoreIdentity, display: PommeDisplayContract) -> Bool {
+        qualification == .accepted && isUsable(for: restore, display: display)
+    }
+}
+
+extension PommeRecoveryProfileContract {
+    /// Converts a selector descriptor into the durable profile contract. The
+    /// descriptor is re-derived from its version/build before conversion so a
+    /// caller cannot construct a new-build descriptor that falsely claims the
+    /// reviewed Tahoe qualification.
+    init(descriptor: PommeCreateRecoveryProfileDescriptor) throws {
+        let canonical: PommeCreateRecoveryProfileDescriptor
+        do {
+            canonical = try PommeRecoveryProfileSelector.descriptor(
+                version: descriptor.version,
+                build: descriptor.build
+            )
+        } catch {
+            throw PommeProvisioningError.invalidPlan
+        }
+
+        guard descriptor.id == canonical.id,
+              descriptor.version == canonical.version,
+              descriptor.build == canonical.build,
+              descriptor.locale == canonical.locale,
+              descriptor.displayWidth == canonical.displayWidth,
+              descriptor.displayHeight == canonical.displayHeight
+        else { throw PommeProvisioningError.invalidPlan }
+
+        switch (descriptor.qualification, canonical.qualification) {
+        case (.accepted, .accepted):
+            self = .tahoe
+        case (.experimental, .experimental), (.externallyPending, .experimental):
+            self.init(
+                identifier: canonical.id,
+                version: canonical.version,
+                build: canonical.build,
+                qualification: .experimental,
+                reviewDigest: ""
+            )
+        default:
+            throw PommeProvisioningError.invalidPlan
+        }
     }
 }
 
@@ -220,7 +302,7 @@ enum PommeProvisioningError: Error, Equatable, LocalizedError, Sendable {
     case generationFailure
     case unexpectedEvent
     case ownershipMismatch
-    case phaseFailed(PommeProvisioningPhase)
+    case phaseFailed(PommeProvisioningPhase, vmName: String? = nil)
     case unavailableIntegration(String)
 
     var errorDescription: String? {
@@ -233,7 +315,8 @@ enum PommeProvisioningError: Error, Equatable, LocalizedError, Sendable {
         case .generationFailure: "Pomme provisioning journal generation is stale or non-monotonic."
         case .unexpectedEvent: "Pomme provisioning journal has an invalid phase transition."
         case .ownershipMismatch: "The VM is not the exact Pomme-owned VM bound to this plan."
-        case .phaseFailed(let phase): "Pomme provisioning phase \(phase.rawValue) failed; the VM and journal were retained."
+        case .phaseFailed(let phase, let vmName):
+            "\(vmName.map { "\($0) " } ?? "")provisioning phase \(phase.rawValue) failed; the VM and journal were retained."
         case .unavailableIntegration(let operation): "Pomme integration is unavailable for \(operation)."
         }
     }
@@ -317,7 +400,10 @@ enum PommeProvisioningFailureDiagnostic {
             case .notPrepared: return "recovery_session.not_prepared"
             case .unauthenticated: return "recovery_session.unauthenticated"
             case .invalidLifecycle: return "recovery_session.invalid_lifecycle"
+            case .observationTimedOut: return "recovery_session.observation_timed_out"
+            case .terminalProofFailed: return "recovery_session.terminal_proof_failed"
             case .rootEvidenceRejected: return "recovery_session.root_evidence_rejected"
+            case .preparationFailed: return "recovery_session.preparation_failed"
             case .guestOperationFailed: return "recovery_session.guest_operation_failed"
             case .cleanupFailed: return "recovery_session.cleanup_failed"
             case .finalStateUnverified: return "recovery_session.final_state_unverified"
@@ -538,13 +624,14 @@ struct PommeProvisioningOrchestrator: Sendable {
                 journal = completed
             } catch {
                 PommeCore.log(
-                    "Pomme provisioning phase \(next.phase.rawValue) failed "
-                        + "[code=\(PommeProvisioningFailureDiagnostic.code(for: error))]."
+                    "provisioning phase \(next.phase.rawValue) failed "
+                        + "[code=\(PommeProvisioningFailureDiagnostic.code(for: error))].",
+                    vmName: journal.plan.vm.name
                 )
                 let digest = PommeProvisioningDigest.sha256(Data(String(describing: error).utf8))
                 let failed = try PommeProvisioningCoordinator.appendingResult(to: journal, kind: .failure, phase: next.phase, attempt: next.attempt, receiptDigest: digest, signer: signer)
                 try repository.commit(failed, replacing: journal.generation)
-                throw PommeProvisioningError.phaseFailed(next.phase)
+                throw PommeProvisioningError.phaseFailed(next.phase, vmName: journal.plan.vm.name)
             }
         }
     }
@@ -554,7 +641,9 @@ struct PommeProvisioningOrchestrator: Sendable {
         try journal.plan.validate()
         _ = try await exactOwnership(journal.plan.vm)
         let receipt = try await effects.recoveryRepair(journal.plan, finalState)
-        guard PommeProvisioningDigest.isSHA256(receipt) else { throw PommeProvisioningError.phaseFailed(.installRecoveryAgent) }
+        guard PommeProvisioningDigest.isSHA256(receipt) else {
+            throw PommeProvisioningError.phaseFailed(.installRecoveryAgent, vmName: journal.plan.vm.name)
+        }
     }
 
     private func exactOwnership(_ expected: PommeVMOwnership) async throws -> PommeVMOwnership {

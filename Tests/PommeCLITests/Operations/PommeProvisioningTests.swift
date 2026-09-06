@@ -5,11 +5,103 @@ import Testing
 struct PommeProvisioningTests {
     private let digest = String(repeating: "a", count: 64)
 
-    @Test("closed plan accepts only the reviewed Tahoe profile")
+    @Test("plans retain reviewed Tahoe and explicit experimental qualifications")
     func closedProfile() throws {
         _ = try plan()
         #expect(throws: PommeProvisioningError.self) {
             _ = try plan(profile: .sequoia)
+        }
+    }
+
+    @Test("new Tahoe builds produce deterministic experimental contracts")
+    func experimentalProfileContract() throws {
+        let descriptor = try PommeRecoveryProfileSelector.descriptor(
+            version: "26.6.2",
+            build: "25G83"
+        )
+        let normalizedDescriptor = try PommeRecoveryProfileSelector.descriptor(
+            version: "026.06.002",
+            build: "25g83"
+        )
+        let distinctPatchDescriptor = try PommeRecoveryProfileSelector.descriptor(
+            version: "26.6.3",
+            build: "25G83"
+        )
+        let contract = try PommeRecoveryProfileContract(descriptor: descriptor)
+
+        #expect(descriptor.qualification == .experimental)
+        #expect(descriptor == normalizedDescriptor)
+        #expect(descriptor.digest == normalizedDescriptor.digest)
+        #expect(descriptor != distinctPatchDescriptor)
+        #expect(descriptor.digest != distinctPatchDescriptor.digest)
+        #expect(contract.identifier == descriptor.id)
+        #expect(contract.version == "26.6.2")
+        #expect(contract.build == "25G83")
+        #expect(contract.qualification == .experimental)
+        #expect(contract.reviewDigest.isEmpty)
+        #expect(contract.isUsable(
+            for: .init(version: "26.6.2", build: "25G83", restoreImageDigest: digest),
+            display: .required
+        ))
+        #expect(!contract.isAccepted(
+            for: .init(version: "26.6.2", build: "25G83", restoreImageDigest: digest),
+            display: .required
+        ))
+        _ = try plan(profile: contract, version: "26.6.2", build: "25G83")
+
+        let pendingContract = try PommeRecoveryProfileContract(
+            descriptor: PommeRecoveryProfileSelector.sequoia1561Build24G90
+        )
+        #expect(pendingContract.qualification == .experimental)
+        #expect(pendingContract.reviewDigest.isEmpty)
+        _ = try plan(profile: pendingContract, version: "15.6.1", build: "24G90")
+    }
+
+    @Test("experimental contracts reject immutable mismatches and forged review claims")
+    func experimentalProfileValidation() throws {
+        let descriptor = try PommeRecoveryProfileSelector.descriptor(
+            version: "26.6.2",
+            build: "25G83"
+        )
+        let contract = try PommeRecoveryProfileContract(descriptor: descriptor)
+
+        #expect(throws: PommeProvisioningError.self) {
+            _ = try plan(profile: contract, version: "26.6.2", build: "25G84")
+        }
+
+        let forgedAccepted = PommeRecoveryProfileContract(
+            identifier: descriptor.id,
+            version: descriptor.version,
+            build: descriptor.build,
+            qualification: .accepted,
+            reviewDigest: digest
+        )
+        #expect(throws: PommeProvisioningError.self) {
+            _ = try plan(profile: forgedAccepted, version: "26.6.2", build: "25G83")
+        }
+
+        let forgedReviewedExperimental = PommeRecoveryProfileContract(
+            identifier: descriptor.id,
+            version: descriptor.version,
+            build: descriptor.build,
+            qualification: .experimental,
+            reviewDigest: digest
+        )
+        #expect(throws: PommeProvisioningError.self) {
+            _ = try plan(profile: forgedReviewedExperimental, version: "26.6.2", build: "25G83")
+        }
+
+        let forgedAcceptedDescriptor = PommeCreateRecoveryProfileDescriptor(
+            id: descriptor.id,
+            version: descriptor.version,
+            build: descriptor.build,
+            locale: descriptor.locale,
+            displayWidth: descriptor.displayWidth,
+            displayHeight: descriptor.displayHeight,
+            qualification: .accepted
+        )
+        #expect(throws: PommeProvisioningError.self) {
+            _ = try PommeRecoveryProfileContract(descriptor: forgedAcceptedDescriptor)
         }
     }
 
@@ -37,22 +129,59 @@ struct PommeProvisioningTests {
             repository: repository,
             effects: effects(calls: calls, fail: .installRecoveryAgent)
         )
-        await #expect(throws: PommeProvisioningError.self) { try await orchestrator.start(plan()) }
+        let vmPlan = try plan()
+        let logs = PommeVMLogCapture()
+        await #expect(throws: PommeProvisioningError.self) {
+            try await PommeCore.withLogSink(logs.append) {
+                try await orchestrator.start(vmPlan)
+            }
+        }
         let journal = try repository.load()
         #expect(journal.events.map(\.kind) == [.intent, .receipt, .intent, .receipt, .intent, .failure])
         #expect(await calls.phases == [.install, .displayOnlyFirstNormalBoot, .installRecoveryAgent])
+        #expect(logs.values == [
+            "pomme-test provisioning phase installRecoveryAgent failed [code=internal.unknown]."
+        ])
     }
 
-    @Test("resume revalidates exact ownership, retries a failed phase, and is idempotent after completion")
-    func resumeIdempotenceAndOwnership() async throws {
+    @Test("resume retries only the failed bootstrap before verification and final-state restoration", arguments: [
+        PommeProvisioningFinalState.stopped, .normalRunning, .recoveryRunning,
+    ])
+    func resumeIdempotenceAndOwnership(finalState: PommeProvisioningFinalState) async throws {
+        // Arrange: retain an interrupted creation at the Recovery install phase.
         let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 2, count: 32))
         let repository = MemoryRepository()
         let calls = CallLog()
+        let vmPlan = try plan(finalState: finalState)
+        let failing = PommeProvisioningOrchestrator(
+            signer: signer, repository: repository,
+            effects: effects(calls: calls, fail: .installRecoveryAgent)
+        )
+        await #expect(throws: PommeProvisioningError.phaseFailed(.installRecoveryAgent, vmName: vmPlan.vm.name)) {
+            try await failing.start(vmPlan)
+        }
+        let retained = try repository.load()
+
+        // Act: resume the exact journal without reinstalling macOS or repeating
+        // the display-only first boot, regardless of the eventual --boot state.
         let good = effects(calls: calls)
         let orchestrator = PommeProvisioningOrchestrator(signer: signer, repository: repository, effects: good)
-        try await orchestrator.start(plan())
+        try await orchestrator.resume(expectedPlan: vmPlan)
+
+        // Assert: installation, normal-agent verification, and final-state
+        // restoration remain separate ordered phases with the plan unchanged.
+        let completed = try repository.load()
+        try signer.verify(completed)
+        #expect(completed.plan == vmPlan)
+        #expect(Array(completed.events.prefix(retained.events.count)) == retained.events)
+        #expect(completed.events.filter { $0.kind == .receipt }.map(\.phase) == PommeProvisioningPhase.allCases)
+        #expect(completed.events.filter { $0.kind == .intent && $0.phase == .installRecoveryAgent }.map(\.attempt) == [1, 2])
+        #expect(await calls.phases == [
+            .install, .displayOnlyFirstNormalBoot, .installRecoveryAgent,
+            .installRecoveryAgent, .verifyNormalAgent, .restoreFinalState,
+        ])
         let count = await calls.phases.count
-        try await orchestrator.resume(expectedPlan: plan())
+        try await orchestrator.resume(expectedPlan: vmPlan)
         #expect(await calls.phases.count == count)
 
         let rejected = PommeProvisioningOrchestrator(
@@ -65,7 +194,7 @@ struct PommeProvisioningTests {
                 restoreFinalState: { _ in self.digest }, recoveryRepair: { _, _ in self.digest }
             )
         )
-        await #expect(throws: PommeProvisioningError.self) { try await rejected.resume(expectedPlan: self.plan()) }
+        await #expect(throws: PommeProvisioningError.self) { try await rejected.resume(expectedPlan: vmPlan) }
     }
 
     @Test("repair is Recovery-only through the dedicated effect and restores only the requested final state")
@@ -79,15 +208,21 @@ struct PommeProvisioningTests {
         #expect(await calls.repairStates == [.normalRunning])
     }
 
-    private func plan(profile: PommeRecoveryProfileContract = .tahoe) throws -> PommeProvisioningPlan {
+    private func plan(
+        profile: PommeRecoveryProfileContract = .tahoe,
+        version: String = "26.6.0",
+        build: String = "25G72",
+        display: PommeDisplayContract = .required,
+        finalState: PommeProvisioningFinalState = .normalRunning
+    ) throws -> PommeProvisioningPlan {
         try .init(
             vm: .init(name: "pomme-test", uuid: UUID(uuidString: "01234567-89AB-CDEF-0123-456789ABCDEF")!, bundlePath: "/tmp/pomme-test.macvm"),
-            restore: .init(version: "26.6.0", build: "25G72", restoreImageDigest: digest),
-            display: .required,
+            restore: .init(version: version, build: build, restoreImageDigest: digest),
+            display: display,
             profile: profile,
             normalAgent: try .init(identifier: "com.github.weswhet.pomme.agent", executableDigest: digest, role: .normal),
             recoveryAgent: try .init(identifier: "com.github.weswhet.pomme.recovery", executableDigest: digest, role: .recovery),
-            finalState: .normalRunning
+            finalState: finalState
         )
     }
 

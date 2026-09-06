@@ -15,13 +15,27 @@ enum RecoveryUIScreenState: Equatable, Sendable {
 struct RecoveryUIObservation: Sendable {
   let lines: [SettingsAIOCRLine]
 
-  /// A startup picker is accepted only when its Options caption is present
-  /// together with the selected disk and a terminal picker action.
+  /// Requires the Options/disk captions and a picker action. Once a tile is
+  /// selected, Vision can omit the low-contrast bottom power actions. Its
+  /// Continue control is an alternative only below an aligned picker caption;
+  /// arbitrary Continue text elsewhere on screen cannot anchor this surface.
   var isAnchoredStartupPicker: Bool {
     let text = normalizedText
-    return line(exactly: "Options") != nil
-      && text.contains("macintosh hd")
-      && (text.contains("restart") || text.contains("shut down"))
+    guard let options = line(exactly: "Options"),
+      let disk = line(exactly: "Macintosh HD")
+    else { return false }
+    if text.contains("restart") || text.contains("shut down") {
+      return true
+    }
+    guard let action = line(exactly: "Continue"),
+      options.rect.minX > disk.rect.maxX,
+      abs(options.rect.midY - disk.rect.midY) <= 24
+    else { return false }
+    return [options, disk].contains { caption in
+      abs(action.rect.midX - caption.rect.midX) <= 64
+        && action.rect.minY >= caption.rect.maxY
+        && action.rect.maxY <= caption.rect.maxY + 100
+    }
   }
 
   /// Bare Language/English labels are not sufficient. Recovery must be

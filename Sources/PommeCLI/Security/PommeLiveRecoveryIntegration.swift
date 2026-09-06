@@ -140,6 +140,42 @@ enum PommeLiveRecoveryIntegration {
         case repair
     }
 
+    /// Validates the install plan against this Recovery transaction before any
+    /// persistent credential is read or a privileged guest operation is sent.
+    /// The session has already authenticated and bound the request and payload.
+    static func validateInstallPayload(
+        _ payload: Data,
+        reference: VMReference,
+        identity: VMIdentity,
+        executable: ExecutableIdentity,
+        request: PommeRecoverySessionRequest,
+        finalState: VMFinalState,
+        installMode: InstallMode?
+    ) throws {
+        let plan: PommeProvisioningPlan
+        do {
+            plan = try JSONDecoder().decode(PommeProvisioningPlan.self, from: payload)
+        } catch {
+            throw PommeRecoverySessionError.requestMismatch
+        }
+        // Initial installation is an intermediate provisioning phase and must
+        // finish stopped. The plan's eventual --boot state is restored only
+        // after normal-agent verification, not by this Recovery transaction.
+        // Repair instead restores its independently request-bound final state.
+        guard plan.digest == PommeProvisioningDigest.sha256(payload),
+              plan.vm.uuid == identity.ownership.uuid,
+              plan.vm.bundlePath == reference.standardizedPath,
+              reference.name == nil || plan.vm.name == reference.name,
+              plan.recoveryAgent.executableDigest == executable.sha256,
+              plan.recoveryAgent.role == .recovery,
+              plan.normalAgent.role == .normal,
+              request.requestedFinalState == finalState.rawValue,
+              installMode != nil,
+              installMode == .initial ? identity.targetVolumeGroupUUID == nil : identity.targetVolumeGroupUUID != nil,
+              installMode == .repair || finalState == .stopped
+        else { throw PommeRecoverySessionError.requestMismatch }
+    }
+
     /// Core constructs the exact VZ VM/configuration/coordinator through this
     /// value.  The module never reaches into a VM or creates an alternate
     /// guest transport; it only decorates the supplied Recovery effects with
@@ -183,7 +219,7 @@ enum PommeLiveRecoveryIntegration {
 
     struct Dependencies: Sendable {
         typealias VMResolver = @Sendable (VMReference) async throws -> VMIdentity
-        typealias ExecutableResolver = @Sendable (VMReference) async throws -> ExecutableIdentity
+        typealias ExecutableResolver = @Sendable (VMReference, PommeRecoveryOperation) async throws -> ExecutableIdentity
         typealias CredentialIssuer = @Sendable (CredentialRequest) async throws -> PommeRecoveryCredential
         typealias RequestBuilder = @Sendable (RequestInput) throws -> PommeRecoverySessionRequest
         typealias RuntimeBuilder = @Sendable (
@@ -328,6 +364,25 @@ enum PommeLiveRecoveryIntegration {
 
     typealias PommeRecoveryLauncher = Launcher
 
+    /// Composes VM startup and post-proof Terminal launch as distinct effects.
+    /// The runtime root owns their ordering and the proof checks between them.
+    static func runtimeEffects(
+        base: PommeRecoveryRuntimeEffects,
+        profile: PommeRecoveryProfileEvidence,
+        launcher: Launcher,
+        vmName: String,
+        terminalPort: any PommeRecoveryTerminalPort,
+        authenticationTimeout: TimeInterval,
+        now: @escaping @Sendable () -> Date
+    ) -> PommeRecoveryRuntimeEffects {
+        LiveAdapter.effects(
+            base: base, profile: profile, launcher: launcher,
+            vmName: vmName,
+            terminalPort: terminalPort,
+            authenticationTimeout: authenticationTimeout, now: now
+        )
+    }
+
     private struct LiveAdapter: PommeRecoveryOperationAdapter, Sendable {
         let reference: VMReference
         let operation: PommeRecoveryOperation
@@ -349,13 +404,14 @@ enum PommeLiveRecoveryIntegration {
                     > dependencies.authenticationTimeout
                         + PommeLiveRecoveryIntegration.credentialAuthenticationReserve
             else { throw Error.invalidDependencies }
-            PommeCore.log("Pomme Recovery bootstrap milestone: requestValidated.")
+            let vmName = Self.loggingVMName(for: reference)
+            PommeCore.log("Recovery bootstrap milestone: requestValidated.", vmName: vmName)
 
             let identity: VMIdentity
             let executable: ExecutableIdentity
             do {
                 identity = try await dependencies.resolveVM(reference)
-                executable = try await dependencies.resolveExecutable(reference)
+                executable = try await dependencies.resolveExecutable(reference, operation)
             } catch let error as Error {
                 throw error
             } catch {
@@ -376,7 +432,7 @@ enum PommeLiveRecoveryIntegration {
             } else {
                 installMode = nil
             }
-            PommeCore.log("Pomme Recovery bootstrap milestone: profileAccepted.")
+            PommeCore.log("Recovery bootstrap milestone: profileAccepted.", vmName: vmName)
 
             let issuedAt = dependencies.now()
             let context = try RequestContext(
@@ -443,7 +499,7 @@ enum PommeLiveRecoveryIntegration {
             } catch {
                 throw Error.launcherRejected
             }
-            PommeCore.log("Pomme Recovery bootstrap milestone: hostStagingPrepared.")
+            PommeCore.log("Recovery bootstrap milestone: hostStagingPrepared.", vmName: vmName)
 
             var runtime: Runtime?
             var sessionOwnsRuntime = false
@@ -463,11 +519,12 @@ enum PommeLiveRecoveryIntegration {
                 guard runtime.verifySessionBinding(request) else {
                     throw Error.runtimeRejected
                 }
-                PommeCore.log("Pomme Recovery bootstrap milestone: runtimeConstructed.")
-                let rootEffects = Self.effects(
+                PommeCore.log("Recovery bootstrap milestone: runtimeConstructed.", vmName: vmName)
+                let rootEffects = PommeLiveRecoveryIntegration.runtimeEffects(
                     base: runtime.effects,
                     profile: profile,
                     launcher: launcher,
+                    vmName: vmName,
                     terminalPort: runtime.terminalPort,
                     authenticationTimeout: dependencies.authenticationTimeout,
                     now: dependencies.now
@@ -502,7 +559,7 @@ enum PommeLiveRecoveryIntegration {
                     now: dependencies.now
                 )
                 sessionOwnsRuntime = true
-                PommeCore.log("Pomme Recovery bootstrap milestone: sessionStarting.")
+                PommeCore.log("Recovery bootstrap milestone: sessionStarting.", vmName: vmName)
                 return try await PommeRecoverySessionAdapter(
                     session: session,
                     credential: credential
@@ -531,10 +588,11 @@ enum PommeLiveRecoveryIntegration {
             }
         }
 
-        private static func effects(
+        fileprivate static func effects(
             base: PommeRecoveryRuntimeEffects,
             profile: PommeRecoveryProfileEvidence,
             launcher: Launcher,
+            vmName: String,
             terminalPort: any PommeRecoveryTerminalPort,
             authenticationTimeout: TimeInterval,
             now: @escaping @Sendable () -> Date
@@ -542,9 +600,16 @@ enum PommeLiveRecoveryIntegration {
             .init(
                 verifyVMIdentity: base.verifyVMIdentity,
                 startRecovery: {
-                    PommeCore.log("Pomme Recovery bootstrap milestone: runtimeStarting.")
+                    PommeCore.log("Recovery bootstrap milestone: runtimeStarting.", vmName: vmName)
                     try await base.startRecovery()
-                    PommeCore.log("Pomme Recovery bootstrap milestone: runtimeStarted.")
+                    PommeCore.log("Recovery bootstrap milestone: runtimeStarted.", vmName: vmName)
+                },
+                launchRecoveryAgent: {
+                    // The root port proves the completed Recovery start, live
+                    // runtime, VM identity, and exact share before this effect.
+                    // No observation-driven input belongs in startRecovery.
+                    PommeCore.log("Recovery bootstrap milestone: recoveryBootVerified.", vmName: vmName)
+                    try await base.launchRecoveryAgent()
                     var interaction = try PommeTahoeRecoveryInteraction(evidence: profile)
                     let disposition = await interaction.driveToTerminalAndLaunch(
                         using: terminalPort,
@@ -558,11 +623,19 @@ enum PommeLiveRecoveryIntegration {
                         },
                         onMilestone: { milestone in
                             PommeCore.log(
-                                "Pomme Recovery bootstrap milestone: \(milestone.rawValue)."
+                                "Recovery bootstrap milestone: \(milestone.rawValue).",
+                                vmName: vmName
                             )
                         }
                     )
-                    guard disposition == .terminalLauncherSubmitted else {
+                    switch disposition {
+                    case .terminalLauncherSubmitted:
+                        break
+                    case .observationTimedOut:
+                        throw PommeRecoverySessionError.observationTimedOut
+                    case .terminalProofFailed:
+                        throw PommeRecoverySessionError.terminalProofFailed
+                    case .noInputDelivered, .recoveryCleanupRequired:
                         throw Error.launcherRejected
                     }
                 },
@@ -571,6 +644,16 @@ enum PommeLiveRecoveryIntegration {
                 verifyBootstrapAttachment: base.verifyBootstrapAttachment,
                 stopReapAndClean: base.stopReapAndClean
             )
+        }
+
+        private static func loggingVMName(for reference: VMReference) -> String {
+            if let name = reference.name, !name.isEmpty {
+                return name
+            }
+            let bundleName = reference.bundle.rootURL
+                .deletingPathExtension()
+                .lastPathComponent
+            return bundleName.isEmpty ? "unknown" : bundleName
         }
 
         private static func requestID(
@@ -683,6 +766,14 @@ enum PommeLiveRecoveryIntegration {
                     throw PommeAgentProtocol.Error.frameTooLarge
                 }
                 return encoded
+            } catch let error as PommeAgentSessionError {
+                // Only the closed Recovery security vocabulary crosses this
+                // boundary. Unknown agent codes retain the historical generic
+                // failure and never expose the transport message.
+                if let code = PommeRecoveryGuestFailureCode(rawValue: error.code) {
+                    throw PommeRecoveryGuestOperationFailure(code: code)
+                }
+                throw PommeRecoverySessionError.guestOperationFailed
             } catch let error as PommeRecoverySessionError {
                 throw error
             } catch {
@@ -696,24 +787,15 @@ enum PommeLiveRecoveryIntegration {
         }
 
         private func installPayload(from payload: Data, requestID: UUID) async throws -> JSONValue {
-            let plan: PommeProvisioningPlan
-            do {
-                plan = try JSONDecoder().decode(PommeProvisioningPlan.self, from: payload)
-            } catch {
-                throw PommeRecoverySessionError.requestMismatch
-            }
-            guard plan.digest == PommeProvisioningDigest.sha256(payload),
-                  plan.vm.uuid == identity.ownership.uuid,
-                  plan.vm.bundlePath == reference.standardizedPath,
-                  reference.name == nil || plan.vm.name == reference.name,
-                  plan.recoveryAgent.executableDigest == executable.sha256,
-                  plan.recoveryAgent.role == .recovery,
-                  plan.normalAgent.role == .normal,
-                  request.requestedFinalState == finalState.rawValue,
-                  installMode != nil,
-                  installMode == .initial ? identity.targetVolumeGroupUUID == nil : identity.targetVolumeGroupUUID != nil,
-                  installMode == .repair || finalStateMatches(plan.finalState, finalState)
-            else { throw PommeRecoverySessionError.requestMismatch }
+            try PommeLiveRecoveryIntegration.validateInstallPayload(
+                payload,
+                reference: reference,
+                identity: identity,
+                executable: executable,
+                request: request,
+                finalState: finalState,
+                installMode: installMode
+            )
 
             let token: String
             do { token = try await persistentAgentSecret(reference) }
@@ -739,12 +821,6 @@ enum PommeLiveRecoveryIntegration {
             catch { throw PommeRecoverySessionError.requestMismatch }
         }
 
-        private func finalStateMatches(_ plan: PommeProvisioningFinalState, _ requested: VMFinalState) -> Bool {
-            switch (plan, requested) {
-            case (.stopped, .stopped), (.normalRunning, .normal), (.recoveryRunning, .recovery): true
-            default: false
-            }
-        }
     }
 
 }

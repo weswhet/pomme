@@ -17,6 +17,30 @@ struct PommeProvisioningFailureDiagnosticTests {
         )
     }
 
+    @Test("Recovery navigation and preparation failures use closed redacted codes")
+    func recoverySessionFailureCodes() {
+        #expect(
+            PommeProvisioningFailureDiagnostic.code(
+                for: PommeRecoverySessionError.observationTimedOut
+            ) == "recovery_session.observation_timed_out"
+        )
+        #expect(
+            PommeProvisioningFailureDiagnostic.code(
+                for: PommeRecoverySessionError.terminalProofFailed
+            ) == "recovery_session.terminal_proof_failed"
+        )
+        #expect(
+            PommeProvisioningFailureDiagnostic.code(
+                for: PommeRecoverySessionError.rootEvidenceRejected
+            ) == "recovery_session.root_evidence_rejected"
+        )
+        #expect(
+            PommeProvisioningFailureDiagnostic.code(
+                for: PommeRecoverySessionError.preparationFailed
+            ) == "recovery_session.preparation_failed"
+        )
+    }
+
     @Test("Framework diagnostics omit descriptions, paths, and secrets")
     func frameworkFailureIsRedacted() {
         let error = NSError(

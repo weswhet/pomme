@@ -137,15 +137,23 @@ struct CreateCommand: AsyncParsableCommand {
 
         let vmName = try validateVMName(name!)
         let restoreArguments: [String]
+        let selectedProfile: PommeCreateRecoveryProfileDescriptor
         if let version {
             let firmware = try await PommeCore.resolveIPSWFirmware(
                 selection: version,
                 deviceIdentifier: ipswDevice
             )
-            _ = try PommeRecoveryProfileSelector.select(for: firmware)
+            let profile = try PommeRecoveryProfileSelector.select(for: firmware)
+            selectedProfile = profile
+            if profile.qualification == .experimental {
+                PommeCore.log(
+                    "Warning: macOS \(firmware.version) (\(firmware.buildid)) has not been qualified for Recovery automation; creation will attempt it with observed-screen checks.",
+                    vmName: vmName
+                )
+            }
             restoreArguments = ["--version", firmware.buildid]
                 + (ipswDevice.map { ["--ipsw-device", $0] } ?? [])
-        } else if let restoreImage {
+        } else if restoreImage != nil {
             // A host-path IPSW has no trustworthy identity at this boundary.
             // Keep the public operation fail-closed until the core exposes a
             // signed image identity reader; never let an unqualified image
@@ -166,7 +174,14 @@ struct CreateCommand: AsyncParsableCommand {
                 "ipswDevice": ipswDevice as Any,
                 "diskSize": diskSize,
                 "memory": memory,
-                "boot": boot.rawValue
+                "boot": boot.rawValue,
+                "recoveryProfile": [
+                    "id": selectedProfile.id,
+                    "version": selectedProfile.version,
+                    "build": selectedProfile.build,
+                    "qualification": selectedProfile.qualification.rawValue,
+                    "digest": selectedProfile.digest
+                ]
             ]
             try CLIOutputWriter.write(
                 payload: payload,

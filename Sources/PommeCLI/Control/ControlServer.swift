@@ -112,8 +112,11 @@ final class PommeControlServer: Sendable {
         let response = response(id: request.id, value: value)
         do {
             try write(response, to: fd)
-            if let afterResponse { await afterResponse(routed, response) }
         } catch { }
+        // Lifecycle cleanup must also finish when the requesting client
+        // disconnects after its operation succeeded. Run this only after the
+        // response write attempt, so a successful stop cannot race its reply.
+        if let afterResponse { await afterResponse(routed, response) }
     }
 
     private func response(id: UUID, value: String) -> PommeControlResponse {

@@ -34,6 +34,8 @@ enum PommeRecoveryInteractionCleanupSignal: Equatable, Sendable {
 enum PommeRecoveryInteractionError: Error, Equatable, Sendable {
   case incompleteQualification
   case noInputDelivered(PommeRecoveryInteractionCleanupSignal)
+  case observationTimedOut(PommeRecoveryInteractionCleanupSignal)
+  case terminalProofFailed(PommeRecoveryInteractionCleanupSignal)
   case recoveryCleanupRequired(PommeRecoveryInteractionCleanupSignal)
   case alreadyComplete
 }
@@ -41,6 +43,8 @@ enum PommeRecoveryInteractionError: Error, Equatable, Sendable {
 enum PommeRecoveryTerminalLaunchDisposition: Equatable, Sendable {
   case terminalLauncherSubmitted
   case noInputDelivered
+  case observationTimedOut
+  case terminalProofFailed
   case recoveryCleanupRequired
 }
 
@@ -57,10 +61,11 @@ enum PommeRecoveryInteractionMilestone: String, Equatable, Sendable {
   case launcherSubmitted
 }
 
-/// A production-facing Tahoe interaction driver.  The driver starts only from
-/// the closed Tahoe qualification contract, gathers exactly two pre-event and
-/// two post-event frame classifications for every single input receipt, and
-/// refuses to dispatch a replacement input after an uncertain delivery.
+/// A production-facing Recovery interaction driver. The driver starts only
+/// from the closed reviewed or experimental qualification contract, gathers
+/// exactly two pre-event and two post-event frame classifications for every
+/// single input receipt, and refuses to dispatch a replacement input after an
+/// uncertain delivery.
 ///
 /// It intentionally exposes neither the framebuffer nor a pointer API.  That
 /// makes this safe for create, repair, SIP, and AMFI owners to call through a
@@ -71,7 +76,7 @@ struct PommeTahoeRecoveryInteraction: Sendable {
 
   init(evidence: PommeRecoveryProfileEvidence) throws {
     do {
-      input = try PommeRecoveryProfileSelector.reviewedTahoeInput(for: evidence)
+      input = try PommeRecoveryProfileSelector.inputForAttempt(for: evidence)
     } catch {
       throw PommeRecoveryInteractionError.incompleteQualification
     }
@@ -98,6 +103,9 @@ struct PommeTahoeRecoveryInteraction: Sendable {
       let preEventFrames = try await stableFrames(using: port)
       key = try input.authorize(preEventFrames: preEventFrames)
     } catch {
+      if Self.isObservationTimeout(error) {
+        throw PommeRecoveryInteractionError.observationTimedOut(.noInputDelivered)
+      }
       throw PommeRecoveryInteractionError.noInputDelivered(.noInputDelivered)
     }
 
@@ -109,6 +117,9 @@ struct PommeTahoeRecoveryInteraction: Sendable {
       receipt = try await port.deliverRecoveryKey(key)
     } catch {
       cleanupRequired = true
+      if Self.isObservationTimeout(error) {
+        throw PommeRecoveryInteractionError.observationTimedOut(.recoveryCleanupRequired)
+      }
       throw PommeRecoveryInteractionError.recoveryCleanupRequired(.recoveryCleanupRequired)
     }
 
@@ -117,6 +128,9 @@ struct PommeTahoeRecoveryInteraction: Sendable {
       try input.commit(receipt, postEventFrames: postEventFrames)
     } catch {
       cleanupRequired = true
+      if Self.isObservationTimeout(error) {
+        throw PommeRecoveryInteractionError.observationTimedOut(.recoveryCleanupRequired)
+      }
       throw PommeRecoveryInteractionError.recoveryCleanupRequired(.recoveryCleanupRequired)
     }
     return input.isComplete ? .terminalVerified : .inputCommitted
@@ -133,11 +147,11 @@ struct PommeTahoeRecoveryInteraction: Sendable {
     return [first, second]
   }
 
-  /// Drives only the reviewed Tahoe trace, proves the non-secret VirtioFS
-  /// capabilities at a fresh shell prompt, then submits the supplied launcher
-  /// exactly once. Authentication is deliberately owned by the surrounding
-  /// request-bound Recovery runtime; no framebuffer is captured and no input
-  /// is retried after the mutating launcher is submitted.
+  /// Drives only the existing bounded Recovery trace, proves the non-secret
+  /// VirtioFS capabilities at a fresh shell prompt, then submits the supplied
+  /// launcher exactly once. Authentication is deliberately owned by the
+  /// surrounding request-bound Recovery runtime; no framebuffer is captured
+  /// and no input is retried after the mutating launcher is submitted.
   mutating func driveToTerminalAndLaunch(
     using port: some PommeRecoveryTerminalPort,
     capabilityProbes: [PommeRecoveryVirtioFSCapabilityProbe],
@@ -163,6 +177,10 @@ struct PommeTahoeRecoveryInteraction: Sendable {
         switch error {
         case .noInputDelivered:
           return .noInputDelivered
+        case .observationTimedOut:
+          return .observationTimedOut
+        case .terminalProofFailed:
+          return .terminalProofFailed
         case .incompleteQualification, .recoveryCleanupRequired, .alreadyComplete:
           return .recoveryCleanupRequired
         }
@@ -176,9 +194,18 @@ struct PommeTahoeRecoveryInteraction: Sendable {
       for probe in capabilityProbes {
         try await port.submitTerminalLine(probe.command)
         await onMilestone(.capabilityProbeSubmitted)
-        guard try await port.terminalMarkerIsVerified(probe.marker) else {
+        let markerVerified: Bool
+        do {
+          markerVerified = try await port.terminalMarkerIsVerified(probe.marker)
+        } catch {
+          if Self.isObservationTimeout(error) {
+            return .observationTimedOut
+          }
+          return .terminalProofFailed
+        }
+        guard markerVerified else {
           await onMilestone(.capabilityProbeRejected)
-          return .recoveryCleanupRequired
+          return .terminalProofFailed
         }
         try await port.clearTerminalLine()
         await onMilestone(.capabilityProbeVerified)
@@ -197,8 +224,22 @@ struct PommeTahoeRecoveryInteraction: Sendable {
       await onMilestone(.launcherSubmitted)
       return .terminalLauncherSubmitted
     } catch {
+      if Self.isObservationTimeout(error) {
+        return .observationTimedOut
+      }
       return .recoveryCleanupRequired
     }
+  }
+
+  /// The underlying timeout carries the expected frame for internal control
+  /// flow only. Never copy that associated value across this redacted UI
+  /// boundary; callers receive only a closed category and cleanup signal.
+  private static func isObservationTimeout(_ error: Error) -> Bool {
+    guard let error = error as? PommeRecoveryVirtualizationPortError else {
+      return false
+    }
+    if case .observationTimedOut = error { return true }
+    return false
   }
 }
 

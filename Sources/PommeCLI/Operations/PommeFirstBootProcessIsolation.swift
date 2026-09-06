@@ -1205,6 +1205,21 @@ private extension PommeFirstBootProcessIsolation {
         return kill(-processGroup, 0) == -1 && errno == ESRCH
     }
 
+    static func killCurrentProcessGroup() -> Never {
+        _ = kill(-getpgrp(), SIGKILL)
+        _exit(125)
+    }
+
+    static func processTimeout(
+        for request: PommeFirstBootProcessRequest
+    ) -> TimeInterval {
+        max(30, request.timeout * 2 + 240)
+    }
+}
+
+extension PommeFirstBootProcessIsolation {
+    /// Resolves the process-owned executable independently of its invocation
+    /// spelling (which may be a bare PATH name or a symlink).
     static func currentExecutableURL() throws -> URL {
         var size: UInt32 = 0
         _ = _NSGetExecutablePath(nil, &size)
@@ -1220,16 +1235,5 @@ private extension PommeFirstBootProcessIsolation {
             as: UTF8.self
         )
         return URL(fileURLWithPath: path).resolvingSymlinksInPath()
-    }
-
-    static func killCurrentProcessGroup() -> Never {
-        _ = kill(-getpgrp(), SIGKILL)
-        _exit(125)
-    }
-
-    static func processTimeout(
-        for request: PommeFirstBootProcessRequest
-    ) -> TimeInterval {
-        max(30, request.timeout * 2 + 240)
     }
 }

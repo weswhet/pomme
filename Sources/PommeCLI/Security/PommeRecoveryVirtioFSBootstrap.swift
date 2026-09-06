@@ -107,7 +107,13 @@ struct PommeRecoveryVirtioFSTerminalPlan: Equatable, Sendable {
         let requestData = try Self.canonicalRequestData(request)
         let requestSHA256 = PommeRecoveryCrypto.sha256(requestData)
         let marker = "POMME \(Self.ocrSafeMarkerSuffix(requestID: request.requestID)) OK"
-        let probe = "test -x /sbin/mount_virtiofs&&test -x /sbin/umount&&test -x /usr/bin/codesign&&printf 'POMME %s OK\\n' \(Self.ocrSafeMarkerSuffix(requestID: request.requestID))"
+        // Tahoe Recovery does not ship the userland `shasum`/`openssl`
+        // commands.  Verify the one command used by the launcher with a
+        // known vector while the share is still read-only and before any
+        // guest workspace can be created.  The command substitution keeps
+        // the digest out of the terminal output; the only proof emitted is
+        // the redaction-safe Pomme marker.
+        let probe = "test -x /sbin/mount_virtiofs&&test -x /sbin/umount&&test -x /usr/bin/codesign&&test -x /sbin/sha256&&test \"$(/usr/bin/printf abc|/sbin/sha256 -q)\" = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad&&printf 'POMME %s OK\\n' \(Self.ocrSafeMarkerSuffix(requestID: request.requestID))"
         // The mount point is intentionally nested below a new directory. A
         // pre-existing directory or symlink makes this command fail closed.
         let launch = "d=\(mountWorkspace);umask 077;/bin/mkdir -m 700 \"$d\" \"$d/m\"&&/sbin/mount_virtiofs -r \(tag) \"$d/m\"&&/bin/cp \"$d/m/\(PommeRecoveryArtifactNames.launcher)\" \"$d/run\"&&/bin/sh \"$d/run\""
@@ -277,8 +283,8 @@ test "$( /usr/bin/stat -f '%u:%Lp' "$g/pomme-agent" )" = 0:555
 test "$( /usr/bin/stat -f '%u:%Lp' "$g/request.json" )" = 0:400
 test "$( /usr/bin/stat -f '%u:%Lp' "$g/session.credential" )" = 0:400
 /usr/bin/codesign --verify --strict --all-architectures "$g/pomme-agent"
-test "$(/usr/bin/shasum -a 256 "$g/pomme-agent" | /usr/bin/awk '{print $1}')" = \#(digest)
-test "$(/usr/bin/shasum -a 256 "$g/request.json" | /usr/bin/awk '{print $1}')" = \#(requestSHA256)
+test "$(/sbin/sha256 -q "$g/pomme-agent")" = \#(digest)
+test "$(/sbin/sha256 -q "$g/request.json")" = \#(requestSHA256)
 /sbin/umount "$m"
 /bin/rmdir "$m"
 test ! -e "$m" && test ! -L "$m"

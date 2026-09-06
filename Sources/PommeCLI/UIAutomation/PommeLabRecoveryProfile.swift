@@ -6,6 +6,7 @@ import Foundation
 enum PommeRecoveryBuild: Equatable, Sendable {
     case tahoe2660Build25G72
     case sequoia1561Build24G90
+    case experimental(version: String, build: String)
     case unknown
 }
 
@@ -15,6 +16,7 @@ enum PommeRecoveryPrivateHostABI: Equatable, Sendable { case qualifiedRecoveryIn
 enum PommeRecoveryManifestHash: Equatable, Sendable {
     case tahoe2660Build25G72
     case sequoia1561Build24G90
+    case experimentalProfile(String)
     case unknown
 }
 enum PommeRecoveryOwnership: Equatable, Sendable { case verified, unknown }
@@ -76,6 +78,11 @@ extension PommeRecoveryProfileSelector {
                 throw PommeRecoveryInputQualificationError.manifestHashMismatch
             }
             return .sequoia1561Build24G90English1280x800PendingReview
+        case .experimental(_, _):
+            // Experimental identities deliberately have no reviewed record.
+            // Callers that need a bounded attempt must use inputForAttempt(for:)
+            // so the planning descriptor and its manifest digest are checked.
+            throw PommeRecoveryInputQualificationError.unsupportedBuild
         case .unknown:
             throw PommeRecoveryInputQualificationError.unsupportedBuild
         }
@@ -89,6 +96,49 @@ extension PommeRecoveryProfileSelector {
             throw PommeRecoveryInputQualificationError.externallyPendingReview(
                 descriptor.reviewedRecordDigest
             )
+        }
+        return .init()
+    }
+
+    /// Selects the existing Tahoe input state machine for either the reviewed
+    /// identity or a planner-qualified experimental identity. Experimental
+    /// evidence remains bounded by the same locale, geometry, private ABI,
+    /// ownership, descriptor, and manifest checks as reviewed input; it never
+    /// receives a reviewed descriptor or record.
+    static func inputForAttempt(
+        for evidence: PommeRecoveryProfileEvidence
+    ) throws -> PommeTahoeReviewedInput {
+        guard case .experimental(let version, let build) = evidence.build else {
+            return try reviewedTahoeInput(for: evidence)
+        }
+
+        guard evidence.locale == .english else {
+            throw PommeRecoveryInputQualificationError.unsupportedLocale
+        }
+        guard evidence.geometry == .pixels1280x800 else {
+            throw PommeRecoveryInputQualificationError.unsupportedGeometry
+        }
+        guard evidence.privateHostABI == .qualifiedRecoveryInputV1 else {
+            throw PommeRecoveryInputQualificationError.unqualifiedPrivateHostABI
+        }
+        guard evidence.ownership == .verified else {
+            throw PommeRecoveryInputQualificationError.ownershipUnverified
+        }
+
+        let descriptor: PommeCreateRecoveryProfileDescriptor
+        do {
+            descriptor = try PommeRecoveryProfileSelector.descriptor(
+                version: version,
+                build: build
+            )
+        } catch {
+            throw PommeRecoveryInputQualificationError.unsupportedBuild
+        }
+        guard descriptor.qualification == .experimental else {
+            throw PommeRecoveryInputQualificationError.unsupportedBuild
+        }
+        guard evidence.manifestHash == .experimentalProfile(descriptor.digest) else {
+            throw PommeRecoveryInputQualificationError.manifestHashMismatch
         }
         return .init()
     }

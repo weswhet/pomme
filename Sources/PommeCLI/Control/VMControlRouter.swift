@@ -21,6 +21,9 @@ enum PommeVMControlRouter {
             return .inspect
         case "agent.perform":
             return .agentPerform(try PommeAgentPerformRequest.parse(from: jsonObject), streaming: request.streaming == true)
+        case "guest-ui":
+            guard request.streaming != true else { throw RunnerError.invalidControlCommand(request.command) }
+            return .guestUI(try PommeUIControlRequest.parse(from: jsonObject))
         default:
             throw RunnerError.invalidControlCommand(request.command)
         }

@@ -107,8 +107,11 @@ struct PommeRecoveryRuntimeEffects: Sendable {
     /// immutable request; a bundle path or display name is not identity.
     let verifyVMIdentity: @Sendable () -> Bool
     let startRecovery: @Sendable () async throws -> Void
+    /// Starts the request's Recovery launcher only after every post-start proof
+    /// has passed. The launcher may be what makes the listener authenticate.
+    let launchRecoveryAgent: @Sendable () async throws -> Void
     /// Checked after `startRecovery` so a helper that starts normal macOS is
-    /// rejected before a guest can authenticate.
+    /// rejected before the launcher can send guest input.
     let verifyRecoveryBoot: @Sendable () -> Bool
     let helperIsAlive: @Sendable () -> Bool
     let verifyBootstrapAttachment: @Sendable () -> Bool
@@ -159,8 +162,15 @@ final class PommeRecoveryRuntimeRootPort: PommeRecoveryRootPort, @unchecked Send
             let role = try recoveryRole(for: request.listenerPort)
             try attach(role)
             try await effects.startRecovery()
+            // Starting a VZ runtime is not proof that it booted the requested
+            // Recovery system. Recheck every immutable binding after the
+            // asynchronous start, immediately before allowing the launcher to
+            // send any guest input.
+            guard effects.verifyVMIdentity() else { throw PommeRecoveryRuntimeError.requestBindingRejected }
             guard effects.verifyRecoveryBoot() else { throw PommeRecoveryRuntimeError.recoveryBootRequired }
             guard effects.helperIsAlive() else { throw PommeRecoveryRuntimeError.helperExited }
+            guard effects.verifyBootstrapAttachment() else { throw PommeRecoveryRuntimeError.attachmentUnverified }
+            try await effects.launchRecoveryAgent()
             lock.withLock { state = .waitingForAuthentication }
             try await waitForAuthentication(role: role)
             lock.withLock { state = .connected }

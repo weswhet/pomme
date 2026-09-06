@@ -364,7 +364,7 @@ struct PommeTUI {
                 TUIMenuItem(title: "Enable SIP", detail: "Use keychain-backed SIP bootstrap credentials.", shortcut: "e"),
                 TUIMenuItem(title: "AMFI Status", detail: "Check AMFI boot-arg policy state.", shortcut: "a"),
                 TUIMenuItem(title: "Disable AMFI", detail: "Relax boot-arg policy and set amfi_get_out_of_my_way=0x1.", shortcut: "x", role: .destructive),
-                TUIMenuItem(title: "Enable AMFI", detail: "Remove amfi_get_out_of_my_way from boot args.", shortcut: "m"),
+                TUIMenuItem(title: "Enable AMFI", detail: "Restore the saved AMFI policy and boot arguments.", shortcut: "m"),
                 TUIMenuItem(title: "Back", detail: "Return to VM actions.")
             ]
             let choice = try choose(

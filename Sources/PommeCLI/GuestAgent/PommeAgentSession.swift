@@ -1,6 +1,35 @@
 import Darwin
 import Foundation
 
+struct PommeAgentSessionError: Error, Equatable, LocalizedError, Sendable {
+    let code: String
+    let message: String
+
+    init(code: String, message: String) {
+        let failure = PommeAgentProtocol.Failure(code: Self.safeCode(code), message: message)
+        self.code = failure.code
+        self.message = failure.message
+    }
+
+    init(failure: PommeAgentProtocol.Failure) {
+        self.init(code: failure.code, message: failure.message)
+    }
+
+    var errorDescription: String? { "Pomme agent request failed (\(code)): \(message)" }
+
+    private static func safeCode(_ code: String) -> String {
+        if PommeRecoveryGuestFailureCode(rawValue: code) != nil { return code }
+        switch code {
+        case "replayed-request", "authentication-required", "authentication-rejected",
+             "authentication-replayed", "credential-expired", "unsupported-operation",
+             "activation-pending", "invalid-operation", "not-found", "operation-failed":
+            return code
+        default:
+            return "guest-failure"
+        }
+    }
+}
+
 /// Transport-neutral host session. Integration supplies exact VSOCK I/O; this
 /// type enforces request correlation and never retries a mutating operation.
 actor PommeAgentSession {
@@ -42,16 +71,14 @@ actor PommeAgentSession {
         guard authenticated else { throw PommeAgentProtocol.Error.invalidRequest }
         let request = PommeAgentProtocol.Envelope.request(operation: operation, payload: payload, requestID: requestID)
         let response = try await send(request)
-        guard response.ok == true, let result = response.result else { throw PommeAgentProtocol.Error.invalidResponse }
-        return result
+        return try result(from: response)
     }
 
     func requestCorrelated(operation: String, payload: JSONValue = .object([:])) async throws -> (requestID: UUID, result: JSONValue) {
         guard authenticated else { throw PommeAgentProtocol.Error.invalidRequest }
         let request = PommeAgentProtocol.Envelope.request(operation: operation, payload: payload)
         let response = try await send(request)
-        guard response.ok == true, let result = response.result else { throw PommeAgentProtocol.Error.invalidResponse }
-        return (request.requestID, result)
+        return (request.requestID, try result(from: response))
     }
 
     /// The VM transport feeds every JSONL frame through this session. Stream
@@ -66,8 +93,21 @@ actor PommeAgentSession {
     func sendStream(jobID: UUID, stream: PommeAgentProtocol.Stream, requestID: UUID = UUID(), data: Data? = nil, dimensions: (columns: Int, rows: Int)? = nil, signal: Int32? = nil) async throws -> [PommeAgentJobStreamFrame] {
         guard authenticated else { throw PommeAgentProtocol.Error.invalidRequest }
         let outgoing = try PommeAgentJobStreamFrame(jobID: jobID, frame: .init(requestID: requestID, stream: stream, data: data, dimensions: dimensions, signal: signal))
-        _ = try await ingest(try await exchange(PommeAgentProtocol.encode(outgoing.envelope())), expectedResponse: nil)
-        return drainStreams(requestID: requestID)
+        let envelope = outgoing.envelope()
+        let responseData = try await exchange(PommeAgentProtocol.encode(envelope))
+        guard let response = try await ingest(responseData, expectedResponse: envelope) else {
+            throw PommeAgentProtocol.Error.invalidResponse
+        }
+        let result = try result(from: response)
+        guard let rawJobID = result.objectValue?["jobID"]?.stringValue,
+              UUID(uuidString: rawJobID) == jobID else {
+            throw PommeAgentProtocol.Error.invalidResponse
+        }
+        let frames = drainStreams(requestID: requestID)
+        guard frames.allSatisfy({ $0.jobID == jobID }) else {
+            throw PommeAgentProtocol.Error.invalidResponse
+        }
+        return frames
     }
 
     private func send(_ request: PommeAgentProtocol.Envelope) async throws -> PommeAgentProtocol.Envelope {
@@ -76,12 +116,23 @@ actor PommeAgentSession {
         return response
     }
 
+    private func result(from response: PommeAgentProtocol.Envelope) throws -> JSONValue {
+        guard response.ok == true else {
+            guard let failure = response.error else { throw PommeAgentProtocol.Error.invalidResponse }
+            throw PommeAgentSessionError(failure: failure)
+        }
+        guard let result = response.result else { throw PommeAgentProtocol.Error.invalidResponse }
+        return result
+    }
+
     private func ingest(_ data: Data, expectedResponse request: PommeAgentProtocol.Envelope?) async throws -> PommeAgentProtocol.Envelope? {
         var matched: PommeAgentProtocol.Envelope?
         for rawLine in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
             let frame = try PommeAgentProtocol.decode(Data(rawLine))
             switch frame.kind {
-            case .stream: streamFrames[frame.requestID, default: []].append(try PommeAgentJobStreamFrame(envelope: frame))
+            case .stream:
+                if let request, frame.requestID != request.requestID { throw PommeAgentProtocol.Error.invalidResponse }
+                streamFrames[frame.requestID, default: []].append(try PommeAgentJobStreamFrame(envelope: frame))
             case .response:
                 guard let request, frame.requestID == request.requestID, frame.operation == request.operation, matched == nil else { throw PommeAgentProtocol.Error.invalidResponse }
                 matched = frame

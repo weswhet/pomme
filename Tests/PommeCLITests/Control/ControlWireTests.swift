@@ -7,7 +7,7 @@ struct ControlWireTests {
     @Test("Golden v1 hello, request, and response envelopes")
     func goldenEnvelopes() throws {
         let id = try #require(UUID(uuidString: "00000000-0000-0000-0000-000000000042"))
-        #expect(String(decoding: try ControlWireCodec.encodeLine(PommeControlHello()), as: UTF8.self) == #"{"features":["lifecycle","status","streaming"],"protocolVersion":1,"type":"hello"}"# + "\n")
+        #expect(String(decoding: try ControlWireCodec.encodeLine(PommeControlHello()), as: UTF8.self) == #"{"features":["lifecycle","status","streaming","ui"],"protocolVersion":1,"type":"hello"}"# + "\n")
         let request = PommeControlRequest(id: id, command: "status")
         #expect(String(decoding: try ControlWireCodec.encodeLine(request), as: UTF8.self) == #"{"command":"status","id":"00000000-0000-0000-0000-000000000042","protocolVersion":1,"type":"request"}"# + "\n")
         let response = PommeControlResponse.success(id: id, result: .object(["vmState": .string("running")]))
@@ -50,6 +50,21 @@ struct ControlWireTests {
         }
         guard case .agentPerform(let agent, streaming: true) = try PommeVMControlRouter.route(.init(command: "agent.perform", payload: .object(["operation": .string("process.start"), "payload": .object([:])]), streaming: true)) else { Issue.record("agent.perform was not routed") ; return }
         #expect(agent.operation == "process.start")
+        for operation in [
+            "amfi.normal.disable", "amfi.normal.enable",
+            "amfi.normal.verifyDisabled", "amfi.normal.verifyEnabled"
+        ] {
+            guard case .agentPerform(let normalAMFI, streaming: false) = try PommeVMControlRouter.route(
+                .init(command: "agent.perform", payload: .object([
+                    "operation": .string(operation),
+                    "payload": .object(["volumeGroupUUID": .string(UUID().uuidString.lowercased())])
+                ]))
+            ) else {
+                Issue.record("\(operation) was not routed")
+                continue
+            }
+            #expect(normalAMFI.operation == operation)
+        }
         #expect(throws: RunnerError.self) { try PommeVMControlRouter.route(.init(command: "agent.perform", payload: .object(["operation": .string("unknown.operation")])) ) }
     }
 

@@ -141,7 +141,7 @@ private final class PommeLiveRecoveryRuntimeResources: @unchecked Sendable {
     }
 
     func isRunningRecovery() -> Bool {
-        queue.sync { vm.state == .running }
+        runtime.provesRunningRecoveryBoot()
     }
 
     func hasExactBootstrapAttachment() -> Bool {
@@ -357,8 +357,21 @@ struct PommeCore {
                         targetVolumeGroupUUID: metadata.startupVolumeGroupUUID
                     )
                 },
-                resolveExecutable: { _ in
+                resolveExecutable: { reference, operation in
                     let identity = try runningExecutableIdentity()
+                    if operation == .installAgent {
+                        let plan = try loadOwnedProvisioningPlan(reference: reference)
+                        let digest = plan.recoveryAgent.executableDigest
+                        guard plan.normalAgent.executableDigest == digest else {
+                            throw PommeLiveRecoveryIntegration.Error.executableMismatch
+                        }
+                        if identity.sha256 != digest {
+                            let store = PommeAgentArtifactStore(rootURL:
+                                try applicationSupportRoot(create: false)
+                            )
+                            return try .init(url: store.resolve(sha256: digest), sha256: digest)
+                        }
+                    }
                     return try .init(url: identity.url, sha256: identity.sha256)
                 },
                 makeRuntime: { reference, request, recoveryConfiguration, launcher in
@@ -391,8 +404,209 @@ struct PommeCore {
         )
     }
 
+    /// Security preparation consumes the immutable creation record without
+    /// changing it or replacing the persistent agent it pins.
+    static func securityProvisioningPlan(reference: VMReference) throws -> PommeProvisioningPlan {
+        let plan = try loadOwnedProvisioningPlan(reference: reference)
+        let key = try Data(contentsOf: provisioningKeyURL(bundle: reference.bundle))
+        let journal = try provisioningRepository(
+            bundleURL: reference.bundle.rootURL,
+            signer: PommeProvisioningJournalSigner(key: key)
+        ).load()
+        guard journal.plan == plan,
+              journal.events.last?.kind == .receipt,
+              journal.events.last?.phase == .restoreFinalState else {
+            throw RunnerError.hostCommandFailed(
+                "Complete the retained Pomme creation transaction with `pomme create NAME --resume` before changing security."
+            )
+        }
+        return plan
+    }
+
     static func expectedProvisionedAgentDigest(reference: VMReference) throws -> String {
         try loadOwnedProvisioningPlan(reference: reference).normalAgent.executableDigest
+    }
+
+    /// Runs one owner-preparation command through the running normal VM helper.
+    /// The helper captures an authenticated coordinator pin before
+    /// `agent.describe` and reuses it for process start, status, stream, and
+    /// cleanup. The password travels only as a post-prompt control-stream
+    /// frame; it is never included in the process-start payload.
+    static func runSecurityPrivatePTY(
+        reference: VMReference,
+        expectedExecutableDigest: String,
+        command: PommeSecurityOwnerPTYCommand,
+        password: String
+    ) async throws -> Int32 {
+        guard PommeProvisioningDigest.isSHA256(expectedExecutableDigest),
+              expectedExecutableDigest == expectedExecutableDigest.lowercased()
+        else { throw PommeSecurityWorkflowError.agentUnverified }
+
+        guard !password.isEmpty else { throw PommePrivatePTYRunner.Error.invalidSecret }
+        let plan = try securityProvisioningPlan(reference: reference)
+        guard plan.normalAgent.protocolVersion == PommeAgentProtocol.version,
+              plan.normalAgent.executableDigest == expectedExecutableDigest,
+              try stableVMRunState(reference: reference) == .running(.normal)
+        else { throw PommeSecurityWorkflowError.agentUnverified }
+
+        let runnerCommand = PommePrivatePTYRunner.Command(
+            path: command.executable,
+            arguments: command.arguments
+        )
+        guard var payload = runnerCommand.startPayload.objectValue else {
+            throw PommePrivatePTYRunner.Error.invalidCommand
+        }
+        // These host-only fields are stripped by the helper before the guest
+        // process.start request. They carry no credential material.
+        payload[privatePTYMarker] = .bool(true)
+        payload[privatePTYDigestMarker] = .string(expectedExecutableDigest)
+        let controlPayload = PommeControlRequest(
+            command: "agent.perform",
+            payload: .object([
+                "operation": .string("process.start"),
+                "payload": .object(payload)
+            ]),
+            streaming: true
+        )
+        let record = try runtimeRecord(for: reference.bundle)
+        let identity = PommeRuntimeIdentity(
+            socketPath: record.socketPath,
+            pid: record.pid,
+            startedAt: record.startedAt
+        )
+        let stream = try PommeControlSocketClient(identity: identity).openStream(controlPayload)
+        var secret = Data(password.utf8)
+        defer {
+            secret.resetBytes(in: 0..<secret.count)
+        }
+
+        let prompt = privatePTYPrompt(for: command)
+        var promptTranscript = Data()
+        // sysadminctl can refuse automatic login while returning status zero.
+        // Keep its bounded output private and expose only closed refusal codes
+        // after verified completion; never forward a native transcript to logs.
+        let inspectAutologin = runnerCommand.autologinOwner != nil
+        var autologinTranscript = Data()
+        defer { autologinTranscript.resetBytes(in: 0..<autologinTranscript.count) }
+        var promptSatisfied = false
+        var inputClosed = false
+        let deadline = Date().addingTimeInterval(PommePrivatePTYRunner.defaultProcessTimeout + 15)
+        do {
+            while Date() < deadline {
+                let remaining = max(0.001, deadline.timeIntervalSinceNow)
+                switch try stream.receiveEvent(timeout: remaining) {
+                case .stream(let frame):
+                    switch frame.stream {
+                    case .stdout, .stderr:
+                        let data = try frame.decodedData() ?? Data()
+                        if inspectAutologin {
+                            guard autologinTranscript.count + data.count <= PommePrivatePTYRunner.maximumBufferedOutputBytes else {
+                                throw PommePrivatePTYRunner.Error.promptOutputLimit
+                            }
+                            autologinTranscript.append(data)
+                        }
+                        guard !promptSatisfied else { continue }
+                        guard promptTranscript.count + data.count <= PommePrivatePTYRunner.maximumPromptTranscriptBytes else {
+                            throw PommePrivatePTYRunner.Error.promptOutputLimit
+                        }
+                        promptTranscript.append(data)
+                        switch prompt.observe(promptTranscript) {
+                        case .unsafe:
+                            throw PommePrivatePTYRunner.Error.unsafePrompt
+                        case .password:
+                            promptSatisfied = true
+                            // The helper runner appends the terminal newline
+                            // only after validating this raw secret. Sending
+                            // it here would make the provider receive a
+                            // newline-bearing value and fail closed.
+                            try stream.send(stream: .stdin, data: secret)
+                            try stream.closeInput()
+                            inputClosed = true
+                        case .none:
+                            break
+                        }
+                    case .progress:
+                        // The helper reports exit as progress before its
+                        // terminal response. Keep reading so the terminal
+                        // response remains the completion proof.
+                        continue
+                    case .stdin, .resize, .signal, .cancellation:
+                        throw PommePrivatePTYRunner.Error.invalidCompletion
+                    }
+                case .response(let response):
+                    if let envelope = response.result?.objectValue, envelope["ok"] == .bool(false) {
+                        throw PommeSecurityPrivatePTYDiagnostic.decode(envelope["failureCode"])
+                    }
+                    guard response.ok,
+                          let envelope = response.result?.objectValue,
+                          envelope["ok"] != .bool(false),
+                          let values = envelope["result"]?.objectValue,
+                          values["exited"] == .bool(true),
+                          values["outputComplete"] == .bool(true),
+                          values["promptSatisfied"] == .bool(true),
+                          values["stdoutTruncated"] != .bool(true),
+                          values["stderrTruncated"] != .bool(true)
+                    else { throw PommePrivatePTYRunner.Error.invalidCompletion }
+                    if case .integer(let code)? = values["exitCode"], (0...255).contains(code), values["signal"] == nil,
+                       let code = Int32(exactly: code) {
+                        if inspectAutologin,
+                           let refusal = PommeSecurityOwnerAutologinRefusal.classify(autologinTranscript) {
+                            throw PommeSecurityOwnerPreparationError.autoLoginRefused(refusal)
+                        }
+                        if inspectAutologin, code == 0,
+                           case .integer(let processID)? = values["pid"], processID > 0,
+                           let refusal = try? PommeSecurityNormalAgent(
+                            reference: reference, expectedExecutableDigest: expectedExecutableDigest
+                           ).autologinSessionRefusal(processID: processID) {
+                            throw PommeSecurityOwnerPreparationError.autoLoginRefused(refusal)
+                        }
+                        return code
+                    }
+                    if case .integer(let signal)? = values["signal"], (1...127).contains(signal), values["exitCode"] == nil,
+                       let signal = Int32(exactly: signal) {
+                        return 128 + signal
+                    }
+                    throw PommePrivatePTYRunner.Error.invalidCompletion
+                }
+            }
+            throw PommePrivatePTYRunner.Error.processTimedOut
+        } catch {
+            if !(error is PommeSecurityOwnerPreparationError) {
+                log(
+                    "Private owner PTY failed: \(PommeSecurityPrivatePTYDiagnostic(error).rawValue).",
+                    vmName: reference.displayName
+                )
+            }
+            if !inputClosed {
+                try? stream.send(stream: .cancellation)
+                try? stream.closeInput()
+            }
+            throw error
+        }
+    }
+
+    private static let privatePTYMarker = "_pommeSecurityPrivatePTY"
+    private static let privatePTYDigestMarker = "_pommeExpectedExecutableSHA256"
+
+    private static func privatePTYPrompt(for command: PommeSecurityOwnerPTYCommand) -> PommePrivatePTYRunner.Prompt {
+        if let owner = PommePrivatePTYRunner.Command(
+            path: command.executable, arguments: command.arguments
+        ).autologinOwner {
+            return .sysadminctlPassword(for: owner)
+        }
+        guard command.executable == "/usr/sbin/sysadminctl" else { return .sysadminctlPassword }
+        return .sysadminctlPassword(for: sysadminctlOwner(in: command.arguments) ?? "")
+    }
+
+    /// Extracts the owner named by the closed sysadminctl command forms used
+    /// by owner preparation. Unknown forms intentionally produce no marker,
+    /// causing the PTY runner to refuse any password prompt.
+    private static func sysadminctlOwner(in arguments: [String]) -> String? {
+        for flag in ["-addUser", "-secureTokenOn", "-userName"] {
+            guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else { continue }
+            return arguments[index + 1]
+        }
+        return nil
     }
 
     static func stableVMRunState(reference: VMReference) throws -> VMRunStateSnapshot {
@@ -420,10 +634,17 @@ struct PommeCore {
             finalState = .paused
             captured = .paused(previousBootMode: mode)
         }
-        try await requestLiveRecoveryFinalState(
-            finalState,
-            captured: captured,
-            reference: reference
+        try await PommeSecurityRunStateRestoration.restore(
+            desired: desired,
+            observe: { try stableVMRunState(reference: reference) },
+            stop: { try await stopForLiveRecovery(reference: reference) },
+            start: { _ in
+                try await requestLiveRecoveryFinalState(
+                    finalState,
+                    captured: captured,
+                    reference: reference
+                )
+            }
         )
     }
 
@@ -455,7 +676,8 @@ struct PommeCore {
         let capturedState = try await captureAndStopForLiveRecovery(reference: reference)
         do {
         try await waitForLiveRecoveryAuxiliaryStorageRelease(
-            at: reference.bundle.auxiliaryStorageURL
+            at: reference.bundle.auxiliaryStorageURL,
+            vmName: plan.vm.name
         )
 
         // Load the one-shot token through an owner-only, no-follow descriptor
@@ -546,6 +768,7 @@ struct PommeCore {
                     && plan.vm.bundlePath == reference.standardizedPath
             },
             startRecovery: { try await resources.runtime.start() },
+            launchRecoveryAgent: {},
             verifyRecoveryBoot: { resources.isRunningRecovery() },
             helperIsAlive: { resources.isRunningRecovery() },
             verifyBootstrapAttachment: { resources.hasExactBootstrapAttachment() },
@@ -644,13 +867,37 @@ struct PommeCore {
         reference: VMReference
     ) async throws -> PommeRecoveryProfileEvidence {
         let plan = try loadOwnedProvisioningPlan(reference: reference)
-        guard plan.profile == .tahoe,
-              plan.restore.version == PommeRecoveryProfileSelector.tahoe2660Build25G72.version,
-              plan.restore.build == PommeRecoveryProfileSelector.tahoe2660Build25G72.build,
-              plan.display == .required,
-              try await verifyProvisioningOwnership(plan.vm) == plan.vm
-        else { throw PommeRecoveryInputQualificationError.unsupportedBuild }
+        guard try await verifyProvisioningOwnership(plan.vm) == plan.vm else {
+            throw PommeRecoveryInputQualificationError.ownershipUnverified
+        }
         try VirtualizationPrivateABIPreflight.validateRuntime()
+        return try recoveryProfileEvidence(for: plan)
+    }
+
+    /// Binds navigation to the exact durable restore identity, without claiming
+    /// a reviewed OS profile for an experimental attempt. The live caller must
+    /// separately prove current ownership and the host input ABI first.
+    static func recoveryProfileEvidence(
+        for plan: PommeProvisioningPlan
+    ) throws -> PommeRecoveryProfileEvidence {
+        try plan.validate()
+        if plan.profile.qualification == .experimental {
+            let descriptor = try PommeRecoveryProfileSelector.descriptor(
+                version: plan.restore.version,
+                build: plan.restore.build
+            )
+            return .init(
+                build: .experimental(version: plan.restore.version, build: plan.restore.build),
+                locale: .english,
+                geometry: .pixels1280x800,
+                privateHostABI: .qualifiedRecoveryInputV1,
+                manifestHash: .experimentalProfile(descriptor.digest),
+                ownership: .verified
+            )
+        }
+        guard plan.profile == .tahoe else {
+            throw PommeRecoveryInputQualificationError.unsupportedBuild
+        }
         return .init(
             build: .tahoe2660Build25G72,
             locale: .english,
@@ -773,7 +1020,7 @@ struct PommeCore {
 
     static func log(_ message: String) {
         let safe = message
-            .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+            .split(whereSeparator: \.isNewline)
             .joined(separator: " ")
         if let sink = PommeLogContext.sink {
             sink(safe)
@@ -781,6 +1028,16 @@ struct PommeCore {
         }
         fputs("[\(Date().pommeISO8601String)] \(safe)\n", stderr)
         fflush(stderr)
+    }
+
+    /// Attributes a diagnostic to one VM without sharing mutable target state.
+    static func log(_ message: String, vmName: String) {
+        log("\(vmName) \(message)")
+    }
+
+    /// Renders the installer's progress using the same VM scope as its plan.
+    static func logInstallProgress(fractionCompleted: Double, vmName: String) {
+        log("install progress: \(Int(fractionCompleted * 100))%", vmName: vmName)
     }
 
     static func withLogSink<Result: Sendable>(
@@ -949,26 +1206,14 @@ struct PommeCore {
     // MARK: Pomme control protocol bridge
 
     static func sendControlObject(_ payload: [String: Any], bundle: BundleLayout) throws -> [String: Any] {
-        let command = try controlCommand(from: payload)
-        var body = payload.filter { key, _ in
-            !["type", "command", "operation", "id", "streaming"].contains(key)
-        }
-        if command == "agent.perform" {
-            guard let operation = payload["operation"] as? String,
-                  operation != command
-            else { throw RunnerError.invalidControlCommand(command) }
-            body["operation"] = operation
-        }
-        let requestPayload = body.isEmpty ? nil : try JSONValue(any: body)
+        let request = try makeControlRequest(from: payload)
         let record = try runtimeRecord(for: bundle)
         let identity = PommeRuntimeIdentity(
             socketPath: record.socketPath,
             pid: record.pid,
             startedAt: record.startedAt
         )
-        let result = try PommeControlSocketClient(identity: identity).send(
-            PommeControlRequest(command: command, payload: requestPayload)
-        )
+        let result = try PommeControlSocketClient(identity: identity).send(request)
         guard let object = result.objectValue else {
             return ["ok": true, "response": result.publicValue, "hostExitCode": 0]
         }
@@ -976,6 +1221,75 @@ struct PommeCore {
         output["ok"] = output["ok"] as? Bool ?? true
         output["hostExitCode"] = output["hostExitCode"] ?? 0
         return output
+    }
+
+    /// Foreground output consists of bounded stream frames followed by one
+    /// completion response; a process-start acknowledgement is not completion.
+    static func sendForegroundControlObject(_ payload: [String: Any], bundle: BundleLayout) throws -> [String: Any] {
+        let request = try makeControlRequest(from: payload)
+        let record = try runtimeRecord(for: bundle)
+        let identity = PommeRuntimeIdentity(socketPath: record.socketPath, pid: record.pid, startedAt: record.startedAt)
+        let stream = try PommeControlSocketClient(identity: identity).openStream(request)
+        try stream.closeInput()
+        return try collectForegroundResponse(receive: stream.receiveEvent)
+    }
+
+    static func collectForegroundResponse(
+        maximumOutputBytes: Int = 16 * 1024 * 1024,
+        receive: () throws -> PommeControlStreamEvent
+    ) throws -> [String: Any] {
+        var frames: [[String: Any]] = []
+        var outputBytes = 0
+        while true {
+            switch try receive() {
+            case .stream(let frame):
+                switch frame.stream {
+                case .stdout, .stderr:
+                    if let data = try frame.decodedData(), !data.isEmpty {
+                        guard data.count <= maximumOutputBytes - outputBytes, frames.count < 16_384 else {
+                            throw RunnerError.invalidGuestCommand("Foreground output exceeded the buffered byte or frame limit.")
+                        }
+                        outputBytes += data.count
+                        frames.append(["stream": frame.stream.rawValue, "dataBase64": data.base64EncodedString()])
+                    }
+                case .progress: break
+                case .stdin, .resize, .signal, .cancellation:
+                    throw RunnerError.invalidControlResponse("Unexpected foreground output stream.")
+                }
+            case .response(let response):
+                guard response.ok, let object = response.result?.objectValue else {
+                    let failure = response.error
+                    throw RunnerError.controlCommandFailed(failure.map { "\($0.code): \($0.message)" } ?? "Missing foreground completion response.")
+                }
+                var output = object.mapValues(\.publicValue)
+                output["streamFrames"] = frames
+                output["foreground"] = true
+                return output
+            }
+        }
+    }
+
+    /// Preserves operation-specific fields inside the bounded helper envelope.
+    static func makeControlRequest(from payload: [String: Any]) throws -> PommeControlRequest {
+        let command = try controlCommand(from: payload)
+        var body = payload.filter { key, _ in
+            !["type", "command", "operation", "id", "streaming"].contains(key)
+        }
+        if command == "agent.perform" || command == "guest-ui" {
+            guard let operation = payload["operation"] as? String,
+                  operation != command
+            else { throw RunnerError.invalidControlCommand(command) }
+            body["operation"] = operation
+        }
+        if command == "guest-ui", let path = body["hostOutputPath"] as? String {
+            guard !path.isEmpty, !path.contains("\0") else {
+                throw RunnerError.invalidUICommand("A screenshot requires a valid host output path.")
+            }
+            // Resolve in the invoking CLI, not the helper's VM-bundle directory.
+            body["hostOutputPath"] = URL(fileURLWithPath: path).standardizedFileURL.path
+        }
+        let requestPayload = body.isEmpty ? nil : try JSONValue(any: body)
+        return PommeControlRequest(command: command, payload: requestPayload)
     }
 
     static func controlCommandPayload(
@@ -992,7 +1306,7 @@ struct PommeCore {
 
     private static func controlCommand(from payload: [String: Any]) throws -> String {
         let candidate = (payload["command"] as? String) ?? (payload["operation"] as? String)
-        guard let candidate, ["pause", "resume", "stop", "force-stop", "status", "inspect", "snapshot-save", "agent.perform"].contains(candidate) else {
+        guard let candidate, ["pause", "resume", "stop", "force-stop", "status", "inspect", "snapshot-save", "agent.perform", "guest-ui"].contains(candidate) else {
             throw RunnerError.invalidControlCommand(candidate ?? "")
         }
         return candidate
@@ -1005,7 +1319,12 @@ struct PommeCore {
         for url in urls where url.pathExtension == "json" {
             guard let data = try? Data(contentsOf: url),
                   let record = try? JSONDecoder().decode(PommeRuntimeRecord.self, from: data),
-                  URL(fileURLWithPath: record.bundlePath).standardizedFileURL.path == expectedPath else { continue }
+                  URL(fileURLWithPath: record.bundlePath).standardizedFileURL.path == expectedPath,
+                  record.pid > 0 else { continue }
+            // An interrupted helper can leave its record behind. Only a
+            // proven-dead PID is safe to ignore; permission or other process
+            // inspection failures retain the record and fail closed later.
+            if Darwin.kill(record.pid, 0) != 0 && errno == ESRCH { continue }
             return record
         }
         throw RunnerError.noRunningVM(bundle.pommeSocketURL)
@@ -1199,8 +1518,11 @@ struct PommeCore {
     /// Entry point used by the private runtime process.  The argument grammar
     /// is intentionally closed and has no public aliases.
     static func runInternalHelper(arguments: [String]) async -> Int32 {
+        var vmName: String?
         do {
             let values = try parseRuntimeArguments(arguments)
+            vmName = values.name
+                ?? URL(fileURLWithPath: values.bundlePath).deletingPathExtension().lastPathComponent
             try await runInternalHelper(
                 bundlePath: values.bundlePath,
                 name: values.name,
@@ -1208,7 +1530,11 @@ struct PommeCore {
             )
             return 0
         } catch {
-            log("Pomme runtime failed: \(error.localizedDescription)")
+            if let vmName {
+                log("runtime failed: \(error.localizedDescription)", vmName: vmName)
+            } else {
+                log("Runtime arguments rejected: \(error.localizedDescription)")
+            }
             return 1
         }
     }
@@ -1319,11 +1645,11 @@ struct PommeCore {
         let version = "\(restoreImage.operatingSystemVersion.majorVersion).\(restoreImage.operatingSystemVersion.minorVersion).\(restoreImage.operatingSystemVersion.patchVersion)"
         let build = restoreImage.buildVersion
         let profileDescriptor = try PommeRecoveryProfileSelector.descriptor(version: version, build: build)
-        guard profileDescriptor.qualification == .accepted else {
-            throw PommeRecoveryProfileSelectionError.externallyPending(profileID: profileDescriptor.id)
-        }
-        guard profileDescriptor == PommeRecoveryProfileSelector.tahoe2660Build25G72 else {
-            throw PommeRecoveryProfileSelectionError.unsupportedRestoreIdentity(version: version, build: build)
+        if profileDescriptor.qualification == .experimental {
+            log(
+                "Warning: Recovery support for macOS \(version) (\(build)) is experimental. Creation will attempt the observed-screen navigation and stop if it does not match.",
+                vmName: reference.name ?? reference.bundle.rootURL.deletingPathExtension().lastPathComponent
+            )
         }
         guard let requirements = restoreImage.mostFeaturefulSupportedConfiguration else {
             throw RunnerError.noSupportedConfiguration
@@ -1343,7 +1669,7 @@ struct PommeCore {
             bundlePath: reference.bundle.rootURL.standardizedFileURL.path
         )
         let executable = try runningExecutableIdentity()
-        let profile = PommeRecoveryProfileContract.tahoe
+        let profile = try PommeRecoveryProfileContract(descriptor: profileDescriptor)
         let normalAgent = try PommeAgentIdentity(
             identifier: PommeAgentInstall.label,
             executableDigest: executable.sha256,
@@ -1491,68 +1817,18 @@ struct PommeCore {
         return bytes.map { String(format: "%02x", $0) }.joined()
     }
 
-    /// SecItem calls are blocking IPC. Keep all persistent-agent credential
-    /// access on one private serial queue rather than the caller's/UI thread.
+    /// Serialize persistent-agent credential operations. SecItem is blocking
+    /// IPC, so callers must not use this synchronous boundary on the UI thread.
     private static let provisioningCredentialQueue = DispatchQueue(
         label: "com.github.weswhet.pomme.provisioning-credential"
     )
-
-    /// The only Keychain primary key used for a persistent Pomme agent. The
-    /// UUID-scoped service prevents two VM bundles from sharing a credential.
-    private static func provisioningCredentialQuery(
-        vmUUID: UUID,
-        account: String,
-        returnData: Bool = false
-    ) -> [String: Any] {
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: pommeCredentialService(forUUID: vmUUID.uuidString),
-            kSecAttrAccount as String: account,
-            kSecUseDataProtectionKeychain as String: true
-        ]
-        if returnData {
-            query[kSecMatchLimit as String] = kSecMatchLimitOne
-            query[kSecReturnData as String] = true
-        }
-        return query
-    }
-
-    private static func normalizedProvisioningAgentCredential(_ data: Data) throws -> String {
-        guard let value = String(data: data, encoding: .utf8) else {
-            throw RunnerError.keychainError("The Pomme agent credential is not valid UTF-8.")
-        }
-        do {
-            return try PommeAgentAuthentication.normalized(value)
-        } catch {
-            throw RunnerError.keychainError("The Pomme agent credential has an invalid format.")
-        }
-    }
 
     private static func loadProvisioningAgentCredential(
         vmUUID: UUID,
         account: String
     ) throws -> String {
         try provisioningCredentialQueue.sync {
-            var result: CFTypeRef?
-            let status = SecItemCopyMatching(
-                provisioningCredentialQuery(vmUUID: vmUUID, account: account, returnData: true) as CFDictionary,
-                &result
-            )
-            switch status {
-            case errSecSuccess:
-                guard let data = result as? Data else {
-                    throw RunnerError.keychainError("The Pomme agent credential returned unexpected data.")
-                }
-                return try normalizedProvisioningAgentCredential(data)
-            case errSecItemNotFound:
-                throw RunnerError.keychainError("The Pomme agent credential is unavailable.")
-            case errSecInteractionNotAllowed:
-                throw RunnerError.keychainError("The Pomme agent credential is unavailable while the Keychain is locked.")
-            default:
-                throw RunnerError.keychainError(
-                    "Could not read the Pomme agent credential: " + securityErrorMessage(status)
-                )
-            }
+            try PommeAgentCredentialStore().read(vmUUID: vmUUID, account: account)
         }
     }
 
@@ -1561,73 +1837,12 @@ struct PommeCore {
     /// is never returned to public output and is not Codable.
     static func provisioningAgentCredential(for plan: PommeProvisioningPlan) throws -> String {
         let input = try loadProvisioningInput(for: plan)
-        let vmUUID = plan.vm.uuid
-        let account = input.agentCredentialAccount
-        let generated = try randomAgentSecret()
         return try provisioningCredentialQueue.sync {
-            var result: CFTypeRef?
-            let lookupStatus = SecItemCopyMatching(
-                provisioningCredentialQuery(vmUUID: vmUUID, account: account, returnData: true) as CFDictionary,
-                &result
+            try PommeAgentCredentialStore().readOrCreate(
+                vmUUID: plan.vm.uuid,
+                account: input.agentCredentialAccount,
+                generate: randomAgentSecret
             )
-            switch lookupStatus {
-            case errSecSuccess:
-                guard let data = result as? Data else {
-                    throw RunnerError.keychainError("The Pomme agent credential returned unexpected data.")
-                }
-                return try normalizedProvisioningAgentCredential(data)
-            case errSecItemNotFound:
-                break
-            case errSecInteractionNotAllowed:
-                throw RunnerError.keychainError("The Pomme agent credential is unavailable while the Keychain is locked.")
-            default:
-                    throw RunnerError.keychainError(
-                        "Could not read the Pomme agent credential: " + securityErrorMessage(lookupStatus)
-                    )
-            }
-
-            let value = Data(generated.utf8)
-            var addQuery = provisioningCredentialQuery(vmUUID: vmUUID, account: account)
-            addQuery[kSecValueData as String] = value
-            addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-            switch addStatus {
-            case errSecSuccess:
-                return generated
-            case errSecDuplicateItem:
-                // Another Pomme process won the create race. Re-read and use
-                // that stable credential; replacing it would invalidate an
-                // already-running persistent agent and concurrent sessions.
-                var duplicateResult: CFTypeRef?
-                let duplicateStatus = SecItemCopyMatching(
-                    provisioningCredentialQuery(
-                        vmUUID: vmUUID,
-                        account: account,
-                        returnData: true
-                    ) as CFDictionary,
-                    &duplicateResult
-                )
-                switch duplicateStatus {
-                case errSecSuccess:
-                    guard let data = duplicateResult as? Data else {
-                        throw RunnerError.keychainError("The Pomme agent credential returned unexpected data.")
-                    }
-                    return try normalizedProvisioningAgentCredential(data)
-                case errSecInteractionNotAllowed:
-                    throw RunnerError.keychainError("The Pomme agent credential is unavailable while the Keychain is locked.")
-                default:
-                    throw RunnerError.keychainError(
-                        "Could not read the concurrently created Pomme agent credential: "
-                            + securityErrorMessage(duplicateStatus)
-                    )
-                }
-            case errSecInteractionNotAllowed:
-                throw RunnerError.keychainError("The Pomme agent credential cannot be stored while the Keychain is locked.")
-            default:
-                throw RunnerError.keychainError(
-                    "Could not store the Pomme agent credential: " + securityErrorMessage(addStatus)
-                )
-            }
         }
     }
 
@@ -1659,22 +1874,7 @@ struct PommeCore {
         account: String
     ) throws {
         try provisioningCredentialQueue.sync {
-            let status = SecItemDelete(
-                provisioningCredentialQuery(
-                    vmUUID: vmUUID,
-                    account: account
-                ) as CFDictionary
-            )
-            switch status {
-            case errSecSuccess, errSecItemNotFound:
-                return
-            case errSecInteractionNotAllowed:
-                throw RunnerError.keychainError("The Pomme agent credential cannot be removed while the Keychain is locked.")
-            default:
-                throw RunnerError.keychainError(
-                    "Could not remove the Pomme agent credential: " + securityErrorMessage(status)
-                )
-            }
+            try PommeAgentCredentialStore().remove(vmUUID: vmUUID, account: account)
         }
     }
 
@@ -1878,7 +2078,7 @@ struct PommeCore {
             return VZMacOSInstaller(virtualMachine: vm, restoringFromImageAt: imageURL)
         }
         let observation = installer.progress.observe(\.fractionCompleted, options: [.initial, .new]) { progress, _ in
-            log("Pomme install progress: \(Int(progress.fractionCompleted * 100))%")
+            logInstallProgress(fractionCompleted: progress.fractionCompleted, vmName: plan.vm.name)
         }
         defer { observation.invalidate() }
         try await install(installer, on: queue)
@@ -1937,13 +2137,13 @@ struct PommeCore {
             nonce: UUID().uuidString.lowercased(),
             timeout: Constants.defaultRecoveryAgentTimeout
         )
-        log("Pomme first normal boot milestone: isolatedSupervisorStarting.")
+        log("first normal boot milestone: isolatedSupervisorStarting.", vmName: plan.vm.name)
         let receipt = try await PommeFirstBootProcessIsolation.run(
             request: request,
             lease: lease,
             executableURL: executable.url
         )
-        log("Pomme first normal boot milestone: isolatedProcessGroupReaped.")
+        log("first normal boot milestone: isolatedProcessGroupReaped.", vmName: plan.vm.name)
         return try receiptDigest(
             "display-only-first-normal-boot-\(receipt.stableObservationCount)-\(receipt.reconstructionCount)",
             plan: plan,
@@ -2440,6 +2640,7 @@ struct PommeCore {
     /// no failed VM instance is ever retried.
     static func waitForLiveRecoveryAuxiliaryStorageRelease(
         at url: URL,
+        vmName: String,
         maxRetries: Int = 1,
         retryDelayNanoseconds: UInt64 = 2_000_000_000,
         hasConflict: @escaping @Sendable (URL) -> Bool = liveRecoveryAuxiliaryStorageHasConflictingLock,
@@ -2455,8 +2656,9 @@ struct PommeCore {
             }
             retries += 1
             log(
-                "Pomme Recovery bootstrap milestone: auxiliaryStorageReleaseWait "
-                    + "\(retries)/\(retryBudget)."
+                "Recovery bootstrap milestone: auxiliaryStorageReleaseWait "
+                    + "\(retries)/\(retryBudget).",
+                vmName: vmName
             )
             if retryDelayNanoseconds > 0 {
                 try await sleep(retryDelayNanoseconds)
@@ -2644,6 +2846,11 @@ struct PommeCore {
             "--mode", bootMode.rawValue
         ] + (reference.name.map { ["--name", $0] } ?? [])
         process.currentDirectoryURL = bundle.rootURL
+        // Owner credentials are consumed by the invoking security workflow;
+        // a long-lived VM helper must never inherit that environment pair.
+        process.environment = ProcessInfo.processInfo.environment.filter {
+            !["POMME_AUTHORIZED_USER", "POMME_AUTHORIZED_PASSWORD"].contains($0.key)
+        }
         process.standardInput = FileHandle(forReadingAtPath: "/dev/null")
         process.standardOutput = logHandle
         process.standardError = logHandle
@@ -2693,6 +2900,12 @@ struct PommeCore {
         let exitSignal = ExitSignal()
         let server = PommeControlServer(
             socketURL: bundle.pommeSocketURL,
+            afterResponse: { request, _ in
+                guard case .lifecycle(let command) = request,
+                      command == .stop || command == .forceStop
+                else { return }
+                await exitSignal.endExitHold()
+            },
             streamHandler: { request, stream in
                 await runtimeStreamResponse(request, stream: stream, runtime: retained.runtime)
             },
@@ -2702,15 +2915,21 @@ struct PommeCore {
         )
         try server.start()
         let recordURL = try writeRuntimeRecord(name: reference.name, bundle: bundle)
-        defer {
-            server.stop()
-            retained.coordinator?.teardown()
-            Task {
-                await retained.runtime.teardown()
-                try? FileManager.default.removeItem(at: recordURL)
-            }
-        }
         await exitSignal.wait()
+        // The CLI process must not exit while teardown and record removal
+        // are merely queued in an unstructured task. Otherwise the next
+        // security boot can find a dead helper's retained record.
+        server.stop()
+        retained.coordinator?.teardown()
+        await retained.runtime.teardown()
+        let record = try JSONDecoder().decode(
+            PommeRuntimeRecord.self, from: Data(contentsOf: recordURL))
+        guard record.pid == Darwin.getpid(),
+              record.bundlePath == bundle.rootURL.standardizedFileURL.path,
+              record.socketPath == bundle.pommeSocketURL.path else {
+            throw RunnerError.virtualMachineState("The VM helper's runtime record changed during teardown.")
+        }
+        try FileManager.default.removeItem(at: recordURL)
     }
 
     private static func runtimeRecordURL(for bundle: BundleLayout) throws -> URL {
@@ -2749,14 +2968,11 @@ struct PommeCore {
                 case .resume: try await runtime.resume()
                 case .stop, .forceStop:
                     await exitSignal.beginExitHold()
-                    do {
-                        if command == .forceStop { try await runtime.forceStopNow() } else { try await runtime.stop() }
-                        await exitSignal.endExitHold()
-                        await exitSignal.requestExit()
-                    } catch {
-                        await exitSignal.endExitHold()
-                        throw error
-                    }
+                    // The response-completion hook releases this hold after
+                    // success or failure is written. A concurrent guest-stop
+                    // notification remains pending until then as well.
+                    if command == .forceStop { try await runtime.forceStopNow() } else { try await runtime.stop() }
+                    await exitSignal.requestExit()
                 }
                 return try jsonLine(["ok": true, "operation": command.rawValue, "hostExitCode": 0])
             case .snapshotSave:
@@ -2765,7 +2981,16 @@ struct PommeCore {
                 return try jsonLine(await runtime.statusPayload(bundle: bundle, inspect: false))
             case .inspect:
                 return try jsonLine(await runtime.statusPayload(bundle: bundle, inspect: true))
+            case .guestUI(let request):
+                let payload = try await runtime.performUI(request)
+                return try jsonLine(payload.mapValues(\.publicValue))
             case .agentPerform(let request, _):
+                if isSecurityNormalAMFI(request) {
+                    return await securityNormalAMFIControlResponse(request, runtime: runtime)
+                }
+                if isBufferedForeground(request) {
+                    return try await foregroundControlResponse(request, runtime: runtime)
+                }
                 let result = try await runtime.performGuestOperationCorrelated(request.operation, payload: request.payload)
                 return try correlatedResultJSON(result)
             }
@@ -2784,6 +3009,21 @@ struct PommeCore {
             return "ERROR Pomme control streaming is limited to agent.perform."
         }
         do {
+            if isSecurityNormalAMFI(operation) {
+                return await securityNormalAMFIControlResponse(operation, runtime: runtime)
+            }
+            if isSecurityPrivatePTY(operation) {
+                return await securityPrivatePTYControlResponse(
+                    operation,
+                    stream: stream,
+                    runtime: runtime
+                )
+            }
+            if isBufferedForeground(operation) {
+                return try await foregroundControlResponse(operation, runtime: runtime) { frames in
+                    try sendControlFrames(frames, through: stream)
+                }
+            }
             let result = try await runtime.performGuestOperationCorrelated(operation.operation, payload: operation.payload)
             guard let jobText = result.result.objectValue?["jobID"]?.stringValue,
                   let jobID = UUID(uuidString: jobText)
@@ -2815,6 +3055,312 @@ struct PommeCore {
             return (try? jsonLine(["ok": false, "error": error.localizedDescription, "hostExitCode": 1]))
                 ?? "{\"ok\":false,\"hostExitCode\":1}"
         }
+    }
+
+    private static func isSecurityPrivatePTY(_ request: PommeAgentPerformRequest) -> Bool {
+        request.operation == "process.start"
+            && request.payload?.objectValue?[privatePTYMarker] == .bool(true)
+    }
+
+    private static func isSecurityNormalAMFI(_ request: PommeAgentPerformRequest) -> Bool {
+        PommeSecurityNormalAgent.normalAMFIOperations.contains(request.operation)
+    }
+
+    /// Verifies the exact normal-agent describe receipt. This is intentionally
+    /// JSONValue-native so booleans, strings, and fractional numbers cannot be
+    /// accepted as capability/version integers through Foundation coercions.
+    static func normalAMFICapabilityReceipt(
+        _ description: JSONValue,
+        expectedExecutableDigest: String
+    ) -> Bool {
+        guard PommeProvisioningDigest.isSHA256(expectedExecutableDigest),
+              expectedExecutableDigest == expectedExecutableDigest.lowercased(),
+              let object = description.objectValue,
+              object["role"] == .string("persistent"),
+              object["protocol"] == .string(PommeAgentProtocol.name),
+              object["version"] == .integer(Int64(PommeAgentProtocol.version)),
+              object["executableSHA256"] == .string(expectedExecutableDigest),
+              object["normalAMFIWorkflowVersion"] == .integer(Int64(PommeSecurityNormalAgent.normalAMFIWorkflowVersion)),
+              case .array(let rawCapabilities)? = object["capabilities"],
+              rawCapabilities.allSatisfy({ $0.stringValue != nil })
+        else { return false }
+        return Set(rawCapabilities.compactMap(\.stringValue))
+            .isSuperset(of: PommeSecurityNormalAgent.normalAMFIOperations)
+    }
+
+    /// Validates and strips the host-only digest marker after the pinned
+    /// session's describe receipt has been verified. The forwarded guest
+    /// payload is exactly the volume-group UUID, with no host control fields.
+    static func normalAMFIForwardPayload(
+        operation: String,
+        payload: JSONValue,
+        expectedExecutableDigest: String
+    ) throws -> JSONValue {
+        guard PommeSecurityNormalAgent.normalAMFIOperations.contains(operation),
+              PommeProvisioningDigest.isSHA256(expectedExecutableDigest),
+              expectedExecutableDigest == expectedExecutableDigest.lowercased(),
+              let object = payload.objectValue,
+              Set(object.keys) == [
+                  PommeSecurityNormalAgent.normalAMFIDigestMarker,
+                  "volumeGroupUUID",
+              ],
+              object[PommeSecurityNormalAgent.normalAMFIDigestMarker]
+                  == .string(expectedExecutableDigest),
+              let rawUUID = object["volumeGroupUUID"]?.stringValue,
+              let volumeGroupUUID = UUID(uuidString: rawUUID),
+              volumeGroupUUID.uuidString.lowercased() == rawUUID
+        else { throw PommeSecurityNormalAgentError.invalidAMFIOperation }
+
+        return .object(["volumeGroupUUID": .string(rawUUID)])
+    }
+
+    /// Handles a closed, credential-free normal-agent AMFI stage. The marker
+    /// is checked before connection use but is removed only after a single
+    /// authenticated session proves the persistent role, protocol, digest,
+    /// capability version, and exact operation vocabulary.
+    private static func securityNormalAMFIControlResponse(
+        _ request: PommeAgentPerformRequest,
+        runtime: PommeVMRuntime
+    ) async -> String {
+        do {
+            guard let payload = request.payload?.objectValue,
+                  Set(payload.keys) == [
+                      PommeSecurityNormalAgent.normalAMFIDigestMarker,
+                      "volumeGroupUUID",
+                  ],
+                  let expectedDigest = payload[PommeSecurityNormalAgent.normalAMFIDigestMarker]?.stringValue,
+                  PommeProvisioningDigest.isSHA256(expectedDigest),
+                  expectedDigest == expectedDigest.lowercased()
+            else { throw PommeSecurityNormalAgentError.invalidAMFIOperation }
+
+            let pinned = try runtime.captureAuthenticatedAgentSession(as: .normal)
+            let description = try await pinned.request(
+                operation: "agent.describe",
+                payload: .object(["includeNormalAMFICapabilities": .bool(true)])
+            )
+            guard Self.normalAMFICapabilityReceipt(
+                description, expectedExecutableDigest: expectedDigest
+            ) else {
+                throw PommeSecurityNormalAgentError.unsupportedAMFIWorkflow
+            }
+
+            // Keep this call after the same-session describe check. It is the
+            // only point where the host marker is removed from the payload.
+            let forwarded = try Self.normalAMFIForwardPayload(
+                operation: request.operation,
+                payload: .object(payload),
+                expectedExecutableDigest: expectedDigest
+            )
+            let result = try await pinned.request(
+                operation: request.operation, payload: forwarded
+            )
+            guard let object = result.objectValue,
+                  object["operation"] == .string(request.operation),
+                  object["verified"] == .bool(true)
+            else { throw PommeSecurityNormalAgentError.unverifiedAMFIResponse }
+
+            return try jsonLine([
+                "ok": true,
+                "operation": request.operation,
+                "result": result.publicValue,
+                "hostExitCode": 0,
+            ])
+        } catch {
+            return Self.normalAMFIErrorResponse(error)
+        }
+    }
+
+    private static func normalAMFIErrorResponse(_ error: Error) -> String {
+        let code: String
+        if let error = error as? PommeSecurityNormalAgentError {
+            switch error {
+            case .invalidAMFIOperation:
+                code = "invalid-operation"
+            case .unsupportedAMFIWorkflow:
+                code = "unsupported-operation"
+            case .unverifiedAMFIResponse:
+                code = "normal-amfi-unverified"
+            case .invalidRebootTimeout, .bootIdentityUnavailable, .rebootRequestFailed,
+                 .rebootDidNotStop, .rebootStartFailed, .rebootBootIdentityUnchanged,
+                 .rebootAgentUnverified:
+                code = "normal-amfi-unverified"
+            }
+        } else if let error = error as? PommeAgentSessionError {
+            if error.code == "unsupported-operation" || error.code == "invalid-operation" {
+                code = error.code
+            } else if PommeRecoveryGuestFailureCode(rawValue: error.code) != nil {
+                code = error.code
+            } else {
+                code = "normal-amfi-failed"
+            }
+        } else {
+            code = "normal-amfi-failed"
+        }
+        return (try? jsonLine([
+            "ok": false,
+            "error": "Normal AMFI operation failed.",
+            "failureCode": code,
+            "hostExitCode": 1,
+        ])) ?? "{\"ok\":false,\"error\":\"Normal AMFI operation failed.\",\"failureCode\":\"normal-amfi-failed\",\"hostExitCode\":1}"
+    }
+
+    /// Handles the host-side private PTY request inside the VM helper. The
+    /// guest sees only the sanitized process.start payload. A concrete
+    /// persistent session is pinned before its describe proof and all runner
+    /// operations use that pin.
+    private static func securityPrivatePTYControlResponse(
+        _ request: PommeAgentPerformRequest,
+        stream: PommeControlStreamSession,
+        runtime: PommeVMRuntime
+    ) async -> String {
+        do {
+            guard var payload = request.payload?.objectValue,
+                  payload[privatePTYMarker] == .bool(true),
+                  let expectedDigest = payload[privatePTYDigestMarker]?.stringValue,
+                  PommeProvisioningDigest.isSHA256(expectedDigest),
+                  expectedDigest == expectedDigest.lowercased(),
+                  let path = payload["path"]?.stringValue,
+                  case .array(let rawArguments)? = payload["arguments"],
+                  payload["pty"] == .bool(true),
+                  payload["detached"] == .bool(false)
+            else { throw PommePrivatePTYRunner.Error.invalidCommand }
+            let arguments = rawArguments.compactMap(\.stringValue)
+            guard arguments.count == rawArguments.count else {
+                throw PommePrivatePTYRunner.Error.invalidCommand
+            }
+            payload.removeValue(forKey: privatePTYMarker)
+            payload.removeValue(forKey: privatePTYDigestMarker)
+
+            let pinned = try runtime.captureAuthenticatedAgentSession(as: .normal)
+            let transport = PommePrivatePTYRunner.Transport(
+                perform: { operation, values in
+                    try await pinned.requestCorrelated(operation: operation, payload: values)
+                },
+                sendStream: { jobID, kind, data, signal in
+                    try await pinned.sendStream(
+                        jobID: jobID,
+                        stream: kind,
+                        requestID: UUID(),
+                        data: data,
+                        dimensions: nil,
+                        signal: signal
+                    )
+                },
+                validateSession: {
+                    let description = try await pinned.request(
+                        operation: "agent.describe",
+                        payload: .object(["includePrivatePTYCapabilities": .bool(true)])
+                    )
+                    guard let object = description.objectValue,
+                          object["role"] == .string("persistent"),
+                          object["protocol"] == .string(PommeAgentProtocol.name),
+                          object["version"] == .integer(Int64(PommeAgentProtocol.version)),
+                          object["executableSHA256"] == .string(expectedDigest),
+                          object["privatePTYInputVersion"] == .integer(Int64(PommeAgent.privatePTYInputVersion)),
+                          case .array(let capabilities)? = object["capabilities"],
+                          Set(capabilities.compactMap(\.stringValue)).isSuperset(of: [
+                              "process.start", "process.status", "process.signal"
+                          ])
+                    else { throw PommePrivatePTYRunner.Error.invalidCompletion }
+                }
+            )
+
+            let command = PommePrivatePTYRunner.Command(path: path, arguments: arguments)
+            let prompt = privatePTYPrompt(for: .init(executable: path, arguments: arguments))
+            let terminal = try await PommePrivatePTYRunner.run(
+                command: command,
+                secretProvider: {
+                    let frame = try stream.receive(timeout: PommePrivatePTYRunner.defaultPromptTimeout)
+                    guard frame.stream == .stdin, frame.eof != true,
+                          let data = try frame.decodedData(),
+                          let secret = String(data: data, encoding: .utf8)
+                    else { throw PommePrivatePTYRunner.Error.transportFailure }
+                    return secret
+                },
+                prompt: prompt,
+                promptTimeout: PommePrivatePTYRunner.defaultPromptTimeout,
+                processTimeout: PommePrivatePTYRunner.defaultProcessTimeout,
+                transport: transport,
+                onFrames: { frames in
+                    try sendControlFrames(frames, through: stream)
+                }
+            )
+            return try correlatedResultJSON(terminal)
+        } catch {
+            // Keep command output and credentials out of the host response.
+            return (try? jsonLine([
+                "ok": false,
+                "error": "Private PTY request failed.",
+                "failureCode": PommeSecurityPrivatePTYDiagnostic(error).rawValue,
+                "hostExitCode": 1
+            ])) ?? "{\"ok\":false,\"hostExitCode\":1}"
+        }
+    }
+
+    private static func isBufferedForeground(_ request: PommeAgentPerformRequest) -> Bool {
+        request.operation == "process.start"
+            && request.payload?.objectValue?["detached"] != .bool(true)
+            && request.payload?.objectValue?["pty"] != .bool(true)
+    }
+
+    private static func foregroundControlResponse(
+        _ request: PommeAgentPerformRequest,
+        runtime: PommeVMRuntime,
+        onFrames: PommeForegroundExecution.FrameHandler? = nil
+    ) async throws -> String {
+        let payload = request.payload ?? .object([:])
+        let timeout: TimeInterval
+        switch payload.objectValue?["timeout"] {
+        case .number(let value): timeout = value
+        case .integer(let value): timeout = TimeInterval(value)
+        case nil: timeout = Constants.defaultGuestCommandTimeout
+        default: throw RunnerError.invalidGuestCommand("Invalid foreground command timeout.")
+        }
+        let result = try await PommeForegroundExecution.run(
+            payload: payload,
+            timeout: timeout,
+            perform: { operation, values in
+                try await runtime.performGuestOperationCorrelated(operation, payload: values)
+            },
+            sendStream: { jobID, kind, data in
+                try await runtime.sendGuestStream(jobID: jobID, stream: kind, requestID: UUID(), data: data)
+            },
+            onFrames: onFrames
+        )
+        return try foregroundResultJSON(result)
+    }
+
+    static func foregroundResultJSON(_ result: PommeAgentCorrelatedResult) throws -> String {
+        guard let terminal = result.result.objectValue else { throw PommeAgentProtocol.Error.invalidResponse }
+        let exitCode: Int
+        let error: String?
+        if terminal["timedOut"] == .bool(true) {
+            exitCode = 124
+            error = "Foreground command timed out; inspect the returned job ID before taking further action."
+        } else if terminal["cancelled"] == .bool(true) {
+            exitCode = 130
+            error = "Foreground command was cancelled; inspect the returned job ID before taking further action."
+        } else if terminal["stdoutTruncated"] == .bool(true) || terminal["stderrTruncated"] == .bool(true) {
+            exitCode = 1
+            error = "Foreground output exceeded the buffered limit; output is incomplete."
+        } else {
+            guard terminal["exited"] == .bool(true) else { throw PommeAgentProtocol.Error.invalidResponse }
+            if case .integer(let value)? = terminal["exitCode"], (0...255).contains(value), terminal["signal"] == nil {
+                exitCode = Int(value)
+            } else if case .integer(let value)? = terminal["signal"], (1...127).contains(value), terminal["exitCode"] == nil {
+                exitCode = 128 + Int(value)
+            } else { throw PommeAgentProtocol.Error.invalidResponse }
+            error = nil
+        }
+        var object: [String: Any] = [
+            "ok": exitCode == 0,
+            "requestID": result.requestID.uuidString.lowercased(),
+            "result": result.result.publicValue,
+            "streamFrames": result.streamFrames.map(agentStreamPayload),
+            "hostExitCode": exitCode,
+        ]
+        if let error { object["error"] = error }
+        return try jsonLine(object)
     }
 
     private static func correlatedResultJSON(_ result: PommeAgentCorrelatedResult) throws -> String {
@@ -3468,10 +4014,16 @@ struct PommeCore {
 
     // MARK: Executable identity
 
-    static func runningExecutableIdentity() throws -> (url: URL, sha256: String) {
-        let url = URL(fileURLWithPath: CommandLine.arguments.first ?? PommeAgentInstall.executable).resolvingSymlinksInPath()
-        let data = try Data(contentsOf: url, options: .mappedIfSafe)
-        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        return (url, digest)
+    static func runningExecutableIdentity(
+        executableURLProvider: @Sendable () throws -> URL = {
+            try PommeFirstBootProcessIsolation.currentExecutableURL()
+        }
+    ) throws -> (url: URL, sha256: String) {
+        // CommandLine.arguments.first is only the invocation spelling. A PATH
+        // launch can provide a bare name that is not resolvable from the
+        // current directory, so use dyld's process-owned executable path and
+        // canonicalize any test or launcher symlink before hashing.
+        let url = try executableURLProvider().resolvingSymlinksInPath()
+        return (url, try PommeFirstBootProcessIsolation.executableDigest(at: url))
     }
 }

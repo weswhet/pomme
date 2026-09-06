@@ -105,6 +105,7 @@ struct VMCreationPlan: Sendable {
             "recoveryProfile": [
                 "id": recoveryProfile.id,
                 "digest": recoveryProfile.digest,
+                "qualification": recoveryProfile.qualification.rawValue,
                 "locale": recoveryProfile.locale,
                 "display": "\(recoveryProfile.displayWidth)x\(recoveryProfile.displayHeight)"
             ],

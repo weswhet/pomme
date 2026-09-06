@@ -67,7 +67,10 @@ enum PommeRecoverySessionError: Error, LocalizedError, Equatable, Sendable {
     case notPrepared
     case unauthenticated
     case invalidLifecycle
+    case observationTimedOut
+    case terminalProofFailed
     case rootEvidenceRejected
+    case preparationFailed
     case guestOperationFailed
     case cleanupFailed
     case finalStateUnverified
@@ -92,8 +95,14 @@ enum PommeRecoverySessionError: Error, LocalizedError, Equatable, Sendable {
             "Recovery operation requires an authenticated session."
         case .invalidLifecycle:
             "Recovery session lifecycle transition was rejected."
+        case .observationTimedOut:
+            "Recovery display observation timed out."
+        case .terminalProofFailed:
+            "Recovery Terminal capability proof failed."
         case .rootEvidenceRejected:
             "Recovery workspace evidence was incomplete."
+        case .preparationFailed:
+            "Recovery session preparation failed."
         case .guestOperationFailed:
             "Recovery operation did not complete."
         case .cleanupFailed:
@@ -561,9 +570,15 @@ actor PommeRecoverySession {
         } catch let error as PommeRecoverySessionError {
             lifecycle = .failed
             throw error
+        } catch let error as PommeRecoveryRuntimeError {
+            lifecycle = .failed
+            throw error
+        } catch is CancellationError {
+            lifecycle = .failed
+            throw CancellationError()
         } catch {
             lifecycle = .failed
-            throw PommeRecoverySessionError.rootEvidenceRejected
+            throw PommeRecoverySessionError.preparationFailed
         }
     }
 
@@ -629,6 +644,9 @@ actor PommeRecoverySession {
                 throw PommeRecoverySessionError.guestOperationFailed
             }
             return result
+        } catch let error as PommeRecoveryGuestOperationFailure {
+            lifecycle = .failed
+            throw error
         } catch let error as PommeRecoverySessionError {
             lifecycle = .failed
             throw error

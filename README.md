@@ -10,26 +10,23 @@ the reviewed qualification described in [Docs/Qualification.md](Docs/Qualificati
 
 ## Build and test
 
-A full Xcode installation is required:
+A full Xcode installation and the configured Developer ID certificate are
+required for the credential-bearing CLI. Build, sign, verify, and install it
+consistently to `~/.local/bin/pomme`:
 
 ```sh
-xcodebuildmcp macos build \
-  --project-path pomme.xcodeproj \
-  --scheme pomme \
-  --configuration Release \
-  --arch arm64 \
-  --output text
+rtk proxy bash Scripts/build-local.sh
 ```
 
-Resolve the built executable with:
+Run isolated offline tests without accessing real VM credentials:
 
 ```sh
-xcodebuildmcp macos get-app-path \
+rtk xcodebuildmcp macos test \
   --project-path pomme.xcodeproj \
   --scheme pomme \
   --configuration Release \
-  --arch arm64 \
-  --output json
+  --extra-args CODE_SIGNING_ALLOWED=NO \
+  --output text
 ```
 
 The package installs the host executable at `/usr/local/bin/pomme`. The guest
@@ -52,7 +49,7 @@ Create is a durable provisioning workflow, not only an installation command:
 
 ```sh
 pomme create dev --version 26.6.0 --boot none
-pomme create dev --restore-image /path/to/Restore.ipsw --boot normal
+pomme create dev --version latest --boot normal
 pomme create dev --resume
 ```
 
@@ -73,6 +70,9 @@ matrix have been independently completed and reviewed.
 If creation stops after an external effect, Pomme preserves the exact VM and
 journal. `--resume` revalidates the immutable plan and continues from the first
 unresolved intent. Resume accepts only its target and output/debug options.
+The local build script retains signed agent artifacts by SHA-256. Recovery
+installation after a host rebuild uses the original pinned artifact, not a
+replacement digest; missing or altered artifacts fail closed.
 
 Config-driven creation supports JSON, YAML, TOML, and Pkl. Every member is
 profile-qualified during whole-batch preflight. After execution begins,
@@ -110,27 +110,76 @@ Process streams, terminal resize, signals, jobs, and file handles are correlated
 and bounded. File transfer is authenticated and chunked, stages adjacent to its
 destination, refuses symbolic-link traversal, and commits atomically.
 
+## Direct guest display input
+
+The helper delivers UI input directly through the VM's private Virtualization
+keyboard/pointer interfaces and captures its framebuffer without a host window.
+These operations work in normal macOS and Recovery without a guest agent:
+
+The following illustrate input syntax, not a complete Recovery navigation sequence.
+
+```sh
+pomme start dev --mode recovery
+pomme ui key dev ctrl-f2
+pomme ui key dev cmd+shift+t
+pomme ui key-sequence dev left right
+pomme ui type dev --text '/usr/bin/id -u'
+pomme ui key dev return
+```
+
+Observe the guest with `pomme ui screenshot dev --output /absolute/private/path.png`.
+Keep Recovery screenshots in a private temporary lab directory, outside the
+repository. Named navigation/function keys and modifier combinations are
+supported; numeric HID scan codes are not exposed. Requests do not move the host
+pointer or change its frontmost app. `ui ai` remains unavailable. Automatic
+provisioning owns an exclusive VM lease; do not mix manual input into it.
+
 ## Security and access
 
-SIP and AMFI operations use only an authenticated Recovery session and restore
-the requested final run state on success or failure. MDM requires verified
-normal-agent capabilities. Remote Login and Screen Sharing are explicit,
-capability-gated operations.
+SIP and AMFI LocalPolicy changes use authenticated Recovery sessions. AMFI
+boot-argument writes use the authenticated normal agent with SIP disabled.
+Disable SIP before changing AMFI, and restore AMFI before re-enabling SIP. Security
+workflows are state-first: status and an already-satisfied no-op observe the
+guest without requesting or transmitting an owner password. Success restores
+the requested `--final-state`; failure restores the run state captured at the
+start when that state can be safely proved, otherwise the journal is retained
+and restoration is reported incomplete. `--force` confirms the fresh-owner
+branch only; it does not override credentials, ownership, native login
+protections, or cleanup barriers. MDM requires verified normal-agent
+capabilities. Remote Login and Screen Sharing are explicit, capability-gated
+operations.
 
 ```sh
 pomme sip status dev
 pomme sip disable dev --final-state previous
+pomme amfi disable dev --final-state normal
 pomme amfi enable dev --final-state normal
+pomme sip enable dev --final-state previous
 pomme mdm enroll dev --profile ./enrollment.mobileconfig
 ```
 
-Pomme currently accepts only the exact Tahoe `26.6.0 (25G72)` profile with its
-reviewed qualification digest. Sequoia `15.6.1 (24G90)` remains a fail-closed
-reference until its fresh-VM qualification and independent review are complete;
-code recognition and unit tests do not enable it.
+Pomme permits new OS versions as experimental Recovery attempts. It records the
+actual restore version/build and warns when that combination has not been
+qualified; an unlisted build is not a reason to refuse creation. The existing
+Tahoe `26.6.0 (25G72)` reviewed profile remains distinct from experimental
+attempts, including Sequoia. Ownership, host-ABI, locale, display, and profile
+integrity checks still apply. Unexpected or unstable Recovery screens stop
+navigation, and a failed phase retains the VM and journal for diagnosis/resume.
+An attempted or successful one-off run is not release qualification.
+
+Fresh-owner decisions bind the exact native stock account name, numeric UID,
+and GeneratedUID baseline; an unfamiliar record blocks freshness. Unknown OS
+versions remain guarded experimental identities when their exact profile,
+ownership, and host checks pass. Native automatic-login refusals, including
+Touch ID, Apple Pay, App Store, and related protections, are closed
+login-restriction results. Pomme has no native-force override, and qualification
+of the actual native automatic-login diagnostic remains pending. See
+[Security workflows](Docs/SecurityWorkflows.md) for the owner, journal, and
+retry rules.
 
 ## Design
 
 - [Architecture](Docs/Architecture.md)
+- [Security workflows](Docs/SecurityWorkflows.md)
 - [Protocol contracts](Docs/Protocols.md)
 - [Qualification and publication gates](Docs/Qualification.md)

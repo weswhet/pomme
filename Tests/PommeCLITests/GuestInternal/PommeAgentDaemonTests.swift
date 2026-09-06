@@ -177,6 +177,108 @@ struct PommeAgentDaemonTests {
         #expect(cleanups.value == 1)
     }
 
+    @Test("default Recovery cleanup accepts an existing private workspace before digest validation")
+    func defaultCleanupCanonicalPrivateWorkspaceReachesDigestValidation() throws {
+        // Given: an actual existing /private/var/tmp workspace. On this host,
+        // standardizedFileURL resolves the /private alias to /var/tmp for
+        // existing paths, while the launcher's request-bound argument remains
+        // the required /private/var/tmp spelling. The credential is removed
+        // before launching so this regression does not read credentials or
+        // attempt a host connection.
+        let fixture = try makeRecoveryRunWorkspace(requestData: Data("not-yet-validated".utf8))
+        defer { try? FileManager.default.removeItem(at: fixture.workspace) }
+        try FileManager.default.removeItem(
+            at: fixture.workspace.appendingPathComponent(PommeRecoveryArtifactNames.credential)
+        )
+
+        // When: the production run path uses its default cleanup factory with
+        // a deliberately incorrect digest.
+        let exit = PommeAgentDaemon.run(
+            arguments: recoveryArguments(
+                requestID: fixture.requestID,
+                workspace: fixture.workspace,
+                expectedDigest: String(repeating: "0", count: 64)
+            ),
+            executablePath: fixture.executable.path,
+            recoveryOwner: geteuid(),
+            recoveryGroup: fixture.group
+        )
+
+        // Then: canonical path validation must pass first, allowing the
+        // digest guard to return integrity (65), and the exact workspace must
+        // be cleaned up without opening a credential or socket.
+        #expect(exit == PommeAgentDaemon.Exit.integrity.rawValue)
+        #expect(!FileManager.default.fileExists(atPath: fixture.workspace.path))
+    }
+
+    @Test("default Recovery cleanup rejects lexical traversal before mutation")
+    func defaultCleanupRejectsLexicalTraversalBeforeMutation() throws {
+        // Given: a valid request-bound workspace, but a request path with a
+        // dot-component that resolves to the same file lexically.
+        let fixture = try makeRecoveryRunWorkspace(requestData: Data("not-yet-validated".utf8))
+        defer { try? FileManager.default.removeItem(at: fixture.workspace) }
+        var arguments = recoveryArguments(
+            requestID: fixture.requestID,
+            workspace: fixture.workspace,
+            expectedDigest: String(repeating: "0", count: 64)
+        )
+        guard let requestFlag = arguments.firstIndex(of: "--request-file") else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        arguments[requestFlag + 1] = "\(fixture.workspace.path)/../\(fixture.workspace.lastPathComponent)/\(PommeRecoveryArtifactNames.request)"
+
+        // When: the daemon is invoked through its production cleanup seam.
+        let exit = PommeAgentDaemon.run(
+            arguments: arguments,
+            executablePath: fixture.executable.path,
+            recoveryOwner: geteuid(),
+            recoveryGroup: fixture.group
+        )
+
+        // Then: the lexical alias is rejected before cleanup, digest, token,
+        // or socket work, and every staged artifact remains in place.
+        #expect(exit == PommeAgentDaemon.Exit.invalidArguments.rawValue)
+        #expect(FileManager.default.fileExists(atPath: fixture.workspace.path))
+        #expect(FileManager.default.fileExists(atPath: fixture.executable.path))
+        #expect(FileManager.default.fileExists(atPath: fixture.workspace.appendingPathComponent(PommeRecoveryArtifactNames.request).path))
+        #expect(FileManager.default.fileExists(atPath: fixture.workspace.appendingPathComponent(PommeRecoveryArtifactNames.credential).path))
+    }
+
+    @Test("default Recovery cleanup rejects a symlink alias before mutation")
+    func defaultCleanupRejectsSymlinkAliasBeforeMutation() throws {
+        // Given: a valid request-bound workspace and a separate symlink to its
+        // executable. The alias points at the right inode but is not the exact
+        // request-bound pathname.
+        let fixture = try makeRecoveryRunWorkspace(requestData: Data("not-yet-validated".utf8))
+        let alias = fixture.workspace.deletingLastPathComponent()
+            .appendingPathComponent("pomme-recovery-executable-alias-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: alias)
+            try? FileManager.default.removeItem(at: fixture.workspace)
+        }
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: fixture.executable)
+
+        // When: the daemon is invoked with the symlink path as its executable.
+        let exit = PommeAgentDaemon.run(
+            arguments: recoveryArguments(
+                requestID: fixture.requestID,
+                workspace: fixture.workspace,
+                expectedDigest: String(repeating: "0", count: 64)
+            ),
+            executablePath: alias.path,
+            recoveryOwner: geteuid(),
+            recoveryGroup: fixture.group
+        )
+
+        // Then: the alias is rejected before any cleanup mutation, and the
+        // original workspace plus the alias are still present.
+        #expect(exit == PommeAgentDaemon.Exit.invalidArguments.rawValue)
+        #expect(FileManager.default.fileExists(atPath: fixture.workspace.path))
+        #expect(FileManager.default.fileExists(atPath: fixture.executable.path))
+        #expect(FileManager.default.fileExists(atPath: alias.path))
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: alias.path) == fixture.executable.path)
+    }
+
     @Test("Recovery daemon removes its exact workspace after request validation fails")
     func daemonCleansWorkspaceAfterRequestFailure() throws {
         let fixture = try makeRecoveryRunWorkspace(requestData: Data("invalid-json".utf8))

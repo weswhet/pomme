@@ -87,6 +87,9 @@ final class PommeAgentConnection: @unchecked Sendable {
     }
 
     private func operationCode(_ error: Error) -> String {
+        if let recoveryError = error as? PommeGuestRecoverySecurityError {
+            return recoveryError.recoveryFailureCode.rawValue
+        }
         guard let operationError = error as? PommeAgentOperationError else { return "operation-failed" }
         switch operationError {
         case .unsupported: return "unsupported-operation"

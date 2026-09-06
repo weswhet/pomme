@@ -101,13 +101,11 @@ struct PommeAgentRecoveryInstaller: Sendable {
 
         private static func isSafeGuestWorkspace(_ root: URL, _ requestID: UUID) -> Bool {
             let expected = "/private/var/tmp/pomme-recovery-\(requestID.uuidString.lowercased())"
-            var info = stat()
-            return root.path == expected
-                && lstat(root.path, &info) == 0
-                && info.st_uid == 0
-                && info.st_mode & S_IFMT == S_IFDIR
-                && info.st_mode & 0o777 == 0o700
-                && root.path == root.resolvingSymlinksInPath().standardizedFileURL.path
+            guard root.path == expected else { return false }
+            do {
+                try PommeAgentFileTransaction.verifyRecoveryWorkspaceDirectory(root, owner: 0, group: 0)
+                return true
+            } catch { return false }
         }
 
     }
@@ -168,15 +166,18 @@ struct PommeAgentRecoveryInstaller: Sendable {
               path.utf8.count <= 256,
               !path.contains("\0")
         else { throw PommeAgentOperationError.invalid }
-        let root = URL(fileURLWithPath: path).standardizedFileURL
+        // The request binds a lexical spelling, not Foundation's preferred
+        // filesystem alias. Existing /private/var paths may otherwise become
+        // /var paths and incorrectly reject their own authenticated request.
+        let root = URL(fileURLWithPath: path).standardized
         guard root.path == path,
               configuration.validateGuestWorkspace(root, requestID)
         else { throw PommeAgentOperationError.invalid }
-        var info = stat()
-        guard lstat(root.path, &info) == 0,
-              info.st_mode & S_IFMT == S_IFDIR,
-              root.path == root.resolvingSymlinksInPath().standardizedFileURL.path
-        else { throw PommeAgentOperationError.invalid }
+        do {
+            try PommeAgentFileTransaction.verifyRecoveryWorkspaceDirectory(
+                root, owner: configuration.expectedOwner, group: configuration.expectedGroup
+            )
+        } catch { throw PommeAgentOperationError.invalid }
         return root
     }
 
@@ -202,7 +203,8 @@ struct PommeAgentRecoveryInstaller: Sendable {
         let uuid = values["targetVolumeGroupUUID"]?.stringValue.flatMap(UUID.init(uuidString:))
         guard mode == "initial" ? uuid == nil : uuid != nil else { throw PommeAgentOperationError.invalid }
         let selected = try configuration.resolveTargetDataRoot(uuid)
-        let root = selected.root.standardizedFileURL
+        let root = selected.root.standardized
+        guard root.path == selected.root.path else { throw PommeAgentOperationError.invalid }
         guard uuid == nil || selected.volumeGroupUUID == uuid else {
             throw PommeAgentOperationError.invalid
         }
@@ -297,7 +299,7 @@ struct PommeAgentRecoveryInstaller: Sendable {
 
     private func targetsAreWithinDataVolume(_ root: URL, paths: Paths) -> Bool {
         [paths.executable, paths.token, paths.plist, paths.privateDirectory]
-            .allSatisfy { $0.standardizedFileURL.path.hasPrefix(root.path + "/") }
+            .allSatisfy { $0.standardized.path == $0.path && $0.path.hasPrefix(root.path + "/") }
     }
 
     private func verifyInstalled(files: [(URL, Data, mode_t)]) throws {
@@ -403,6 +405,29 @@ enum PommeAgentJournalStore {
 }
 
 enum PommeAgentFileTransaction {
+    /// Verify the actual directory through the no-follow component walker.
+    /// String-based symlink resolution is not an identity proof on macOS:
+    /// Foundation can rewrite a real /private/var path to its /var alias.
+    static func verifyRecoveryWorkspaceDirectory(_ url: URL, owner: uid_t, group: gid_t) throws {
+        guard url.standardized.path == url.path else { throw PommeAgentProtocol.Error.invalidRequest }
+        try withVerifiedParent(of: url) { parent, name in
+            var entry = stat()
+            guard fstatat(parent, name, &entry, AT_SYMLINK_NOFOLLOW) == 0,
+                  entry.st_mode & S_IFMT == S_IFDIR
+            else { throw PommeAgentProtocol.Error.invalidRequest }
+            let descriptor = openat(parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+            guard descriptor >= 0 else { throw PommeAgentProtocol.Error.invalidRequest }
+            defer { _ = Darwin.close(descriptor) }
+            var opened = stat()
+            guard fstat(descriptor, &opened) == 0,
+                  opened.st_dev == entry.st_dev, opened.st_ino == entry.st_ino,
+                  opened.st_mode & S_IFMT == S_IFDIR,
+                  opened.st_uid == owner, opened.st_gid == group,
+                  opened.st_mode & 0o777 == 0o700
+            else { throw PommeAgentProtocol.Error.invalidRequest }
+        }
+    }
+
     /// Reads a fixed artifact through an O_NOFOLLOW descriptor so a staging
     /// mount cannot substitute a symlink between validation and consumption.
     static func readRegular(_ url: URL, maximumBytes: Int) throws -> Data {
@@ -475,9 +500,11 @@ enum PommeAgentFileTransaction {
         owner: uid_t,
         group: gid_t
     ) throws {
-        let normalizedRoot = root.standardizedFileURL
-        let normalizedDirectory = directoryURL.standardizedFileURL
-        guard normalizedRoot.path.hasPrefix("/"),
+        let normalizedRoot = root.standardized
+        let normalizedDirectory = directoryURL.standardized
+        guard normalizedRoot.path == root.path,
+              normalizedDirectory.path == directoryURL.path,
+              normalizedRoot.path.hasPrefix("/"),
               normalizedDirectory.path == normalizedRoot.path
                 || normalizedDirectory.path.hasPrefix(normalizedRoot.path + "/"),
               createdMode & ~mode_t(0o777) == 0,
@@ -565,7 +592,7 @@ enum PommeAgentFileTransaction {
         group: gid_t
     ) throws {
         let expectedName = "pomme-recovery-\(requestID.uuidString.lowercased())"
-        let normalized = workspace.standardizedFileURL
+        let normalized = workspace.standardized
         guard normalized.path == workspace.path,
               normalized.lastPathComponent == expectedName
         else { throw PommeAgentProtocol.Error.invalidRequest }
@@ -787,6 +814,21 @@ enum PommeAgentFileTransaction {
     private static func fsyncParent(of url: URL) throws { try fsyncParentDirectory(of: url) }
 
     private static func withVerifiedParent<T>(of url: URL, _ body: (Int32, String) throws -> T) throws -> T {
+        let root = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        guard root >= 0 else { throw PommeAgentProtocol.Error.invalidRequest }
+        defer { _ = Darwin.close(root) }
+        return try withVerifiedParent(of: url, rootDescriptor: root, body)
+    }
+
+    /// Walks beneath an already-open filesystem root. Production always uses
+    /// the real root and root-owned platform aliases; a separate descriptor
+    /// allows tests to reproduce Recovery's filesystem without changing it.
+    static func withVerifiedParent<T>(
+        of url: URL,
+        rootDescriptor: Int32,
+        trustedAliasOwner: uid_t = 0,
+        _ body: (Int32, String) throws -> T
+    ) throws -> T {
         let path = url.path
         guard path.hasPrefix("/"), !path.contains("\0") else { throw PommeAgentProtocol.Error.invalidRequest }
         var pieces = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
@@ -800,7 +842,57 @@ enum PommeAgentFileTransaction {
             pieces.insert("private", at: 0)
         }
 
-        var directory = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        // Tahoe Recovery makes /private an actual symlink rather than the
+        // directory seen in normal macOS. Recognize only the observed,
+        // system-owned alias (relative to / or absolute) and walk its fixed
+        // destination from the root descriptor; never follow an arbitrary
+        // link or canonicalize a path.
+        if pieces.first == "private", pieces.count > 1 {
+            var entry = stat()
+            guard fstatat(rootDescriptor, "private", &entry, AT_SYMLINK_NOFOLLOW) == 0 else {
+                throw PommeAgentProtocol.Error.invalidRequest
+            }
+            if entry.st_mode & S_IFMT == S_IFLNK {
+                let expectedTargets = [
+                    Array("System/Volumes/Data/private".utf8),
+                    Array("/System/Volumes/Data/private".utf8)
+                ]
+                // One extra byte distinguishes an exact target from a longer
+                // link whose prefix would otherwise look valid after truncation.
+                var target = [UInt8](repeating: 0, count: "/System/Volumes/Data/private".utf8.count + 1)
+                let count = target.withUnsafeMutableBytes { buffer in
+                    readlinkat(
+                        rootDescriptor,
+                        "private",
+                        buffer.baseAddress!.assumingMemoryBound(to: CChar.self),
+                        buffer.count
+                    )
+                }
+                let matchesTarget = expectedTargets.contains { expected in
+                    count == expected.count
+                        && target.prefix(expected.count).elementsEqual(expected)
+                }
+                guard entry.st_uid == trustedAliasOwner,
+                      entry.st_nlink == 1,
+                      matchesTarget
+                else { throw PommeAgentProtocol.Error.invalidRequest }
+
+                // A changed directory entry is not the link whose target was
+                // just checked. Reject replacement before opening any target.
+                var current = stat()
+                guard fstatat(rootDescriptor, "private", &current, AT_SYMLINK_NOFOLLOW) == 0,
+                      current.st_dev == entry.st_dev,
+                      current.st_ino == entry.st_ino,
+                      current.st_mode == entry.st_mode,
+                      current.st_uid == entry.st_uid,
+                      current.st_gid == entry.st_gid,
+                      current.st_nlink == entry.st_nlink
+                else { throw PommeAgentProtocol.Error.invalidRequest }
+                pieces = ["System", "Volumes", "Data", "private"] + pieces.dropFirst()
+            }
+        }
+
+        var directory = Darwin.fcntl(rootDescriptor, F_DUPFD_CLOEXEC, 0)
         guard directory >= 0 else { throw PommeAgentProtocol.Error.invalidRequest }
         defer { _ = Darwin.close(directory) }
         for component in pieces.dropLast() {

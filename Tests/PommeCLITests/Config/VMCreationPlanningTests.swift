@@ -149,41 +149,55 @@ struct VMCreationPlanningTests {
         )
     }
 
-    @Test("Only closed, release-accepted profiles may enter a plan")
-    func closedProfileQualification() throws {
+    @Test("Reviewed Tahoe and unreviewed identities have explicit qualifications")
+    func profileQualification() throws {
         let tahoe = firmware(version: "26.6.0", build: "25G72")
         let sequoia = firmware(version: "15.6.1", build: "24G90")
+        let latestTahoe = firmware(version: "26.6.2", build: "25G83")
+        let newer = firmware(version: "27.0.0", build: "26A123b")
 
         let selected = try PommeRecoveryProfileSelector.select(for: tahoe)
         let feedSelected = try PommeRecoveryProfileSelector.select(
             for: firmware(version: "26.6", build: "25G72")
         )
+        let latestSelected = try PommeRecoveryProfileSelector.select(for: latestTahoe)
+        let newerSelected = try PommeRecoveryProfileSelector.select(for: newer)
+        let pendingSelected = try PommeRecoveryProfileSelector.select(for: sequoia)
         #expect(selected.id == "tahoe-26.6.0-25G72-en-1280x800")
         #expect(feedSelected == selected)
+        #expect(selected.qualification == .accepted)
         #expect(selected.locale == "en")
         #expect(selected.displayWidth == 1280)
         #expect(selected.displayHeight == 800)
         #expect(PommeCreateAgentPlanRequest(profile: selected).recoveryProfileDigest == selected.digest)
+        #expect(latestSelected.qualification == .experimental)
+        #expect(latestSelected.version == "26.6.2")
+        #expect(latestSelected.build == "25G83")
+        #expect(try latestSelected == PommeRecoveryProfileSelector.descriptor(version: "26.6.2", build: "25G83"))
+        #expect(newerSelected.qualification == .experimental)
+        #expect(newerSelected.version == "27.0.0")
+        #expect(newerSelected.build == "26A123b")
+        #expect(pendingSelected.qualification == .experimental)
+        #expect(pendingSelected.version == "15.6.1")
+        #expect(pendingSelected.build == "24G90")
+        #expect(try latestSelected.digest == PommeRecoveryProfileSelector.descriptor(version: "26.6.2", build: "25G83").digest)
         #expect(throws: PommeRecoveryProfileSelectionError.self) {
-            _ = try PommeRecoveryProfileSelector.select(for: sequoia)
+            _ = try PommeRecoveryProfileSelector.select(for: firmware(version: "not-an-os-version", build: "25G99"))
         }
         #expect(throws: PommeRecoveryProfileSelectionError.self) {
-            _ = try PommeRecoveryProfileSelector.select(for: firmware(version: "26.6.1", build: "25G99"))
-        }
-        #expect(throws: PommeRecoveryProfileSelectionError.self) {
-            _ = try PommeRecoveryProfileSelector.select(for: firmware(version: "26.6", build: "25G99"))
+            _ = try PommeRecoveryProfileSelector.select(for: firmware(version: "26.6.2", build: "not-a-build"))
         }
     }
 
-    @Test("Profile preflight fails before an executor could mutate any batch member")
-    func unknownProfileBlocksWholeBatch() async throws {
+    @Test("Malformed restore identity fails before an executor could mutate any batch member")
+    func malformedProfileBlocksWholeBatch() async throws {
         let calls = PlanningCalls()
         let planner = VMCreationPlanner(dependencies: .init(
             firmwareLookup: { selector, _ in
                 await calls.resolved(selector)
                 return selector == "latest"
                     ? firmware(version: "26.6.0", build: "25G72")
-                    : firmware(version: "99.0", build: "Z99")
+                    : firmware(version: "99.invalid", build: "Z99")
             },
             profileSelection: PommeRecoveryProfileSelector.select,
             managedVMCollision: { _ in
@@ -196,7 +210,7 @@ struct VMCreationPlanningTests {
             _ = try await planner.plans(for: sampleConfig())
             Issue.record("Expected profile preflight to reject the whole batch.")
         } catch {
-            #expect(error.localizedDescription.contains("99.0"))
+            #expect(error.localizedDescription.contains("99.invalid"))
         }
         #expect(await calls.selectors == ["latest", "26.6.0"])
     }

@@ -110,7 +110,16 @@ enum CLIOutputWriter {
                     let name = result.vmName ?? "unknown"
                     print("\(name):")
                 }
-                print(result.text)
+                if result.payload["foreground"] as? Bool == true {
+                    for output in try foregroundOutput(result.payload) {
+                        try writeBytes(output.data, to: output.descriptor)
+                    }
+                    if let error = result.payload["error"] as? String {
+                        try writeBytes(Data((error + "\n").utf8), to: STDERR_FILENO)
+                    }
+                } else {
+                    print(result.text)
+                }
                 if results.count > 1, index != results.indices.last {
                     print("")
                 }
@@ -119,6 +128,36 @@ enum CLIOutputWriter {
 
         if let failed = results.first(where: { !$0.ok || $0.hostExitCode != 0 }) {
             throw ExitCode(failed.hostExitCode)
+        }
+    }
+
+    /// Keep command bytes separate from presentation text: no replacement
+    /// decoding, combined stderr, extra newline, or synthetic "OK" output.
+    static func foregroundOutput(_ payload: [String: Any]) throws -> [(descriptor: Int32, data: Data)] {
+        guard let frames = payload["streamFrames"] as? [[String: Any]] else {
+            throw RunnerError.invalidControlResponse("Missing foreground output frames.")
+        }
+        return try frames.map { frame in
+            guard let kind = frame["stream"] as? String,
+                  kind == "stdout" || kind == "stderr",
+                  let encoded = frame["dataBase64"] as? String,
+                  let data = Data(base64Encoded: encoded),
+                  data.count <= PommeControlProtocol.maximumStreamChunkBytes
+            else { throw RunnerError.invalidControlResponse("Invalid foreground output frame.") }
+            return (kind == "stdout" ? STDOUT_FILENO : STDERR_FILENO, data)
+        }
+    }
+
+    private static func writeBytes(_ data: Data, to descriptor: Int32) throws {
+        try data.withUnsafeBytes { bytes in
+            guard let base = bytes.baseAddress else { return }
+            var offset = 0
+            while offset < bytes.count {
+                let count = Darwin.write(descriptor, base.advanced(by: offset), bytes.count - offset)
+                if count > 0 { offset += count }
+                else if count < 0, errno == EINTR { continue }
+                else { try throwPOSIX("foreground output") }
+            }
         }
     }
 

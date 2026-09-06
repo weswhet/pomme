@@ -87,5 +87,9 @@ final class PommeControlSocketStream: @unchecked Sendable {
     deinit { Darwin.close(fileDescriptor) }
     func send(stream: PommeControlStreamFrame.Stream, data: Data? = nil, payload: JSONValue? = nil, eof: Bool? = nil) throws { try session.send(stream: stream, data: data, payload: payload, eof: eof) }
     func receive() throws -> PommeControlStreamFrame { try session.receive() }
-    func finish() throws -> PommeControlResponse { Darwin.shutdown(fileDescriptor, SHUT_WR); return try session.receiveResponse() }
+    func receive(timeout: TimeInterval) throws -> PommeControlStreamFrame { try session.receive(timeout: timeout) }
+    func receiveEvent() throws -> PommeControlStreamEvent { try session.receiveEvent() }
+    func receiveEvent(timeout: TimeInterval) throws -> PommeControlStreamEvent { try session.receiveEvent(timeout: timeout) }
+    func closeInput() throws { try session.closeInput() }
+    func finish() throws -> PommeControlResponse { try session.closeInput(); return try session.receiveResponse() }
 }
