@@ -7,12 +7,31 @@ enum PommeAgentRole: String, Sendable { case persistent, recovery }
 /// VSOCK integration owns framing I/O and delegates each authenticated request
 /// to this actor; process and file state intentionally survive reconnects.
 actor PommeAgent {
+    /// Version of the credential-free normal-boot AMFI staging contract. The
+    /// host asks for this version through the opt-in describe payload before
+    /// it can submit any normal AMFI operation.
+    static let normalAMFIWorkflowVersion = 1
+
+    /// These operation names are deliberately closed. They only stage and
+    /// verify the boot-argument half of the AMFI transaction; Recovery owns
+    /// LocalPolicy writes and credentials.
+    static let normalAMFIOperations = [
+        "amfi.normal.disable",
+        "amfi.normal.enable",
+        "amfi.normal.verifyDisabled",
+        "amfi.normal.verifyEnabled"
+    ]
+
+    /// Version of the private PTY input contract supported by this persistent
+    /// agent.  Hosts require this additive describe field before starting a
+    /// credential-bearing process so older pinned daemons cannot run it.
+    static let privatePTYInputVersion = 1
     static let recoveryCapabilities = [
         "agent.install",
         "sip.status", "sip.disable", "sip.enable",
         "amfi.status", "amfi.disable", "amfi.enable"
     ]
-    static let persistentCapabilities = ["agent.describe", "agent.health", "process.start", "process.status", "process.signal", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize"]
+    static let persistentCapabilities = ["agent.describe", "agent.health", "process.start", "process.status", "process.signal", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize"] + normalAMFIOperations
     struct Job: Sendable {
         let id: UUID
         let pid: Int32
@@ -23,6 +42,11 @@ actor PommeAgent {
         var stdin: Int32?
         let stdout: Int32?
         let stderr: Int32?
+        /// Output descriptors are marked only after a read observes EOF
+        /// (EIO for a PTY master). POLLHUP remains readable on Darwin even
+        /// after the final bytes have been consumed, so readiness alone
+        /// cannot establish completion.
+        var outputEOF: Set<Int32>
         let detached: Bool
     }
 
@@ -104,12 +128,25 @@ actor PommeAgent {
         }
         switch request.operation {
         case "agent.describe":
-            return .object([
+            var description: [String: JSONValue] = [
                 "role": .string(role.rawValue), "protocol": .string(PommeAgentProtocol.name),
                 "version": .integer(Int64(PommeAgentProtocol.version)), "executableSHA256": .string(executableSHA256),
                 "capabilities": .array(Self.persistentCapabilities.map(JSONValue.string))
-            ])
+            ]
+            if request.payload.objectValue?["includePrivatePTYCapabilities"] == .bool(true) {
+                description["privatePTYInputVersion"] = .integer(Int64(Self.privatePTYInputVersion))
+            }
+            if request.payload.objectValue?["includeNormalAMFICapabilities"] == .bool(true) {
+                description["normalAMFIWorkflowVersion"] = .integer(Int64(Self.normalAMFIWorkflowVersion))
+            }
+            return .object(description)
         case "agent.health": return .object(["ok": .bool(true), "activationPending": .bool(activationPending)])
+        case let operation where Self.normalAMFIOperations.contains(operation):
+            return try recoverySecurity.executeNormalAMFI(
+                role: role,
+                operation: operation,
+                payload: request.payload
+            )
         case "system.info": return .object(["name": .string("macOS"), "hostName": .string(ProcessInfo.processInfo.hostName)])
         case "network.interfaces": return .array([])
         case "remoteLogin.set": return try remoteLogin(request.payload)
@@ -146,15 +183,28 @@ actor PommeAgent {
         guard !(pty && bool(object["detached"]) == true) else { throw PommeAgentOperationError.invalid }
         let detached = bool(object["detached"]) ?? false
         let launched = try PommeProcess.spawn(path: path, arguments: arguments, identity: identity, pty: pty)
-        let job = Job(id: UUID(), pid: launched.pid, startedAt: Date(), exited: false, status: nil, ptyMaster: launched.ptyMaster, stdin: launched.stdin, stdout: launched.stdout, stderr: launched.stderr, detached: detached)
+        let job = Job(id: UUID(), pid: launched.pid, startedAt: Date(), exited: false, status: nil, ptyMaster: launched.ptyMaster, stdin: launched.stdin, stdout: launched.stdout, stderr: launched.stderr, outputEOF: [], detached: detached)
         jobs[job.id] = job
-        return .object(["jobID": .string(job.id.uuidString.lowercased()), "pid": .integer(Int64(launched.pid)), "detached": .bool(detached), "exited": .bool(false)])
+        var result: [String: JSONValue] = [
+            "jobID": .string(job.id.uuidString.lowercased()),
+            "pid": .integer(Int64(launched.pid)),
+            "detached": .bool(detached),
+            "exited": .bool(false)
+        ]
+        if pty { result["ptyEchoDisabled"] = .bool(launched.ptyEchoDisabled) }
+        return .object(result)
     }
 
     private func status(_ payload: JSONValue) throws -> JSONValue {
         let id = try jobID(payload)
         let job = try refreshStatus(for: id)
-        var result: [String: JSONValue] = ["jobID": .string(id.uuidString.lowercased()), "pid": .integer(Int64(job.pid)), "exited": .bool(job.exited)]
+        let outputPending = hasPendingOutput(job)
+        var result: [String: JSONValue] = [
+            "jobID": .string(id.uuidString.lowercased()),
+            "pid": .integer(Int64(job.pid)),
+            "exited": .bool(job.exited),
+            "outputPending": .bool(outputPending)
+        ]
         if let rawStatus = job.status {
             let terminal = terminalStatus(rawStatus)
             if let exitCode = terminal.exitCode { result["exitCode"] = .integer(Int64(exitCode)) }
@@ -415,28 +465,72 @@ actor PommeAgent {
         guard role == .persistent else { throw PommeAgentOperationError.unsupported }
         guard let job = jobs[jobID] else { throw PommeAgentOperationError.invalid }
         var output: [PommeAgentStreamFrame] = []
-        if let terminal = job.ptyMaster { output += try drain(descriptor: terminal, stream: .stdout, requestID: requestID) }
-        if let stdout = job.stdout { output += try drain(descriptor: stdout, stream: .stdout, requestID: requestID) }
-        if let stderr = job.stderr { output += try drain(descriptor: stderr, stream: .stderr, requestID: requestID) }
+        if let terminal = job.ptyMaster { output += try drain(descriptor: terminal, stream: .stdout, requestID: requestID, isPTY: true, jobID: jobID) }
+        if let stdout = job.stdout { output += try drain(descriptor: stdout, stream: .stdout, requestID: requestID, isPTY: false, jobID: jobID) }
+        if let stderr = job.stderr { output += try drain(descriptor: stderr, stream: .stderr, requestID: requestID, isPTY: false, jobID: jobID) }
         return output
     }
 
-    private func drain(descriptor: Int32, stream: PommeAgentProtocol.Stream, requestID: UUID) throws -> [PommeAgentStreamFrame] {
-        var output: [PommeAgentStreamFrame] = []; var buffer = [UInt8](repeating: 0, count: PommeAgentProtocol.maximumStreamChunkBytes)
-        while true {
-            var readiness = pollfd(fd: descriptor, events: Int16(POLLIN | POLLHUP | POLLERR), revents: 0)
-            var polled: Int32
-            repeat { polled = poll(&readiness, 1, 0) } while polled < 0 && errno == EINTR
-            guard polled > 0 else { break }
-            let count = Darwin.read(descriptor, &buffer, buffer.count)
-            if count > 0 {
-                output.append(try .init(requestID: requestID, stream: stream, data: Data(buffer.prefix(count))))
-                continue
+    private func drain(
+        descriptor: Int32,
+        stream: PommeAgentProtocol.Stream,
+        requestID: UUID,
+        isPTY: Bool,
+        jobID: UUID
+    ) throws -> [PommeAgentStreamFrame] {
+        guard let job = jobs[jobID], !job.outputEOF.contains(descriptor) else { return [] }
+        var readiness = pollfd(
+            fd: descriptor,
+            events: Int16(POLLIN | POLLHUP | POLLERR),
+            revents: 0
+        )
+        var polled: Int32
+        repeat { polled = poll(&readiness, 1, 0) } while polled < 0 && errno == EINTR
+        guard polled > 0 else { return [] }
+
+        var buffer = [UInt8](repeating: 0, count: PommeAgentProtocol.maximumStreamChunkBytes)
+        var count: Int
+        repeat { count = Darwin.read(descriptor, &buffer, buffer.count) } while count < 0 && errno == EINTR
+        guard count > 0 else {
+            if count == 0 || (count < 0 && isPTY && errno == EIO) {
+                markOutputEOF(descriptor, jobID: jobID)
             }
-            if count < 0, errno == EINTR { continue }
-            break
+            return []
         }
-        return output
+        // One read per descriptor is intentional. A normal exchange may
+        // therefore contain at most one 64 KiB stdout and one 64 KiB stderr
+        // frame, leaving room under the 256 KiB envelope limit.
+        return [try .init(requestID: requestID, stream: stream, data: Data(buffer.prefix(count)))]
+    }
+
+    private func hasPendingOutput(_ job: Job) -> Bool {
+        [job.ptyMaster, job.stdout, job.stderr]
+            .compactMap { $0 }
+            .filter { !job.outputEOF.contains($0) }
+            .contains(where: descriptorHasReadableOutput)
+    }
+
+    private func outputIsDrained(_ job: Job) -> Bool {
+        [job.ptyMaster, job.stdout, job.stderr]
+            .compactMap { $0 }
+            .allSatisfy { job.outputEOF.contains($0) }
+    }
+
+    private func markOutputEOF(_ descriptor: Int32, jobID: UUID) {
+        guard var job = jobs[jobID] else { return }
+        job.outputEOF.insert(descriptor)
+        jobs[jobID] = job
+    }
+
+    private func descriptorHasReadableOutput(_ descriptor: Int32) -> Bool {
+        var readiness = pollfd(
+            fd: descriptor,
+            events: Int16(POLLIN | POLLHUP | POLLERR),
+            revents: 0
+        )
+        var polled: Int32
+        repeat { polled = poll(&readiness, 1, 0) } while polled < 0 && errno == EINTR
+        return polled > 0 && readiness.revents & Int16(POLLIN) != 0
     }
     func acceptStream(_ frame: PommeAgentStreamFrame, jobID: UUID) throws -> [PommeAgentStreamFrame] {
         guard role == .persistent else { throw PommeAgentOperationError.unsupported }
@@ -461,9 +555,13 @@ actor PommeAgent {
     }
     func streamEvents(jobID: UUID, requestID: UUID) throws -> [PommeAgentStreamFrame] {
         guard role == .persistent else { throw PommeAgentOperationError.unsupported }
-        let job = try refreshStatus(for: jobID)
+        _ = try refreshStatus(for: jobID)
         var frames = try drainPTY(jobID: jobID, requestID: requestID)
-        if job.exited, let rawStatus = job.status {
+        // An exited child can still have bytes buffered in either pipe. Do
+        // not publish the terminal frame until bounded nonblocking reads have
+        // observed EOF on every output descriptor; POLLHUP remains readable
+        // on Darwin after the final bytes are consumed.
+        if let current = jobs[jobID], current.exited, outputIsDrained(current), let rawStatus = current.status {
             let terminal = terminalStatus(rawStatus)
             frames.append(try .init(requestID: requestID, stream: .exit, signal: terminal.signal))
         }
@@ -561,7 +659,14 @@ struct PommePrivilege: Sendable {
 }
 
 enum PommeProcess {
-    struct Spawned: Sendable { let pid: Int32; let ptyMaster: Int32?; let stdin: Int32?; let stdout: Int32?; let stderr: Int32? }
+    struct Spawned: Sendable {
+        let pid: Int32
+        let ptyMaster: Int32?
+        let stdin: Int32?
+        let stdout: Int32?
+        let stderr: Int32?
+        let ptyEchoDisabled: Bool
+    }
 
     static func spawn(path: String, arguments: [String], identity: PommePrivilege?, pty: Bool) throws -> Spawned {
         guard path.hasPrefix("/"), !path.contains("\0"), arguments.allSatisfy({ !$0.contains("\0") }) else {
@@ -571,6 +676,20 @@ enum PommeProcess {
         var stdinPipe: [Int32] = [-1, -1]; var stdoutPipe: [Int32] = [-1, -1]; var stderrPipe: [Int32] = [-1, -1]
         if pty {
             guard openpty(&master, &slave, nil, nil, nil) == 0 else { throw PommeAgentOperationError.io }
+            // A private PTY may carry a credential after a prompt.  Disable
+            // terminal echo before the child opens the slave so a password is
+            // never returned as output.  Failure is fail-closed: a PTY with
+            // unknown echo state is unsafe for streamed secrets.
+            var attributes = termios()
+            guard tcgetattr(slave, &attributes) == 0 else {
+                _ = Darwin.close(master); _ = Darwin.close(slave)
+                throw PommeAgentOperationError.io
+            }
+            attributes.c_lflag &= ~tcflag_t(ECHO | ECHONL)
+            guard tcsetattr(slave, TCSANOW, &attributes) == 0 else {
+                _ = Darwin.close(master); _ = Darwin.close(slave)
+                throw PommeAgentOperationError.io
+            }
         } else {
             guard pipe(&stdinPipe) == 0, pipe(&stdoutPipe) == 0, pipe(&stderrPipe) == 0 else {
                 [stdinPipe, stdoutPipe, stderrPipe].flatMap { $0 }.filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
@@ -663,9 +782,27 @@ enum PommeProcess {
             else { [stdinPipe, stdoutPipe, stderrPipe].flatMap { $0 }.forEach { _ = Darwin.close($0) } }
             throw PommeAgentOperationError.io
         }
-        if pty { _ = Darwin.close(slave); _ = fcntl(master, F_SETFL, O_NONBLOCK); return .init(pid: pid, ptyMaster: master, stdin: nil, stdout: nil, stderr: nil) }
+        if pty {
+            _ = Darwin.close(slave)
+            _ = fcntl(master, F_SETFL, O_NONBLOCK)
+            return .init(
+                pid: pid,
+                ptyMaster: master,
+                stdin: nil,
+                stdout: nil,
+                stderr: nil,
+                ptyEchoDisabled: true
+            )
+        }
         _ = Darwin.close(stdinPipe[0]); _ = Darwin.close(stdoutPipe[1]); _ = Darwin.close(stderrPipe[1])
         [stdinPipe[1], stdoutPipe[0], stderrPipe[0]].forEach { _ = fcntl($0, F_SETFL, O_NONBLOCK) }
-        return .init(pid: pid, ptyMaster: nil, stdin: stdinPipe[1], stdout: stdoutPipe[0], stderr: stderrPipe[0])
+        return .init(
+            pid: pid,
+            ptyMaster: nil,
+            stdin: stdinPipe[1],
+            stdout: stdoutPipe[0],
+            stderr: stderrPipe[0],
+            ptyEchoDisabled: false
+        )
     }
 }

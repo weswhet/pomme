@@ -38,6 +38,103 @@ struct PommeRecoveryInteractionTests {
     #expect(await port.remainingFrameCount == 0)
   }
 
+  @Test("the bounded experimental identity uses the same observed one-event trace")
+  func experimentalSequenceReachesTerminalProof() async throws {
+    let transitions = tahoeTransitions
+    let frames = transitions.flatMap { pre, _, post in [pre, pre, post, post] }
+    let receipts = transitions.map { _, key, _ in
+      PommeRecoveryDurableInputReceipt(key: key, deliveredEventCount: 1)
+    }
+    let port = RecoveryPort(frames: frames, receipts: receipts)
+    var interaction = try PommeTahoeRecoveryInteraction(evidence: experimentalEvidence)
+    var signal: PommeRecoveryInteractionCleanupSignal = .noInputDelivered
+
+    while !interaction.isComplete {
+      signal = try await interaction.advance(using: port)
+    }
+
+    #expect(signal == .terminalVerified)
+    #expect(await port.deliveredKeys == transitions.map { $0.1 })
+    #expect(await port.remainingFrameCount == 0)
+  }
+
+  @Test("an unknown experimental screen emits no input")
+  func experimentalUnknownScreenEmitsNoInput() async throws {
+    let port = RecoveryPort(
+      frames: [.unknown, .unknown],
+      receipts: [.init(key: .right, deliveredEventCount: 1)]
+    )
+    var interaction = try PommeTahoeRecoveryInteraction(evidence: experimentalEvidence)
+
+    await #expect(
+      throws: PommeRecoveryInteractionError.noInputDelivered(.noInputDelivered)
+    ) {
+      _ = try await interaction.advance(using: port)
+    }
+    #expect(await port.deliveredKeys.isEmpty)
+  }
+
+  @Test("unstable experimental screens emit no input")
+  func experimentalUnstableScreenEmitsNoInput() async throws {
+    let port = RecoveryPort(
+      frames: [.startupOptions, .startupIntermediate],
+      receipts: [.init(key: .right, deliveredEventCount: 1)]
+    )
+    var interaction = try PommeTahoeRecoveryInteraction(evidence: experimentalEvidence)
+
+    await #expect(
+      throws: PommeRecoveryInteractionError.noInputDelivered(.noInputDelivered)
+    ) {
+      _ = try await interaction.advance(using: port)
+    }
+    #expect(await port.deliveredKeys.isEmpty)
+  }
+
+  @Test("an observation timeout before input stays a closed no-input failure")
+  func observationTimeoutBeforeInputDoesNotDeliver() async throws {
+    let port = RecoveryPort(
+      frames: [],
+      receipts: [.init(key: .right, deliveredEventCount: 1)],
+      timeoutAfterExhaustion: .startupOptions
+    )
+    var interaction = try PommeTahoeRecoveryInteraction(evidence: tahoeEvidence)
+
+    await #expect(
+      throws: PommeRecoveryInteractionError.observationTimedOut(.noInputDelivered)
+    ) {
+      _ = try await interaction.advance(using: port)
+    }
+    #expect(await port.deliveredKeys.isEmpty)
+  }
+
+  @Test("an observation timeout after input requires cleanup and never replays")
+  func observationTimeoutAfterInputDoesNotReplay() async throws {
+    let port = RecoveryPort(
+      frames: [.startupOptions, .startupOptions],
+      receipts: [.init(key: .right, deliveredEventCount: 1)],
+      timeoutAfterExhaustion: .startupIntermediate
+    )
+    var interaction = try PommeTahoeRecoveryInteraction(evidence: tahoeEvidence)
+
+    await #expect(
+      throws: PommeRecoveryInteractionError.observationTimedOut(
+        .recoveryCleanupRequired
+      )
+    ) {
+      _ = try await interaction.advance(using: port)
+    }
+    #expect(await port.deliveredKeys == [.right])
+
+    await #expect(
+      throws: PommeRecoveryInteractionError.recoveryCleanupRequired(
+        .recoveryCleanupRequired
+      )
+    ) {
+      _ = try await interaction.advance(using: port)
+    }
+    #expect(await port.deliveredKeys == [.right])
+  }
+
   @Test("capability is proven and prompt cleared before one launcher submission")
   func terminalLauncherFlow() async throws {
     let transitions = tahoeTransitions
@@ -96,7 +193,7 @@ struct PommeRecoveryInteractionTests {
       onMilestone: { await milestones.record($0) }
     )
 
-    #expect(disposition == .recoveryCleanupRequired)
+    #expect(disposition == .terminalProofFailed)
     #expect(await port.submittedLines == [probe.command])
     #expect(await port.launcherCount == 0)
     #expect(await port.clearCount == 0)
@@ -308,6 +405,21 @@ struct PommeRecoveryInteractionTests {
     )
   }
 
+  private var experimentalEvidence: PommeRecoveryProfileEvidence {
+    let descriptor = try! PommeRecoveryProfileSelector.descriptor(
+      version: "26.6.2",
+      build: "25G83"
+    )
+    return .init(
+      build: .experimental(version: descriptor.version, build: descriptor.build),
+      locale: .english,
+      geometry: .pixels1280x800,
+      privateHostABI: .qualifiedRecoveryInputV1,
+      manifestHash: .experimentalProfile(descriptor.digest),
+      ownership: .verified
+    )
+  }
+
   private var tahoeTransitions: [(PommeRecoveryFrame, PommeRecoveryVirtualKey, PommeRecoveryFrame)]
   {
     [
@@ -348,14 +460,23 @@ struct PommeRecoveryInteractionTests {
 private actor RecoveryPort: PommeRecoveryKeyboardPort {
   private var frames: [PommeRecoveryFrame]
   private var receipts: [PommeRecoveryDurableInputReceipt]
+  private let timeoutAfterExhaustion: PommeRecoveryFrame?
   private(set) var deliveredKeys: [PommeRecoveryVirtualKey] = []
 
-  init(frames: [PommeRecoveryFrame], receipts: [PommeRecoveryDurableInputReceipt]) {
+  init(
+    frames: [PommeRecoveryFrame],
+    receipts: [PommeRecoveryDurableInputReceipt],
+    timeoutAfterExhaustion: PommeRecoveryFrame? = nil
+  ) {
     self.frames = frames
     self.receipts = receipts
+    self.timeoutAfterExhaustion = timeoutAfterExhaustion
   }
 
   func nextRecoveryFrame() throws -> PommeRecoveryFrame {
+    if frames.isEmpty, let expected = timeoutAfterExhaustion {
+      throw PommeRecoveryVirtualizationPortError.observationTimedOut(expected)
+    }
     guard !frames.isEmpty else { throw RecoveryPortError.depleted }
     return frames.removeFirst()
   }

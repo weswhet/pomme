@@ -32,6 +32,21 @@ struct PommeRecoverySecurityTests {
         #expect(value?.contains(PommeBootArguments.amfiOverride) == true)
     }
 
+    @Test("AMFI boot-argument mutation preserves exact unrelated bytes")
+    func preservesExactBootArgumentBytes() throws {
+        let original = Data("debug=1  keeps-me=two\t trailing  ".utf8)
+        let mutated = PommeBootArguments.addingOverride(to: original)
+        // The original value already ends in whitespace, so the new token is
+        // appended directly; every original byte must remain in place.
+        let suffix = Data(PommeBootArguments.amfiOverride.utf8)
+        #expect(Data(mutated.prefix(original.count)) == original)
+        #expect(Data(mutated.suffix(suffix.count)) == suffix)
+
+        let absent = try PommeNVRAMValue(present: false, bytes: Data())
+        #expect(!PommeBootArguments.containsOverride(absent))
+        #expect(PommeBootArguments.addingOverride(to: absent.bytes) == Data(PommeBootArguments.amfiOverride.utf8))
+    }
+
     @Test("AMFI disable retains unrelated NVRAM keys in the exact mutation")
     func preservesUnrelatedNVRAM() async throws {
         let originalDelta = try PommeNVRAMDelta(values: [

@@ -17,20 +17,27 @@ enum HostAutomationFailureCode: String, CaseIterable, Codable, Equatable, Sendab
     case frameTimeout = "frame_timeout"
     case frameInvalid = "frame_invalid"
     case inputInterrupted = "input_interrupted"
+    case inputTimeout = "input_timeout"
 }
 
 struct VirtualizationPrivateHeadlessError: LocalizedError, Equatable, Sendable {
     let code: HostAutomationFailureCode
     let partialInputPossible: Bool
+    /// True only when the framebuffer contains no visible pixels. During a
+    /// Recovery boot this is an expected transition surface; malformed frame
+    /// dimensions, decode failures, and ABI errors remain non-transient.
+    let isBlankFrame: Bool
     private let detail: String
 
     init(
         _ code: HostAutomationFailureCode,
         detail: String,
-        partialInputPossible: Bool = false
+        partialInputPossible: Bool = false,
+        isBlankFrame: Bool = false
     ) {
         self.code = code
         self.partialInputPossible = partialInputPossible
+        self.isBlankFrame = isBlankFrame
         self.detail = detail
     }
 
@@ -303,6 +310,230 @@ enum HeadlessInputTiming {
     static let transitionGapNanoseconds: UInt64 = 8_000_000
     static let pointerHoverNanoseconds: UInt64 = 250_000_000
     static let minimumKeyCycleNanoseconds = keyDownDwellNanoseconds + transitionGapNanoseconds
+}
+
+/// A monotonic operation budget for direct VM input. The budget is
+/// checked before any event is emitted, and again only at complete key-chord
+/// boundaries. That lets an in-flight chord finish without leaving a modifier
+/// pressed while still refusing an obviously overlong plan up front.
+struct HeadlessInputBudget: Sendable {
+    typealias Clock = @Sendable () -> UInt64
+
+    private let deadline: UInt64
+    private let clock: Clock
+    private let operation: String
+
+    init(
+        timeout: TimeInterval,
+        operation: String,
+        clock: @escaping Clock = { DispatchTime.now().uptimeNanoseconds }
+    ) throws {
+        guard timeout.isFinite, timeout > 0 else {
+            throw Self.timeoutError(
+                partialInputPossible: false,
+                detail: "The direct VM \(operation) timeout must be finite and positive."
+            )
+        }
+        self.deadline = Self.addingSaturating(
+            clock(),
+            Self.nanoseconds(for: timeout)
+        )
+        self.clock = clock
+        self.operation = operation
+    }
+
+    /// The minimum elapsed time introduced by the backend's event dwell and
+    /// transition gaps. Saturating arithmetic keeps malformed/huge requests
+    /// fail-closed instead of wrapping to a deceptively small budget.
+    static func minimumDurationNanoseconds(
+        for plan: [HostDisplayInputEvent]
+    ) -> UInt64 {
+        plan.reduce(into: UInt64.zero) { total, event in
+            let delay = event.kind == .keyDown
+                ? HeadlessInputTiming.keyDownDwellNanoseconds
+                : HeadlessInputTiming.transitionGapNanoseconds
+            total = addingSaturating(total, delay)
+        }
+    }
+
+    static func minimumDurationNanoseconds(
+        for plans: [[HostDisplayInputEvent]]
+    ) -> UInt64 {
+        plans.reduce(into: UInt64.zero) { total, plan in
+            total = addingSaturating(total, minimumDurationNanoseconds(for: plan))
+        }
+    }
+
+    static func minimumDurationNanoseconds(for delays: [UInt64]) -> UInt64 {
+        delays.reduce(into: UInt64.zero) { total, delay in
+            total = addingSaturating(total, delay)
+        }
+    }
+
+    static func minimumDurationNanoseconds(for delayPlans: [[UInt64]]) -> UInt64 {
+        delayPlans.reduce(into: UInt64.zero) { total, plan in
+            total = addingSaturating(total, minimumDurationNanoseconds(for: plan))
+        }
+    }
+
+    func requireFullPlan(_ plans: [[HostDisplayInputEvent]]) throws {
+        try requireFullDuration(
+            Self.minimumDurationNanoseconds(for: plans),
+            partialInputPossible: false
+        )
+    }
+
+    func requireNextChord(
+        _ plan: [HostDisplayInputEvent],
+        partialInputPossible: Bool
+    ) throws {
+        try requireNextDuration(
+            Self.minimumDurationNanoseconds(for: plan),
+            partialInputPossible: partialInputPossible
+        )
+    }
+
+    func requireFullDuration(
+        _ nanoseconds: UInt64,
+        partialInputPossible: Bool
+    ) throws {
+        try requireMinimumDuration(nanoseconds, partialInputPossible: partialInputPossible)
+    }
+
+    func requireNextDuration(
+        _ nanoseconds: UInt64,
+        partialInputPossible: Bool
+    ) throws {
+        try requireMinimumDuration(nanoseconds, partialInputPossible: partialInputPossible)
+    }
+
+    func requireMinimumDuration(
+        _ nanoseconds: UInt64,
+        partialInputPossible: Bool
+    ) throws {
+        let now = clock()
+        guard now <= deadline,
+              deadline - now >= nanoseconds
+        else {
+            throw Self.timeoutError(
+                partialInputPossible: partialInputPossible,
+                detail: "The direct VM \(operation) input plan exceeded its bounded deadline."
+            )
+        }
+    }
+
+    private static func nanoseconds(for seconds: TimeInterval) -> UInt64 {
+        let raw = seconds * 1_000_000_000
+        guard raw.isFinite else { return .max }
+        let rounded = raw.rounded(.up)
+        guard rounded < Double(UInt64.max) else { return .max }
+        return max(1, UInt64(rounded))
+    }
+
+    fileprivate static func addingSaturating(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? .max : sum
+    }
+
+    private static func timeoutError(
+        partialInputPossible: Bool,
+        detail: String
+    ) -> VirtualizationPrivateHeadlessError {
+        VirtualizationPrivateHeadlessError(
+            .inputTimeout,
+            detail: detail,
+            partialInputPossible: partialInputPossible
+        )
+    }
+}
+
+/// Executes cancellation-safe input units with injectable timing and event
+/// delivery. A unit is a complete key chord or a complete pointer phase; a
+/// cancellation observed during its dwell is deferred until every event in
+/// that unit has been delivered.
+struct HeadlessInputEventDispatcher {
+    typealias EventSender = (_ unitIndex: Int, _ eventIndex: Int) throws -> Void
+    typealias Sleeper = (UInt64) async throws -> Void
+    typealias Clock = @Sendable () -> UInt64
+
+    static func dispatch(
+        delayPlans: [[UInt64]],
+        timeout: TimeInterval,
+        operation: String,
+        clock: @escaping Clock = { DispatchTime.now().uptimeNanoseconds },
+        sleep: @escaping Sleeper = { nanoseconds in
+            try await Task.sleep(nanoseconds: nanoseconds)
+        },
+        send: @escaping EventSender
+    ) async throws -> Int {
+        let budget = try HeadlessInputBudget(
+            timeout: timeout,
+            operation: operation,
+            clock: clock
+        )
+        return try await dispatch(
+            delayPlans: delayPlans,
+            budget: budget,
+            sleep: sleep,
+            send: send
+        )
+    }
+
+    static func dispatch(
+        delayPlans: [[UInt64]],
+        budget: HeadlessInputBudget,
+        sleep: @escaping Sleeper = { nanoseconds in
+            try await Task.sleep(nanoseconds: nanoseconds)
+        },
+        send: @escaping EventSender
+    ) async throws -> Int {
+        try budget.requireFullDuration(
+            HeadlessInputBudget.minimumDurationNanoseconds(for: delayPlans),
+            partialInputPossible: false
+        )
+
+        var emitted = 0
+        for (unitIndex, delays) in delayPlans.enumerated() {
+            try budget.requireNextDuration(
+                HeadlessInputBudget.minimumDurationNanoseconds(for: delays),
+                partialInputPossible: emitted > 0
+            )
+            if Task.isCancelled {
+                throw interruptedError(from: CancellationError(), emitted: emitted)
+            }
+
+            var cancellationObserved = false
+            for (eventIndex, delay) in delays.enumerated() {
+                do {
+                    // No cancellation check occurs between events in one
+                    // unit. This is what guarantees key-up/release and
+                    // pointer button-up after a cancellation during dwell.
+                    try send(unitIndex, eventIndex)
+                    emitted += 1
+                } catch {
+                    throw interruptedError(from: error, emitted: emitted)
+                }
+                do {
+                    try await sleep(delay)
+                } catch {
+                    cancellationObserved = true
+                }
+            }
+            if cancellationObserved {
+                throw interruptedError(from: CancellationError(), emitted: emitted)
+            }
+        }
+        return emitted
+    }
+
+    private static func interruptedError(from error: Error, emitted: Int) -> Error {
+        guard emitted > 0 else { return error }
+        return VirtualizationPrivateHeadlessError(
+            .inputInterrupted,
+            detail: "Direct VM input readiness disappeared during the operation.",
+            partialInputPossible: true
+        )
+    }
 }
 
 enum PommeProvisioningObservationDestination {
@@ -695,7 +926,15 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
     }
 
     func click(x: Double, y: Double, timeout: TimeInterval) async throws -> [String: JSONValue] {
-        _ = timeout
+        let budget = try HeadlessInputBudget(timeout: timeout, operation: "click")
+        let delayPlans = [
+            [HeadlessInputTiming.pointerHoverNanoseconds],
+            [UInt64.zero, UInt64.zero],
+        ]
+        try budget.requireFullDuration(
+            HeadlessInputBudget.minimumDurationNanoseconds(for: delayPlans),
+            partialInputPossible: false
+        )
         try VirtualizationPrivateABIPreflight.validateRuntime()
         let resources = try pointerResources()
         let clampedX = max(0, min(Double(resources.width - 1), x))
@@ -727,24 +966,19 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
             return event
         }
 
-        var emitted = 0
-        for (index, event) in events.enumerated() {
-            do {
-                try Task.checkCancellation()
-                try sendPointerEvent(
+        _ = try await HeadlessInputEventDispatcher.dispatch(
+            delayPlans: delayPlans,
+            budget: budget,
+            send: { unitIndex, eventIndex in
+                let event = unitIndex == 0 ? events[0] : events[eventIndex + 1]
+                try self.sendPointerEvent(
                     event,
                     deviceIndex: resources.pointingDeviceIndex,
                     width: resources.width,
                     height: resources.height
                 )
-                emitted += 1
-            } catch {
-                throw interruptedError(from: error, emitted: emitted)
             }
-            if index == 0 {
-                try await Task.sleep(nanoseconds: HeadlessInputTiming.pointerHoverNanoseconds)
-            }
-        }
+        )
         return successPayload(
             operation: "click",
             width: resources.width,
@@ -756,11 +990,14 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
     }
 
     func sendKey(name: String, timeout: TimeInterval) async throws -> [String: JSONValue] {
-        _ = timeout
         guard let key = HostDisplayKey.lookup(name) else {
             throw RunnerError.invalidUICommand("Unsupported direct VM key: \(name)")
         }
-        let dimensions = try await dispatchKeyPlan(key.inputEventPlan)
+        let dimensions = try await dispatchKeyPlan(
+            [key.inputEventPlan],
+            timeout: timeout,
+            operation: "key"
+        )
         return successPayload(
             operation: "key",
             width: dimensions.width,
@@ -772,7 +1009,6 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
         names: [String],
         timeout: TimeInterval
     ) async throws -> [String: JSONValue] {
-        _ = timeout
         guard !names.isEmpty else {
             throw RunnerError.invalidUICommand("A direct VM key sequence may not be empty.")
         }
@@ -782,7 +1018,11 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
             }
             return key
         }
-        let dimensions = try await dispatchKeyPlan(keys.flatMap(\.inputEventPlan))
+        let dimensions = try await dispatchKeyPlan(
+            keys.map(\.inputEventPlan),
+            timeout: timeout,
+            operation: "key-sequence"
+        )
         return successPayload(
             operation: "key-sequence",
             width: dimensions.width,
@@ -798,8 +1038,7 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
         replace: Bool,
         timeout: TimeInterval
     ) async throws -> [String: JSONValue] {
-        _ = timeout
-        var plan: [HostDisplayInputEvent] = []
+        var plans: [[HostDisplayInputEvent]] = []
         if replace {
             guard let selectAll = HostDisplayKey.lookup("cmd-a") else {
                 throw VirtualizationPrivateHeadlessError(
@@ -807,16 +1046,20 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
                     detail: "The Command-A input plan could not be constructed."
                 )
             }
-            plan += selectAll.inputEventPlan
+            plans.append(selectAll.inputEventPlan)
         }
         for character in text {
             if let key = HostDisplayKey.lookup(character: character) {
-                plan += key.inputEventPlan
+                plans.append(key.inputEventPlan)
             } else {
-                plan += Self.unicodeEventPlan(String(character))
+                plans.append(Self.unicodeEventPlan(String(character)))
             }
         }
-        let dimensions = try await dispatchKeyPlan(plan)
+        let dimensions = try await dispatchKeyPlan(
+            plans,
+            timeout: timeout,
+            operation: "type"
+        )
         return successPayload(
             operation: "type",
             width: dimensions.width,
@@ -886,6 +1129,18 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
             || error.code == .frameInvalid
     }
 
+    /// Recovery navigation may legitimately observe a blank framebuffer while
+    /// macOS changes boot surfaces. Keep this stricter than the legacy first
+    /// normal-boot predicate: only an explicitly identified blank frame can be
+    /// retried; malformed dimensions/decoding and private ABI failures fail
+    /// closed immediately.
+    static func isTransientRecoveryCaptureFailure(_ error: Error) -> Bool {
+        guard let error = error as? VirtualizationPrivateHeadlessError else { return false }
+        return error.code == .displayNotReady
+            || error.code == .frameTimeout
+            || (error.code == .frameInvalid && error.isBlankFrame)
+    }
+
     static func isTransientInputReadinessFailure(_ error: Error) -> Bool {
         guard let error = error as? VirtualizationPrivateHeadlessError else { return false }
         return error.code == .displayNotReady || error.code == .inputUnavailable
@@ -944,7 +1199,8 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
         }
         throw VirtualizationPrivateHeadlessError(
             .frameInvalid,
-            detail: "The framebuffer was blank."
+            detail: "The framebuffer was blank.",
+            isBlankFrame: true
         )
     }
 
@@ -1233,32 +1489,35 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
     }
 
     private func dispatchKeyPlan(
-        _ plan: [HostDisplayInputEvent]
+        _ plans: [[HostDisplayInputEvent]],
+        timeout: TimeInterval,
+        operation: String
     ) async throws -> (width: Int, height: Int) {
+        let budget = try HeadlessInputBudget(timeout: timeout, operation: operation)
+        try budget.requireFullPlan(plans)
         try VirtualizationPrivateABIPreflight.validateRuntime()
         let resources = try keyboardResources()
-        let events = try plan.map(Self.makeKeyEvent)
-        var emitted = 0
-        for event in events {
-            do {
-                try Task.checkCancellation()
-                try queue.sync {
-                    try requireInputReady()
-                    try Self.sendKeyEvent(event.object, to: resources.keyboard)
-                }
-                emitted += 1
-            } catch {
-                throw interruptedError(from: error, emitted: emitted)
-            }
-            let delay = event.kind == .keyDown
-                ? HeadlessInputTiming.keyDownDwellNanoseconds
-                : HeadlessInputTiming.transitionGapNanoseconds
-            do {
-                try await Task.sleep(nanoseconds: delay)
-            } catch {
-                throw interruptedError(from: error, emitted: emitted)
+        let eventChords = try plans.map { plan in
+            try plan.map(Self.makeKeyEvent)
+        }
+        let delayPlans = plans.map { plan in
+            plan.map { event in
+                event.kind == .keyDown
+                    ? HeadlessInputTiming.keyDownDwellNanoseconds
+                    : HeadlessInputTiming.transitionGapNanoseconds
             }
         }
+        _ = try await HeadlessInputEventDispatcher.dispatch(
+            delayPlans: delayPlans,
+            budget: budget,
+            send: { chordIndex, eventIndex in
+                let event = eventChords[chordIndex][eventIndex]
+                try self.queue.sync {
+                    try self.requireInputReady()
+                    try Self.sendKeyEvent(event.object, to: resources.keyboard)
+                }
+            }
+        )
         return (resources.width, resources.height)
     }
 
@@ -1343,15 +1602,6 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
             updateSelector,
             CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)),
             false
-        )
-    }
-
-    private func interruptedError(from error: Error, emitted: Int) -> Error {
-        guard emitted > 0 else { return error }
-        return VirtualizationPrivateHeadlessError(
-            .inputInterrupted,
-            detail: "Direct VM input readiness disappeared during the operation.",
-            partialInputPossible: true
         )
     }
 

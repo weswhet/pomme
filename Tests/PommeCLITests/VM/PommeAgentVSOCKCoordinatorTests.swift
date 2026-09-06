@@ -42,6 +42,118 @@ struct PommeAgentVSOCKCoordinatorTests {
         #expect(transport.removedPorts == Set(transport.installedPorts))
     }
 
+    @Test("Only authenticated Recovery security operations receive the bounded transaction window")
+    func recoverySecurityExchangeTimeoutSelection() {
+        let ordinary = 0.25
+        #expect(
+            PommeAgentVSOCKCoordinator.exchangeTimeout(
+                for: .recoveryRuntime,
+                operation: "amfi.disable",
+                defaultTimeout: ordinary
+            ) == PommeAgentVSOCKCoordinator.recoverySecurityExchangeTimeout
+        )
+        #expect(
+            PommeAgentVSOCKCoordinator.exchangeTimeout(
+                for: .recoveryRuntime,
+                operation: "sip.status",
+                defaultTimeout: ordinary
+            ) == PommeAgentVSOCKCoordinator.recoverySecurityExchangeTimeout
+        )
+        #expect(
+            PommeAgentVSOCKCoordinator.exchangeTimeout(
+                for: .recoveryRuntime,
+                operation: "process.start",
+                defaultTimeout: ordinary
+            ) == ordinary
+        )
+        #expect(
+            PommeAgentVSOCKCoordinator.exchangeTimeout(
+                for: .recoveryBootstrap,
+                operation: "amfi.disable",
+                defaultTimeout: ordinary
+            ) == ordinary
+        )
+        #expect(
+            PommeAgentVSOCKCoordinator.exchangeTimeout(
+                for: .normal,
+                operation: "amfi.disable",
+                defaultTimeout: ordinary
+            ) == ordinary
+        )
+        #expect(
+            PommeAgentVSOCKCoordinator.exchangeTimeout(
+                for: .normal,
+                operation: "amfi.normal.disable",
+                defaultTimeout: ordinary
+            ) == PommeAgentVSOCKCoordinator.normalAMFIExchangeTimeout
+        )
+        #expect(
+            PommeAgentVSOCKCoordinator.exchangeTimeout(
+                for: .normal,
+                operation: "amfi.normal.verifyEnabled",
+                defaultTimeout: ordinary
+            ) == PommeAgentVSOCKCoordinator.normalAMFIExchangeTimeout
+        )
+        #expect(
+            PommeAgentVSOCKCoordinator.exchangeTimeout(
+                for: .normal,
+                operation: "amfi.normal.unsupported",
+                defaultTimeout: ordinary
+            ) == ordinary
+        )
+        #expect(
+            PommeAgentVSOCKCoordinator.exchangeTimeout(
+                for: .recoveryRuntime,
+                operation: "amfi.normal.disable",
+                defaultTimeout: ordinary
+            ) == ordinary
+        )
+        #expect(
+            PommeAgentVSOCKCoordinator.exchangeTimeout(
+                for: .recoveryRuntime,
+                operation: nil,
+                defaultTimeout: ordinary
+            ) == ordinary
+        )
+        #expect(PommeAgentVSOCKCoordinator.recoverySecurityExchangeTimeout == 300)
+        #expect(PommeAgentVSOCKCoordinator.normalAMFIExchangeTimeout == 300)
+    }
+
+    @Test("Recovery security error envelopes survive the extended exchange budget")
+    func recoverySecurityErrorEnvelopeUsesExtendedTimeout() async throws {
+        let transport = FakeTransport()
+        let coordinator = PommeAgentVSOCKCoordinator(
+            transport: transport,
+            secretProvider: { _ in Self.token },
+            bindingProvider: { role in role == .normal ? nil : Self.recoveryBinding },
+            exchangeTimeout: 0.25
+        )
+        try coordinator.attachRecoveryRuntime()
+        let connection = FakeConnection(
+            token: Self.token,
+            vmID: Self.vmID,
+            sessionID: Self.sessionID,
+            operationFailureCode: "recovery-command-failed",
+            operationFailureOperation: "amfi.disable"
+        )
+        transport.connect(connection, port: PommeAgentPort.recoveryRuntime)
+        let connected = await eventually { await coordinator.status() }
+        #expect(connected.connection == .connected)
+
+        do {
+            _ = try await coordinator.performCorrelated(operation: "amfi.disable", payload: .object([:]))
+            Issue.record("Expected the closed Recovery error envelope to be thrown.")
+        } catch let error as PommeAgentSessionError {
+            #expect(error.code == "recovery-command-failed")
+            #expect(error.message == "closed test failure")
+        } catch {
+            Issue.record("Unexpected error type: \(error)")
+        }
+
+        #expect(connection.timeouts.last == PommeAgentVSOCKCoordinator.recoverySecurityExchangeTimeout)
+        coordinator.teardown()
+    }
+
     @Test("Authenticated connection exposes the closed normal status")
     func authenticatedStatus() async throws {
         let transport = FakeTransport()
@@ -267,24 +379,31 @@ private final class FakeConnection: PommeAgentVSOCKConnection, @unchecked Sendab
     private let timeout: Bool
     private let disconnectAfterAuthentication: Bool
     private let streamsProcessStart: Bool
+    private let operationFailureCode: String?
+    private let operationFailureOperation: String
     private let lock = NSLock()
     private var storedClosed = false
+    private var storedTimeouts: [TimeInterval] = []
     var closed: Bool { lock.withLock { storedClosed } }
+    var timeouts: [TimeInterval] { lock.withLock { storedTimeouts } }
 
     private let vmID: String?
     private let sessionID: String?
 
-    init(token: String, invalidProof: Bool = false, timeout: Bool = false, disconnectAfterAuthentication: Bool = false, streamsProcessStart: Bool = false, vmID: String? = nil, sessionID: String? = nil) {
+    init(token: String, invalidProof: Bool = false, timeout: Bool = false, disconnectAfterAuthentication: Bool = false, streamsProcessStart: Bool = false, vmID: String? = nil, sessionID: String? = nil, operationFailureCode: String? = nil, operationFailureOperation: String = "amfi.disable") {
         self.token = token
         self.invalidProof = invalidProof
         self.timeout = timeout
         self.disconnectAfterAuthentication = disconnectAfterAuthentication
         self.streamsProcessStart = streamsProcessStart
+        self.operationFailureCode = operationFailureCode
+        self.operationFailureOperation = operationFailureOperation
         self.vmID = vmID
         self.sessionID = sessionID
     }
 
     func exchange(_ request: Data, timeout: TimeInterval) async throws -> Data {
+        lock.withLock { storedTimeouts.append(timeout) }
         if self.timeout { throw RunnerError.guestAgentTimedOut("test exchange") }
         guard request.last == 0x0A else { throw PommeAgentProtocol.Error.malformedFrame }
         let envelope = try PommeAgentProtocol.decode(Data(request.dropLast()))
@@ -306,6 +425,11 @@ private final class FakeConnection: PommeAgentVSOCKConnection, @unchecked Sendab
             let jobID = UUID()
             let stream = try PommeAgentJobStreamFrame(jobID: jobID, frame: .init(requestID: envelope.requestID, stream: .stdout, data: Data("ready".utf8)))
             return try PommeAgentProtocol.encode(stream.envelope()) + PommeAgentProtocol.encode(.response(to: envelope, result: .object(["jobID": .string(jobID.uuidString)])))
+        }
+        if let operationFailureCode, envelope.operation == operationFailureOperation {
+            return try PommeAgentProtocol.encode(
+                .failure(to: envelope, code: operationFailureCode, message: "closed test failure")
+            )
         }
         guard envelope.operation == "authenticate", let challenge = envelope.payload.objectValue?["challenge"]?.stringValue else { throw PommeAgentProtocol.Error.invalidRequest }
         if let vmID {

@@ -221,6 +221,91 @@ struct PommeRecoverySessionTests {
         #expect(await vm.finalStateRequests == [.stopped])
     }
 
+    @Test("An unknown preparation error is closed without being called root evidence rejection")
+    func unknownPreparationFailureIsClosed() async throws {
+        let now = Date(timeIntervalSince1970: 5_600)
+        let credential = try credential(expiresAt: now.addingTimeInterval(60))
+        let request = try request(
+            credential: credential,
+            issuedAt: now,
+            expiresAt: now.addingTimeInterval(30),
+            requestedFinalState: .previous
+        )
+        let root = RootMock(request: request, unexpectedPrepareFailure: true)
+        let vm = VMMock()
+        let session = try PommeRecoverySession(
+            request: request,
+            credential: credential,
+            root: root,
+            vm: vm,
+            guest: GuestMock(),
+            registry: PommeRecoveryCredentialRegistry(),
+            now: { now }
+        )
+
+        await #expect(throws: PommeRecoverySessionError.preparationFailed) {
+            _ = try await session.run(finalState: .previous)
+        }
+        #expect(await root.cleanupCount == 1)
+        #expect(await vm.finalStateRequests == [.stopped])
+    }
+
+    @Test("A known runtime preparation error retains its closed type through cleanup")
+    func knownRuntimePreparationFailureIsPreserved() async throws {
+        let now = Date(timeIntervalSince1970: 5_625)
+        let credential = try credential(expiresAt: now.addingTimeInterval(60))
+        let request = try request(
+            credential: credential,
+            issuedAt: now,
+            expiresAt: now.addingTimeInterval(30),
+            requestedFinalState: .previous
+        )
+        let root = RootMock(
+            request: request,
+            runtimePrepareFailure: .listenerAuthenticationTimedOut
+        )
+        let vm = VMMock()
+        let session = try PommeRecoverySession(
+            request: request,
+            credential: credential,
+            root: root,
+            vm: vm,
+            guest: GuestMock(),
+            registry: PommeRecoveryCredentialRegistry(),
+            now: { now }
+        )
+
+        await #expect(throws: PommeRecoveryRuntimeError.listenerAuthenticationTimedOut) {
+            _ = try await session.run(finalState: .previous)
+        }
+        #expect(await root.cleanupCount == 1)
+        #expect(await vm.finalStateRequests == [.stopped])
+    }
+
+    @Test("Cancellation during preparation remains cancellation")
+    func preparationCancellationIsPreserved() async throws {
+        let now = Date(timeIntervalSince1970: 5_650)
+        let credential = try credential(expiresAt: now.addingTimeInterval(60))
+        let request = try request(
+            credential: credential,
+            issuedAt: now,
+            expiresAt: now.addingTimeInterval(30)
+        )
+        let session = try PommeRecoverySession(
+            request: request,
+            credential: credential,
+            root: RootMock(request: request, cancelledPrepare: true),
+            vm: VMMock(),
+            guest: GuestMock(),
+            registry: PommeRecoveryCredentialRegistry(),
+            now: { now }
+        )
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await session.prepare()
+        }
+    }
+
     @Test("A failed final-state proof attempts to restore the captured state")
     func finalStateProofFailureRestoresCapture() async throws {
         let now = Date(timeIntervalSince1970: 5_750)
@@ -252,6 +337,35 @@ struct PommeRecoverySessionTests {
         #expect(await vm.provenFinalStates == [.normal, .stopped])
     }
 
+    @Test("A closed guest failure survives session cleanup and final-state restoration")
+    func typedGuestFailureSurvivesCleanup() async throws {
+        let now = Date(timeIntervalSince1970: 5_800)
+        let credential = try credential(expiresAt: now.addingTimeInterval(60))
+        let request = try request(credential: credential, issuedAt: now, expiresAt: now.addingTimeInterval(30))
+        let root = RootMock(request: request)
+        let vm = VMMock()
+        let session = try PommeRecoverySession(
+            request: request,
+            credential: credential,
+            root: root,
+            vm: vm,
+            guest: GuestMock(failureCode: .rollbackFailed),
+            registry: PommeRecoveryCredentialRegistry(),
+            now: { now }
+        )
+
+        do {
+            _ = try await session.run(finalState: .stopped)
+            Issue.record("The typed guest failure was reported as success.")
+        } catch let error as PommeRecoveryGuestOperationFailure {
+            #expect(error.code == .rollbackFailed)
+            #expect(error.phase == .rollbackFailed)
+            #expect(error.localizedDescription.contains("retained transaction"))
+        }
+        #expect(await root.cleanupCount == 1)
+        #expect(await vm.finalStateRequests == [.stopped])
+    }
+
     private func credential(expiresAt: Date) throws -> PommeRecoveryCredential {
         try .init(secret: Data(repeating: 0x2a, count: 32), expiresAt: expiresAt)
     }
@@ -259,7 +373,8 @@ struct PommeRecoverySessionTests {
     private func request(
         credential: PommeRecoveryCredential,
         issuedAt: Date,
-        expiresAt: Date
+        expiresAt: Date,
+        requestedFinalState: VMFinalState = .stopped
     ) throws -> PommeRecoverySessionRequest {
         try .init(
             vmUUID: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!,
@@ -267,6 +382,7 @@ struct PommeRecoverySessionTests {
             issuedAt: issuedAt,
             expiresAt: expiresAt,
             executableSHA256: String(repeating: "a", count: 64),
+            requestedFinalState: requestedFinalState,
             credential: credential
         )
     }
@@ -276,20 +392,32 @@ private actor RootMock: PommeRecoveryRootPort {
     let request: PommeRecoverySessionRequest
     let cleanupComplete: Bool
     let prepareFailure: Bool
+    let runtimePrepareFailure: PommeRecoveryRuntimeError?
+    let unexpectedPrepareFailure: Bool
+    let cancelledPrepare: Bool
     private(set) var cleanupCount = 0
 
     init(
         request: PommeRecoverySessionRequest,
         cleanupComplete: Bool = true,
-        prepareFailure: Bool = false
+        prepareFailure: Bool = false,
+        runtimePrepareFailure: PommeRecoveryRuntimeError? = nil,
+        unexpectedPrepareFailure: Bool = false,
+        cancelledPrepare: Bool = false
     ) {
         self.request = request
         self.cleanupComplete = cleanupComplete
         self.prepareFailure = prepareFailure
+        self.runtimePrepareFailure = runtimePrepareFailure
+        self.unexpectedPrepareFailure = unexpectedPrepareFailure
+        self.cancelledPrepare = cancelledPrepare
     }
 
     func prepare(request: PommeRecoverySessionRequest) async throws -> PommeRecoveryRootEvidence {
         if prepareFailure { throw PommeRecoverySessionError.rootEvidenceRejected }
+        if let runtimePrepareFailure { throw runtimePrepareFailure }
+        if unexpectedPrepareFailure { throw UnexpectedPreparationFailure.failed }
+        if cancelledPrepare { throw CancellationError() }
         return .init(
             requestID: request.requestID,
             vmUUID: request.vmUUID,
@@ -317,6 +445,10 @@ private actor RootMock: PommeRecoveryRootPort {
     }
 }
 
+private enum UnexpectedPreparationFailure: Error {
+    case failed
+}
+
 private actor VMMock: PommeRecoveryVMPort {
     private(set) var finalStateRequests: [VMFinalState] = []
     private(set) var provenFinalStates: [VMFinalState] = []
@@ -341,10 +473,15 @@ private actor VMMock: PommeRecoveryVMPort {
 
 private actor GuestMock: PommeRecoveryGuestPort {
     let failure: Bool
+    let failureCode: PommeRecoveryGuestFailureCode?
 
-    init(failure: Bool = false) { self.failure = failure }
+    init(failure: Bool = false, failureCode: PommeRecoveryGuestFailureCode? = nil) {
+        self.failure = failure
+        self.failureCode = failureCode
+    }
 
     func perform(operation: String, requestID: UUID, payload: Data) async throws -> Data {
+        if let failureCode { throw PommeRecoveryGuestOperationFailure(code: failureCode) }
         if failure { throw PommeRecoverySessionError.guestOperationFailed }
         return Data("ok".utf8)
     }

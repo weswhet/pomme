@@ -25,7 +25,7 @@ struct SIPStatusCommand: AsyncParsableCommand {
     mutating func run() async throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
         try CLIOutputWriter.write(
-            await PommeEnvironment.live().security.sip(target, .status, workflow.finalState),
+            await PommeEnvironment.live().security.sip(target, .status, workflow.finalState, false),
             options: workflow.output
         )
     }
@@ -34,12 +34,14 @@ struct SIPStatusCommand: AsyncParsableCommand {
 struct SIPEnableCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "enable", abstract: "Enable SIP and restore the VM state.")
     @Argument var name: String?
+    @Flag(help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
+    var force = false
     @OptionGroup private var workflow: SecurityWorkflowOptions
 
     mutating func run() async throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
         try CLIOutputWriter.write(
-            await PommeEnvironment.live().security.sip(target, .enable, workflow.finalState),
+            await PommeEnvironment.live().security.sip(target, .enable, workflow.finalState, force),
             options: workflow.output
         )
     }
@@ -48,22 +50,24 @@ struct SIPEnableCommand: AsyncParsableCommand {
 struct SIPDisableCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "disable", abstract: "Disable SIP and restore the VM state.")
     @Argument var name: String?
+    @Flag(help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
+    var force = false
     @OptionGroup private var workflow: SecurityWorkflowOptions
 
     mutating func run() async throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
         try CLIOutputWriter.write(
-            await PommeEnvironment.live().security.sip(target, .disable, workflow.finalState),
+            await PommeEnvironment.live().security.sip(target, .disable, workflow.finalState, force),
             options: workflow.output
         )
     }
 }
 
-/// Manages AMFI boot-argument enforcement through complete Recovery workflows.
+/// Manages AMFI configuration through complete Recovery workflows.
 struct AMFICommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "amfi",
-        abstract: "Manage AMFI boot-argument enforcement.",
+        abstract: "Manage AMFI policy and boot-argument configuration.",
         subcommands: [AMFIStatusCommand.self, AMFIEnableCommand.self, AMFIDisableCommand.self]
     )
 }
@@ -76,35 +80,39 @@ struct AMFIStatusCommand: AsyncParsableCommand {
     mutating func run() async throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
         try CLIOutputWriter.write(
-            await PommeEnvironment.live().security.amfi(target, .status, workflow.finalState),
+            await PommeEnvironment.live().security.amfi(target, .status, workflow.finalState, false),
             options: workflow.output
         )
     }
 }
 
 struct AMFIEnableCommand: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "enable", abstract: "Enable AMFI enforcement and restore the VM state.")
+    static let configuration = CommandConfiguration(commandName: "enable", abstract: "Restore the saved AMFI configuration and the VM state.")
     @Argument var name: String?
+    @Flag(help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
+    var force = false
     @OptionGroup private var workflow: SecurityWorkflowOptions
 
     mutating func run() async throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
         try CLIOutputWriter.write(
-            await PommeEnvironment.live().security.amfi(target, .enable, workflow.finalState),
+            await PommeEnvironment.live().security.amfi(target, .enable, workflow.finalState, force),
             options: workflow.output
         )
     }
 }
 
 struct AMFIDisableCommand: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "disable", abstract: "Disable AMFI enforcement and restore the VM state.")
+    static let configuration = CommandConfiguration(commandName: "disable", abstract: "Configure AMFI as disabled and restore the VM state.")
     @Argument var name: String?
+    @Flag(help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
+    var force = false
     @OptionGroup private var workflow: SecurityWorkflowOptions
 
     mutating func run() async throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
         try CLIOutputWriter.write(
-            await PommeEnvironment.live().security.amfi(target, .disable, workflow.finalState),
+            await PommeEnvironment.live().security.amfi(target, .disable, workflow.finalState, force),
             options: workflow.output
         )
     }

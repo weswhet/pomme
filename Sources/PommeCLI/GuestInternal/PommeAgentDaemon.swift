@@ -233,9 +233,16 @@ enum PommeAgentDaemon {
         let expectedExecutable = "\(expectedWorkspace)/\(PommeRecoveryArtifactNames.executable)"
         let expectedRequest = "\(expectedWorkspace)/\(PommeRecoveryArtifactNames.request)"
         let expectedCredential = "\(expectedWorkspace)/\(PommeRecoveryArtifactNames.credential)"
-        let executable = URL(fileURLWithPath: executablePath).standardizedFileURL
-        let request = URL(fileURLWithPath: requestFile).standardizedFileURL
-        let credential = URL(fileURLWithPath: options.tokenFile).standardizedFileURL
+        // Validate lexical identity without resolving existing symlinks. The
+        // Recovery staging root is intentionally addressed as
+        // /private/var/tmp; on macOS, standardizedFileURL resolves the
+        // existing /private alias to /var/tmp and would reject the exact
+        // request-bound spelling before digest validation. The exact-string
+        // guards below still reject dot components and aliases, while the
+        // descriptor-backed cleanup performs the no-follow filesystem check.
+        let executable = URL(fileURLWithPath: executablePath).standardized
+        let request = URL(fileURLWithPath: requestFile).standardized
+        let credential = URL(fileURLWithPath: options.tokenFile).standardized
         let workspace = URL(fileURLWithPath: expectedWorkspace, isDirectory: true)
         guard executable.path == executablePath,
               request.path == requestFile,
@@ -286,8 +293,26 @@ enum PommeAgentDaemon {
                 let line = Data(buffer[..<newline]); buffer.removeSubrange(...newline)
                 guard !line.isEmpty, line.count < PommeAgentProtocol.maximumFrameBytes else { return }
                 if let envelope = try? PommeAgentProtocol.decode(line), envelope.kind == .stream {
-                    guard connection.permitsStream, let frames = try? await routeStream(envelope, agent: agent) else { return }
-                    for frame in frames { guard let encoded = try? PommeAgentProtocol.encode(frame.envelope()), writeAll(descriptor: descriptor, data: encoded) else { return } }
+                    guard connection.permitsStream,
+                          let jobID = streamJobID(envelope),
+                          let frames = try? await routeStream(envelope, agent: agent)
+                    else { return }
+                    for frame in frames {
+                        guard let encoded = try? PommeAgentProtocol.encode(frame.envelope()),
+                              writeAll(descriptor: descriptor, data: encoded)
+                        else { return }
+                    }
+                    // A stream mutation with no output still needs a
+                    // correlated completion delimiter.  The response is
+                    // emitted only after acceptStream and all bounded output
+                    // frames have completed.
+                    let acknowledgement = PommeAgentProtocol.Envelope.response(
+                        to: envelope,
+                        result: .object(["jobID": .string(jobID.uuidString.lowercased())])
+                    )
+                    guard let encoded = try? PommeAgentProtocol.encode(acknowledgement),
+                          writeAll(descriptor: descriptor, data: encoded)
+                    else { return }
                     continue
                 }
                 let request = try? PommeAgentProtocol.decode(line)
@@ -315,6 +340,25 @@ enum PommeAgentDaemon {
                         throw error
                     }
                 }
+                // Process output is part of the same request exchange.  The
+                // correlated response is the host-side delimiter, so drain
+                // successful normal process operations before publishing it.
+                // In particular, do not call streamEvents for an
+                // unauthenticated or failed request: neither is permitted to
+                // observe a job's output.
+                if allowedOperation == nil,
+                   let request,
+                   let responseEnvelope = try? decodeResponse(response),
+                   responseEnvelope.ok == true,
+                   let jobID = processJobID(request: request, response: responseEnvelope),
+                   let events = try? await agent.streamEvents(jobID: jobID, requestID: request.requestID) {
+                    for event in events {
+                        let frame = PommeAgentJobStreamFrame(jobID: jobID, frame: event)
+                        guard let encoded = try? PommeAgentProtocol.encode(frame.envelope()),
+                              writeAll(descriptor: descriptor, data: encoded)
+                        else { return }
+                    }
+                }
                 guard !response.isEmpty, writeAll(descriptor: descriptor, data: response) else { return }
                 if let request,
                    request.kind == .request,
@@ -326,14 +370,40 @@ enum PommeAgentDaemon {
                     operationConsumed = true
                     return
                 }
-                if let request = try? PommeAgentProtocol.decode(line),
-                   let jobText = request.payload.objectValue?["jobID"]?.stringValue,
-                   let jobID = UUID(uuidString: jobText),
-                   let events = try? await agent.streamEvents(jobID: jobID, requestID: request.requestID) {
-                    for event in events { let frame = PommeAgentJobStreamFrame(jobID: jobID, frame: event); guard let encoded = try? PommeAgentProtocol.encode(frame.envelope()), writeAll(descriptor: descriptor, data: encoded) else { return } }
-                }
             }
         }
+    }
+
+    private static let processOperations: Set<String> = [
+        "process.start", "process.status", "process.signal"
+    ]
+
+    private static func decodeResponse(_ data: Data) throws -> PommeAgentProtocol.Envelope {
+        guard data.last == 0x0A else { throw PommeAgentProtocol.Error.invalidResponse }
+        return try PommeAgentProtocol.decode(Data(data.dropLast()))
+    }
+
+    private static func processJobID(
+        request: PommeAgentProtocol.Envelope,
+        response: PommeAgentProtocol.Envelope
+    ) -> UUID? {
+        guard request.kind == .request,
+              processOperations.contains(request.operation),
+              response.kind == .response,
+              response.ok == true
+        else { return nil }
+
+        let responseText = response.result?.objectValue?["jobID"]?.stringValue
+        let requestText = request.payload.objectValue?["jobID"]?.stringValue
+        return [responseText, requestText]
+            .compactMap { $0 }
+            .compactMap { UUID(uuidString: $0) }
+            .first
+    }
+
+    private static func streamJobID(_ envelope: PommeAgentProtocol.Envelope) -> UUID? {
+        guard let text = envelope.payload.objectValue?["jobID"]?.stringValue else { return nil }
+        return UUID(uuidString: text)
     }
 
     private static func routeStream(_ envelope: PommeAgentProtocol.Envelope, agent: PommeAgent) async throws -> [PommeAgentJobStreamFrame] {

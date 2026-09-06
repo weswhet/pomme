@@ -58,8 +58,13 @@ final class PommeVMRuntime: @unchecked Sendable {
     private let saveStateURL: URL
     private let snapshotsURL: URL
     private let requiredSnapshotRestoreURL: URL
+    private let queueExecutor: PommeVMQueueExecutor
     private let agentProvider: (any PommeAgentSessionProvider)?
+    private let uiController: PommeRuntimeUIController
     private let bootMode: BootMode
+    /// Protected by `queue`; a running VZ VM alone cannot prove that the
+    /// requested Recovery boot path was used.
+    private var recoveryStartCompleted = false
 
     init(vm: VZVirtualMachine, configuration: VZVirtualMachineConfiguration, queue: DispatchQueue,
          saveStateURL: URL, snapshotsURL: URL, requiredSnapshotRestoreURL: URL,
@@ -70,7 +75,18 @@ final class PommeVMRuntime: @unchecked Sendable {
         self.saveStateURL = saveStateURL
         self.snapshotsURL = snapshotsURL
         self.requiredSnapshotRestoreURL = requiredSnapshotRestoreURL
+        self.queueExecutor = PommeVMQueueExecutor(queue: queue)
         self.agentProvider = agentProvider
+        // Construct the queue-confined private backend before handing it to
+        // the actor. This keeps raw Virtualization references out of the
+        // actor boundary while preserving the VM's documented queue owner.
+        self.uiController = PommeRuntimeUIController(
+            backend: VirtualizationPrivateHeadlessBackend(
+                virtualMachine: vm,
+                configuration: configuration,
+                queue: queue
+            )
+        )
         self.bootMode = bootMode
     }
 
@@ -109,12 +125,19 @@ final class PommeVMRuntime: @unchecked Sendable {
     }
 
     private func startRecovery() async throws {
+        clearRecoveryBootProof()
         guard !FileManager.default.fileExists(atPath: saveStateURL.path) else {
             throw RunnerError.virtualMachineState("Cannot boot Recovery while a saved VM state exists. Resume and stop the VM first.")
         }
         let options = VZMacOSVirtualMachineStartOptions()
         options.startUpFromMacOSRecovery = true
-        try await PommeCore.start(vm, options: options, on: queue)
+        do {
+            try await PommeCore.start(vm, options: options, on: queue)
+            queueExecutor.sync { recoveryStartCompleted = true }
+        } catch {
+            clearRecoveryBootProof()
+            throw error
+        }
     }
 
     func stop() async throws {
@@ -170,6 +193,24 @@ final class PommeVMRuntime: @unchecked Sendable {
         return try await provider.sendStream(jobID: jobID, stream: stream, requestID: requestID, data: data, dimensions: dimensions, signal: signal)
     }
 
+    /// Captures one authenticated coordinator session for a security-bound
+    /// operation. The returned pin owns the session choice; callers must use
+    /// it for describe, process, and stream exchanges rather than reacquiring
+    /// the coordinator's current session for each request.
+    func captureAuthenticatedAgentSession(as role: PommeAgentVSOCKRole) throws -> PommeAuthenticatedAgentSession {
+        guard let coordinator = agentProvider as? PommeAgentVSOCKCoordinator else {
+            throw RunnerError.guestAgentUnavailable
+        }
+        return try coordinator.captureAuthenticatedSession(as: role)
+    }
+
+    /// Host-display UI is delivered by the private Virtualization backend in
+    /// both normal and Recovery modes. It intentionally does not consult the
+    /// guest-agent provider, so Recovery remains usable before authentication.
+    func performUI(_ request: PommeUIControlRequest) async throws -> [String: JSONValue] {
+        try await uiController.perform(request)
+    }
+
     func statusPayload(bundle: BundleLayout, inspect: Bool) async -> [String: Any] {
         let state = await PommeCore.state(of: vm, on: queue)
         let role: GuestAgentStatusV1.Role = bootMode == .normal ? .normal : .recovery
@@ -187,7 +228,33 @@ final class PommeVMRuntime: @unchecked Sendable {
         return payload
     }
 
-    func teardown() async { agentProvider?.teardown() }
+    func teardown() async {
+        clearRecoveryBootProof()
+        agentProvider?.teardown()
+    }
+
+    /// Returns proof only when this immutable Recovery runtime completed its
+    /// own `startUpFromMacOSRecovery` call and the same VM is currently
+    /// running. A state of `.running` without the successful start marker is
+    /// intentionally insufficient.
+    func provesRunningRecoveryBoot() -> Bool {
+        guard bootMode == .recovery else { return false }
+        return queueExecutor.sync {
+            Self.recoveryBootIsProven(
+                bootMode: bootMode,
+                startCompleted: recoveryStartCompleted,
+                state: vm.state
+            )
+        }
+    }
+
+    static func recoveryBootIsProven(
+        bootMode: BootMode,
+        startCompleted: Bool,
+        state: VZVirtualMachine.State
+    ) -> Bool {
+        bootMode == .recovery && startCompleted && state == .running
+    }
 
     private func forceStop() async throws {
         let state = await PommeCore.state(of: vm, on: queue)
@@ -207,6 +274,10 @@ final class PommeVMRuntime: @unchecked Sendable {
     private func quarantineSaveState() {
         let quarantine = saveStateURL.deletingLastPathComponent().appendingPathComponent("SaveFile.invalid-\(UUID().uuidString).vzvmsave")
         try? FileManager.default.moveItem(at: saveStateURL, to: quarantine)
+    }
+
+    private func clearRecoveryBootProof() {
+        queueExecutor.sync { recoveryStartCompleted = false }
     }
 
     private func stateDescription(_ state: VZVirtualMachine.State) -> String {

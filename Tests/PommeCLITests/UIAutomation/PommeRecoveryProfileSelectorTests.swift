@@ -10,6 +10,30 @@ struct PommeRecoveryProfileSelectorTests {
             .sequoia1561Build24G90English1280x800PendingReview)
     }
 
+    @Test("the exact new identity can use the bounded experimental input gate")
+    func experimentalIdentityCanAttemptInput() throws {
+        let descriptor = try PommeRecoveryProfileSelector.descriptor(
+            version: "26.6.2",
+            build: "25G83"
+        )
+        #expect(descriptor.version == "26.6.2")
+        #expect(descriptor.build == "25G83")
+        #expect(descriptor.qualification == .experimental)
+
+        let input = try PommeRecoveryProfileSelector.inputForAttempt(for: experimentalEvidence)
+        #expect(input.committedInputCount == 0)
+    }
+
+    @Test("experimental evidence never claims a reviewed descriptor or record")
+    func experimentalStaysOutOfReviewedAPIs() {
+        #expect(throws: PommeRecoveryInputQualificationError.unsupportedBuild) {
+            _ = try PommeRecoveryProfileSelector.reviewedDescriptor(for: experimentalEvidence)
+        }
+        #expect(throws: PommeRecoveryInputQualificationError.unsupportedBuild) {
+            _ = try PommeRecoveryProfileSelector.reviewedTahoeInput(for: experimentalEvidence)
+        }
+    }
+
     @Test("each unknown qualification fact prevents input authorization")
     func mismatchesFailBeforeInput() {
         let mismatches: [PommeRecoveryProfileEvidence] = [
@@ -23,6 +47,47 @@ struct PommeRecoveryProfileSelectorTests {
         for evidence in mismatches {
             #expect(throws: (any Error).self) {
                 _ = try PommeRecoveryProfileSelector.reviewedTahoeInput(for: evidence)
+            }
+        }
+    }
+
+    @Test("experimental input requires identity, digest, and every non-version gate")
+    func experimentalMismatchesFailBeforeInput() {
+        let mismatches: [(PommeRecoveryProfileEvidence, PommeRecoveryInputQualificationError)] = [
+            (
+                replacing(
+                    experimentalEvidence,
+                    build: .experimental(version: "26.6.2", build: "25G84")
+                ),
+                .manifestHashMismatch
+            ),
+            (
+                replacing(
+                    experimentalEvidence,
+                    build: .experimental(version: "", build: "")
+                ),
+                .unsupportedBuild
+            ),
+            (
+                replacing(
+                    experimentalEvidence,
+                    manifestHash: .experimentalProfile("bad-experimental-digest")
+                ),
+                .manifestHashMismatch
+            ),
+            (replacing(experimentalEvidence, locale: .unknown), .unsupportedLocale),
+            (replacing(experimentalEvidence, geometry: .unknown), .unsupportedGeometry),
+            (
+                replacing(experimentalEvidence, privateHostABI: .unknown),
+                .unqualifiedPrivateHostABI
+            ),
+            (replacing(experimentalEvidence, ownership: .unknown), .ownershipUnverified),
+            (replacing(experimentalEvidence, build: .unknown), .unsupportedBuild),
+        ]
+
+        for (evidence, error) in mismatches {
+            #expect(throws: error) {
+                _ = try PommeRecoveryProfileSelector.inputForAttempt(for: evidence)
             }
         }
     }
@@ -82,6 +147,21 @@ struct PommeRecoveryProfileSelectorTests {
         .init(build: .sequoia1561Build24G90, locale: .english, geometry: .pixels1280x800,
               privateHostABI: .qualifiedRecoveryInputV1, manifestHash: .sequoia1561Build24G90,
               ownership: .verified)
+    }
+
+    private var experimentalEvidence: PommeRecoveryProfileEvidence {
+        let descriptor = try! PommeRecoveryProfileSelector.descriptor(
+            version: "26.6.2",
+            build: "25G83"
+        )
+        return .init(
+            build: .experimental(version: descriptor.version, build: descriptor.build),
+            locale: .english,
+            geometry: .pixels1280x800,
+            privateHostABI: .qualifiedRecoveryInputV1,
+            manifestHash: .experimentalProfile(descriptor.digest),
+            ownership: .verified
+        )
     }
 
     private func replacing(

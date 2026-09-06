@@ -95,12 +95,17 @@ Configuration mode supports JSON, YAML, TOML, and Pkl, resolves every selector,
 and collision-checks the entire batch before mutation. Once execution starts,
 successful siblings remain when another member fails.
 
-Creation must select an accepted Recovery profile before its first external
-effect. The closed identities are Tahoe `26.6.0 (25G72)` and Sequoia
-`15.6.1 (24G90)`, English, `1280×800`, with reviewed qualification digests.
-Unknown build, locale, geometry, private host ABI, manifest digest, or ownership
-evidence emits no input and fails preflight. `latest` resolves to an exact
-accepted identity or fails.
+Creation resolves an exact restore identity before its first external effect.
+New OS versions and builds are allowed as experimental attempts; do not block
+them solely because no reviewed build entry exists. Keep the actual version and
+build in the immutable plan and expose experimental qualification honestly.
+Tahoe `26.6.0 (25G72)` retains its existing reviewed profile. Experimental attempts
+do not inherit a reviewed-record digest, including attempts of Sequoia.
+Unknown locale, geometry, private host ABI, profile digest, or ownership evidence
+still emits no input. Navigation requires the expected stable screen before and
+after each single event. `latest` resolves to an exact identity, not an alias in
+the durable plan. A failed experiment retains its VM/journal and is not release
+qualification.
 
 Journal intent before every effect. Install macOS, perform the required
 display-only normal boot, install the signed persistent agent in Recovery via
@@ -112,6 +117,14 @@ accepts only the target plus output/debug options and resumes after revalidating
 the immutable plan.
 
 ## Agent and guest operations
+
+Host-side persistent-agent credentials use the file-based login Keychain via
+Apple's `Security.framework`. Target that Keychain explicitly for every query
+and add, preserving the UUID service/account and the CLI's signing identity.
+Do not select the Data Protection Keychain, add Keychain entitlements, silently
+replace credentials, or auto-unlock the login Keychain. Keep credential tests
+isolated in temporary Keychains. This Pomme policy takes precedence over generic
+cross-platform Keychain recommendations.
 
 The persistent normal role is `PommeAgent`; temporary Recovery work uses
 `PommeRecoverySession`. Both use `PommeAgentProtocol` version 1 with

@@ -46,6 +46,7 @@ struct PommeAgentVSOCKBinding: Equatable, Sendable {
 enum PommeAgentVSOCKError: Error, Equatable, Sendable {
     case invalidBinding
     case missingBinding
+    case sessionReplaced
 }
 
 protocol PommeAgentVSOCKConnection: AnyObject, Sendable {
@@ -64,6 +65,22 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
     typealias SecretProvider = @Sendable (PommeAgentVSOCKRole) throws -> String
     typealias BindingProvider = @Sendable (PommeAgentVSOCKRole) throws -> PommeAgentVSOCKBinding?
 
+    // Recovery security handlers may run several native commands, each with
+    // its own bounded guest-side deadline. Keep one practical overall
+    // transport window so the host can receive the closed result envelope
+    // without claiming that every native command and rollback fits inside
+    // this single value. If it expires, the Recovery journal must be
+    // reconciled before a retry. Ordinary agent traffic retains
+    // `Constants.agentRoundTripTimeout` (or the caller-supplied value).
+    static let recoverySecurityExchangeTimeout: TimeInterval = 300
+
+    // A normal-role AMFI operation is a closed, credential-free guest
+    // transaction. Give its bounded native work enough time to finish while
+    // keeping ordinary normal-agent requests on their existing short budget.
+    // If this window expires, the durable guest receipt must be reconciled
+    // before a retry.
+    static let normalAMFIExchangeTimeout: TimeInterval = 300
+
     private enum Phase { case disconnected, connecting(PommeAgentVSOCKRole), connected(PommeAgentVSOCKRole), failed(PommeAgentVSOCKRole) }
 
     private let transport: any PommeAgentVSOCKTransport
@@ -76,6 +93,60 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
     private var lastRole: PommeAgentVSOCKRole = .normal
     private var pending: (role: PommeAgentVSOCKRole, connection: any PommeAgentVSOCKConnection)?
     private var active: (role: PommeAgentVSOCKRole, connection: any PommeAgentVSOCKConnection, session: PommeAgentSession)?
+
+    /// Selects the transport budget only for the closed Recovery security
+    /// vocabulary on the authenticated Recovery runtime listener. Keeping
+    /// this selector independent of envelope decoding makes malformed or
+    /// unrelated requests fall back to the existing ordinary budget.
+    static func exchangeTimeout(
+        for role: PommeAgentVSOCKRole,
+        operation: String?,
+        defaultTimeout: TimeInterval
+    ) -> TimeInterval {
+        guard let operation else { return defaultTimeout }
+        if role == .recoveryRuntime, isRecoverySecurityOperation(operation) {
+            return recoverySecurityExchangeTimeout
+        }
+        if role == .normal, isNormalAMFIOperation(operation) {
+            return normalAMFIExchangeTimeout
+        }
+        return defaultTimeout
+    }
+
+    private static func isRecoverySecurityOperation(_ operation: String) -> Bool {
+        switch operation {
+        case "sip.status", "sip.disable", "sip.enable",
+             "amfi.status", "amfi.disable", "amfi.enable":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func isNormalAMFIOperation(_ operation: String) -> Bool {
+        switch operation {
+        case "amfi.normal.disable", "amfi.normal.enable",
+             "amfi.normal.verifyDisabled", "amfi.normal.verifyEnabled":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func exchangeTimeout(
+        for request: Data,
+        role: PommeAgentVSOCKRole,
+        defaultTimeout: TimeInterval
+    ) -> TimeInterval {
+        guard request.last == 0x0A,
+              let envelope = try? PommeAgentProtocol.decode(Data(request.dropLast()))
+        else { return defaultTimeout }
+        return exchangeTimeout(
+            for: role,
+            operation: envelope.operation,
+            defaultTimeout: defaultTimeout
+        )
+    }
 
     init(transport: any PommeAgentVSOCKTransport, secretProvider: @escaping SecretProvider,
          bindingProvider: @escaping BindingProvider = { _ in nil },
@@ -159,6 +230,28 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
         lock.withLock { active?.session }
     }
 
+    /// Captures the currently authenticated session for a security operation.
+    /// Every operation made through the returned pin verifies that this exact
+    /// session remains active, so a candidate connection cannot replace the
+    /// transport between describe, process start, and stream frames.
+    func captureAuthenticatedSession(as role: PommeAgentVSOCKRole) throws -> PommeAuthenticatedAgentSession {
+        let session: PommeAgentSession? = lock.withLock {
+            guard let active, active.role == role else { return nil }
+            return active.session
+        }
+        guard let session else {
+            throw RunnerError.guestAgentUnavailable
+        }
+        return .init(coordinator: self, session: session, role: role)
+    }
+
+    fileprivate func isCurrent(_ session: PommeAgentSession, as role: PommeAgentVSOCKRole) -> Bool {
+        lock.withLock {
+            guard let active, active.role == role else { return false }
+            return active.session === session
+        }
+    }
+
     func status() async -> GuestAgentStatusV1 {
         let snapshot = lock.withLock { (phase, lastRole, active) }
         if let active = snapshot.2 {
@@ -232,8 +325,13 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
             return
         }
         let session = PommeAgentSession(exchange: { [weak self, exchangeTimeout] request in
+            let requestTimeout = Self.exchangeTimeout(
+                for: request,
+                role: role,
+                defaultTimeout: exchangeTimeout
+            )
             do {
-                return try await connection.exchange(request, timeout: exchangeTimeout)
+                return try await connection.exchange(request, timeout: requestTimeout)
             } catch {
                 self?.connectionDidDisconnect(connection, as: role)
                 throw error
@@ -301,6 +399,64 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
 }
 
 extension PommeAgentVSOCKCoordinator: PommeAgentSessionProvider {}
+
+/// A request/stream surface bound to one coordinator session.  The session is
+/// intentionally opaque to callers; only this pin can invoke the operations
+/// needed by a security PTY, and each call fails if the coordinator replaced
+/// the authenticated connection.
+struct PommeAuthenticatedAgentSession: Sendable {
+    private let coordinator: PommeAgentVSOCKCoordinator
+    private let session: PommeAgentSession
+    let role: PommeAgentVSOCKRole
+
+    fileprivate init(coordinator: PommeAgentVSOCKCoordinator, session: PommeAgentSession, role: PommeAgentVSOCKRole) {
+        self.coordinator = coordinator
+        self.session = session
+        self.role = role
+    }
+
+    func request(operation: String, payload: JSONValue = .object([:])) async throws -> JSONValue {
+        try requireCurrent()
+        let result = try await session.request(operation: operation, payload: payload)
+        try requireCurrent()
+        return result
+    }
+
+    func requestCorrelated(operation: String, payload: JSONValue = .object([:])) async throws -> PommeAgentCorrelatedResult {
+        try requireCurrent()
+        let response = try await session.requestCorrelated(operation: operation, payload: payload)
+        let frames = await session.drainStreams(requestID: response.requestID)
+        try requireCurrent()
+        return .init(requestID: response.requestID, result: response.result, streamFrames: frames)
+    }
+
+    func sendStream(
+        jobID: UUID,
+        stream: PommeAgentProtocol.Stream,
+        requestID: UUID = UUID(),
+        data: Data? = nil,
+        dimensions: (columns: Int, rows: Int)? = nil,
+        signal: Int32? = nil
+    ) async throws -> [PommeAgentJobStreamFrame] {
+        try requireCurrent()
+        let frames = try await session.sendStream(
+            jobID: jobID,
+            stream: stream,
+            requestID: requestID,
+            data: data,
+            dimensions: dimensions,
+            signal: signal
+        )
+        try requireCurrent()
+        return frames
+    }
+
+    private func requireCurrent() throws {
+        guard coordinator.isCurrent(session, as: role) else {
+            throw PommeAgentVSOCKError.sessionReplaced
+        }
+    }
+}
 
 extension PommeAgentVSOCKCoordinator: PommeAgentStreamingSessionProvider {
     func performCorrelated(operation: String, payload: JSONValue?) async throws -> PommeAgentCorrelatedResult {
@@ -397,7 +553,9 @@ private final class PommeVirtualizationVSOCKConnection: @unchecked Sendable, Pom
     func close() { connection.close() }
 }
 
-private final class PommeAgentVSOCKWire: @unchecked Sendable {
+/// Synchronous, descriptor-owned exchange engine. The lock covers each entire
+/// request/response transaction, including its correlated output frames.
+final class PommeAgentVSOCKWire: @unchecked Sendable {
     private let fileDescriptor: Int32
     private let lock = NSLock()
     private var buffered = Data()
@@ -406,48 +564,38 @@ private final class PommeAgentVSOCKWire: @unchecked Sendable {
 
     func exchange(_ request: Data, timeout: TimeInterval) throws -> Data {
         try lock.withLock {
+            guard timeout.isFinite, timeout > 0 else { throw PommeAgentProtocol.Error.invalidRequest }
             guard request.last == 0x0A, request.count <= PommeAgentProtocol.maximumFrameBytes else { throw PommeAgentProtocol.Error.frameTooLarge }
             let requestEnvelope = try PommeAgentProtocol.decode(Data(request.dropLast()))
             guard requestEnvelope.kind == .request || requestEnvelope.kind == .stream else { throw PommeAgentProtocol.Error.invalidRequest }
             let deadline = Date().addingTimeInterval(timeout)
+            var noSigPipe: Int32 = 1
+            guard Darwin.setsockopt(fileDescriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe,
+                                    socklen_t(MemoryLayout<Int32>.size)) == 0 else { try throwPOSIX("vsock setsockopt") }
             try writeAll(request, deadline: deadline)
             var delivered = Data()
             var receivedTerminalFrame = false
             while !receivedTerminalFrame {
                 let line = try readLine(deadline: deadline)
                 let envelope = try PommeAgentProtocol.decode(line)
-                switch requestEnvelope.kind {
-                case .request:
-                    switch envelope.kind {
-                    case .stream:
-                        try append(line, to: &delivered)
-                    case .response:
-                        guard envelope.requestID == requestEnvelope.requestID,
-                              envelope.operation == requestEnvelope.operation
-                        else { throw PommeAgentProtocol.Error.invalidResponse }
-                        try append(line, to: &delivered)
-                        receivedTerminalFrame = true
-                    case .request: throw PommeAgentProtocol.Error.invalidResponse
-                    }
+                guard envelope.requestID == requestEnvelope.requestID else {
+                    throw PommeAgentProtocol.Error.invalidResponse
+                }
+                switch envelope.kind {
                 case .stream:
-                    guard envelope.kind == .stream, envelope.requestID == requestEnvelope.requestID else {
-                        throw PommeAgentProtocol.Error.invalidStream
+                    try append(line, to: &delivered)
+                case .response:
+                    guard envelope.operation == requestEnvelope.operation else {
+                        throw PommeAgentProtocol.Error.invalidResponse
                     }
                     try append(line, to: &delivered)
                     receivedTerminalFrame = true
-                case .response: throw PommeAgentProtocol.Error.invalidRequest
+                case .request: throw PommeAgentProtocol.Error.invalidResponse
                 }
             }
-            // The guest commonly emits process frames immediately after the
-            // correlated response. Drain them into this exchange so they are
-            // handed to PommeAgentSession's request-ID demux, never the next
-            // unary request.
-            while hasReadableData() {
-                let line = try readLine(deadline: Date().addingTimeInterval(0.01))
-                let envelope = try PommeAgentProtocol.decode(line)
-                guard envelope.kind == .stream else { throw PommeAgentProtocol.Error.invalidResponse }
-                try append(line, to: &delivered)
-            }
+            // A response is the delimiter for both ordinary requests and
+            // input-stream mutations, even when there is no output. Never
+            // guess completion from socket readiness or a scheduling delay.
             return delivered
         }
     }
@@ -456,14 +604,6 @@ private final class PommeAgentVSOCKWire: @unchecked Sendable {
         guard delivered.count + line.count + 1 <= PommeAgentProtocol.maximumFrameBytes else { throw PommeAgentProtocol.Error.frameTooLarge }
         delivered.append(line)
         delivered.append(0x0A)
-    }
-
-    private func hasReadableData() -> Bool {
-        if buffered.firstIndex(of: 0x0A) != nil { return true }
-        var descriptor = pollfd(fd: fileDescriptor, events: Int16(POLLIN), revents: 0)
-        let result = Darwin.poll(&descriptor, 1, 0)
-        let failureEvents = Int16(POLLERR | POLLHUP | POLLNVAL)
-        return result > 0 && descriptor.revents & failureEvents == 0
     }
 
     private func writeAll(_ data: Data, deadline: Date) throws {
@@ -500,16 +640,21 @@ private final class PommeAgentVSOCKWire: @unchecked Sendable {
     }
 
     private func wait(events: Int16, deadline: Date) throws {
-        let remainingMilliseconds = Int64(max(0, deadline.timeIntervalSinceNow * 1_000))
-        let milliseconds = Int32(min(Int64(Int32.max), remainingMilliseconds))
-        guard milliseconds > 0 else { throw RunnerError.guestAgentTimedOut("Pomme agent exchange") }
         var descriptor = pollfd(fd: fileDescriptor, events: events, revents: 0)
         while true {
+            let remainingMilliseconds = max(0, deadline.timeIntervalSinceNow * 1_000)
+            let milliseconds = Int32(min(Double(Int32.max), remainingMilliseconds))
+            guard milliseconds > 0 else { throw RunnerError.guestAgentTimedOut("Pomme agent exchange") }
             let result = Darwin.poll(&descriptor, 1, milliseconds)
             if result > 0 {
+                // A peer may close immediately after writing its response.
+                // Consume queued readable bytes before interpreting hangup.
+                if events & Int16(POLLIN) != 0, descriptor.revents & Int16(POLLIN) != 0,
+                   descriptor.revents & Int16(POLLNVAL) == 0 { return }
                 let failureEvents = Int16(POLLERR | POLLHUP | POLLNVAL)
                 guard descriptor.revents & failureEvents == 0 else { throw RunnerError.guestAgentDisconnected }
-                return
+                if descriptor.revents & events != 0 { return }
+                continue
             }
             if result == 0 { throw RunnerError.guestAgentTimedOut("Pomme agent exchange") }
             if errno != EINTR { try throwPOSIX("vsock poll") }

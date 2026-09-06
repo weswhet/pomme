@@ -32,17 +32,62 @@ enum PommeRecoverySecurityError: Error, LocalizedError, Equatable, Sendable {
 
 struct PommeNVRAMValue: Codable, Equatable, Sendable {
     let present: Bool
-    let value: String?
+    /// The byte payload returned by Recovery's NVRAM reader.  Keep this
+    /// separate from the display string: boot arguments are an opaque byte
+    /// sequence and normalising whitespace (or decoding/re-encoding UTF-8)
+    /// would silently change unrelated arguments.
+    let bytes: Data
+
+    /// A display-only view retained for existing callers and diagnostics.
+    /// Mutation code uses `bytes` so this lossy view can never become the
+    /// source of a restore.
+    var value: String? {
+        present ? String(decoding: bytes, as: UTF8.self) : nil
+    }
 
     init(present: Bool, value: String?) throws {
         guard present == (value != nil),
               value.map({ $0.utf8.count <= 64 * 1024 && !$0.contains("\0") }) ?? true
         else { throw PommeRecoverySecurityError.invalidNVRAM }
         self.present = present
-        self.value = value
+        self.bytes = value.map { Data($0.utf8) } ?? Data()
+    }
+
+    init(present: Bool, bytes: Data) throws {
+        guard bytes.count <= 64 * 1024,
+              !bytes.contains(0),
+              present || bytes.isEmpty
+        else { throw PommeRecoverySecurityError.invalidNVRAM }
+        self.present = present
+        self.bytes = bytes
     }
 
     static let absent = try! PommeNVRAMValue(present: false, value: nil)
+
+    private enum CodingKeys: String, CodingKey {
+        case present
+        case value
+        case bytes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let present = try container.decode(Bool.self, forKey: .present)
+        if let bytes = try container.decodeIfPresent(Data.self, forKey: .bytes) {
+            try self.init(present: present, bytes: bytes)
+        } else {
+            try self.init(present: present, value: try container.decodeIfPresent(String.self, forKey: .value))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(present, forKey: .present)
+        // Keep a human-readable field for old journal readers while `bytes`
+        // carries the authoritative exact payload.
+        try container.encodeIfPresent(value, forKey: .value)
+        try container.encode(bytes, forKey: .bytes)
+    }
 }
 
 struct PommeNVRAMDelta: Codable, Equatable, Sendable {
@@ -60,6 +105,13 @@ struct PommeNVRAMDelta: Codable, Equatable, Sendable {
         value: String?
     ) throws -> Self {
         try .init(values: ["boot-args": .init(present: present, value: value)])
+    }
+
+    static func bootArguments(
+        present: Bool,
+        bytes: Data
+    ) throws -> Self {
+        try .init(values: ["boot-args": .init(present: present, bytes: bytes)])
     }
 
     func value(for key: String) -> PommeNVRAMValue? { values[key] }
@@ -83,25 +135,88 @@ struct PommeNVRAMDelta: Codable, Equatable, Sendable {
 /// for byte; only the requested override is added or removed in a mutation.
 enum PommeBootArguments {
     static let amfiOverride = "amfi_get_out_of_my_way=0x1"
+    private static let amfiOverrideBytes = Data(amfiOverride.utf8)
 
     static func addingOverride(to value: String?) -> String {
-        let tokens = tokenize(value ?? "")
-        guard !tokens.contains(amfiOverride) else { return tokens.joined(separator: " ") }
-        return (tokens + [amfiOverride]).joined(separator: " ")
+        String(decoding: addingOverride(to: Data((value ?? "").utf8)), as: UTF8.self)
     }
 
     static func removingOverride(from value: String?) -> String {
-        tokenize(value ?? "")
-            .filter { $0 != amfiOverride }
-            .joined(separator: " ")
+        String(decoding: removingOverride(from: Data((value ?? "").utf8)), as: UTF8.self)
     }
 
     static func containsOverride(_ value: String?) -> Bool {
-        tokenize(value ?? "").contains(amfiOverride)
+        containsOverride(Data((value ?? "").utf8))
     }
 
-    private static func tokenize(_ value: String) -> [String] {
-        value.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+    /// Appends the AMFI token without touching any byte already present in
+    /// `value`.  A separator is introduced only when the original value does
+    /// not already end in ASCII whitespace.
+    static func addingOverride(to value: Data) -> Data {
+        guard !containsOverride(value) else { return value }
+        guard !value.isEmpty else { return amfiOverrideBytes }
+        var result = value
+        if let last = value.last, !isWhitespace(last) {
+            result.append(0x20)
+        }
+        result.append(contentsOf: amfiOverrideBytes)
+        return result
+    }
+
+    /// Removes only exact AMFI tokens and retains every other byte and every
+    /// separator.  This is useful for callers that do not have the durable
+    /// baseline, while enable transactions restore the baseline directly.
+    static func removingOverride(from value: Data) -> Data {
+        guard containsOverride(value) else { return value }
+        var result = Data()
+        var tokenStart = 0
+        var index = 0
+        let bytes = [UInt8](value)
+        while index <= bytes.count {
+            let atEnd = index == bytes.count
+            if !atEnd, !isWhitespace(bytes[index]) {
+                index += 1
+                continue
+            }
+            let token = bytes[tokenStart..<index]
+            if Data(token) != amfiOverrideBytes {
+                result.append(contentsOf: value[tokenStart..<index])
+            } else if !result.isEmpty, index < bytes.count, isWhitespace(bytes[index]) {
+                // Drop one separator adjacent to a removed token only when it
+                // would otherwise leave a separator with no following token.
+                // Existing unrelated bytes remain untouched in all other
+                // cases.
+                if tokenStart > 0, isWhitespace(bytes[tokenStart - 1]) {
+                    result.removeLast()
+                }
+            }
+            if atEnd { break }
+            let separatorStart = index
+            repeat { index += 1 } while index < bytes.count && isWhitespace(bytes[index])
+            result.append(contentsOf: value[separatorStart..<index])
+            tokenStart = index
+        }
+        return result
+    }
+
+    static func containsOverride(_ value: PommeNVRAMValue?) -> Bool {
+        guard let value, value.present else { return false }
+        return containsOverride(value.bytes)
+    }
+
+    static func containsOverride(_ value: Data) -> Bool {
+        let bytes = [UInt8](value)
+        var start = 0
+        for index in 0...bytes.count {
+            guard index == bytes.count || isWhitespace(bytes[index]) else { continue }
+            if Data(bytes[start..<index]) == amfiOverrideBytes { return true }
+            start = index + 1
+        }
+        return false
+    }
+
+    private static func isWhitespace(_ byte: UInt8) -> Bool {
+        byte == 0x09 || byte == 0x0a || byte == 0x0b || byte == 0x0c || byte == 0x0d || byte == 0x20
     }
 }
 
@@ -249,7 +364,7 @@ struct PommeAMFITransaction: Sendable {
     func disable(localPolicy: Data, currentBootArguments: PommeNVRAMValue) async throws -> PommeAMFITransactionReport {
         let next = try PommeNVRAMDelta.bootArguments(
             present: true,
-            value: PommeBootArguments.addingOverride(to: currentBootArguments.value)
+            bytes: PommeBootArguments.addingOverride(to: currentBootArguments.bytes)
         )
         return try await execute(.init(localPolicy: localPolicy, nvram: next))
     }
@@ -262,7 +377,7 @@ struct PommeAMFITransaction: Sendable {
         var values = currentNVRAM.values
         values["boot-args"] = try .init(
             present: true,
-            value: PommeBootArguments.addingOverride(to: currentBootArguments.value)
+            bytes: PommeBootArguments.addingOverride(to: currentBootArguments.bytes)
         )
         return try await execute(.init(localPolicy: localPolicy, nvram: .init(values: values)))
     }

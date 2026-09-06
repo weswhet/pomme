@@ -594,12 +594,15 @@ enum PommeApplication {
     ) throws -> PommeOperationResult {
         try VMBundleMutationLease.withLease(name: name) { _ in
         let reference = try namedReference(name)
-        var payload = try PommeCore.sendControlObject(request.controlPayload, bundle: reference.bundle)
+        var payload = try request.pty
+            ? PommeCore.sendControlObject(request.controlPayload, bundle: reference.bundle)
+            : PommeCore.sendForegroundControlObject(request.controlPayload, bundle: reference.bundle)
         payload["operation"] = "process.start"
         payload["name"] = name
         let ok = payload["ok"] as? Bool == true
         let text = agentResponseText(payload)
-        return result(title: "Exec", reference: reference, payload: payload, text: text.isEmpty ? (ok ? "OK" : "ERROR") : text)
+        return result(title: "Exec", reference: reference, payload: payload,
+                      text: payload["foreground"] as? Bool == true ? text : (text.isEmpty ? (ok ? "OK" : "ERROR") : text))
         }
     }
 
@@ -727,19 +730,34 @@ enum PommeApplication {
     static func sipWorkflow(
         name: String,
         action: SIPAction,
-        finalState: VMFinalState
+        finalState: VMFinalState,
+        force: Bool = false
     ) async throws -> PommeOperationResult {
-        try await sipWorkflow(name: name, action: action, finalState: finalState, lease: nil)
+        try await sipWorkflow(name: name, action: action, finalState: finalState, force: force, lease: nil)
     }
 
     private static func sipWorkflow(
         name: String,
         action: SIPAction,
         finalState: VMFinalState,
+        force: Bool = false,
         lease: VMBundleMutationLease?
     ) async throws -> PommeOperationResult {
-        try await VMBundleMutationLease.withLease(name: name, inherited: lease) { _ in
+        try await VMBundleMutationLease.withLease(name: name, inherited: lease) { acquiredLease in
             let reference = try namedReference(name)
+            if action != .status {
+                let operation: PommeSecurityWorkflowOperation = action == .enable ? .sipEnable : .sipDisable
+                let payload = try await PommeSecurityWorkflow.runLive(
+                    reference: reference, operation: operation, finalState: finalState,
+                    force: force, lease: acquiredLease,
+                    recoveryFactory: currentRecoveryIntegrationFactory()
+                )
+                return result(
+                    title: action == .enable ? "Enable SIP" : "Disable SIP",
+                    reference: reference, payload: payload.publicValue as? [String: Any] ?? [:],
+                    text: formatSecurityPayload(payload.publicValue as? [String: Any] ?? [:])
+                )
+            }
             let integration = try await currentRecoveryIntegrationFactory().make(
                 reference: reference,
                 operation: .sip(action)
@@ -775,19 +793,34 @@ enum PommeApplication {
     static func amfiWorkflow(
         name: String,
         action: AMFIAction,
-        finalState: VMFinalState
+        finalState: VMFinalState,
+        force: Bool = false
     ) async throws -> PommeOperationResult {
-        try await amfiWorkflow(name: name, action: action, finalState: finalState, lease: nil)
+        try await amfiWorkflow(name: name, action: action, finalState: finalState, force: force, lease: nil)
     }
 
     private static func amfiWorkflow(
         name: String,
         action: AMFIAction,
         finalState: VMFinalState,
+        force: Bool = false,
         lease: VMBundleMutationLease?
     ) async throws -> PommeOperationResult {
-        try await VMBundleMutationLease.withLease(name: name, inherited: lease) { _ in
+        try await VMBundleMutationLease.withLease(name: name, inherited: lease) { acquiredLease in
             let reference = try namedReference(name)
+            if action != .status {
+                let operation: PommeSecurityWorkflowOperation = action == .enable ? .amfiEnable : .amfiDisable
+                let payload = try await PommeSecurityWorkflow.runLive(
+                    reference: reference, operation: operation, finalState: finalState,
+                    force: force, lease: acquiredLease,
+                    recoveryFactory: currentRecoveryIntegrationFactory()
+                )
+                return result(
+                    title: action == .enable ? "Enable AMFI" : "Disable AMFI",
+                    reference: reference, payload: payload.publicValue as? [String: Any] ?? [:],
+                    text: formatSecurityPayload(payload.publicValue as? [String: Any] ?? [:])
+                )
+            }
             let integration = try await currentRecoveryIntegrationFactory().make(
                 reference: reference,
                 operation: .amfi(action)

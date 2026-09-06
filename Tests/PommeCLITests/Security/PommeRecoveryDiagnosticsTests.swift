@@ -22,6 +22,80 @@ struct PommeRecoveryDiagnosticsTests {
         #expect(payload["code"] as? String == "authenticationRejected")
     }
 
+    @Test("Known guest rollback failures expose only the closed code and proven phase")
+    func typedRollbackDiagnostic() throws {
+        let failure = PommeRecoveryGuestOperationFailure(code: .rollbackFailed)
+        let diagnostic = PommeRecoveryDiagnosticRedactor.make(
+            error: failure,
+            stage: .operation,
+            cleanupComplete: true,
+            finalStateVerified: true
+        )
+        let payload = PommeRecoveryDiagnosticRedactor.payload(diagnostic)
+        let serialized = String(data: try JSONSerialization.data(withJSONObject: payload), encoding: .utf8)!
+
+        #expect(diagnostic.code == .policyRollbackRejected)
+        #expect(diagnostic.phase == .rollbackFailed)
+        #expect(payload["phase"] as? String == "rollbackFailed")
+        #expect(serialized.contains("policyRollbackRejected"))
+        #expect(!serialized.contains("password"))
+        #expect(!serialized.contains("argv"))
+    }
+
+    @Test("Guest Recovery errors map to the allowlisted wire vocabulary")
+    func guestFailureWireVocabulary() {
+        let mappings: [(PommeGuestRecoverySecurityError, PommeRecoveryGuestFailureCode)] = [
+            (.rollbackFailed, .rollbackFailed),
+            (.verificationFailed, .verificationFailed),
+            (.invalidSnapshot, .invalidSnapshot),
+            (.snapshotPending, .snapshotPending),
+            (.invalidPolicy, .invalidPolicy),
+            (.invalidNVRAM, .invalidNVRAM),
+            (.nvramWriteDenied, .nvramWriteDenied),
+            (.commandFailed, .commandFailed),
+            (.promptRejected, .promptRejected),
+            (.timedOut, .timedOut),
+        ]
+        for (error, expected) in mappings {
+            #expect(error.recoveryFailureCode == expected)
+            #expect(expected.rawValue.hasPrefix("recovery-"))
+        }
+    }
+
+    @Test("Unknown errors remain generic and cannot manufacture a Recovery phase")
+    func unknownErrorRemainsGeneric() {
+        struct Unknown: Error, LocalizedError {
+            var errorDescription: String? { "secret /private/var/tmp and argv password" }
+        }
+        let diagnostic = PommeRecoveryDiagnosticRedactor.make(
+            error: Unknown(),
+            stage: .operation
+        )
+
+        #expect(diagnostic.code == .unknown)
+        #expect(diagnostic.phase == nil)
+    }
+
+    @Test("NVRAM permission refusal stays closed and does not claim rollback")
+    func nvramWriteDeniedDiagnostic() throws {
+        let failure = PommeRecoveryGuestOperationFailure(code: .nvramWriteDenied)
+        let diagnostic = PommeRecoveryDiagnosticRedactor.make(
+            error: failure,
+            stage: .operation,
+            cleanupComplete: true
+        )
+        let payload = PommeRecoveryDiagnosticRedactor.payload(diagnostic)
+        let serialized = String(data: try JSONSerialization.data(withJSONObject: payload), encoding: .utf8)!
+
+        #expect(failure.phase == nil)
+        #expect(failure.errorDescription == "Recovery denied the AMFI boot-argument write; the retained transaction requires inspection before retry.")
+        #expect(diagnostic.code == .operationRejected)
+        #expect(diagnostic.phase == nil)
+        #expect(!serialized.contains("rollback"))
+        #expect(!serialized.contains("password"))
+        #expect(!serialized.contains("boot-argument"))
+    }
+
     @Test("Owned Recovery sources contain no removed alternate-path vocabulary")
     func prohibitedStringsAbsent() throws {
         let repository = URL(fileURLWithPath: #filePath)

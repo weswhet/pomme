@@ -18,6 +18,24 @@ struct PommeAgentTests {
         let agent = try PommeAgent(role: .persistent, executableSHA256: oldDigest, journalPath: directory.appendingPathComponent("journal").path, executablePath: executable.path)
         let describe = try await agent.perform(.request(operation: "agent.describe"))
         #expect(describe.objectValue?["role"]?.stringValue == "persistent")
+        #expect(describe.objectValue.map { Set($0.keys) } == Set(["role", "protocol", "version", "executableSHA256", "capabilities"]))
+        #expect(describe.objectValue?["privatePTYInputVersion"] == nil)
+        let privatePTYDescribe = try await agent.perform(.request(
+            operation: "agent.describe",
+            payload: .object(["includePrivatePTYCapabilities": .bool(true)])
+        ))
+        #expect(privatePTYDescribe.objectValue.map { Set($0.keys) } == Set(["role", "protocol", "version", "executableSHA256", "capabilities", "privatePTYInputVersion"]))
+        #expect(privatePTYDescribe.objectValue?["privatePTYInputVersion"] == .integer(Int64(PommeAgent.privatePTYInputVersion)))
+        let normalAMFIDescribe = try await agent.perform(.request(
+            operation: "agent.describe",
+            payload: .object(["includeNormalAMFICapabilities": .bool(true)])
+        ))
+        #expect(normalAMFIDescribe.objectValue.map { Set($0.keys) } == Set([
+            "role", "protocol", "version", "executableSHA256", "capabilities",
+            "normalAMFIWorkflowVersion"
+        ]))
+        #expect(normalAMFIDescribe.objectValue?["normalAMFIWorkflowVersion"] == .integer(Int64(PommeAgent.normalAMFIWorkflowVersion)))
+        #expect(normalAMFIDescribe.objectValue?["capabilities"]?.arrayValue?.compactMap(\.stringValue).contains("amfi.normal.disable") == true)
         let begin = try await agent.perform(.request(operation: "maintenance.update.begin", payload: .object(["targetSHA256": .string(newDigest), "targetBytes": .integer(9), "stagedExecutable": .string(staged.path)])))
         let transaction = try #require(begin.objectValue?["transactionID"]?.stringValue)
         await #expect(throws: PommeAgentOperationError.self) {
@@ -110,6 +128,44 @@ struct PommeAgentTests {
         )[.posixPermissions] as? NSNumber)?.intValue == 0o755)
     }
 
+    @Test("Recovery installation accepts the existing canonical private workspace")
+    func recoveryInstallFromCanonicalPrivateWorkspace() async throws {
+        // Arrange: reproduce the literal /private path emitted by the launcher,
+        // with real files present (nonexistent paths hide Foundation's aliasing).
+        let root = try recoveryFixture(
+            createTargetParents: false,
+            workspaceParent: URL(fileURLWithPath: "/private/var/tmp", isDirectory: true),
+            baseParent: URL(fileURLWithPath: "/private/var/tmp", isDirectory: true)
+        )
+        defer {
+            try? FileManager.default.removeItem(at: root.workspace)
+            try? FileManager.default.removeItem(at: root.base)
+        }
+        #expect(root.workspace.path.hasPrefix("/private/var/tmp/pomme-recovery-"))
+        let agent = try PommeAgent(
+            role: .recovery, executableSHA256: root.digest,
+            recoveryInstaller: root.installer
+        )
+
+        // Act: run the actual workspace validation and transactional installer,
+        // targeting only the isolated fixture's fake Data-volume directory.
+        let result = try await agent.perform(.request(
+            operation: "agent.install",
+            payload: .object([
+                "persistentToken": .string(root.persistentToken),
+                "requestID": .string(root.request.requestID.uuidString.lowercased()),
+                "workspacePath": .string(root.workspace.path),
+                "installMode": .string("initial")
+            ]),
+            requestID: root.request.requestID
+        ))
+
+        // Assert: source identity survives validation and installation.
+        #expect(result.objectValue?["executableSHA256"]?.stringValue == root.digest)
+        #expect(try Data(contentsOf: root.executable) == root.executableData)
+        #expect(FileManager.default.fileExists(atPath: root.token.path))
+    }
+
     @Test("Recovery install rejects a digest mismatch without replacing an existing executable")
     func recoveryInstallRollbackOnValidationFailure() async throws {
         let root = try recoveryFixture(manifestDigest: String(repeating: "f", count: 64))
@@ -131,11 +187,49 @@ struct PommeAgentTests {
         #expect(try Data(contentsOf: root.executable) == Data("old".utf8))
     }
 
+    @Test("Recovery workspace proof rejects symlink components and unsafe modes")
+    func recoveryWorkspaceProofRejectsSymlinksAndUnsafeModes() throws {
+        // Arrange: no real VM, root directory, or credential is used.
+        let root = try recoveryFixture()
+        defer { try? FileManager.default.removeItem(at: root.base) }
+        try PommeAgentFileTransaction.verifyRecoveryWorkspaceDirectory(
+            root.workspace, owner: geteuid(), group: getegid()
+        )
+        let leafAlias = root.base.appendingPathComponent("workspace-alias")
+        try FileManager.default.createSymbolicLink(at: leafAlias, withDestinationURL: root.workspace)
+        let parentAlias = root.base.appendingPathComponent("linked-parent")
+        try FileManager.default.createSymbolicLink(at: parentAlias, withDestinationURL: root.base)
+
+        // Act/Assert: neither a leaf nor an ancestor link can become a proof.
+        for alias in [leafAlias, parentAlias.appendingPathComponent(root.workspace.lastPathComponent)] {
+            #expect(throws: PommeAgentProtocol.Error.self) {
+                try PommeAgentFileTransaction.verifyRecoveryWorkspaceDirectory(
+                    alias, owner: geteuid(), group: getegid()
+                )
+            }
+        }
+        try #require(chmod(root.workspace.path, 0o755) == 0)
+        #expect(throws: PommeAgentProtocol.Error.self) {
+            try PommeAgentFileTransaction.verifyRecoveryWorkspaceDirectory(
+                root.workspace, owner: geteuid(), group: getegid()
+            )
+        }
+        #expect(try Data(contentsOf: root.workspace.appendingPathComponent(
+            PommeRecoveryArtifactNames.executable
+        )) == root.executableData)
+    }
+
     @Test("Recovery role cannot run the persistent command surface")
     func recoveryRoleIsClosed() async throws {
         let agent = try PommeAgent(role: .recovery, executableSHA256: String(repeating: "a", count: 64))
         await #expect(throws: PommeAgentOperationError.self) {
             _ = try await agent.perform(.request(operation: "process.start", payload: .object(["path": .string("/bin/true"), "arguments": .array([])])))
+        }
+        await #expect(throws: PommeAgentOperationError.self) {
+            _ = try await agent.perform(.request(
+                operation: "amfi.normal.disable",
+                payload: .object(["volumeGroupUUID": .string(UUID().uuidString.lowercased())])
+            ))
         }
     }
 }
@@ -156,12 +250,24 @@ private struct RecoveryFixture {
 
 private func recoveryFixture(
     manifestDigest: String? = nil,
-    createTargetParents: Bool = true
+    createTargetParents: Bool = true,
+    workspaceParent: URL? = nil,
+    baseParent: URL? = nil
 ) throws -> RecoveryFixture {
-    let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let base = (baseParent ?? FileManager.default.temporaryDirectory).appendingPathComponent(UUID().uuidString)
     let requestID = UUID()
-    let workspace = base.appendingPathComponent("pomme-recovery-\(requestID.uuidString.lowercased())")
-    try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(
+        at: base, withIntermediateDirectories: false,
+        attributes: [.posixPermissions: 0o700]
+    )
+    let workspace = (workspaceParent ?? base).appendingPathComponent("pomme-recovery-\(requestID.uuidString.lowercased())")
+    try FileManager.default.createDirectory(
+        at: workspace, withIntermediateDirectories: false,
+        attributes: [.posixPermissions: 0o700]
+    )
+    guard chown(workspace.path, geteuid(), getegid()) == 0 else {
+        throw CocoaError(.fileWriteNoPermission)
+    }
     let executableData = Data("signed-recovery-agent".utf8)
     let digest = SHA256.hash(data: executableData).map { String(format: "%02x", $0) }.joined()
     let persistentToken = String(repeating: "9", count: 64)

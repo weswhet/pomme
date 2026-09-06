@@ -126,11 +126,30 @@ struct PommeAgentOperationsTests {
         let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64))
         let started = try await agent.perform(.request(operation: "process.start", payload: .object(["path": .string("/bin/sh"), "arguments": .array([.string("-c"), .string("printf out; printf err >&2")]) ])))
         let id = try #require(started.objectValue?["jobID"]?.stringValue)
-        try await Task.sleep(for: .milliseconds(100))
-        let events = try await agent.streamEvents(jobID: try #require(UUID(uuidString: id)), requestID: UUID())
-        #expect(events.contains { $0.stream == .stdout && $0.data == Data("out".utf8) })
-        #expect(events.contains { $0.stream == .stderr && $0.data == Data("err".utf8) })
-        #expect(events.contains { $0.stream == .exit })
+        let jobID = try #require(UUID(uuidString: id))
+        let requestID = UUID()
+        var events: [PommeAgentStreamFrame] = []
+        for _ in 0..<128 where !events.contains(where: { $0.stream == .exit }) {
+            events += try await agent.streamEvents(jobID: jobID, requestID: requestID)
+            if !events.contains(where: { $0.stream == .exit }) {
+                await Task.yield()
+            }
+        }
+
+        let stdout = events
+            .filter { $0.stream == .stdout }
+            .compactMap(\.data)
+            .reduce(into: Data()) { $0.append(contentsOf: $1) }
+        let stderr = events
+            .filter { $0.stream == .stderr }
+            .compactMap(\.data)
+            .reduce(into: Data()) { $0.append(contentsOf: $1) }
+        let exitIndex = try #require(events.firstIndex { $0.stream == .exit })
+        #expect(stdout == Data("out".utf8))
+        #expect(stderr == Data("err".utf8))
+        #expect(events[..<exitIndex].contains { $0.stream == .stdout })
+        #expect(events[..<exitIndex].contains { $0.stream == .stderr })
+        #expect(events[exitIndex].requestID == requestID)
     }
 
     @Test("PTY receives resize, signal, and terminal output")

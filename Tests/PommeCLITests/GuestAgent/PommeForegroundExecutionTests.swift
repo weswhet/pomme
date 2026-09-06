@@ -1,0 +1,351 @@
+import Foundation
+import Testing
+
+@Suite("Pomme foreground execution")
+struct PommeForegroundExecutionTests {
+    private let jobID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+    private let startRequestID = UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!
+
+    @Test("polls until output is complete and retains stderr and exit status")
+    func delayedOutputAndCompletion() async throws {
+        // Given
+        let firstStatus = correlated(
+            requestID: UUID(),
+            result: status(exited: false),
+            frames: [frame(jobID: jobID, stream: .stdout, data: Data("early".utf8))]
+        )
+        let finalStatus = correlated(
+            requestID: UUID(),
+            result: status(exited: true, exitCode: 7),
+            frames: [
+                frame(jobID: jobID, stream: .stdout, data: Data("late".utf8)),
+                frame(jobID: jobID, stream: .stderr, data: Data("warning".utf8)),
+                frame(jobID: jobID, stream: .exit)
+            ]
+        )
+        let transport = ForegroundTransport(
+            start: correlated(
+                requestID: startRequestID,
+                result: started(),
+                frames: []
+            ),
+            statuses: [firstStatus, finalStatus]
+        )
+
+        // When
+        let result = try await run(transport: transport)
+
+        // Then
+        #expect(result.requestID == startRequestID)
+        #expect(result.result.objectValue?["jobID"] == .string(jobID.uuidString.lowercased()))
+        #expect(result.result.objectValue?["exited"] == .bool(true))
+        #expect(result.result.objectValue?["exitCode"] == .integer(7))
+        #expect(result.streamFrames.filter { $0.frame.stream == .stdout }.count == 2)
+        #expect(result.streamFrames.contains { $0.frame.stream == .stderr && $0.frame.data == Data("warning".utf8) })
+        #expect(await transport.operationNames == ["process.start", "process.status", "process.status"])
+        #expect(await transport.streamCalls.map(\.stream) == [.eof])
+    }
+
+    @Test("sends supplied input in bounded chunks followed by one EOF")
+    func suppliedInputIsChunkedAndClosed() async throws {
+        // Given
+        let input = Data(repeating: 0x61, count: PommeAgentProtocol.maximumStreamChunkBytes * 2 + 7)
+        let transport = ForegroundTransport(
+            start: correlated(requestID: startRequestID, result: started(), frames: []),
+            statuses: [
+                correlated(
+                    requestID: UUID(),
+                    result: status(exited: true, exitCode: 0),
+                    frames: [frame(jobID: jobID, stream: .exit)]
+                )
+            ]
+        )
+
+        // When
+        _ = try await run(
+            payload: .object([
+                "path": .string("/bin/cat"),
+                "arguments": .array([]),
+                "stdinDataBase64": .string(input.base64EncodedString())
+            ]),
+            transport: transport
+        )
+
+        // Then
+        let calls = await transport.streamCalls
+        #expect(calls.map(\.stream) == [.stdin, .stdin, .stdin, .eof])
+        #expect(calls.dropLast().map { $0.data?.count } == [PommeAgentProtocol.maximumStreamChunkBytes, PommeAgentProtocol.maximumStreamChunkBytes, 7])
+        #expect(calls.last?.data == nil)
+    }
+
+    @Test("bounds unary output while preserving the terminal frame")
+    func boundedOutput() async throws {
+        // Given
+        let chunk = Data(repeating: 0x62, count: PommeAgentProtocol.maximumStreamChunkBytes)
+        let transport = ForegroundTransport(
+            start: correlated(requestID: startRequestID, result: started(), frames: []),
+            statuses: [
+                correlated(
+                    requestID: UUID(),
+                    result: status(exited: true, exitCode: 0),
+                    frames: [
+                        frame(jobID: jobID, stream: .stdout, data: chunk),
+                        frame(jobID: jobID, stream: .stdout, data: chunk),
+                        frame(jobID: jobID, stream: .stdout, data: chunk),
+                        frame(jobID: jobID, stream: .exit)
+                    ]
+                )
+            ]
+        )
+
+        // When
+        let result = try await run(transport: transport)
+
+        // Then
+        let stdoutBytes = result.streamFrames
+            .filter { $0.frame.stream == .stdout }
+            .compactMap { $0.frame.data?.count }
+            .reduce(0, +)
+        #expect(stdoutBytes == PommeForegroundExecution.maximumBufferedOutputBytes)
+        #expect(result.result.objectValue?["stdoutTruncated"] == .bool(true))
+        #expect(result.streamFrames.contains { $0.frame.stream == .exit })
+    }
+
+    @Test("callback mode forwards all frames and does not return a second copy")
+    func callbackMode() async throws {
+        // Given
+        let collector = FrameCollector()
+        let transport = ForegroundTransport(
+            start: correlated(requestID: startRequestID, result: started(), frames: []),
+            statuses: [
+                correlated(
+                    requestID: UUID(),
+                    result: status(exited: true, exitCode: 0),
+                    frames: [
+                        frame(jobID: jobID, stream: .stdout, data: Data("out".utf8)),
+                        frame(jobID: jobID, stream: .stderr, data: Data("err".utf8)),
+                        frame(jobID: jobID, stream: .exit)
+                    ]
+                )
+            ]
+        )
+
+        // When
+        let result = try await run(transport: transport) { frames in
+            await collector.append(frames)
+        }
+
+        // Then
+        #expect(result.streamFrames.isEmpty)
+        #expect(await collector.frames.count == 3)
+        #expect(await collector.frames.contains { $0.frame.stream == .stderr })
+        #expect(result.result.objectValue?["stdoutTruncated"] == .bool(false))
+        #expect(result.result.objectValue?["stderrTruncated"] == .bool(false))
+    }
+
+    @Test("timeout sends SIGTERM once and reports the still-owned job")
+    func timeoutDoesNotRestart() async throws {
+        // Given
+        let transport = ForegroundTransport(
+            start: correlated(requestID: startRequestID, result: started(), frames: []),
+            statuses: []
+        )
+
+        // When
+        let result = try await run(transport: transport, timeout: 0.03)
+
+        // Then
+        #expect(result.result.objectValue?["jobID"] == .string(jobID.uuidString.lowercased()))
+        #expect(result.result.objectValue?["exited"] == .bool(false))
+        #expect(result.result.objectValue?["timedOut"] == .bool(true))
+        #expect(await transport.signalCalls == 1)
+        #expect(await transport.operationNames.filter { $0 == "process.start" }.count == 1)
+    }
+
+    @Test("cancellation sends SIGTERM once and reports the still-owned job")
+    func cancellationDoesNotRestart() async throws {
+        // Given
+        let transport = ForegroundTransport(
+            start: correlated(requestID: startRequestID, result: started(), frames: []),
+            statuses: []
+        )
+        let task = Task {
+            try await run(transport: transport, timeout: 5)
+        }
+        try await Task.sleep(for: .milliseconds(20))
+
+        // When
+        task.cancel()
+        let result = try await task.value
+
+        // Then
+        #expect(result.result.objectValue?["jobID"] == .string(jobID.uuidString.lowercased()))
+        #expect(result.result.objectValue?["cancelled"] == .bool(true))
+        #expect(result.result.objectValue?["timedOut"] == .bool(false))
+        #expect(await transport.signalCalls == 1)
+        #expect(await transport.operationNames.filter { $0 == "process.start" }.count == 1)
+    }
+
+    @Test("rejects a stream frame for another job and terminates the known job once")
+    func unrelatedJobFrameIsRejected() async throws {
+        // Given
+        let otherJob = UUID(uuidString: "cccccccc-cccc-cccc-cccc-cccccccccccc")!
+        let transport = ForegroundTransport(
+            start: correlated(requestID: startRequestID, result: started(), frames: []),
+            statuses: [
+                correlated(
+                    requestID: UUID(),
+                    result: status(exited: true, exitCode: 0),
+                    frames: [frame(jobID: otherJob, stream: .stdout, data: Data("wrong".utf8))]
+                )
+            ]
+        )
+
+        // When / Then
+        do {
+            _ = try await run(transport: transport)
+            Issue.record("Expected an unrelated-job stream frame to be rejected.")
+        } catch let error as PommeForegroundExecution.Error {
+            #expect(error == .unrelatedJobFrame)
+        }
+        #expect(await transport.signalCalls == 1)
+    }
+
+    @Test("rejects detached payloads before starting a process")
+    func detachedPayloadIsRejected() async throws {
+        // Given
+        let transport = ForegroundTransport(
+            start: correlated(requestID: startRequestID, result: started(), frames: []),
+            statuses: []
+        )
+
+        // When / Then
+        do {
+            _ = try await run(
+                payload: .object(["detached": .bool(true)]),
+                transport: transport
+            )
+            Issue.record("Expected detached execution to be rejected.")
+        } catch let error as PommeForegroundExecution.Error {
+            #expect(error == .detachedPayload)
+        }
+        #expect(await transport.operationNames.isEmpty)
+    }
+
+    private func run(
+        payload: JSONValue = .object([
+            "path": .string("/bin/true"),
+            "arguments": .array([])
+        ]),
+        transport: ForegroundTransport,
+        timeout: TimeInterval = 1,
+        onFrames: PommeForegroundExecution.FrameHandler? = nil
+    ) async throws -> PommeAgentCorrelatedResult {
+        try await PommeForegroundExecution.run(
+            payload: payload,
+            timeout: timeout,
+            perform: { operation, payload in
+                try await transport.perform(operation: operation, payload: payload)
+            },
+            sendStream: { jobID, stream, data in
+                try await transport.sendStream(jobID: jobID, stream: stream, data: data)
+            },
+            onFrames: onFrames
+        )
+    }
+
+    private func started() -> JSONValue {
+        .object([
+            "jobID": .string(jobID.uuidString.lowercased()),
+            "pid": .integer(42),
+            "detached": .bool(false),
+            "exited": .bool(false)
+        ])
+    }
+
+    private func status(exited: Bool, exitCode: Int64? = nil, signal: Int64? = nil) -> JSONValue {
+        var values: [String: JSONValue] = [
+            "jobID": .string(jobID.uuidString.lowercased()),
+            "pid": .integer(42),
+            "detached": .bool(false),
+            "exited": .bool(exited)
+        ]
+        if let exitCode { values["exitCode"] = .integer(exitCode) }
+        if let signal { values["signal"] = .integer(signal) }
+        return .object(values)
+    }
+
+    private func frame(
+        jobID: UUID,
+        stream: PommeAgentProtocol.Stream,
+        data: Data? = nil
+    ) -> PommeAgentJobStreamFrame {
+        try! .init(jobID: jobID, frame: .init(requestID: UUID(), stream: stream, data: data))
+    }
+
+    private func correlated(
+        requestID: UUID,
+        result: JSONValue,
+        frames: [PommeAgentJobStreamFrame]
+    ) -> PommeAgentCorrelatedResult {
+        .init(requestID: requestID, result: result, streamFrames: frames)
+    }
+}
+
+private actor FrameCollector {
+    private(set) var frames: [PommeAgentJobStreamFrame] = []
+
+    func append(_ values: [PommeAgentJobStreamFrame]) { frames.append(contentsOf: values) }
+}
+
+private actor ForegroundTransport {
+    struct StreamCall: Sendable {
+        let jobID: UUID
+        let stream: PommeAgentProtocol.Stream
+        let data: Data?
+    }
+
+    let start: PommeAgentCorrelatedResult
+    let statuses: [PommeAgentCorrelatedResult]
+    private var statusIndex = 0
+    private(set) var operationNames: [String] = []
+    private(set) var streamCalls: [StreamCall] = []
+    private(set) var signalCalls = 0
+
+    init(start: PommeAgentCorrelatedResult, statuses: [PommeAgentCorrelatedResult]) {
+        self.start = start
+        self.statuses = statuses
+    }
+
+    func perform(operation: String, payload: JSONValue) -> PommeAgentCorrelatedResult {
+        operationNames.append(operation)
+        switch operation {
+        case "process.start": return start
+        case "process.status":
+            if statusIndex < statuses.count {
+                defer { statusIndex += 1 }
+                return statuses[statusIndex]
+            }
+            return .init(
+                requestID: UUID(),
+                result: .object([
+                    "jobID": .string("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                    "pid": .integer(42),
+                    "detached": .bool(false),
+                    "exited": .bool(false)
+                ]),
+                streamFrames: []
+            )
+        case "process.signal":
+            signalCalls += 1
+            return .init(requestID: UUID(), result: .object([:]), streamFrames: [])
+        default:
+            return .init(requestID: UUID(), result: .object([:]), streamFrames: [])
+        }
+    }
+
+    func sendStream(jobID: UUID, stream: PommeAgentProtocol.Stream, data: Data?) -> [PommeAgentJobStreamFrame] {
+        streamCalls.append(.init(jobID: jobID, stream: stream, data: data))
+        return []
+    }
+}

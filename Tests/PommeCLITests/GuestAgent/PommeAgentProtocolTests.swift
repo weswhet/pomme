@@ -148,6 +148,25 @@ struct PommeAgentProtocolTests {
         #expect(response.error?.code == "not-found")
         #expect(response.result == nil)
     }
+
+    @Test("Recovery security errors use a closed code and fixed protocol message")
+    func recoverySecurityFailureIsClosed() async throws {
+        let connection = try PommeAgentConnection(
+            token: String(repeating: "a", count: 64), lifetime: .persistent)
+        let auth = PommeAgentProtocol.Envelope.request(
+            operation: "authenticate",
+            payload: .object(["challenge": .string(String(repeating: "b", count: 64))])
+        )
+        _ = await connection.receive(try PommeAgentProtocol.encode(auth).dropLast()) { _ in .object([:]) }
+        let request = PommeAgentProtocol.Envelope.request(operation: "amfi.disable")
+        let line = await connection.receive(try PommeAgentProtocol.encode(request).dropLast()) { _ in
+            throw PommeGuestRecoverySecurityError.rollbackFailed
+        }
+        let response = try PommeAgentProtocol.decode(Data(line.dropLast()))
+        #expect(response.error?.code == PommeRecoveryGuestFailureCode.rollbackFailed.rawValue)
+        #expect(response.error?.message == "The requested operation could not be completed.")
+        #expect(response.error?.message.contains("rollback") == false)
+    }
 }
 
 private actor AgentRequestIDRecorder {

@@ -65,13 +65,15 @@ actor ExitSignal {
 
 final class VMDelegate: NSObject, VZVirtualMachineDelegate {
     private let exitSignal: ExitSignal
+    private let vmName: String
 
-    init(exitSignal: ExitSignal) {
+    init(exitSignal: ExitSignal, vmName: String) {
         self.exitSignal = exitSignal
+        self.vmName = vmName
     }
 
     func guestDidStop(_ virtualMachine: VZVirtualMachine) {
-        print("[\(Date().pommeISO8601String)] Guest stopped the VM.")
+        PommeCore.log("Guest stopped the VM.", vmName: vmName)
         let exitSignal = self.exitSignal
         Task {
             await exitSignal.requestExit()
@@ -79,7 +81,7 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
     }
 
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
-        print("[\(Date().pommeISO8601String)] VM stopped with error: \(error.localizedDescription)")
+        PommeCore.log("VM stopped with error: \(error.localizedDescription)", vmName: vmName)
         let exitSignal = self.exitSignal
         Task {
             await exitSignal.requestExit()

@@ -3,6 +3,35 @@ import Testing
 
 @Suite("PommeCore Recovery provisioning")
 struct PommeCoreRecoveryProvisioningTests {
+    @Test("experimental Recovery evidence preserves the new OS identity", arguments: [
+        ("26.6.2", "25G83"), ("27.0.0", "26A5351b")
+    ])
+    func experimentalRecoveryEvidence(version: String, build: String) throws {
+        let descriptor = try PommeRecoveryProfileSelector.descriptor(version: version, build: build)
+        let digest = String(repeating: "a", count: 64)
+        let plan = try PommeProvisioningPlan(
+            vm: .init(
+                name: "pomme-experimental-evidence",
+                uuid: UUID(uuidString: "01234567-89AB-CDEF-0123-456789ABCDEF")!,
+                bundlePath: "/tmp/pomme-experimental-evidence.bundle"
+            ),
+            restore: .init(version: version, build: build, restoreImageDigest: digest),
+            display: .required,
+            profile: try .init(descriptor: descriptor),
+            normalAgent: try .init(identifier: "com.github.weswhet.pomme.agent", executableDigest: digest, role: .normal),
+            recoveryAgent: try .init(identifier: "com.github.weswhet.pomme.recovery", executableDigest: digest, role: .recovery),
+            finalState: .stopped
+        )
+
+        let evidence = try PommeCore.recoveryProfileEvidence(for: plan)
+
+        #expect(evidence.build == .experimental(version: version, build: build))
+        #expect(evidence.manifestHash == .experimentalProfile(descriptor.digest))
+        #expect(throws: PommeRecoveryInputQualificationError.self) {
+            _ = try PommeRecoveryProfileSelector.reviewedDescriptor(for: evidence)
+        }
+    }
+
     @Test("normal-agent provisioning requires granular Pomme operations")
     func provisioningAgentCapabilityPolicy() {
         #expect(PommeCore.supportsProvisioningAgentCapabilities([
@@ -24,6 +53,90 @@ struct PommeCoreRecoveryProvisioningTests {
             "file.open",
             "maintenance"
         ]))
+    }
+
+    @Test("normal AMFI forwarding strips only the host digest marker")
+    func normalAMFIForwardingIsClosed() throws {
+        let digest = String(repeating: "a", count: 64)
+        let volumeGroupUUID = "11111111-2222-3333-4444-555555555555"
+        let payload = JSONValue.object([
+            PommeSecurityNormalAgent.normalAMFIDigestMarker: .string(digest),
+            "volumeGroupUUID": .string(volumeGroupUUID),
+        ])
+
+        let forwarded = try PommeCore.normalAMFIForwardPayload(
+            operation: "amfi.normal.disable",
+            payload: payload,
+            expectedExecutableDigest: digest
+        )
+        #expect(forwarded == .object([
+            "volumeGroupUUID": .string(volumeGroupUUID),
+        ]))
+
+        var extra = payload.objectValue!
+        extra["unexpected"] = .string("rejected")
+        #expect(throws: PommeSecurityNormalAgentError.self) {
+            _ = try PommeCore.normalAMFIForwardPayload(
+                operation: "amfi.normal.disable",
+                payload: .object(extra),
+                expectedExecutableDigest: digest
+            )
+        }
+
+        var wrongMarker = payload.objectValue!
+        wrongMarker[PommeSecurityNormalAgent.normalAMFIDigestMarker] =
+            .string(String(repeating: "b", count: 64))
+        #expect(throws: PommeSecurityNormalAgentError.self) {
+            _ = try PommeCore.normalAMFIForwardPayload(
+                operation: "amfi.normal.disable",
+                payload: .object(wrongMarker),
+                expectedExecutableDigest: digest
+            )
+        }
+
+        #expect(throws: PommeSecurityNormalAgentError.self) {
+            _ = try PommeCore.normalAMFIForwardPayload(
+                operation: "amfi.disable",
+                payload: payload,
+                expectedExecutableDigest: digest
+            )
+        }
+    }
+
+    @Test("normal AMFI capability receipt is pinned and strictly typed")
+    func normalAMFICapabilityReceiptIsStrict() {
+        let digest = String(repeating: "a", count: 64)
+        let description = JSONValue.object([
+            "role": .string("persistent"),
+            "protocol": .string(PommeAgentProtocol.name),
+            "version": .integer(Int64(PommeAgentProtocol.version)),
+            "executableSHA256": .string(digest),
+            "normalAMFIWorkflowVersion": .integer(
+                Int64(PommeSecurityNormalAgent.normalAMFIWorkflowVersion)
+            ),
+            "capabilities": .array(
+                PommeSecurityNormalAgent.normalAMFIOperations.map(JSONValue.string)
+            ),
+        ])
+        #expect(PommeCore.normalAMFICapabilityReceipt(
+            description, expectedExecutableDigest: digest))
+
+        var old = description.objectValue!
+        old.removeValue(forKey: "normalAMFIWorkflowVersion")
+        #expect(!PommeCore.normalAMFICapabilityReceipt(
+            .object(old), expectedExecutableDigest: digest))
+
+        var coerced = description.objectValue!
+        coerced["version"] = .string("1")
+        #expect(!PommeCore.normalAMFICapabilityReceipt(
+            .object(coerced), expectedExecutableDigest: digest))
+
+        var malformedCapabilities = description.objectValue!
+        malformedCapabilities["capabilities"] = .array([
+            .string("amfi.normal.disable"), .bool(true),
+        ])
+        #expect(!PommeCore.normalAMFICapabilityReceipt(
+            .object(malformedCapabilities), expectedExecutableDigest: digest))
     }
 
     @Test("previous resolves the captured stopped state")
@@ -149,7 +262,21 @@ struct PommeCoreRecoveryProvisioningTests {
             recoveryAgent: try .init(identifier: "com.github.weswhet.pomme.recovery", executableDigest: String(repeating: "a", count: 64), role: .recovery),
             finalState: .stopped
         )
-        try writeMetadataPayload([Constants.vmUUIDMetadataKey: vmUUID.uuidString.lowercased()], bundle: .init(rootURL: root))
+        let bundle = BundleLayout(rootURL: root)
+        let mismatchedUUID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        try writeMetadataPayload(
+            [Constants.vmUUIDMetadataKey: mismatchedUUID.uuidString.lowercased()],
+            bundle: bundle
+        )
+        let mismatchedMetadata = try Data(contentsOf: bundle.metadataURL)
+        #expect(throws: PommeProvisioningError.ownershipMismatch) {
+            _ = try PommeCore.provisioningRuntimeMetadata(for: plan)
+        }
+        // The ownership rejection is metadata-only and must not alter the VM
+        // bundle or reach any runtime effect.
+        #expect(try Data(contentsOf: bundle.metadataURL) == mismatchedMetadata)
+
+        try writeMetadataPayload([Constants.vmUUIDMetadataKey: vmUUID.uuidString.lowercased()], bundle: bundle)
 
         #expect(try PommeCore.provisioningRuntimeMetadata(for: plan).startupVolumeGroupUUID == nil)
         try PommeCore.persistProvisioningStartupVolumeGroup(groupUUID, for: plan)
@@ -167,6 +294,7 @@ struct PommeCoreRecoveryProvisioningTests {
 
         try await PommeCore.waitForLiveRecoveryAuxiliaryStorageRelease(
             at: URL(fileURLWithPath: "/tmp/pomme-auxiliary-storage-test"),
+            vmName: "dev",
             maxRetries: 1,
             retryDelayNanoseconds: 123,
             hasConflict: { _ in conflicts.next() },
@@ -184,6 +312,7 @@ struct PommeCoreRecoveryProvisioningTests {
         await #expect(throws: PommeLiveRecoveryIntegration.Error.runtimeRejected) {
             try await PommeCore.waitForLiveRecoveryAuxiliaryStorageRelease(
                 at: URL(fileURLWithPath: "/tmp/pomme-auxiliary-storage-test"),
+                vmName: "dev",
                 maxRetries: 1,
                 retryDelayNanoseconds: 0,
                 hasConflict: { _ in conflicts.next() },
