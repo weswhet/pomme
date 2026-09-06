@@ -79,6 +79,14 @@ actor PommeRecoveryObservationReadiness {
     self.pollNanoseconds = max(1, pollNanoseconds)
   }
 
+  /// Resets the per-session classification cache and stability state without
+  /// retaining any previously observed frame label.
+  func clear() {
+    classifications.removeAll(keepingCapacity: false)
+    priorDigest = nil
+    stableCaptureCount = 0
+  }
+
   func waitForExpected(
     _ expected: PommeRecoveryFrame,
     context: PommeRecoveryFrameClassificationContext,
@@ -202,33 +210,99 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
 
   private let backend: VirtualizationPrivateHeadlessBackend
   private let timeout: TimeInterval
-  private let recognizer = SettingsAIOCRRecognizer()
+  private let recognizer: SettingsAIOCRRecognizer
+  private let regionalRecognizer: PommeRecoveryNavigationRecognizer
   private let readiness: PommeRecoveryObservationReadiness
+  private let metrics: PommeRecoveryPerformanceMetrics
+  private let log: @Sendable (String) -> Void
+  private var navigationRoute: PommeRecoveryNavigationRoute = .reviewedMenus
+  private var hasObservedOrDelivered = false
   private var deliveredKeys: [PommeRecoveryVirtualKey] = []
 
-  init(backend: VirtualizationPrivateHeadlessBackend, timeout: TimeInterval) {
+  init(
+    backend: VirtualizationPrivateHeadlessBackend,
+    timeout: TimeInterval,
+    metrics: PommeRecoveryPerformanceMetrics = .init(),
+    log: @escaping @Sendable (String) -> Void = { PommeCore.log($0) }
+  ) {
     self.backend = backend
     self.timeout = timeout
-    let recognizer = SettingsAIOCRRecognizer()
+    self.metrics = metrics
+    self.log = log
+    let recognizer = SettingsAIOCRRecognizer(
+      onRecognition: { seconds in
+        metrics.record(.ocr, seconds: seconds)
+      }
+    )
+    self.recognizer = recognizer
+    let regionalRecognizer = PommeRecoveryNavigationRecognizer(
+      ocr: { image, displaySize in
+        try recognizer.recognizeRecovery(image: image, displaySize: displaySize)
+      },
+      onEvent: { event in
+        switch event {
+        case .regionOCR:
+          break
+        case .regionCacheHit:
+          metrics.record(.regionCacheHit)
+        case .fullFrameFallback:
+          metrics.record(.fullFrameFallback)
+        }
+      }
+    )
+    self.regionalRecognizer = regionalRecognizer
     self.readiness = .init(
       capture: { timeout in
-        try .init(image: await backend.recoveryFrame(timeout: timeout))
+        let captureStart = PommeRecoveryPerformanceMetrics.now()
+        let image: CGImage
+        do {
+          image = try await backend.recoveryFrame(timeout: timeout)
+        } catch {
+          metrics.record(.capture, since: captureStart)
+          throw error
+        }
+        metrics.record(.capture, since: captureStart)
+
+        let hashStart = PommeRecoveryPerformanceMetrics.now()
+        do {
+          let captured = try PommeRecoveryFrameCapture(image: image)
+          metrics.record(.hash, since: hashStart)
+          return captured
+        } catch {
+          metrics.record(.hash, since: hashStart)
+          throw error
+        }
       },
       classify: { capture, context in
+        let classificationStart = PommeRecoveryPerformanceMetrics.now()
+        defer {
+          metrics.record(.classification, since: classificationStart)
+        }
         guard let image = capture.image else {
           throw PommeRecoveryVirtualizationPortError.unprovenFrame
         }
-        let lines = try recognizer.recognizeRecovery(
+        return try regionalRecognizer.classify(
           image: image,
-          displaySize: VirtualizationPrivateHeadlessBackend.displaySize
-        )
-        return PommeRecoveryFrameClassifier.classify(
-          image: image,
-          lines: lines,
           context: context
         )
+      },
+      sleep: { nanoseconds in
+        let waitStart = PommeRecoveryPerformanceMetrics.now()
+        defer { metrics.record(.wait, since: waitStart) }
+        try await Task.sleep(nanoseconds: nanoseconds)
       }
     )
+  }
+
+  /// Selects the immutable navigation trace before Recovery observation or
+  /// input begins. Repeating the already-selected route is harmless; changing
+  /// it after either effect has started is rejected so frame and key history
+  /// cannot be interpreted against a different trace.
+  func prepareRecoveryNavigation(route: PommeRecoveryNavigationRoute) async throws {
+    guard route == navigationRoute || !hasObservedOrDelivered else {
+      throw PommeRecoveryVirtualizationPortError.navigationRouteLocked
+    }
+    navigationRoute = route
   }
 
   func nextRecoveryFrame() async throws -> PommeRecoveryFrame {
@@ -237,27 +311,28 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
   }
 
   func nextRecoveryFramePair() async throws -> [PommeRecoveryFrame] {
+    hasObservedOrDelivered = true
     guard let expected = expectedCoarseFrame else {
       throw PommeRecoveryVirtualizationPortError.unprovenFrame
     }
-    let context: PommeRecoveryFrameClassificationContext =
-      deliveredKeys == [.right, .right, .return]
-      ? .optionsActivated
-      : .unproven
+    let context = classificationContext
     let coarsePair = try await readiness.waitForExpectedStablePair(
       expected,
       context: context,
       timeout: timeout
     )
-    return try coarsePair.map { try frameFromReviewedTrace(coarse: $0) }
+    return try coarsePair.map { try frameFromNavigationTrace(coarse: $0) }
   }
 
   func deliverRecoveryKey(
     _ key: PommeRecoveryVirtualKey
   ) async throws -> PommeRecoveryDurableInputReceipt {
+    hasObservedOrDelivered = true
     guard let expectedKey, key == expectedKey else {
       throw PommeRecoveryVirtualizationPortError.unexpectedKey
     }
+    let inputStart = PommeRecoveryPerformanceMetrics.now()
+    defer { metrics.record(.input, since: inputStart) }
     _ = try await backend.awaitInputReadiness(timeout: timeout)
     _ = try await backend.sendKey(name: Self.backendKeyName(for: key), timeout: timeout)
     let coarseFrameBeforeDelivery = expectedCoarseFrame
@@ -267,9 +342,18 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
       ? Timing.inferredFocusSettleNanoseconds
       : 0
     if settleNanoseconds > 0 {
-      try await Task.sleep(nanoseconds: settleNanoseconds)
+      try await sleep(settleNanoseconds)
     }
     return .init(key: key, deliveredEventCount: 1)
+  }
+
+  func clearRecoveryObservations() async {
+    await readiness.clear()
+    regionalRecognizer.clear()
+  }
+
+  func reportRecoveryPerformance(phase: PommeRecoveryPerformancePhase) async {
+    log(metrics.summary(phase: phase))
   }
 
   func submitTerminalLine(_ command: String) async throws {
@@ -279,7 +363,7 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     _ = try await backend.awaitInputReadiness(timeout: timeout)
     _ = try await backend.typeText(command, replace: false, timeout: timeout)
     _ = try await backend.sendKey(name: "return", timeout: timeout)
-    try await Task.sleep(nanoseconds: Timing.terminalCommandSettleNanoseconds)
+    try await sleep(Timing.terminalCommandSettleNanoseconds)
   }
 
   func terminalMarkerIsVerified(_ marker: String) async throws -> Bool {
@@ -289,7 +373,7 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     for attempt in 0..<Timing.markerAttempts {
       if try await recognizesTerminalMarker(marker) { return true }
       if attempt + 1 < Timing.markerAttempts {
-        try await Task.sleep(nanoseconds: Timing.markerRetryNanoseconds)
+        try await sleep(Timing.markerRetryNanoseconds)
       }
     }
     return false
@@ -298,115 +382,92 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
   func clearTerminalLine() async throws {
     _ = try await backend.awaitInputReadiness(timeout: timeout)
     _ = try await backend.sendKey(name: "control-u", timeout: timeout)
-    try await Task.sleep(nanoseconds: Timing.terminalCommandSettleNanoseconds)
+    try await sleep(Timing.terminalCommandSettleNanoseconds)
   }
 
   private func recognizesTerminalMarker(_ marker: String) async throws -> Bool {
-    let image = try await backend.recoveryFrame(timeout: timeout)
-    let lines = try recognizer.recognizeRecovery(
+    let captureStart = PommeRecoveryPerformanceMetrics.now()
+    let image: CGImage
+    do {
+      image = try await backend.recoveryFrame(timeout: timeout)
+    } catch {
+      metrics.record(.capture, since: captureStart)
+      throw error
+    }
+    metrics.record(.capture, since: captureStart)
+    let lines = try recognizer.recognizeRecoveryTerminalMarker(
       image: image,
       displaySize: VirtualizationPrivateHeadlessBackend.displaySize,
-      customWord: marker
+      marker: marker
     )
     let observation = RecoveryUIObservation(lines: lines)
     return observation.isLikelyTerminalWindow
       && observation.containsExactMarkerFollowedByShellPrompt(marker)
   }
 
+  private func sleep(_ nanoseconds: UInt64) async throws {
+    let waitStart = PommeRecoveryPerformanceMetrics.now()
+    defer { metrics.record(.wait, since: waitStart) }
+    try await Task.sleep(nanoseconds: nanoseconds)
+  }
+
   private var expectedKey: PommeRecoveryVirtualKey? {
-    switch deliveredKeys {
-    case []: .right
-    case [.right]: .right
-    case [.right, .right]: .return
-    case [.right, .right, .return]: .return
-    case [.right, .right, .return, .return]: .controlF2
-    case [.right, .right, .return, .return, .controlF2],
-      [.right, .right, .return, .return, .controlF2, .right],
-      [.right, .right, .return, .return, .controlF2, .right, .right],
-      [.right, .right, .return, .return, .controlF2, .right, .right, .right]:
-      .right
-    case [.right, .right, .return, .return, .controlF2, .right, .right, .right, .right]: .down
-    case [.right, .right, .return, .return, .controlF2, .right, .right, .right, .right, .down]:
-      .shiftCommandT
-    default: nil
-    }
+    guard deliveredKeysMatchRoutePrefix,
+      deliveredKeys.count < navigationRoute.eventTrace.count
+    else { return nil }
+    return navigationRoute.eventTrace[deliveredKeys.count].key
   }
 
   private var expectedCoarseFrame: PommeRecoveryFrame? {
-    switch deliveredKeys {
-    case [], [.right], [.right, .right]:
-      .startupOptions
-    case [.right, .right, .return]:
-      .languageEnglish
-    case [.right, .right, .return, .return],
-      [.right, .right, .return, .return, .controlF2],
-      [.right, .right, .return, .return, .controlF2, .right],
-      [.right, .right, .return, .return, .controlF2, .right, .right],
-      [.right, .right, .return, .return, .controlF2, .right, .right, .right],
-      [.right, .right, .return, .return, .controlF2, .right, .right, .right, .right],
-      [.right, .right, .return, .return, .controlF2, .right, .right, .right, .right, .down]:
-      .recoveryUtilities
-    case [
-      .right, .right, .return, .return, .controlF2, .right, .right, .right, .right, .down,
-      .shiftCommandT,
-    ]:
-      .terminal
-    default:
-      nil
-    }
+    guard let logicalFrame = expectedLogicalFrame else { return nil }
+    return Self.coarseFrame(for: logicalFrame)
   }
 
-  private func frameFromReviewedTrace(
+  private var expectedLogicalFrame: PommeRecoveryFrame? {
+    guard deliveredKeysMatchRoutePrefix else { return nil }
+    let events = navigationRoute.eventTrace
+    if deliveredKeys.count < events.count {
+      return events[deliveredKeys.count].preEventFrame
+    }
+    guard deliveredKeys.count == events.count else { return nil }
+    return events.last?.postEventFrame
+  }
+
+  private var classificationContext: PommeRecoveryFrameClassificationContext {
+    expectedLogicalFrame == .languageEnglish ? .optionsActivated : .unproven
+  }
+
+  private var deliveredKeysMatchRoutePrefix: Bool {
+    let routeKeys = navigationRoute.keys
+    guard deliveredKeys.count <= routeKeys.count else { return false }
+    return routeKeys.prefix(deliveredKeys.count).elementsEqual(deliveredKeys)
+  }
+
+  private func frameFromNavigationTrace(
     coarse: PommeRecoveryFrame
   ) throws -> PommeRecoveryFrame {
-    switch deliveredKeys {
-    case []:
-      return try require(coarse, .startupOptions, as: .startupOptions)
-    case [.right]:
-      return try require(coarse, .startupOptions, as: .startupIntermediate)
-    case [.right, .right]:
-      return try require(coarse, .startupOptions, as: .startupOptionsActivated)
-    case [.right, .right, .return]:
-      return try require(coarse, .languageEnglish, as: .languageEnglish)
-    case [.right, .right, .return, .return],
-      [.right, .right, .return, .return, .controlF2],
-      [.right, .right, .return, .return, .controlF2, .right],
-      [.right, .right, .return, .return, .controlF2, .right, .right],
-      [.right, .right, .return, .return, .controlF2, .right, .right, .right],
-      [.right, .right, .return, .return, .controlF2, .right, .right, .right, .right]:
-      let deterministic: [PommeRecoveryFrame] = [
-        .recoveryUtilities, .applicationMenu, .recoveryMenu, .fileMenu, .editMenu, .utilitiesMenu,
-      ]
-      guard coarse == .recoveryUtilities,
-        let index = [
-          [.right, .right, .return, .return],
-          [.right, .right, .return, .return, .controlF2],
-          [.right, .right, .return, .return, .controlF2, .right],
-          [.right, .right, .return, .return, .controlF2, .right, .right],
-          [.right, .right, .return, .return, .controlF2, .right, .right, .right],
-          [.right, .right, .return, .return, .controlF2, .right, .right, .right, .right],
-        ].firstIndex(of: deliveredKeys)
-      else { throw PommeRecoveryVirtualizationPortError.unprovenFrame }
-      return deterministic[index]
-    case [.right, .right, .return, .return, .controlF2, .right, .right, .right, .right, .down]:
-      return try require(coarse, .recoveryUtilities, as: .terminalMenuItem)
-    case [
-      .right, .right, .return, .return, .controlF2, .right, .right, .right, .right, .down,
-      .shiftCommandT,
-    ]:
-      return try require(coarse, .terminal, as: .terminal)
-    default:
+    guard let logicalFrame = expectedLogicalFrame,
+      coarse == Self.coarseFrame(for: logicalFrame)
+    else {
       throw PommeRecoveryVirtualizationPortError.unprovenFrame
     }
+    return logicalFrame
   }
 
-  private func require(
-    _ actual: PommeRecoveryFrame,
-    _ expected: PommeRecoveryFrame,
-    as trace: PommeRecoveryFrame
-  ) throws -> PommeRecoveryFrame {
-    guard actual == expected else { throw PommeRecoveryVirtualizationPortError.unprovenFrame }
-    return trace
+  private static func coarseFrame(for logicalFrame: PommeRecoveryFrame) -> PommeRecoveryFrame? {
+    switch logicalFrame {
+    case .startupOptions, .startupIntermediate, .startupOptionsActivated:
+      .startupOptions
+    case .languageEnglish:
+      .languageEnglish
+    case .recoveryUtilities, .applicationMenu, .recoveryMenu, .fileMenu, .editMenu,
+      .utilitiesMenu, .terminalMenuItem:
+      .recoveryUtilities
+    case .terminal:
+      .terminal
+    case .unknown:
+      nil
+    }
   }
 
   private static func backendKeyName(for key: PommeRecoveryVirtualKey) -> String {
@@ -422,6 +483,7 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
 
 enum PommeRecoveryVirtualizationPortError: Error, Equatable, Sendable {
   case unexpectedKey
+  case navigationRouteLocked
   case unprovenFrame
   case invalidObservationTimeout
   case observationTimedOut(PommeRecoveryFrame)

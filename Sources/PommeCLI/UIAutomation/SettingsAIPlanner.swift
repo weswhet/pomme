@@ -609,12 +609,43 @@ struct SettingsAIOCRRecognitionOptions: Equatable, Sendable {
     let usesLanguageCorrection: Bool
 }
 
+enum SettingsAIOCRRecognitionLevel: String, Sendable {
+    case fast
+    case accurate
+}
+
+struct SettingsAIOCRRecognitionRequest: Sendable {
+    let imageSize: CGSize
+    let displaySize: CGSize
+    let recognitionLevel: SettingsAIOCRRecognitionLevel
+    let customWords: [String]
+    let usesLanguageCorrection: Bool
+}
+
 struct SettingsAIOCRRecognizer: Sendable {
     /// Recovery Terminal's default 120x30 window at the fixed 1280x800 Lab
     /// display size. Full-frame Vision OCR intermittently omits its small
     /// marker and prompt lines even when both are visibly present. Keep the
     /// higher-resolution fallback confined to this known, non-secret surface.
     static let recoveryTerminalProofCrop = CGRect(x: 39, y: 50, width: 879, height: 500)
+
+    /// A test-only executor can observe the recognition requests without
+    /// constructing a VM or depending on Vision's model output. Production
+    /// instances leave this nil and execute the real Vision request below.
+    typealias RecognitionExecutor = @Sendable (
+        SettingsAIOCRRecognitionRequest
+    ) throws -> [SettingsAIOCRLine]
+
+    let onRecognition: (@Sendable (TimeInterval) -> Void)?
+    private let recognitionExecutor: RecognitionExecutor?
+
+    init(
+        onRecognition: (@Sendable (TimeInterval) -> Void)? = nil,
+        recognitionExecutor: RecognitionExecutor? = nil
+    ) {
+        self.onRecognition = onRecognition
+        self.recognitionExecutor = recognitionExecutor
+    }
 
     func recognize(imageURL: URL, displaySize: CGSize) async throws -> [SettingsAIOCRLine] {
         try recognizeWithVN(imageURL: imageURL, displaySize: displaySize)
@@ -680,6 +711,24 @@ struct SettingsAIOCRRecognizer: Sendable {
             return fullFrameLines
         }
         return (fullFrameLines + terminalLines).sorted(by: Self.readingOrder)
+    }
+
+    /// Explicit Terminal-proof spelling for callers that have a marker. The
+    /// shared Recovery recognizer performs accurate full-frame OCR first so a
+    /// Terminal-looking crop cannot hide `Recovery Assistant`, `Share Disk`,
+    /// or `Startup Security Utility` elsewhere on the display. If the full
+    /// frame is incomplete, it supplements that evidence with the validated,
+    /// mapped Terminal crop before the caller evaluates the closed proof.
+    func recognizeRecoveryTerminalMarker(
+        image: CGImage,
+        displaySize: CGSize,
+        marker: String
+    ) throws -> [SettingsAIOCRLine] {
+        return try recognizeRecovery(
+            image: image,
+            displaySize: displaySize,
+            customWord: marker
+        )
     }
 
     static func recoveryRecognitionOptions(customWord: String?) -> SettingsAIOCRRecognitionOptions {
@@ -793,6 +842,19 @@ struct SettingsAIOCRRecognizer: Sendable {
         customWords: [String],
         usesLanguageCorrection: Bool
     ) throws -> [SettingsAIOCRLine] {
+        if let recognitionExecutor {
+            let request = SettingsAIOCRRecognitionRequest(
+                imageSize: CGSize(width: image.width, height: image.height),
+                displaySize: displaySize,
+                recognitionLevel: recognitionLevel == .accurate ? .accurate : .fast,
+                customWords: customWords,
+                usesLanguageCorrection: usesLanguageCorrection
+            )
+            return try recognitionExecutor(request)
+                .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .sorted(by: Self.readingOrder)
+        }
+
         var requestError: Error?
         var recognizedLines: [SettingsAIOCRLine] = []
         let request = VNRecognizeTextRequest { request, error in
@@ -823,6 +885,11 @@ struct SettingsAIOCRRecognizer: Sendable {
         request.customWords = customWords
         request.usesLanguageCorrection = usesLanguageCorrection
 
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let elapsedNanoseconds = DispatchTime.now().uptimeNanoseconds &- startedAt
+            onRecognition?(Double(elapsedNanoseconds) / 1_000_000_000)
+        }
         try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
         if let requestError {
             throw requestError

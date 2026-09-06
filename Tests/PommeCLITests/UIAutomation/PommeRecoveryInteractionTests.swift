@@ -54,9 +54,11 @@ struct PommeRecoveryInteractionTests {
     #expect(await port.remainingFrameCount == 0)
   }
 
-  @Test("the bounded experimental identity uses the same observed one-event trace")
+  @Test("the live-proven experimental identity uses the direct observed trace")
   func experimentalSequenceReachesTerminalProof() async throws {
-    let transitions = tahoeTransitions
+    let transitions = PommeRecoveryNavigationRoute.directTerminal.eventTrace.map {
+      ($0.preEventFrame, $0.key, $0.postEventFrame)
+    }
     let frames = transitions.flatMap { pre, _, post in [pre, pre, post, post] }
     let receipts = transitions.map { _, key, _ in
       PommeRecoveryDurableInputReceipt(key: key, deliveredEventCount: 1)
@@ -178,6 +180,8 @@ struct PommeRecoveryInteractionTests {
     #expect(await port.submittedLines == [probe.command, "/bin/echo POMME_READY"])
     #expect(await port.verifiedMarkers == [probe.marker])
     #expect(await port.clearCount == 1)
+    #expect(await port.observationsClearedBeforeLauncher)
+    #expect(await port.preparedRoutes == [.reviewedMenus])
     #expect(await milestones.values == [
       .navigationStarted,
       .terminalVerified,
@@ -565,6 +569,15 @@ private actor RecoveryTerminalPort: PommeRecoveryTerminalPort {
   private(set) var submittedLines: [String] = []
   private(set) var verifiedMarkers: [String] = []
   private(set) var clearCount = 0
+  private(set) var preparedRoutes: [PommeRecoveryNavigationRoute] = []
+  private var observationsCleared = false
+  private(set) var observationsClearedBeforeLauncher = false
+
+  func prepareRecoveryNavigation(route: PommeRecoveryNavigationRoute) {
+    preparedRoutes.append(route)
+  }
+
+  func clearRecoveryObservations() { observationsCleared = true }
 
   init(
     frames: [PommeRecoveryFrame],
@@ -592,6 +605,9 @@ private actor RecoveryTerminalPort: PommeRecoveryTerminalPort {
   }
 
   func submitTerminalLine(_ command: String) throws {
+    if !submittedLines.isEmpty {
+      observationsClearedBeforeLauncher = observationsCleared
+    }
     submittedLines.append(command)
     if submittedLines.count == failSubmission { throw RecoveryPortError.submissionFailed }
   }
