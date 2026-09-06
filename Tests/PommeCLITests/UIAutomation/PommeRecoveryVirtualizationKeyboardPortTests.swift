@@ -71,6 +71,86 @@ struct PommeRecoveryVirtualizationKeyboardPortTests {
         #expect(classifications.value == 1)
     }
 
+    @Test("a new checkpoint can classify immediately after a recent checkpoint")
+    func checkpointResetsClassificationCooldown() async throws {
+        let clock = RecoveryTestClock()
+        let captures = RecoveryCaptureScript([
+            .success(.init(digest: "checkpoint-a")),
+            .success(.init(digest: "checkpoint-a")),
+            .success(.init(digest: "checkpoint-b")),
+            .success(.init(digest: "checkpoint-b")),
+        ])
+        let classifications = RecoveryClassificationCounter()
+        let readiness = PommeRecoveryObservationReadiness(
+            capture: { _ in try captures.next() },
+            classify: { capture, _ in
+                classifications.increment()
+                switch capture.digest {
+                case "checkpoint-a": return .startupOptions
+                case "checkpoint-b": return .languageEnglish
+                default: return .unknown
+                }
+            },
+            sleep: { nanoseconds in
+                clock.advance(nanoseconds: nanoseconds)
+            },
+            clock: { clock.now },
+            pollNanoseconds: 100_000_000
+        )
+
+        let start = clock.now
+        let first = try await readiness.waitForExpectedStablePair(
+            .startupOptions,
+            context: .unproven,
+            timeout: 0.3
+        )
+        let second = try await readiness.waitForExpectedStablePair(
+            .languageEnglish,
+            context: .unproven,
+            timeout: 0.3
+        )
+        #expect(first == [.startupOptions, .startupOptions])
+        #expect(second == [.languageEnglish, .languageEnglish])
+        #expect(classifications.value == 2)
+        #expect(captures.remaining == 0)
+        #expect(clock.now.timeIntervalSince(start) < 2)
+    }
+
+    @Test("a mismatching checkpoint throttles OCR retries within its deadline")
+    func mismatchingFramesThrottleClassificationRetries() async {
+        let clock = RecoveryTestClock()
+        let captures = RecoveryCaptureScript([
+            .success(.init(digest: "wrong-one")),
+            .success(.init(digest: "wrong-one")),
+            .success(.init(digest: "wrong-two")),
+            .success(.init(digest: "wrong-two")),
+            .success(.init(digest: "wrong-three")),
+            .success(.init(digest: "wrong-three")),
+        ])
+        let classifications = RecoveryClassificationCounter()
+        let readiness = PommeRecoveryObservationReadiness(
+            capture: { _ in try captures.next() },
+            classify: { _, _ in
+                classifications.increment()
+                return .unknown
+            },
+            sleep: { nanoseconds in
+                clock.advance(nanoseconds: nanoseconds)
+            },
+            clock: { clock.now },
+            pollNanoseconds: 500_000_000
+        )
+
+        await #expect(throws: PommeRecoveryVirtualizationPortError.observationTimedOut(.startupOptions)) {
+            try await readiness.waitForExpectedStablePair(
+                .startupOptions,
+                context: .unproven,
+                timeout: 3
+            )
+        }
+        #expect(classifications.value == 2)
+    }
+
     @Test("waits through a blank transition and OCRs an identical stable frame once")
     func waitsForStableCheckpoint() async throws {
         let clock = RecoveryTestClock()

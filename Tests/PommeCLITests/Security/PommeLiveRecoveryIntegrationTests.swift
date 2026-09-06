@@ -93,8 +93,8 @@ struct PommeLiveRecoveryIntegrationTests {
             #expect(!launcher.script.contains(placeholder))
         }
         #expect(launcher.command.contains("/sbin/mount_virtiofs -r \(launcher.tag)"))
-        #expect(launcher.command.contains("/bin/cp \"$d/m/\(PommeRecoveryArtifactNames.launcher)\" \"$d/run\""))
-        #expect(launcher.command.contains("/bin/sh \"$d/run\""))
+        #expect(launcher.command.contains("&&cd \"$d\"&&/sbin/mount_virtiofs"))
+        #expect(launcher.command.contains("&&/bin/cp m/\(PommeRecoveryArtifactNames.launcher) run&&/bin/sh run"))
         #expect(launcher.script.contains("codesign --verify --strict --all-architectures"))
         #expect(launcher.script.contains("/sbin/sha256 -q"))
         #expect(launcher.script.contains("--pomme-agent 505053"))

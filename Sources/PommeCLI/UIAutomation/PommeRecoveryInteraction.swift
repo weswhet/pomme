@@ -6,9 +6,27 @@ import Foundation
 /// pointer, focus, display-wake, or host-window capability.
 protocol PommeRecoveryKeyboardPort: Sendable {
   func nextRecoveryFrame() async throws -> PommeRecoveryFrame
+  /// Returns the two fresh observations that form one Recovery checkpoint.
+  ///
+  /// Production ports should capture this pair as one stability operation so
+  /// the interaction driver does not nest an already-stable observation
+  /// inside another pair request. The default keeps older test and adapter
+  /// ports source-compatible while they migrate to the explicit operation.
+  func nextRecoveryFramePair() async throws -> [PommeRecoveryFrame]
   func deliverRecoveryKey(
     _ key: PommeRecoveryVirtualKey
   ) async throws -> PommeRecoveryDurableInputReceipt
+}
+
+extension PommeRecoveryKeyboardPort {
+  func nextRecoveryFramePair() async throws -> [PommeRecoveryFrame] {
+    try Task.checkCancellation()
+    let first = try await nextRecoveryFrame()
+    try Task.checkCancellation()
+    let second = try await nextRecoveryFrame()
+    try Task.checkCancellation()
+    return [first, second]
+  }
 }
 
 /// Extends the keyboard-only port only after Terminal has been proven by the
@@ -100,7 +118,9 @@ struct PommeTahoeRecoveryInteraction: Sendable {
 
     let key: PommeRecoveryVirtualKey
     do {
-      let preEventFrames = try await stableFrames(using: port)
+      try Task.checkCancellation()
+      let preEventFrames = try await port.nextRecoveryFramePair()
+      try Task.checkCancellation()
       key = try input.authorize(preEventFrames: preEventFrames)
     } catch {
       if Self.isObservationTimeout(error) {
@@ -124,7 +144,9 @@ struct PommeTahoeRecoveryInteraction: Sendable {
     }
 
     do {
-      let postEventFrames = try await stableFrames(using: port)
+      try Task.checkCancellation()
+      let postEventFrames = try await port.nextRecoveryFramePair()
+      try Task.checkCancellation()
       try input.commit(receipt, postEventFrames: postEventFrames)
     } catch {
       cleanupRequired = true
@@ -134,17 +156,6 @@ struct PommeTahoeRecoveryInteraction: Sendable {
       throw PommeRecoveryInteractionError.recoveryCleanupRequired(.recoveryCleanupRequired)
     }
     return input.isComplete ? .terminalVerified : .inputCommitted
-  }
-
-  private func stableFrames(
-    using port: some PommeRecoveryKeyboardPort
-  ) async throws -> [PommeRecoveryFrame] {
-    try Task.checkCancellation()
-    let first = try await port.nextRecoveryFrame()
-    try Task.checkCancellation()
-    let second = try await port.nextRecoveryFrame()
-    try Task.checkCancellation()
-    return [first, second]
   }
 
   /// Drives only the existing bounded Recovery trace, proves the non-secret

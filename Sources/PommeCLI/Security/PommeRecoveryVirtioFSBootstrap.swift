@@ -113,10 +113,14 @@ struct PommeRecoveryVirtioFSTerminalPlan: Equatable, Sendable {
         // guest workspace can be created.  The command substitution keeps
         // the digest out of the terminal output; the only proof emitted is
         // the redaction-safe Pomme marker.
-        let probe = "test -x /sbin/mount_virtiofs&&test -x /sbin/umount&&test -x /usr/bin/codesign&&test -x /sbin/sha256&&test \"$(/usr/bin/printf abc|/sbin/sha256 -q)\" = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad&&printf 'POMME %s OK\\n' \(Self.ocrSafeMarkerSuffix(requestID: request.requestID))"
+        // Fixed absolute prefixes save HID events without consulting PATH or
+        // weakening the short-circuit checks before the known-vector probe.
+        let probe = "p=/sbin;u=/usr/bin;test -x $p/mount_virtiofs&&test -x $p/umount&&test -x $u/codesign&&test -x $p/sha256&&test \"$($u/printf abc|$p/sha256 -q)\" = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad&&printf 'POMME \(Self.ocrSafeMarkerSuffix(requestID: request.requestID)) OK\\n'"
         // The mount point is intentionally nested below a new directory. A
         // pre-existing directory or symlink makes this command fail closed.
-        let launch = "d=\(mountWorkspace);umask 077;/bin/mkdir -m 700 \"$d\" \"$d/m\"&&/sbin/mount_virtiofs -r \(tag) \"$d/m\"&&/bin/cp \"$d/m/\(PommeRecoveryArtifactNames.launcher)\" \"$d/run\"&&/bin/sh \"$d/run\""
+        // Enter only the newly created private workspace before shortening
+        // its paths; the copied launcher still runs outside the mounted share.
+        let launch = "d=\(mountWorkspace);umask 077;/bin/mkdir -m700 \"$d\" \"$d/m\"&&cd \"$d\"&&/sbin/mount_virtiofs -r \(tag) m&&/bin/cp m/\(PommeRecoveryArtifactNames.launcher) run&&/bin/sh run"
         guard Self.keyboardSafe(probe),
               Self.keyboardSafe(launch),
               probe.utf8.count <= Self.maximumCommandLength,

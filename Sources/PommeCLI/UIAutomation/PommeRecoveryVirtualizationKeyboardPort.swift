@@ -62,7 +62,6 @@ actor PommeRecoveryObservationReadiness {
   private var priorDigest: String?
   private var stableCaptureCount = 0
   private var isObserving = false
-  private var lastClassificationAt: Date?
 
   init(
     capture: @escaping Capture,
@@ -85,6 +84,23 @@ actor PommeRecoveryObservationReadiness {
     context: PommeRecoveryFrameClassificationContext,
     timeout: TimeInterval
   ) async throws -> PommeRecoveryFrame {
+    let pair = try await waitForExpectedStablePair(
+      expected,
+      context: context,
+      timeout: timeout
+    )
+    return pair[1]
+  }
+
+  /// Returns the two fresh observations that authorize one input checkpoint.
+  /// The classifier may run once for the pair; the closed result is repeated
+  /// so callers can prove the required two-frame equality without capturing a
+  /// second stable pair inside this operation.
+  func waitForExpectedStablePair(
+    _ expected: PommeRecoveryFrame,
+    context: PommeRecoveryFrameClassificationContext,
+    timeout: TimeInterval
+  ) async throws -> [PommeRecoveryFrame] {
     guard !isObserving else {
       throw PommeRecoveryVirtualizationPortError.unprovenFrame
     }
@@ -93,11 +109,15 @@ actor PommeRecoveryObservationReadiness {
     guard timeout.isFinite, timeout > 0 else {
       throw PommeRecoveryVirtualizationPortError.invalidObservationTimeout
     }
-    // Every call represents a new checkpoint after exactly one delivered
-    // input. Require two captures from this call even if the same digest was
-    // already classified at the previous checkpoint.
+    // Every call represents an independent fresh checkpoint. Require two
+    // captures from this call even if the same digest was already classified
+    // at a previous checkpoint.
     priorDigest = nil
     stableCaptureCount = 0
+    // Cooldown applies to unsuccessful retries within this checkpoint only.
+    // A newly delivered input must be eligible for immediate OCR even when
+    // the preceding checkpoint was classified moments ago.
+    var lastClassificationAt: Date?
     let deadline = clock().addingTimeInterval(timeout)
     while true {
       try Task.checkCancellation()
@@ -121,7 +141,7 @@ actor PommeRecoveryObservationReadiness {
           context: context.cacheKey
         )
         if stableCaptureCount >= 2, let cached = classifications[key] {
-          if cached == expected { return cached }
+          if cached == expected { return [cached, cached] }
         } else if stableCaptureCount >= 2,
           lastClassificationAt.map({ clock().timeIntervalSince($0) >= 2 }) ?? true
         {
@@ -133,7 +153,7 @@ actor PommeRecoveryObservationReadiness {
             classifications.removeValue(forKey: oldest)
           }
           classifications[key] = classified
-          if classified == expected { return classified }
+          if classified == expected { return [classified, classified] }
         }
       } catch let error as VirtualizationPrivateHeadlessError
         where VirtualizationPrivateHeadlessBackend.isTransientRecoveryCaptureFailure(error)
@@ -171,8 +191,10 @@ private extension PommeRecoveryFrameClassificationContext {
 /// type never writes a screenshot or exposes OCR text.
 actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
   private enum Timing {
-    static let navigationSettleNanoseconds: UInt64 = 350_000_000
-    static let terminalSettleNanoseconds: UInt64 = 1_500_000_000
+    // OCR-backed checkpoints wait for the guest to publish the new screen.
+    // Only focus transitions whose labels are intentionally inferred from the
+    // reviewed trace keep a short bounded dwell before that observation.
+    static let inferredFocusSettleNanoseconds: UInt64 = 100_000_000
     static let terminalCommandSettleNanoseconds: UInt64 = 250_000_000
     static let markerRetryNanoseconds: UInt64 = 500_000_000
     static let markerAttempts = 3
@@ -210,6 +232,11 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
   }
 
   func nextRecoveryFrame() async throws -> PommeRecoveryFrame {
+    let pair = try await nextRecoveryFramePair()
+    return pair[1]
+  }
+
+  func nextRecoveryFramePair() async throws -> [PommeRecoveryFrame] {
     guard let expected = expectedCoarseFrame else {
       throw PommeRecoveryVirtualizationPortError.unprovenFrame
     }
@@ -217,12 +244,12 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
       deliveredKeys == [.right, .right, .return]
       ? .optionsActivated
       : .unproven
-    let coarse = try await readiness.waitForExpected(
+    let coarsePair = try await readiness.waitForExpectedStablePair(
       expected,
       context: context,
       timeout: timeout
     )
-    return try frameFromReviewedTrace(coarse: coarse)
+    return try coarsePair.map { try frameFromReviewedTrace(coarse: $0) }
   }
 
   func deliverRecoveryKey(
@@ -233,12 +260,15 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     }
     _ = try await backend.awaitInputReadiness(timeout: timeout)
     _ = try await backend.sendKey(name: Self.backendKeyName(for: key), timeout: timeout)
+    let coarseFrameBeforeDelivery = expectedCoarseFrame
     deliveredKeys.append(key)
-    try await Task.sleep(
-      nanoseconds: key == .shiftCommandT
-        ? Timing.terminalSettleNanoseconds
-        : Timing.navigationSettleNanoseconds
-    )
+    let coarseFrameAfterDelivery = expectedCoarseFrame
+    let settleNanoseconds = coarseFrameBeforeDelivery == coarseFrameAfterDelivery
+      ? Timing.inferredFocusSettleNanoseconds
+      : 0
+    if settleNanoseconds > 0 {
+      try await Task.sleep(nanoseconds: settleNanoseconds)
+    }
     return .init(key: key, deliveredEventCount: 1)
   }
 
