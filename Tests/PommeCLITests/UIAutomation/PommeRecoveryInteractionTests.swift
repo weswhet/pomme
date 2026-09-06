@@ -18,6 +18,22 @@ struct PommeRecoveryInteractionTests {
     #expect(await port.remainingFrameCount == 0)
   }
 
+  @Test("one advance requests one explicit pair before and after its receipt")
+  func singleAdvanceUsesExplicitPairs() async throws {
+    let port = RecoveryPairPort(
+      preEventFrame: .startupOptions,
+      postEventFrame: .startupIntermediate,
+      receipt: .init(key: .right, deliveredEventCount: 1)
+    )
+    var interaction = try PommeTahoeRecoveryInteraction(evidence: tahoeEvidence)
+
+    let signal = try await interaction.advance(using: port)
+
+    #expect(signal == .inputCommitted)
+    #expect(await port.pairRequestCount == 2)
+    #expect(await port.deliveredKeys == [.right])
+  }
+
   @Test("only the reviewed Tahoe sequence reaches terminal proof")
   func reviewedSequenceReachesTerminalProof() async throws {
     let transitions = tahoeTransitions
@@ -489,6 +505,46 @@ private actor RecoveryPort: PommeRecoveryKeyboardPort {
   }
 
   var remainingFrameCount: Int { frames.count }
+}
+
+private actor RecoveryPairPort: PommeRecoveryKeyboardPort {
+  private let preEventFrame: PommeRecoveryFrame
+  private let postEventFrame: PommeRecoveryFrame
+  private let receipt: PommeRecoveryDurableInputReceipt
+  private var pairPhase = 0
+  private(set) var pairRequestCount = 0
+  private(set) var deliveredKeys: [PommeRecoveryVirtualKey] = []
+
+  init(
+    preEventFrame: PommeRecoveryFrame,
+    postEventFrame: PommeRecoveryFrame,
+    receipt: PommeRecoveryDurableInputReceipt
+  ) {
+    self.preEventFrame = preEventFrame
+    self.postEventFrame = postEventFrame
+    self.receipt = receipt
+  }
+
+  func nextRecoveryFrame() async throws -> PommeRecoveryFrame {
+    throw RecoveryPortError.depleted
+  }
+
+  func nextRecoveryFramePair() async throws -> [PommeRecoveryFrame] {
+    pairRequestCount += 1
+    defer { pairPhase += 1 }
+    switch pairPhase {
+    case 0: return [preEventFrame, preEventFrame]
+    case 1: return [postEventFrame, postEventFrame]
+    default: throw RecoveryPortError.depleted
+    }
+  }
+
+  func deliverRecoveryKey(
+    _ key: PommeRecoveryVirtualKey
+  ) async throws -> PommeRecoveryDurableInputReceipt {
+    deliveredKeys.append(key)
+    return receipt
+  }
 }
 
 private enum RecoveryPortError: Error {

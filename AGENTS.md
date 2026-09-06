@@ -1,5 +1,13 @@
 # Pomme agent instructions
 
+## Disposable test VM resources
+
+For future disposable test VMs, explicitly pass `--disk-size 40GB --memory 4GB`
+instead of the CLI's larger defaults. Increase resources only when the test
+requires it and explain why. Keep an active before/after comparison at the same
+resource settings across all measured runs. A 25GB disk failed Tahoe installation
+in the September 6, 2026 lab; do not reuse that size for Tahoe install tests.
+
 ## Build and sign consistently
 
 Run commands from the Pomme repository root and prefix shell commands with `rtk`.

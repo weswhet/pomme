@@ -115,10 +115,11 @@ struct PommeRecoveryVirtioFSBootstrapTests {
         let knownVector = PommeRecoveryCrypto.sha256(Data("abc".utf8))
         #expect(knownVector == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
         #expect(knownVector.utf8.count == 64)
-        #expect(probe.command.contains("test -x /sbin/sha256"))
-        #expect(probe.command.contains("/usr/bin/printf abc|/sbin/sha256 -q"))
+        #expect(probe.command.hasPrefix("p=/sbin;u=/usr/bin;"))
+        #expect(probe.command.contains("test -x $p/mount_virtiofs&&test -x $p/umount&&test -x $u/codesign&&test -x $p/sha256&&test"))
+        #expect(probe.command.contains("$u/printf abc|$p/sha256 -q"))
         #expect(probe.command.contains(knownVector))
-        #expect(probe.command.contains("printf 'POMME %s OK\\n'"))
+        #expect(probe.command.contains("printf '\(probe.marker)\\n'"))
         #expect(!probe.command.contains("/usr/bin/shasum"))
         #expect(!probe.command.contains("/usr/bin/openssl"))
         #expect(plan.launcherScript.contains("/sbin/sha256 -q \"$g/pomme-agent\""))
@@ -162,6 +163,60 @@ struct PommeRecoveryVirtioFSBootstrapTests {
         #expect(process.terminationStatus == 0)
         #expect(errorOutput.isEmpty)
         #expect(output == "\(probe.marker)\n")
+    }
+
+    @Test("Compact launcher keeps workspace confinement and stops at failed guards", arguments: ["success", "existing", "mountFailure", "copyFailure"])
+    func compactLauncherPreservesGuardOrdering(scenario: String) throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let plan = try PommeRecoveryVirtioFSTerminalPlan(request: fixture.request)
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent("pomme-compact-launch-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let workspace = parent.appendingPathComponent("workspace with spaces")
+        let arguments = parent.appendingPathComponent("mount-arguments")
+        let mount = parent.appendingPathComponent("mount-stub")
+        func quote(_ value: String) -> String {
+            "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+        var mountScript = "#!/bin/sh\nprintf '%s\\n' \"$@\" > \(quote(arguments.path))\n"
+        if scenario == "mountFailure" {
+            mountScript += "exit 9\n"
+        } else if scenario != "copyFailure" {
+            let launcher = "#!/bin/sh\nprintf '%s\\n' \"$PWD\"\n"
+            mountScript += "printf '%s' \(quote(launcher)) > \(quote("m/" + PommeRecoveryArtifactNames.launcher))\n"
+        }
+        try mountScript.write(to: mount, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: mount.path)
+        if scenario == "existing" {
+            try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: false)
+        }
+        let command = plan.command
+            .replacingOccurrences(of: "d=\(plan.mountWorkspacePath)", with: "d=\(quote(workspace.path))")
+            .replacingOccurrences(of: "/sbin/mount_virtiofs", with: quote(mount.path))
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", command]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        if scenario == "success" {
+            #expect(process.terminationStatus == 0)
+            #expect(text == workspace.path + "\n")
+            let attributes = try FileManager.default.attributesOfItem(atPath: workspace.path)
+            #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
+        } else {
+            #expect(process.terminationStatus != 0)
+            #expect(text.isEmpty)
+        }
+        if scenario == "existing" {
+            #expect(!FileManager.default.fileExists(atPath: arguments.path))
+        } else {
+            #expect(try String(contentsOf: arguments, encoding: .utf8) == "-r\n\(plan.tag)\nm\n")
+        }
     }
 
     @Test("Recovery SHA-256 command agrees with CryptoKit for a private fixture")
