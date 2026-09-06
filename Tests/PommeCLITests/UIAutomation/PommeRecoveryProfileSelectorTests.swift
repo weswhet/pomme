@@ -22,6 +22,19 @@ struct PommeRecoveryProfileSelectorTests {
 
         let input = try PommeRecoveryProfileSelector.inputForAttempt(for: experimentalEvidence)
         #expect(input.committedInputCount == 0)
+        #expect(input.route == .directTerminal)
+        #expect(input.route.keys == [.right, .right, .return, .return, .shiftCommandT])
+    }
+
+    @Test("only the live-qualified experimental identity selects direct Terminal")
+    func routeSelectionKeepsOtherIdentitiesReviewed() throws {
+        let reviewed = try PommeRecoveryProfileSelector.reviewedTahoeInput(for: tahoeEvidence)
+        #expect(reviewed.route == .reviewedMenus)
+
+        let otherExperimental = try PommeRecoveryProfileSelector.inputForAttempt(
+            for: otherExperimentalEvidence
+        )
+        #expect(otherExperimental.route == .reviewedMenus)
     }
 
     @Test("experimental evidence never claims a reviewed descriptor or record")
@@ -119,6 +132,82 @@ struct PommeRecoveryProfileSelectorTests {
         #expect(input.committedInputCount == 1)
     }
 
+    @Test("the direct Terminal route completes its five event trace")
+    func directTerminalRouteSucceeds() throws {
+        let route = PommeRecoveryNavigationRoute.directTerminal
+        var input = PommeTahoeReviewedInput(route: route)
+
+        #expect(input.route == route)
+        #expect(route.keys == [.right, .right, .return, .return, .shiftCommandT])
+        #expect(route.eventTrace.count == 5)
+
+        for event in route.eventTrace {
+            let key = try input.authorize(
+                preEventFrames: [event.preEventFrame, event.preEventFrame]
+            )
+            #expect(key == event.key)
+            try input.commit(
+                .init(key: key, deliveredEventCount: 1),
+                postEventFrames: [event.postEventFrame, event.postEventFrame]
+            )
+        }
+
+        #expect(input.isComplete)
+        #expect(input.committedInputCount == 5)
+    }
+
+    @Test("the direct Terminal route rejects wrong pre and post frames")
+    func directTerminalRouteRejectsWrongFrames() throws {
+        var preInput = PommeTahoeReviewedInput(route: .directTerminal)
+        #expect(throws: PommeTahoeReviewedInputError.unexpectedPreEventFrame) {
+            _ = try preInput.authorize(
+                preEventFrames: [.recoveryUtilities, .recoveryUtilities]
+            )
+        }
+
+        var postInput = PommeTahoeReviewedInput(route: .directTerminal)
+        let key = try postInput.authorize(
+            preEventFrames: [.startupOptions, .startupOptions]
+        )
+        #expect(key == .right)
+        #expect(throws: PommeTahoeReviewedInputError.unexpectedPostEventFrame) {
+            try postInput.commit(
+                .init(key: key, deliveredEventCount: 1),
+                postEventFrames: [.startupOptionsActivated, .startupOptionsActivated]
+            )
+        }
+        #expect(postInput.committedInputCount == 0)
+    }
+
+    @Test("a committed direct receipt cannot be replayed")
+    func directReceiptCannotReplay() throws {
+        let event = PommeRecoveryNavigationRoute.directTerminal.eventTrace[0]
+        var input = PommeTahoeReviewedInput(route: .directTerminal)
+        let key = try input.authorize(
+            preEventFrames: [event.preEventFrame, event.preEventFrame]
+        )
+        let receipt = PommeRecoveryDurableInputReceipt(key: key, deliveredEventCount: 1)
+        let postFrames = [event.postEventFrame, event.postEventFrame]
+
+        try input.commit(receipt, postEventFrames: postFrames)
+        #expect(input.committedInputCount == 1)
+        #expect(throws: PommeTahoeReviewedInputError.invalidReceipt) {
+            try input.commit(receipt, postEventFrames: postFrames)
+        }
+        #expect(input.committedInputCount == 1)
+    }
+
+    @Test("reviewed Tahoe selection remains on the reviewed menu route")
+    func reviewedSelectionRemainsUnchanged() throws {
+        let input = try PommeRecoveryProfileSelector.reviewedTahoeInput(for: tahoeEvidence)
+        #expect(input.route == .reviewedMenus)
+        #expect(input.route.keys == [
+            .right, .right, .return, .return, .controlF2,
+            .right, .right, .right, .right, .down, .shiftCommandT,
+        ])
+        #expect(input.route.eventTrace.count == 11)
+    }
+
     @Test("Sequoia record is pending and never yields an input contract")
     func sequoiaStaysReferenceOnly() throws {
         let descriptor = try PommeRecoveryProfileSelector.reviewedDescriptor(for: sequoiaEvidence)
@@ -153,6 +242,21 @@ struct PommeRecoveryProfileSelectorTests {
         let descriptor = try! PommeRecoveryProfileSelector.descriptor(
             version: "26.6.2",
             build: "25G83"
+        )
+        return .init(
+            build: .experimental(version: descriptor.version, build: descriptor.build),
+            locale: .english,
+            geometry: .pixels1280x800,
+            privateHostABI: .qualifiedRecoveryInputV1,
+            manifestHash: .experimentalProfile(descriptor.digest),
+            ownership: .verified
+        )
+    }
+
+    private var otherExperimentalEvidence: PommeRecoveryProfileEvidence {
+        let descriptor = try! PommeRecoveryProfileSelector.descriptor(
+            version: "26.6.2",
+            build: "25G84"
         )
         return .init(
             build: .experimental(version: descriptor.version, build: descriptor.build),

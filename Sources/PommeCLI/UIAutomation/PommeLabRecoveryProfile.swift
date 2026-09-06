@@ -97,14 +97,14 @@ extension PommeRecoveryProfileSelector {
                 descriptor.reviewedRecordDigest
             )
         }
-        return .init()
+        return .init(route: .reviewedMenus)
     }
 
     /// Selects the existing Tahoe input state machine for either the reviewed
     /// identity or a planner-qualified experimental identity. Experimental
     /// evidence remains bounded by the same locale, geometry, private ABI,
-    /// ownership, descriptor, and manifest checks as reviewed input; it never
-    /// receives a reviewed descriptor or record.
+    /// ownership, descriptor, and manifest checks as reviewed input; only the
+    /// exact live-qualified identity opts into the direct Terminal trace.
     static func inputForAttempt(
         for evidence: PommeRecoveryProfileEvidence
     ) throws -> PommeTahoeReviewedInput {
@@ -140,7 +140,11 @@ extension PommeRecoveryProfileSelector {
         guard evidence.manifestHash == .experimentalProfile(descriptor.digest) else {
             throw PommeRecoveryInputQualificationError.manifestHashMismatch
         }
-        return .init()
+        let route: PommeRecoveryNavigationRoute =
+            descriptor.version == "26.6.2" && descriptor.build == "25G83"
+            ? .directTerminal
+            : .reviewedMenus
+        return .init(route: route)
     }
 }
 
@@ -153,6 +157,54 @@ enum PommeRecoveryFrame: Equatable, Sendable {
 
 enum PommeRecoveryVirtualKey: Equatable, Sendable {
     case controlF2, right, down, `return`, shiftCommandT
+}
+
+/// One immutable, closed Recovery navigation transition. The input contract
+/// validates the observed frames around every event before and after delivery.
+struct PommeRecoveryNavigationEvent: Equatable, Sendable {
+    let preEventFrame: PommeRecoveryFrame
+    let key: PommeRecoveryVirtualKey
+    let postEventFrame: PommeRecoveryFrame
+}
+
+/// Qualified navigation traces. The direct route is intentionally opt-in and
+/// is selected only for an identity qualified by the profile gate.
+enum PommeRecoveryNavigationRoute: Equatable, Sendable {
+    case reviewedMenus
+    case directTerminal
+
+    /// The complete immutable trace for this route. Every event has exactly
+    /// one key and the closed frame labels required around that key.
+    var eventTrace: [PommeRecoveryNavigationEvent] {
+        switch self {
+        case .reviewedMenus:
+            return [
+                .init(preEventFrame: .startupOptions, key: .right, postEventFrame: .startupIntermediate),
+                .init(preEventFrame: .startupIntermediate, key: .right, postEventFrame: .startupOptionsActivated),
+                .init(preEventFrame: .startupOptionsActivated, key: .return, postEventFrame: .languageEnglish),
+                .init(preEventFrame: .languageEnglish, key: .return, postEventFrame: .recoveryUtilities),
+                .init(preEventFrame: .recoveryUtilities, key: .controlF2, postEventFrame: .applicationMenu),
+                .init(preEventFrame: .applicationMenu, key: .right, postEventFrame: .recoveryMenu),
+                .init(preEventFrame: .recoveryMenu, key: .right, postEventFrame: .fileMenu),
+                .init(preEventFrame: .fileMenu, key: .right, postEventFrame: .editMenu),
+                .init(preEventFrame: .editMenu, key: .right, postEventFrame: .utilitiesMenu),
+                .init(preEventFrame: .utilitiesMenu, key: .down, postEventFrame: .terminalMenuItem),
+                .init(preEventFrame: .terminalMenuItem, key: .shiftCommandT, postEventFrame: .terminal),
+            ]
+        case .directTerminal:
+            return [
+                .init(preEventFrame: .startupOptions, key: .right, postEventFrame: .startupIntermediate),
+                .init(preEventFrame: .startupIntermediate, key: .right, postEventFrame: .startupOptionsActivated),
+                .init(preEventFrame: .startupOptionsActivated, key: .return, postEventFrame: .languageEnglish),
+                .init(preEventFrame: .languageEnglish, key: .return, postEventFrame: .recoveryUtilities),
+                .init(preEventFrame: .recoveryUtilities, key: .shiftCommandT, postEventFrame: .terminal),
+            ]
+        }
+    }
+
+    var keys: [PommeRecoveryVirtualKey] {
+        eventTrace.map(\.key)
+    }
 }
 
 struct PommeRecoveryDurableInputReceipt: Equatable, Sendable {
@@ -168,15 +220,14 @@ enum PommeTahoeReviewedInputError: Error, Equatable, Sendable {
 /// Tahoe's sole production input contract: two equal pre-event observations,
 /// one key, one durable receipt, and two equal post-event observations.
 struct PommeTahoeReviewedInput: Sendable {
-    private enum Stage: Sendable {
-        case startupFirstRight, startupSecondRight, activateOptions, chooseEnglish
-        case activateMenuBar, recoveryMenuRight, fileMenuRight, editMenuRight
-        case utilitiesMenuRight, utilitiesMenuDown, terminalShortcut, complete
-    }
-
-    private var stage: Stage = .startupFirstRight
+    let route: PommeRecoveryNavigationRoute
+    private var eventIndex = 0
     private var outstandingKey: PommeRecoveryVirtualKey?
     private(set) var committedInputCount = 0
+
+    init(route: PommeRecoveryNavigationRoute = .reviewedMenus) {
+        self.route = route
+    }
 
     mutating func authorize(preEventFrames: [PommeRecoveryFrame]) throws -> PommeRecoveryVirtualKey {
         do { try Task.checkCancellation() }
@@ -186,10 +237,10 @@ struct PommeTahoeReviewedInput: Sendable {
               preEventFrames[0] == preEventFrames[1],
               preEventFrames[0] != .unknown
         else { throw PommeTahoeReviewedInputError.unstablePreEventFrames }
-        guard preEventFrames[0] == expectedPreFrame else {
+        guard let event = currentEvent, preEventFrames[0] == event.preEventFrame else {
             throw PommeTahoeReviewedInputError.unexpectedPreEventFrame
         }
-        let key = expectedKey
+        let key = event.key
         outstandingKey = key
         return key
     }
@@ -207,75 +258,20 @@ struct PommeTahoeReviewedInput: Sendable {
               postEventFrames[0] == postEventFrames[1],
               postEventFrames[0] != .unknown
         else { throw PommeTahoeReviewedInputError.unstablePostEventFrames }
-        guard postEventFrames[0] == expectedPostFrame else {
+        guard let event = currentEvent, postEventFrames[0] == event.postEventFrame else {
             throw PommeTahoeReviewedInputError.unexpectedPostEventFrame
         }
         outstandingKey = nil
         committedInputCount += 1
-        stage = nextStage
+        eventIndex += 1
     }
 
-    var isComplete: Bool { stage == .complete && outstandingKey == nil }
-
-    private var expectedPreFrame: PommeRecoveryFrame {
-        switch stage {
-        case .startupFirstRight: .startupOptions
-        case .startupSecondRight: .startupIntermediate
-        case .activateOptions: .startupOptionsActivated
-        case .chooseEnglish: .languageEnglish
-        case .activateMenuBar: .recoveryUtilities
-        case .recoveryMenuRight: .applicationMenu
-        case .fileMenuRight: .recoveryMenu
-        case .editMenuRight: .fileMenu
-        case .utilitiesMenuRight: .editMenu
-        case .utilitiesMenuDown: .utilitiesMenu
-        case .terminalShortcut: .terminalMenuItem
-        case .complete: .unknown
-        }
+    var isComplete: Bool {
+        eventIndex == route.eventTrace.count && outstandingKey == nil
     }
 
-    private var expectedKey: PommeRecoveryVirtualKey {
-        switch stage {
-        case .startupFirstRight, .startupSecondRight, .recoveryMenuRight,
-             .fileMenuRight, .editMenuRight, .utilitiesMenuRight: .right
-        case .activateOptions, .chooseEnglish: .return
-        case .activateMenuBar: .controlF2
-        case .utilitiesMenuDown: .down
-        case .terminalShortcut: .shiftCommandT
-        case .complete: .return
-        }
-    }
-
-    private var expectedPostFrame: PommeRecoveryFrame {
-        switch stage {
-        case .startupFirstRight: .startupIntermediate
-        case .startupSecondRight: .startupOptionsActivated
-        case .activateOptions: .languageEnglish
-        case .chooseEnglish: .recoveryUtilities
-        case .activateMenuBar: .applicationMenu
-        case .recoveryMenuRight: .recoveryMenu
-        case .fileMenuRight: .fileMenu
-        case .editMenuRight: .editMenu
-        case .utilitiesMenuRight: .utilitiesMenu
-        case .utilitiesMenuDown: .terminalMenuItem
-        case .terminalShortcut: .terminal
-        case .complete: .unknown
-        }
-    }
-
-    private var nextStage: Stage {
-        switch stage {
-        case .startupFirstRight: .startupSecondRight
-        case .startupSecondRight: .activateOptions
-        case .activateOptions: .chooseEnglish
-        case .chooseEnglish: .activateMenuBar
-        case .activateMenuBar: .recoveryMenuRight
-        case .recoveryMenuRight: .fileMenuRight
-        case .fileMenuRight: .editMenuRight
-        case .editMenuRight: .utilitiesMenuRight
-        case .utilitiesMenuRight: .utilitiesMenuDown
-        case .utilitiesMenuDown: .terminalShortcut
-        case .terminalShortcut, .complete: .complete
-        }
+    private var currentEvent: PommeRecoveryNavigationEvent? {
+        guard eventIndex < route.eventTrace.count else { return nil }
+        return route.eventTrace[eventIndex]
     }
 }

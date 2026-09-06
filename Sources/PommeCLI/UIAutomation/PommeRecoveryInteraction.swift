@@ -5,6 +5,7 @@ import Foundation
 /// delivery and must return one receipt for that one requested key.  It has no
 /// pointer, focus, display-wake, or host-window capability.
 protocol PommeRecoveryKeyboardPort: Sendable {
+  func prepareRecoveryNavigation(route: PommeRecoveryNavigationRoute) async throws
   func nextRecoveryFrame() async throws -> PommeRecoveryFrame
   /// Returns the two fresh observations that form one Recovery checkpoint.
   ///
@@ -19,6 +20,8 @@ protocol PommeRecoveryKeyboardPort: Sendable {
 }
 
 extension PommeRecoveryKeyboardPort {
+  func prepareRecoveryNavigation(route: PommeRecoveryNavigationRoute) async throws {}
+
   func nextRecoveryFramePair() async throws -> [PommeRecoveryFrame] {
     try Task.checkCancellation()
     let first = try await nextRecoveryFrame()
@@ -36,6 +39,13 @@ protocol PommeRecoveryTerminalPort: PommeRecoveryKeyboardPort {
   func submitTerminalLine(_ command: String) async throws
   func terminalMarkerIsVerified(_ marker: String) async throws -> Bool
   func clearTerminalLine() async throws
+  func clearRecoveryObservations() async
+  func reportRecoveryPerformance(phase: PommeRecoveryPerformancePhase) async
+}
+
+extension PommeRecoveryTerminalPort {
+  func clearRecoveryObservations() async {}
+  func reportRecoveryPerformance(phase: PommeRecoveryPerformancePhase) async {}
 }
 
 /// A closed signal for a caller that owns the surrounding Recovery session.
@@ -91,6 +101,7 @@ enum PommeRecoveryInteractionMilestone: String, Equatable, Sendable {
 struct PommeTahoeRecoveryInteraction: Sendable {
   private var input: PommeTahoeReviewedInput
   private var cleanupRequired = false
+  private var navigationPrepared = false
 
   init(evidence: PommeRecoveryProfileEvidence) throws {
     do {
@@ -118,6 +129,11 @@ struct PommeTahoeRecoveryInteraction: Sendable {
 
     let key: PommeRecoveryVirtualKey
     do {
+      try Task.checkCancellation()
+      if !navigationPrepared {
+        try await port.prepareRecoveryNavigation(route: input.route)
+        navigationPrepared = true
+      }
       try Task.checkCancellation()
       let preEventFrames = try await port.nextRecoveryFramePair()
       try Task.checkCancellation()
@@ -201,6 +217,7 @@ struct PommeTahoeRecoveryInteraction: Sendable {
     }
 
     await onMilestone(.terminalVerified)
+    await port.reportRecoveryPerformance(phase: .navigation)
     do {
       for probe in capabilityProbes {
         try await port.submitTerminalLine(probe.command)
@@ -225,6 +242,7 @@ struct PommeTahoeRecoveryInteraction: Sendable {
       // Crossing this boundary may mutate the guest. Never capture another
       // frame, submit another line, or retry Return after this succeeds or
       // throws: a delivery error can mean the command reached Recovery.
+      await port.clearRecoveryObservations()
       do {
         try authorizeLauncherSubmission()
       } catch {
@@ -232,6 +250,7 @@ struct PommeTahoeRecoveryInteraction: Sendable {
         return .recoveryCleanupRequired
       }
       try await port.submitTerminalLine(launcherCommand)
+      await port.reportRecoveryPerformance(phase: .bootstrap)
       await onMilestone(.launcherSubmitted)
       return .terminalLauncherSubmitted
     } catch {
