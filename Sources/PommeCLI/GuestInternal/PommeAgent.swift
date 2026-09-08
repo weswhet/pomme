@@ -186,10 +186,17 @@ actor PommeAgent {
         let path = try string(object, "path")
         let arguments = try strings(object["arguments"])
         let identity = try PommePrivilege.resolve(object)
-        let pty = bool(object["pty"]) ?? false
-        guard !(pty && bool(object["detached"]) == true) else { throw PommeAgentOperationError.invalid }
-        let detached = bool(object["detached"]) ?? false
-        let launched = try PommeProcess.spawn(path: path, arguments: arguments, identity: identity, pty: pty)
+        let pty = try strictBoolean(object["pty"])
+        let detached = try strictBoolean(object["detached"])
+        guard !(pty && detached) else { throw PommeAgentOperationError.invalid }
+        let options = try PommeProcess.Options(payload: object, pty: pty)
+        let launched = try PommeProcess.spawn(
+            path: path,
+            arguments: arguments,
+            identity: identity,
+            pty: pty,
+            options: options
+        )
         let job = Job(id: UUID(), pid: launched.pid, startedAt: Date(), exited: false, status: nil, ptyMaster: launched.ptyMaster, stdin: launched.stdin, stdout: launched.stdout, stderr: launched.stderr, outputEOF: [], detached: detached)
         jobs[job.id] = job
         var result: [String: JSONValue] = [
@@ -623,6 +630,11 @@ actor PommeAgent {
         return value
     }
     private func bool(_ value: JSONValue?) -> Bool? { if case .bool(let value) = value { return value }; return nil }
+    private func strictBoolean(_ value: JSONValue?) throws -> Bool {
+        guard let value else { return false }
+        guard case .bool(let result) = value else { throw PommeAgentOperationError.invalid }
+        return result
+    }
     private func uuid(_ object: [String: JSONValue], _ key: String) throws -> UUID { guard let value = object[key]?.stringValue, let uuid = UUID(uuidString: value) else { throw PommeAgentOperationError.invalid }; return uuid }
     private func jobID(_ value: JSONValue) throws -> UUID { try uuid(try object(value), "jobID") }
     private func file(_ object: [String: JSONValue]) throws -> OpenFile { let id = try uuid(object, "fileID"); guard let file = files[id] else { throw PommeAgentOperationError.notFound }; return file }
@@ -648,6 +660,7 @@ enum PommeRemoteLogin {
 }
 
 struct PommePrivilege: Sendable {
+    let account: String
     let uid: uid_t
     let gid: gid_t
     let supplementary: [gid_t]
@@ -676,27 +689,134 @@ struct PommePrivilege: Sendable {
         } else {
             resolvedGID = record.pointee.pw_gid
         }
-        guard let baseGroup = Int32(exactly: resolvedGID) else {
-            throw PommeAgentOperationError.invalid
-        }
-        var count: Int32 = 0
-        _ = getgrouplist(account, baseGroup, nil, &count)
-        guard count > 0, count <= 1_024 else { throw PommeAgentOperationError.invalid }
+        let baseGroup = Int32(bitPattern: resolvedGID)
+        // Darwin can report a zero count for a nil root buffer and does not
+        // reliably grow a short buffer. Query once with the protocol's hard
+        // 1,024-group ceiling and reject an account that exceeds it.
+        var count: Int32 = 1_024
         var rawGroups = [Int32](repeating: 0, count: Int(count))
-        guard getgrouplist(account, baseGroup, &rawGroups, &count) >= 0 else {
-            throw PommeAgentOperationError.invalid
+        guard getgrouplist(account, baseGroup, &rawGroups, &count) >= 0,
+              count > 0, count <= 1_024
+        else { throw PommeAgentOperationError.invalid }
+        let groups = rawGroups.prefix(Int(count)).map { value -> gid_t in
+            gid_t(bitPattern: value)
         }
-        let groups = try rawGroups.prefix(Int(count)).map { value -> gid_t in
-            guard value >= 0, let group = gid_t(exactly: value) else {
-                throw PommeAgentOperationError.invalid
-            }
-            return group
-        }
-        return .init(uid: resolvedUID, gid: resolvedGID, supplementary: groups)
+        return .init(account: account, uid: resolvedUID, gid: resolvedGID, supplementary: groups)
     }
 }
 
 enum PommeProcess {
+    /// Process settings received through the authenticated request.  The
+    /// agent validates them again here because the daemon accepts protocol
+    /// envelopes directly, without passing through the CLI model layer.
+    struct Options: Sendable {
+        let cwd: String?
+        let environment: [String: String]
+        let stdinPath: String?
+        let stdoutPath: String?
+        let stderrPath: String?
+
+        init(
+            cwd: String? = nil,
+            environment: [String: String] = [:],
+            stdinPath: String? = nil,
+            stdoutPath: String? = nil,
+            stderrPath: String? = nil
+        ) {
+            self.cwd = cwd
+            self.environment = environment
+            self.stdinPath = stdinPath
+            self.stdoutPath = stdoutPath
+            self.stderrPath = stderrPath
+        }
+
+        init(payload: [String: JSONValue], pty: Bool) throws {
+            let allowed: Set<String> = [
+                "path", "arguments", "timeout", "stdinDataBase64", "attachStdin",
+                "pty", "cwd", "environment", "user", "uid", "group", "gid",
+                "stdinPath", "stdoutPath", "stderrPath", "detached"
+            ]
+            guard Set(payload.keys).isSubset(of: allowed) else {
+                throw PommeAgentOperationError.invalid
+            }
+            let cwd = try Self.path(payload["cwd"])
+            let stdinPath = try Self.path(payload["stdinPath"])
+            let stdoutPath = try Self.path(payload["stdoutPath"])
+            let stderrPath = try Self.path(payload["stderrPath"])
+            let attachedStdin = try Self.boolean(payload["attachStdin"])
+            guard !(attachedStdin && stdinPath != nil),
+                  !(pty && (stdinPath != nil || stdoutPath != nil || stderrPath != nil))
+            else {
+                throw PommeAgentOperationError.invalid
+            }
+            self.init(
+                cwd: cwd,
+                environment: try Self.environment(payload["environment"]),
+                stdinPath: stdinPath,
+                stdoutPath: stdoutPath,
+                stderrPath: stderrPath
+            )
+        }
+
+        fileprivate func mergedEnvironment() throws -> [String: String] {
+            var merged = ProcessInfo.processInfo.environment
+            for (key, value) in environment {
+                merged[key] = value
+            }
+            try Self.validateEnvironment(merged)
+            return merged
+        }
+
+        fileprivate static func validateEnvironment(_ environment: [String: String]) throws {
+            guard environment.count <= 1_024 else { throw PommeAgentOperationError.invalid }
+            for (key, value) in environment {
+                guard !key.isEmpty,
+                      key.utf8.count <= 256,
+                      value.utf8.count <= 64 * 1_024,
+                      !key.contains("\0"),
+                      !value.contains("\0"),
+                      key.first?.isASCII == true,
+                      key.first?.isLetter == true || key.first == "_",
+                      key.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") })
+                else {
+                    throw PommeAgentOperationError.invalid
+                }
+            }
+        }
+
+        private static func path(_ value: JSONValue?) throws -> String? {
+            guard let value else { return nil }
+            guard let path = value.stringValue,
+                  !path.isEmpty,
+                  path.utf8.count <= 4 * 1_024,
+                  path.hasPrefix("/"),
+                  !path.contains("\0"),
+                  !path.split(separator: "/", omittingEmptySubsequences: false).contains("..")
+            else {
+                throw PommeAgentOperationError.invalid
+            }
+            return path
+        }
+
+        private static func environment(_ value: JSONValue?) throws -> [String: String] {
+            guard let value else { return [:] }
+            guard let object = value.objectValue else { throw PommeAgentOperationError.invalid }
+            var result: [String: String] = [:]
+            for (key, value) in object {
+                guard let text = value.stringValue else { throw PommeAgentOperationError.invalid }
+                result[key] = text
+            }
+            try validateEnvironment(result)
+            return result
+        }
+
+        private static func boolean(_ value: JSONValue?) throws -> Bool {
+            guard let value else { return false }
+            guard case .bool(let result) = value else { throw PommeAgentOperationError.invalid }
+            return result
+        }
+    }
+
     struct Spawned: Sendable {
         let pid: Int32
         let ptyMaster: Int32?
@@ -706,8 +826,29 @@ enum PommeProcess {
         let ptyEchoDisabled: Bool
     }
 
-    static func spawn(path: String, arguments: [String], identity: PommePrivilege?, pty: Bool) throws -> Spawned {
-        guard path.hasPrefix("/"), !path.contains("\0"), arguments.allSatisfy({ !$0.contains("\0") }) else {
+    private static let helperStatusDescriptor: Int32 = 3
+    private static let helperEnvironmentDescriptor: Int32 = 4
+    private static let helperSuccessMarker: UInt8 = 0x7f
+
+    static func spawn(
+        path: String,
+        arguments: [String],
+        identity: PommePrivilege?,
+        pty: Bool,
+        options: Options = .init()
+    ) throws -> Spawned {
+        guard path.hasPrefix("/"),
+              path.utf8.count <= 4 * 1_024,
+              !path.contains("\0"),
+              !path.split(separator: "/", omittingEmptySubsequences: false).contains(".."),
+              arguments.count <= 1_024,
+              arguments.allSatisfy({ !$0.contains("\0") && $0.utf8.count <= 64 * 1_024 })
+        else {
+            throw PommeAgentOperationError.invalid
+        }
+        let environment = try options.mergedEnvironment()
+        let usesIdentityHelper = try identity.map(requiresIdentityHelper) ?? false
+        if usesIdentityHelper, geteuid() != 0 {
             throw PommeAgentOperationError.invalid
         }
         var master: Int32 = -1; var slave: Int32 = -1
@@ -735,14 +876,28 @@ enum PommeProcess {
             }
         }
 
+        var helperStatusPipe: [Int32] = [-1, -1]
+        var helperEnvironmentPipe: [Int32] = [-1, -1]
+        if usesIdentityHelper {
+            var noSigPipe: Int32 = 1
+            guard pipe(&helperStatusPipe) == 0,
+                  socketpair(AF_UNIX, SOCK_STREAM, 0, &helperEnvironmentPipe) == 0,
+                  setsockopt(helperEnvironmentPipe[1], SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size)) == 0
+            else {
+                closeDescriptors(master: master, slave: slave, stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe, pty: pty)
+                [helperStatusPipe, helperEnvironmentPipe].flatMap { $0 }.filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
+                throw PommeAgentOperationError.io
+            }
+        }
+
         var actions: posix_spawn_file_actions_t? = nil
         var attributes: posix_spawnattr_t? = nil
         guard posix_spawn_file_actions_init(&actions) == 0,
               posix_spawnattr_init(&attributes) == 0
         else {
             if actions != nil { _ = posix_spawn_file_actions_destroy(&actions) }
-            if pty { _ = Darwin.close(master); _ = Darwin.close(slave) }
-            else { [stdinPipe, stdoutPipe, stderrPipe].flatMap { $0 }.forEach { _ = Darwin.close($0) } }
+            closeDescriptors(master: master, slave: slave, stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe, pty: pty)
+            [helperStatusPipe, helperEnvironmentPipe].flatMap { $0 }.filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
             throw PommeAgentOperationError.io
         }
         defer {
@@ -750,30 +905,68 @@ enum PommeProcess {
             _ = posix_spawnattr_destroy(&attributes)
         }
 
-        let actionResults: [Int32]
+        var actionResults: [Int32] = []
         if pty {
             guard let terminalName = ttyname(slave) else {
-                _ = Darwin.close(master); _ = Darwin.close(slave)
+                closeDescriptors(master: master, slave: slave, stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe, pty: pty)
+                [helperStatusPipe, helperEnvironmentPipe].flatMap { $0 }.filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
                 throw PommeAgentOperationError.io
             }
-            actionResults = [
+            actionResults += [
                 posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, terminalName, O_RDWR, 0),
                 posix_spawn_file_actions_adddup2(&actions, STDIN_FILENO, STDOUT_FILENO),
                 posix_spawn_file_actions_adddup2(&actions, STDIN_FILENO, STDERR_FILENO)
             ]
         } else {
-            actionResults = [
-                posix_spawn_file_actions_adddup2(&actions, stdinPipe[0], STDIN_FILENO),
-                posix_spawn_file_actions_adddup2(&actions, stdoutPipe[1], STDOUT_FILENO),
-                posix_spawn_file_actions_adddup2(&actions, stderrPipe[1], STDERR_FILENO),
-                posix_spawn_file_actions_addclose(&actions, stdinPipe[1]),
-                posix_spawn_file_actions_addclose(&actions, stdoutPipe[0]),
-                posix_spawn_file_actions_addclose(&actions, stderrPipe[0])
+            if let stdinPath = options.stdinPath, !usesIdentityHelper {
+                actionResults.append(posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, stdinPath, O_RDONLY, 0))
+            } else {
+                actionResults += [
+                    posix_spawn_file_actions_adddup2(&actions, stdinPipe[0], STDIN_FILENO),
+                    posix_spawn_file_actions_addclose(&actions, stdinPipe[1])
+                ]
+            }
+            if let stdoutPath = options.stdoutPath, !usesIdentityHelper {
+                actionResults.append(posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, stdoutPath, O_WRONLY | O_CREAT | O_TRUNC, 0o600))
+            } else {
+                actionResults += [
+                    posix_spawn_file_actions_adddup2(&actions, stdoutPipe[1], STDOUT_FILENO),
+                    posix_spawn_file_actions_addclose(&actions, stdoutPipe[0])
+                ]
+            }
+            if let stderrPath = options.stderrPath, !usesIdentityHelper {
+                actionResults.append(posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, stderrPath, O_WRONLY | O_CREAT | O_TRUNC, 0o600))
+            } else {
+                actionResults += [
+                    posix_spawn_file_actions_adddup2(&actions, stderrPipe[1], STDERR_FILENO),
+                    posix_spawn_file_actions_addclose(&actions, stderrPipe[0])
+                ]
+            }
+        }
+        if let cwd = options.cwd, !usesIdentityHelper {
+            if #available(macOS 26, *) {
+                actionResults.append(cwd.withCString { posix_spawn_file_actions_addchdir(&actions, $0) })
+            } else {
+                actionResults.append(cwd.withCString { posix_spawn_file_actions_addchdir_np(&actions, $0) })
+            }
+        }
+        if usesIdentityHelper {
+            actionResults += [
+                posix_spawn_file_actions_adddup2(&actions, helperStatusPipe[1], helperStatusDescriptor),
+                posix_spawn_file_actions_adddup2(&actions, helperEnvironmentPipe[0], helperEnvironmentDescriptor),
+                posix_spawn_file_actions_addclose(&actions, helperStatusPipe[0]),
+                posix_spawn_file_actions_addclose(&actions, helperEnvironmentPipe[1])
             ]
+            if helperStatusPipe[1] != helperStatusDescriptor {
+                actionResults.append(posix_spawn_file_actions_addclose(&actions, helperStatusPipe[1]))
+            }
+            if helperEnvironmentPipe[0] != helperEnvironmentDescriptor {
+                actionResults.append(posix_spawn_file_actions_addclose(&actions, helperEnvironmentPipe[0]))
+            }
         }
         guard actionResults.allSatisfy({ $0 == 0 }) else {
-            if pty { _ = Darwin.close(master); _ = Darwin.close(slave) }
-            else { [stdinPipe, stdoutPipe, stderrPipe].flatMap { $0 }.forEach { _ = Darwin.close($0) } }
+            closeDescriptors(master: master, slave: slave, stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe, pty: pty)
+            [helperStatusPipe, helperEnvironmentPipe].flatMap { $0 }.filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
             throw PommeAgentOperationError.io
         }
 
@@ -782,43 +975,67 @@ enum PommeProcess {
         guard posix_spawnattr_setflags(&attributes, spawnFlags) == 0,
               (pty || posix_spawnattr_setpgroup(&attributes, 0) == 0)
         else {
-            if pty { _ = Darwin.close(master); _ = Darwin.close(slave) }
-            else { [stdinPipe, stdoutPipe, stderrPipe].flatMap { $0 }.forEach { _ = Darwin.close($0) } }
+            closeDescriptors(master: master, slave: slave, stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe, pty: pty)
+            [helperStatusPipe, helperEnvironmentPipe].flatMap { $0 }.filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
             throw PommeAgentOperationError.io
         }
 
-        let launchPath: String
-        let launchArguments: [String]
-        if let identity, identity.uid != geteuid() || identity.gid != getegid() {
-            guard geteuid() == 0 else {
-                if pty { _ = Darwin.close(master); _ = Darwin.close(slave) }
-                else { [stdinPipe, stdoutPipe, stderrPipe].flatMap { $0 }.forEach { _ = Darwin.close($0) } }
-                throw PommeAgentOperationError.invalid
-            }
-            // sudo is used only as the root-owned credential transition
-            // helper. It initializes the already-resolved supplementary
-            // groups, changes gid/uid, and then execs the requested absolute
-            // path without involving a shell.
-            launchPath = "/usr/bin/sudo"
-            launchArguments = [
-                "-n", "-H", "-u", "#\(identity.uid)", "-g", "#\(identity.gid)", "--", path
-            ] + arguments
-        } else {
-            launchPath = path
-            launchArguments = arguments
-        }
+        let launchPath = usesIdentityHelper ? PommeAgentInstall.executable : path
+        let launchArguments = try helperArguments(
+            path: path,
+            arguments: arguments,
+            identity: identity,
+            options: options,
+            usesIdentityHelper: usesIdentityHelper
+        )
 
         var argv = ([launchPath] + launchArguments).map { strdup($0) }
         argv.append(nil)
         defer { argv.dropLast().forEach { free($0) } }
+        var environmentPointers: [UnsafeMutablePointer<CChar>?]
+        if usesIdentityHelper {
+            // No caller-controlled value can affect the signed helper before
+            // it has dropped credentials. The requested environment travels
+            // over its dedicated inherited descriptor instead.
+            environmentPointers = [nil]
+        } else {
+            environmentPointers = try makeEnvironmentPointers(environment)
+        }
+        defer { environmentPointers.dropLast().forEach { free($0) } }
         var pid: pid_t = 0
         let spawnStatus = launchPath.withCString { executable in
-            posix_spawn(&pid, executable, &actions, &attributes, &argv, environ)
+            posix_spawn(&pid, executable, &actions, &attributes, &argv, &environmentPointers)
         }
         guard spawnStatus == 0, pid > 0 else {
-            if pty { _ = Darwin.close(master); _ = Darwin.close(slave) }
-            else { [stdinPipe, stdoutPipe, stderrPipe].flatMap { $0 }.forEach { _ = Darwin.close($0) } }
+            closeDescriptors(master: master, slave: slave, stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe, pty: pty)
+            [helperStatusPipe, helperEnvironmentPipe].flatMap { $0 }.filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
             throw PommeAgentOperationError.io
+        }
+        if usesIdentityHelper {
+            _ = Darwin.close(helperStatusPipe[1])
+            _ = Darwin.close(helperEnvironmentPipe[0])
+            do {
+                let environmentData = try JSONSerialization.data(withJSONObject: environment, options: [.sortedKeys])
+                guard environmentData.count <= PommeAgentProtocol.maximumFrameBytes else {
+                    throw PommeAgentOperationError.invalid
+                }
+                try writeAll(environmentData, to: helperEnvironmentPipe[1])
+                _ = Darwin.close(helperEnvironmentPipe[1])
+                helperEnvironmentPipe[1] = -1
+                guard try helperSucceeded(statusDescriptor: helperStatusPipe[0]) else {
+                    throw PommeAgentOperationError.io
+                }
+                _ = Darwin.close(helperStatusPipe[0])
+                helperStatusPipe[0] = -1
+            } catch {
+                _ = Darwin.close(helperStatusPipe[0])
+                _ = Darwin.close(helperEnvironmentPipe[1])
+                _ = kill(pid, SIGKILL)
+                var status: Int32 = 0
+                _ = waitpid(pid, &status, 0)
+                closeDescriptors(master: master, slave: slave, stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe, pty: pty)
+                throw error
+            }
         }
         if pty {
             _ = Darwin.close(slave)
@@ -832,8 +1049,8 @@ enum PommeProcess {
                 ptyEchoDisabled: true
             )
         }
-        _ = Darwin.close(stdinPipe[0]); _ = Darwin.close(stdoutPipe[1]); _ = Darwin.close(stderrPipe[1])
-        [stdinPipe[1], stdoutPipe[0], stderrPipe[0]].forEach { _ = fcntl($0, F_SETFL, O_NONBLOCK) }
+        [stdinPipe[0], stdoutPipe[1], stderrPipe[1]].filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
+        [stdinPipe[1], stdoutPipe[0], stderrPipe[0]].filter { $0 >= 0 }.forEach { _ = fcntl($0, F_SETFL, O_NONBLOCK) }
         return .init(
             pid: pid,
             ptyMaster: nil,
@@ -842,5 +1059,238 @@ enum PommeProcess {
             stderr: stderrPipe[0],
             ptyEchoDisabled: false
         )
+    }
+
+    /// Runs in the already-execed, signed Pomme executable.  This is never a
+    /// post-fork Swift path: the root agent starts it with posix_spawn, then
+    /// it establishes the requested target identity and execs the command.
+    static func runIdentityHelper(arguments: [String]) -> Int32 {
+        do {
+            let request = try IdentityHelperRequest(arguments: arguments)
+            let environmentData = try readAll(from: helperEnvironmentDescriptor, maximumBytes: PommeAgentProtocol.maximumFrameBytes)
+            guard Darwin.close(helperEnvironmentDescriptor) == 0 else {
+                throw PommeAgentOperationError.io
+            }
+            guard let object = try JSONSerialization.jsonObject(with: environmentData) as? [String: String] else {
+                throw PommeAgentOperationError.invalid
+            }
+            try Options.validateEnvironment(object)
+            let initialGroup = Int32(bitPattern: request.identity.gid)
+            guard geteuid() == 0,
+                  request.identity.account.withCString({ initgroups($0, initialGroup) }) == 0,
+                  setgid(request.identity.gid) == 0,
+                  setuid(request.identity.uid) == 0
+            else {
+                throw PommeAgentOperationError.invalid
+            }
+            if let cwd = request.cwd, chdir(cwd) != 0 { throw PommeAgentOperationError.io }
+            try redirect(request.stdinPath, descriptor: STDIN_FILENO, flags: O_RDONLY)
+            try redirect(request.stdoutPath, descriptor: STDOUT_FILENO, flags: O_WRONLY | O_CREAT | O_TRUNC)
+            try redirect(request.stderrPath, descriptor: STDERR_FILENO, flags: O_WRONLY | O_CREAT | O_TRUNC)
+            for (key, value) in object {
+                guard setenv(key, value, 1) == 0 else { throw PommeAgentOperationError.io }
+            }
+            guard fcntl(helperStatusDescriptor, F_SETFD, FD_CLOEXEC) == 0 else {
+                throw PommeAgentOperationError.io
+            }
+            try writeStatusMarker(helperSuccessMarker)
+            var argv = ([request.path] + request.arguments).map { strdup($0) }
+            argv.append(nil)
+            defer { argv.dropLast().forEach { free($0) } }
+            _ = request.path.withCString { executable in
+                execv(executable, &argv)
+            }
+            throw PommeAgentOperationError.io
+        } catch {
+            var failure: UInt8 = 1
+            _ = withUnsafePointer(to: &failure) { Darwin.write(helperStatusDescriptor, $0, 1) }
+            return 64
+        }
+    }
+
+    private struct IdentityHelperRequest {
+        let identity: PommePrivilege
+        let cwd: String?
+        let stdinPath: String?
+        let stdoutPath: String?
+        let stderrPath: String?
+        let path: String
+        let arguments: [String]
+
+        init(arguments: [String]) throws {
+            guard arguments.first == "--pomme-exec-helper" else { throw PommeAgentOperationError.invalid }
+            var values: [String: String] = [:]
+            var index = 1
+            while index < arguments.count, arguments[index] != "--" {
+                let flag = arguments[index]
+                guard ["--uid", "--gid", "--account", "--cwd", "--stdin-path", "--stdout-path", "--stderr-path"].contains(flag),
+                      index + 1 < arguments.count,
+                      values[flag] == nil
+                else {
+                    throw PommeAgentOperationError.invalid
+                }
+                values[flag] = arguments[index + 1]
+                index += 2
+            }
+            guard index < arguments.count - 1,
+                  let uidText = values["--uid"], let uid = uid_t(uidText),
+                  let gidText = values["--gid"], let gid = gid_t(gidText),
+                  let account = values["--account"],
+                  !account.isEmpty,
+                  account.utf8.count <= 256,
+                  !account.contains("\0")
+            else {
+                throw PommeAgentOperationError.invalid
+            }
+            let options = try Options(
+                cwd: Self.path(values["--cwd"]),
+                environment: [:],
+                stdinPath: Self.path(values["--stdin-path"]),
+                stdoutPath: Self.path(values["--stdout-path"]),
+                stderrPath: Self.path(values["--stderr-path"])
+            )
+            let target = arguments[index + 1]
+            guard target.hasPrefix("/"), !target.contains("\0"), arguments.dropFirst(index + 2).allSatisfy({ !$0.contains("\0") }) else {
+                throw PommeAgentOperationError.invalid
+            }
+            identity = .init(account: account, uid: uid, gid: gid, supplementary: [])
+            cwd = options.cwd
+            stdinPath = options.stdinPath
+            stdoutPath = options.stdoutPath
+            stderrPath = options.stderrPath
+            path = target
+            self.arguments = Array(arguments.dropFirst(index + 2))
+        }
+
+        private static func path(_ value: String?) throws -> String? {
+            guard let value else { return nil }
+            return try Options(payload: ["cwd": .string(value)], pty: false).cwd
+        }
+    }
+
+    private static func helperArguments(
+        path: String,
+        arguments: [String],
+        identity: PommePrivilege?,
+        options: Options,
+        usesIdentityHelper: Bool
+    ) throws -> [String] {
+        guard usesIdentityHelper, let identity else { return arguments }
+        var result = [
+            "--pomme-exec-helper", "--uid", String(identity.uid),
+            "--gid", String(identity.gid),
+            "--account", identity.account
+        ]
+        if let cwd = options.cwd { result += ["--cwd", cwd] }
+        if let stdinPath = options.stdinPath { result += ["--stdin-path", stdinPath] }
+        if let stdoutPath = options.stdoutPath { result += ["--stdout-path", stdoutPath] }
+        if let stderrPath = options.stderrPath { result += ["--stderr-path", stderrPath] }
+        return result + ["--", path] + arguments
+    }
+
+    private static func requiresIdentityHelper(_ identity: PommePrivilege) throws -> Bool {
+        guard identity.uid == geteuid(), identity.gid == getegid() else { return true }
+        let count = getgroups(0, nil)
+        guard count >= 0, count <= 1_024 else { throw PommeAgentOperationError.io }
+        guard count > 0 else { return !identity.supplementary.isEmpty }
+        var rawGroups = [Int32](repeating: 0, count: Int(count))
+        let populated = getgroups(count, &rawGroups)
+        guard populated >= 0, populated <= count else { throw PommeAgentOperationError.io }
+        let current = Set(rawGroups.prefix(Int(populated)).map { gid_t(bitPattern: $0) })
+        return current != Set(identity.supplementary)
+    }
+
+    private static func makeEnvironmentPointers(_ environment: [String: String]) throws -> [UnsafeMutablePointer<CChar>?] {
+        try Options.validateEnvironment(environment)
+        var result = environment.keys.sorted().map { strdup("\($0)=\(environment[$0]!)") }
+        guard !result.contains(where: { $0 == nil }) else {
+            result.forEach { free($0) }
+            throw PommeAgentOperationError.io
+        }
+        result.append(nil)
+        return result
+    }
+
+    private static func closeDescriptors(
+        master: Int32,
+        slave: Int32,
+        stdin: [Int32],
+        stdout: [Int32],
+        stderr: [Int32],
+        pty: Bool
+    ) {
+        if pty {
+            _ = Darwin.close(master)
+            _ = Darwin.close(slave)
+        } else {
+            [stdin, stdout, stderr].flatMap { $0 }.filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
+        }
+    }
+
+    private static func writeAll(_ data: Data, to descriptor: Int32) throws {
+        try data.withUnsafeBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else { return }
+            var offset = 0
+            while offset < bytes.count {
+                let result = Darwin.write(descriptor, baseAddress.advanced(by: offset), bytes.count - offset)
+                if result > 0 { offset += result }
+                else if result < 0, errno == EINTR { continue }
+                else { throw PommeAgentOperationError.io }
+            }
+        }
+    }
+
+    static func helperSucceeded(statusDescriptor: Int32, successMarker: UInt8 = helperSuccessMarker) throws -> Bool {
+        var sawSuccess = false
+        var result: UInt8 = 0
+        while true {
+            let count = withUnsafeMutablePointer(to: &result) { Darwin.read(statusDescriptor, $0, 1) }
+            if count == 0 { return sawSuccess }
+            if count > 0 {
+                guard !sawSuccess, result == successMarker else { return false }
+                sawSuccess = true
+                continue
+            }
+            if errno == EINTR { continue }
+            throw PommeAgentOperationError.io
+        }
+    }
+
+    private static func writeStatusMarker(_ marker: UInt8) throws {
+        var marker = marker
+        while true {
+            let count = withUnsafePointer(to: &marker) { Darwin.write(helperStatusDescriptor, $0, 1) }
+            if count == 1 { return }
+            if count < 0, errno == EINTR { continue }
+            throw PommeAgentOperationError.io
+        }
+    }
+
+    private static func readAll(from descriptor: Int32, maximumBytes: Int) throws -> Data {
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 8 * 1024)
+        while true {
+            let count = Darwin.read(descriptor, &buffer, buffer.count)
+            if count > 0 {
+                data.append(contentsOf: buffer.prefix(Int(count)))
+                guard data.count <= maximumBytes else { throw PommeAgentOperationError.invalid }
+            } else if count == 0 {
+                return data
+            } else if errno != EINTR {
+                throw PommeAgentOperationError.io
+            }
+        }
+    }
+
+    private static func redirect(_ path: String?, descriptor: Int32, flags: Int32) throws {
+        guard let path else { return }
+        let opened = path.withCString { Darwin.open($0, flags, mode_t(0o600)) }
+        guard opened >= 0 else { throw PommeAgentOperationError.io }
+        defer {
+            if opened != descriptor { _ = Darwin.close(opened) }
+        }
+        guard opened == descriptor || dup2(opened, descriptor) >= 0 else {
+            throw PommeAgentOperationError.io
+        }
     }
 }
