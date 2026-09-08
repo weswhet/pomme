@@ -27,6 +27,9 @@ extension PommeSecurityWorkflow {
     // Capture this before even the read-only Recovery inspection boots.
     let original = try PommeCore.stableVMRunState(reference: reference)
     let plan = try PommeCore.securityProvisioningPlan(reference: reference)
+    try PommeRecoverySecurityQualification.require(
+      profile: try PommeCore.recoveryProfileEvidence(for: plan)
+    )
     let runtimeMetadata = try PommeCore.provisioningRuntimeMetadata(for: plan)
     guard let group = runtimeMetadata.startupVolumeGroupUUID else {
       throw PommeSecurityWorkflowJournalError.invalidIdentity
