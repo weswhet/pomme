@@ -62,6 +62,13 @@ actor PommeAgent {
     let role: PommeAgentRole
     let executableSHA256: String
     private var files: [UUID: OpenFile] = [:]
+    private struct FileCleanup {
+        let stage: URL
+        let destination: URL
+        let preservePriorEntry: Bool
+    }
+    private var pendingFileCleanup: [UUID: FileCleanup] = [:]
+    private var completedFileCleanup: Set<UUID> = []
     private var jobs: [UUID: Job] = [:]
     private var activationPending = false
     private var update: PommeAgentUpdateJournal?
@@ -318,10 +325,20 @@ actor PommeAgent {
 
         var descriptorOpen = true
         var committed = false
+        var preservePriorEntry = false
         defer {
             if descriptorOpen { _ = Darwin.close(file.descriptor) }
             if !committed {
-                try? PommeAgentFileTransaction.removeAdjacentStage(stage, for: destination)
+                pendingFileCleanup[id] = .init(stage: stage, destination: destination, preservePriorEntry: preservePriorEntry)
+                if !preservePriorEntry {
+                    do {
+                        try PommeAgentFileTransaction.removeAdjacentStage(stage, for: destination)
+                        pendingFileCleanup.removeValue(forKey: id)
+                        completedFileCleanup.insert(id)
+                    } catch {
+                        // Keep the exact cleanup record addressable by file.abort.
+                    }
+                }
             }
         }
         guard !file.tainted else { throw PommeAgentOperationError.invalid }
@@ -341,8 +358,13 @@ actor PommeAgent {
         guard actualSHA256 == expectedSHA256 else {
             throw PommeAgentOperationError.invalid
         }
-        try mapFileTransactionError {
-            try PommeAgentFileTransaction.commit(stage: stage, destination: destination)
+        do {
+            try mapFileTransactionError {
+                try PommeAgentFileTransaction.commit(stage: stage, destination: destination)
+            }
+        } catch let error as PommeAgentFileTransaction.CommitError {
+            preservePriorEntry = true
+            throw error
         }
         committed = true
         return .object([
@@ -353,8 +375,24 @@ actor PommeAgent {
     }
     private func abortFile(_ payload: JSONValue) throws -> JSONValue {
         let id = try uuid(try object(payload), "fileID")
-        guard let file = files.removeValue(forKey: id), let stage = file.stage, let destination = file.destination else { throw PommeAgentOperationError.invalid }
-        _ = Darwin.close(file.descriptor); try? PommeAgentFileTransaction.removeAdjacentStage(stage, for: destination)
+        if completedFileCleanup.remove(id) != nil { return .object(["aborted": .bool(true)]) }
+        if let cleanup = pendingFileCleanup[id] {
+            guard !cleanup.preservePriorEntry else {
+                throw PommeAgentFileTransaction.CommitError.destinationPublishedCleanupFailed
+            }
+            try mapFileTransactionError {
+                try PommeAgentFileTransaction.removeAdjacentStage(cleanup.stage, for: cleanup.destination)
+            }
+            pendingFileCleanup.removeValue(forKey: id)
+            return .object(["aborted": .bool(true)])
+        }
+        guard let file = files[id], let stage = file.stage, let destination = file.destination else { throw PommeAgentOperationError.invalid }
+        files.removeValue(forKey: id)
+        let closeResult = Darwin.close(file.descriptor)
+        pendingFileCleanup[id] = .init(stage: stage, destination: destination, preservePriorEntry: false)
+        try mapFileTransactionError { try PommeAgentFileTransaction.removeAdjacentStage(stage, for: destination) }
+        pendingFileCleanup.removeValue(forKey: id)
+        guard closeResult == 0 else { throw PommeAgentOperationError.io }
         return .object(["aborted": .bool(true)])
     }
     private func remoteLogin(_ payload: JSONValue) throws -> JSONValue {
