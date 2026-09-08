@@ -119,6 +119,103 @@ struct PommeProvisioningTests {
         #expect(throws: PommeProvisioningError.self) { try signer.verify(replacement) }
     }
 
+    @Test("completed provisioning journals report that agent repair has nothing to do")
+    func completedJournalHasNothingToRepair() throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 8, count: 32))
+        let journal = try signer.make(
+            generation: 1,
+            plan: plan(),
+            events: try completedEvents()
+        )
+
+        #expect(throws: PommeProvisioningError.nothingToRepair(vmName: "pomme-test")) {
+            try PommeProvisioningCoordinator.repairPhase(in: journal)
+        }
+        #expect(PommeProvisioningError.nothingToRepair(vmName: "pomme-test").localizedDescription.contains("SIP or AMFI"))
+    }
+
+    @Test("agent repair gives resume guidance for unsupported provisioning phases")
+    func unsupportedRepairPhaseProvidesResumeGuidance() throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 9, count: 32))
+        let journal = try signer.make(
+            generation: 1,
+            plan: plan(),
+            events: try eventsThrough(.install)
+        )
+
+        #expect(throws: PommeProvisioningError.repairUnavailable(
+            phase: .displayOnlyFirstNormalBoot,
+            vmName: "pomme-test"
+        )) {
+            try PommeProvisioningCoordinator.repairPhase(in: journal)
+        }
+        #expect(PommeProvisioningError.repairUnavailable(
+            phase: .displayOnlyFirstNormalBoot,
+            vmName: "pomme-test"
+        ).localizedDescription.contains("--resume"))
+    }
+
+    @Test("an unfinished intent is reported as interrupted before phase support is checked")
+    func interruptedRepairIntentIsActionable() throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 10, count: 32))
+        let journal = try signer.make(
+            generation: 1,
+            plan: plan(),
+            events: try eventsThrough(.install, leavingIntentFor: .displayOnlyFirstNormalBoot)
+        )
+
+        #expect(throws: PommeProvisioningError.repairInterrupted(
+            phase: .displayOnlyFirstNormalBoot,
+            vmName: "pomme-test"
+        )) {
+            try PommeProvisioningCoordinator.repairPhase(in: journal)
+        }
+        #expect(PommeProvisioningError.repairInterrupted(
+            phase: .displayOnlyFirstNormalBoot,
+            vmName: "pomme-test"
+        ).localizedDescription.contains("retained"))
+    }
+
+    @Test("failed and not-yet-started Recovery agent phases remain repairable")
+    func recoveryAgentRepairPhase() throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 11, count: 32))
+        let notStarted = try signer.make(
+            generation: 1,
+            plan: plan(),
+            events: try eventsThrough(.displayOnlyFirstNormalBoot)
+        )
+        let first = try PommeProvisioningCoordinator.repairPhase(in: notStarted)
+        #expect(first.phase == .installRecoveryAgent)
+        #expect(first.attempt == 1)
+
+        let failed = try signer.make(
+            generation: 1,
+            plan: plan(),
+            events: try eventsThrough(.displayOnlyFirstNormalBoot)
+                + [
+                    try event(kind: .intent, phase: .installRecoveryAgent),
+                    try event(kind: .failure, phase: .installRecoveryAgent),
+                ]
+        )
+        let retry = try PommeProvisioningCoordinator.repairPhase(in: failed)
+        #expect(retry.phase == .installRecoveryAgent)
+        #expect(retry.attempt == 2)
+    }
+
+    @Test("repair phase preserves invalid journal events")
+    func invalidRepairJournalRemainsInvalid() throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 12, count: 32))
+        let journal = try signer.make(
+            generation: 1,
+            plan: plan(),
+            events: [try event(kind: .receipt, phase: .install)]
+        )
+
+        #expect(throws: PommeProvisioningError.unexpectedEvent) {
+            try PommeProvisioningCoordinator.repairPhase(in: journal)
+        }
+    }
+
     @Test("intent commits before every effect and failed partial effects retain the VM and journal")
     func intentBeforeEffectAndFailureRetention() async throws {
         let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 1, count: 32))
@@ -236,6 +333,45 @@ struct PommeProvisioningTests {
             restoreFinalState: { _ in try await calls.record(.restoreFinalState, digest: self.digest, fail: fail) },
             recoveryRepair: { _, state in await calls.recordRepair(state, digest: self.digest) }
         )
+    }
+
+    private func event(
+        kind: PommeProvisioningEvent.Kind,
+        phase: PommeProvisioningPhase,
+        attempt: UInt64 = 1
+    ) throws -> PommeProvisioningEvent {
+        try .init(kind: kind, phase: phase, attempt: attempt, digest: kind == .intent ? nil : digest)
+    }
+
+    private func eventsThrough(
+        _ lastReceipt: PommeProvisioningPhase,
+        failedPhase: PommeProvisioningPhase? = nil
+    ) throws -> [PommeProvisioningEvent] {
+        var events: [PommeProvisioningEvent] = []
+        for phase in PommeProvisioningPhase.allCases {
+            guard PommeProvisioningPhase.allCases.firstIndex(of: phase)! <=
+                    PommeProvisioningPhase.allCases.firstIndex(of: lastReceipt)! else { break }
+            events.append(try event(kind: .intent, phase: phase))
+            if phase == failedPhase {
+                events.append(try event(kind: .failure, phase: phase))
+            } else {
+                events.append(try event(kind: .receipt, phase: phase))
+            }
+        }
+        return events
+    }
+
+    private func eventsThrough(
+        _ lastReceipt: PommeProvisioningPhase,
+        leavingIntentFor pendingPhase: PommeProvisioningPhase
+    ) throws -> [PommeProvisioningEvent] {
+        var events = try eventsThrough(lastReceipt)
+        events.append(try event(kind: .intent, phase: pendingPhase))
+        return events
+    }
+
+    private func completedEvents() throws -> [PommeProvisioningEvent] {
+        try eventsThrough(.restoreFinalState)
     }
 }
 
