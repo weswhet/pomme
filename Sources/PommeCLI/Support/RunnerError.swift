@@ -199,7 +199,7 @@ enum PommeHelp {
         case .files:
             "Usage: pomme cp SOURCE DESTINATION\n       pomme cat NAME:/absolute/path"
         case .mdm:
-            "Usage: pomme mdm enroll NAME --profile PATH"
+            "Usage: pomme mdm NAME --profile PATH [--enrollment-mode supervised|unapproved]"
         case .ui:
             "Usage: pomme ui <action> NAME"
         case .security:

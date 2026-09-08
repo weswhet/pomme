@@ -6,11 +6,13 @@ import Security
 enum GuestInternalError: LocalizedError {
     case mdm(String)
     case timedOut
+    case mdmOutcomeUnknown
 
     var errorDescription: String? {
         switch self {
         case .mdm(let message): message
         case .timedOut: "The guest MDM operation timed out."
+        case .mdmOutcomeUnknown: "The MDM enrollment outcome is unknown; identity state was retained. Verify installed-profile state before retrying."
         }
     }
 }
@@ -202,10 +204,10 @@ enum GuestMDMStaging {
         expectedOwner: uid_t,
         expectedGroup: gid_t
     ) throws -> (descriptor: Int32, name: String) {
-        let root = rootURL.standardizedFileURL
+        let root = rootURL
         guard root.isFileURL,
               root.path.hasPrefix("/"),
-              root.path == rootURL.path,
+              PommeMDMStagingHelper.isCanonicalPath(root.path),
               !root.path.contains("\0"),
               let name = root.path.split(separator: "/", omittingEmptySubsequences: true).last.map(String.init),
               name == root.lastPathComponent,
@@ -245,11 +247,11 @@ enum GuestMDMStaging {
             throw GuestMDMStagingError.invalidProfile
         }
         let components = path.split(separator: "/", omittingEmptySubsequences: false)
-        guard !components.contains("."), !components.contains("..") else {
+        guard !components.dropFirst().contains(""), !components.contains("."), !components.contains("..") else {
             throw GuestMDMStagingError.invalidProfile
         }
-        let root = rootURL.standardizedFileURL
-        let profile = URL(fileURLWithPath: path).standardizedFileURL
+        let root = rootURL
+        let profile = URL(fileURLWithPath: path)
         guard profile.path == path,
               profile.deletingLastPathComponent().path == root.path,
               !profile.lastPathComponent.isEmpty,
@@ -348,14 +350,95 @@ private enum PersistentMDMEnrollmentError: LocalizedError {
     func privateRequest(_ request: NSDictionary, withReply reply: @escaping (NSDictionary) -> Void)
 }
 
+struct GuestMDMIdentityKeychainOperations<Handle> {
+    let open: (String) -> (OSStatus, Handle?)
+    let status: (Handle) -> (OSStatus, SecKeychainStatus)
+}
+
+enum GuestMDMIdentityKeychain {
+    static let privatePath = "/private/var/db/ConfigurationProfiles/Store/MCXPrivate.keychain"
+    static let systemPath = "/Library/Keychains/System.keychain"
+
+    static func select<Handle>(operations: GuestMDMIdentityKeychainOperations<Handle>) throws -> Handle {
+        var (result, handle) = operations.open(privatePath)
+        var systemSelected = false
+        var observedStatus: (OSStatus, SecKeychainStatus)?
+        if result == errSecSuccess, let privateHandle = handle {
+            observedStatus = operations.status(privateHandle)
+        }
+        // SecKeychainOpen may return a reference to a missing keychain on
+        // Sequoia; absence is then reported by SecKeychainGetStatus.
+        if result == errSecNoSuchKeychain || observedStatus?.0 == errSecNoSuchKeychain {
+            (result, handle) = operations.open(systemPath)
+            systemSelected = true
+            observedStatus = nil
+        }
+        guard result == errSecSuccess, let handle else {
+            throw GuestInternalError.mdm("Could not open the guest MDM identity keychain.")
+        }
+        let (statusResult, status) = observedStatus ?? operations.status(handle)
+        guard statusResult == errSecSuccess,
+              (systemSelected ? status & kSecReadPermStatus != 0
+                              : status & kSecUnlockStateStatus != 0) else {
+            throw GuestInternalError.mdm("The guest MDM identity keychain is locked or unavailable.")
+        }
+        // The System keychain can report readable but locked until securityd
+        // services an operation. Noninteractive SecPKCS12Import remains the
+        // authority for access; never guess a password or change its ACL.
+
+        return handle
+    }
+
+    static func openSelectedKeychain() throws -> SecKeychain {
+        try select(operations: .init(
+            open: { path in
+                var handle: SecKeychain?
+                return (SecKeychainOpen(path, &handle), handle)
+            },
+            status: { handle in
+                var status: SecKeychainStatus = 0
+                return (SecKeychainGetStatus(handle, &status), status)
+            }
+        ))
+    }
+}
+
 struct GuestMDMEnrollment {
     static let stagingDirectory = "/private/var/db/pomme-mdm-enrollment"
     var requestTimeout: TimeInterval = 60
     var request: ([String: Any], TimeInterval) throws -> [String: Any] = GuestMDMEnrollment.privateRequest
     var profileArchiveOverride: Data?
-    /// Test seam for failure cleanup; production uses only the exact
-    /// references returned by `ImportedMDMIdentity`.
-    var cleanupImportedIdentityOverride: (() throws -> Void)?
+    /// Test-only source identity for an archive override. Real staged
+    /// profiles are parsed from their bytes before any native side effect.
+    var profileIdentityOverride: MDMEnrollmentProfileIdentity?
+    /// A bounded, structured installed-profile observation. The production
+    /// default invokes `profiles show -output stdout-xml`; tests inject a
+    /// parser-backed result and never invoke native commands.
+    var installedProfileObservation: ((MDMEnrollmentProfileIdentity, TimeInterval) throws -> MDMInstalledProfileIdentity?)?
+    /// Test-only proof that identity import was not reached on a conflict.
+    var identityImportObserver: (() -> Void)?
+
+    private struct ObservationContext {
+        let expected: MDMEnrollmentProfileIdentity
+        let sourceData: Data?
+        let observe: () throws -> MDMInstalledProfileIdentity?
+    }
+
+    init(
+        requestTimeout: TimeInterval = 60,
+        request: @escaping ([String: Any], TimeInterval) throws -> [String: Any] = GuestMDMEnrollment.privateRequest,
+        profileArchiveOverride: Data? = nil,
+        profileIdentityOverride: MDMEnrollmentProfileIdentity? = nil,
+        installedProfileObservation: ((MDMEnrollmentProfileIdentity, TimeInterval) throws -> MDMInstalledProfileIdentity?)? = nil,
+        identityImportObserver: (() -> Void)? = nil
+    ) {
+        self.requestTimeout = requestTimeout
+        self.request = request
+        self.profileArchiveOverride = profileArchiveOverride
+        self.profileIdentityOverride = profileIdentityOverride
+        self.installedProfileObservation = installedProfileObservation
+        self.identityImportObserver = identityImportObserver
+    }
 
     /// Dispatcher-facing typed operations. The persistent PommeAgent owns the
     /// authenticated call boundary; these methods expose only redacted proof
@@ -368,85 +451,114 @@ struct GuestMDMEnrollment {
         try GuestMDMStaging.cleanup(profilePath: profilePath)
     }
 
-    func enroll(profilePath: String) throws -> GuestOperationExecution {
-        var importedIdentity: ImportedMDMIdentity?
-        var primaryError: Error?
-        var execution: GuestOperationExecution?
-        do {
-            let validatedProfile = try Self.validatedStagedProfile(
-                profilePath,
-                requireRegularFile: profileArchiveOverride == nil
-            )
-            let archive: Data
-            if let profileArchiveOverride {
-                archive = profileArchiveOverride
-            } else {
-                let built = try buildProfileArchiveWithIdentity(profilePath: validatedProfile.path)
-                archive = built.archive
-                importedIdentity = built.importedIdentity
+    func enroll(
+        profilePath: String,
+        mode: MDMEnrollmentMode = .unapproved
+    ) throws -> GuestOperationExecution {
+        let validatedProfile = try Self.validatedStagedProfile(
+            profilePath,
+            requireRegularFile: profileArchiveOverride == nil
+        )
+
+        // This probe must precede archive construction and identity import. A
+        // conflicting installed identity therefore cannot cause either an XPC
+        // request or a new keychain identity to be created.
+        let observationContext = try makeObservationContext(profileURL: validatedProfile)
+        if let observationContext,
+           let installed = try observationContext.observe() {
+            guard installed.matches(observationContext.expected) else {
+                throw GuestInternalError.mdm("The installed MDM profile does not match the requested profile.")
             }
+            var payload: [String: Any] = [
+                "reused": true,
+                "profileIdentifier": installed.identifier
+            ]
+            if case .supervised = mode {
+                do {
+                    let approval = try markUserApproved(profileIdentifier: installed.identifier)
+                    payload.merge(approval.payload) { current, _ in current }
+                } catch {
+                    // A dispatched approval with no trustworthy reply is an
+                    // unknown outcome. Never turn that into a reinstall.
+                    throw GuestInternalError.mdmOutcomeUnknown
+                }
+            }
+            return GuestOperationExecution(exitCode: 0, payload: payload)
+        }
+
+        let archive: Data
+        let expectedProfileIdentifier: String?
+        if let profileArchiveOverride {
+            archive = profileArchiveOverride
+            expectedProfileIdentifier = observationContext?.expected.identifier
+        } else {
+            let built = try buildProfileArchiveWithIdentity(
+                profilePath: validatedProfile.path,
+                profileData: observationContext?.sourceData
+            )
+            archive = built.archive
+            expectedProfileIdentifier = built.profileIdentifier
+        }
+        // Once dispatched, a lost reply cannot prove absence of enrollment
+        // effects. Preserve the identity referenced by the profile on every
+        // ambiguous outcome, and require verification before another attempt.
+        do {
             let setupReply = try request([
                 "Command": "InstallMDMv1Profile",
                 "CommandDesc": "pomme mdm private-xpc setup",
                 "MDMProfileArchive": archive,
                 "UpdatingEnrollment": false
             ], requestTimeout)
-            let setupSuccess = Self.replySuccess(setupReply)
-            guard let response = setupReply["Response"] as? [String: Any],
+            guard Self.replySuccess(setupReply),
+                  let response = setupReply["Response"] as? [String: Any],
                   let updatedArchive = response["UpdatedMDMProfileArchive"] as? Data,
                   !updatedArchive.isEmpty else {
-                throw GuestInternalError.mdm(Self.replyError(setupReply))
+                throw GuestInternalError.mdmOutcomeUnknown
             }
-
             let installReply = try request([
                 "Command": "InstallProfile",
                 "CommandDesc": "pomme mdm private-xpc install",
                 "ProfileArchive": updatedArchive
             ], requestTimeout)
-            let installSuccess = Self.replySuccess(installReply)
-            guard installSuccess else { throw GuestInternalError.mdm(Self.replyError(installReply)) }
+            guard Self.replySuccess(installReply) else { throw GuestInternalError.mdmOutcomeUnknown }
             let installResponse = installReply["Response"] as? [String: Any]
             let identifier = (installResponse?["ProfileIdentifier"] ?? installResponse?["profileIdentifier"]) as? String ?? ""
-            let perUser = (installResponse?["ServerSupportsPerUserConnections"] as? NSNumber)?.boolValue
+            guard !identifier.isEmpty,
+                  identifier.utf8.count <= 255,
+                  !identifier.contains("\0"),
+                  identifier.trimmingCharacters(in: .whitespacesAndNewlines) == identifier,
+                  expectedProfileIdentifier == nil || expectedProfileIdentifier == identifier else {
+                // A successful install reply for a different profile is a
+                // conflict. Never mark that unexpected profile user-intended.
+                throw GuestInternalError.mdmOutcomeUnknown
+            }
             var payload: [String: Any] = [
-                "setupSuccess": setupSuccess,
-                "installSuccess": installSuccess,
+                "setupSuccess": true,
+                "installSuccess": true,
                 "setupArchiveBytes": archive.count,
                 "updatedArchiveBytes": updatedArchive.count,
                 "profileIdentifier": identifier
             ]
-            if let perUser { payload["serverSupportsPerUserConnections"] = perUser }
-            execution = GuestOperationExecution(exitCode: 0, payload: payload)
-        } catch {
-            primaryError = error
-        }
-
-        guard let primaryError else {
-            guard let execution else { throw GuestInternalError.mdm("MDM enrollment produced no result.") }
-            // The installed MDM profile stores persistent references to this
-            // identity and private key. They must remain in the Configuration
-            // Profiles keychain for all later command connections.
-            return execution
-        }
-
-        let cleanupError: Error?
-        do {
-            if let cleanupImportedIdentityOverride {
-                try cleanupImportedIdentityOverride()
-            } else {
-                try importedIdentity?.removeOnlyNewItems()
+            if let perUser = (installResponse?["ServerSupportsPerUserConnections"] as? NSNumber)?.boolValue {
+                payload["serverSupportsPerUserConnections"] = perUser
             }
-            cleanupError = nil
+            if case .supervised = mode {
+                if let observationContext {
+                    guard let installed = try observationContext.observe(),
+                          installed.matches(observationContext.expected),
+                          installed.identifier == identifier else {
+                        // Installation already happened, so the state is no
+                        // longer safe to classify as a clean failure.
+                        throw GuestInternalError.mdmOutcomeUnknown
+                    }
+                }
+                let approval = try markUserApproved(profileIdentifier: identifier)
+                payload.merge(approval.payload) { current, _ in current }
+            }
+            return GuestOperationExecution(exitCode: 0, payload: payload)
         } catch {
-            cleanupError = error
+            throw GuestInternalError.mdmOutcomeUnknown
         }
-
-        if let cleanupError {
-            throw GuestInternalError.mdm(
-                "MDM enrollment failed: \(primaryError.localizedDescription); newly imported identity cleanup failed: \(cleanupError.localizedDescription)"
-            )
-        }
-        throw primaryError
     }
 
     static func isStagedProfilePath(_ path: String) -> Bool {
@@ -461,11 +573,11 @@ struct GuestMDMEnrollment {
             throw GuestInternalError.mdm("The MDM profile path is invalid.")
         }
         let components = path.split(separator: "/", omittingEmptySubsequences: false)
-        guard !components.contains("."), !components.contains("..") else {
+        guard !components.dropFirst().contains(""), !components.contains("."), !components.contains("..") else {
             throw GuestInternalError.mdm("The MDM profile path is invalid.")
         }
-        let profile = URL(fileURLWithPath: path).standardizedFileURL
-        let root = URL(fileURLWithPath: stagingDirectory).standardizedFileURL
+        let profile = URL(fileURLWithPath: path)
+        let root = URL(fileURLWithPath: stagingDirectory)
         guard profile.path == path,
               profile.deletingLastPathComponent().path == root.path,
               profile.lastPathComponent != ".",
@@ -481,6 +593,45 @@ struct GuestMDMEnrollment {
             throw GuestInternalError.mdm("The staged MDM profile is unavailable.")
         }
         return profile
+    }
+
+    private func makeObservationContext(profileURL: URL) throws -> ObservationContext? {
+        let expected: MDMEnrollmentProfileIdentity
+        let sourceData: Data?
+
+        if let profileIdentityOverride, profileArchiveOverride != nil {
+            expected = profileIdentityOverride
+            sourceData = nil
+        } else if profileArchiveOverride == nil {
+            let data: Data
+            do {
+                data = try Data(contentsOf: profileURL, options: [.mappedIfSafe])
+            } catch {
+                throw GuestInternalError.mdm("The staged MDM profile is unavailable.")
+            }
+            guard data.count <= GuestMDMObservation.defaultMaximumOutputBytes else {
+                throw GuestInternalError.mdm("The staged MDM profile is too large.")
+            }
+            do {
+                expected = try MDMEnrollmentEvidenceParser.parseProfileIdentity(fromMobileconfig: data)
+            } catch {
+                throw GuestInternalError.mdm("The staged MDM profile identity is invalid.")
+            }
+            sourceData = data
+        } else {
+            // Preserve the legacy archive-override seam: callers that do not
+            // provide a source identity explicitly do not invoke a native
+            // command against their synthetic archive bytes.
+            return nil
+        }
+
+        let observer = installedProfileObservation ?? GuestMDMObservation.liveInstalledProfileIdentity
+        let timeout = requestTimeout
+        return ObservationContext(
+            expected: expected,
+            sourceData: sourceData,
+            observe: { try observer(expected, timeout) }
+        )
     }
 
     /// Marks an already-installed device MDM profile as user-intended through
@@ -510,21 +661,37 @@ struct GuestMDMEnrollment {
         )
     }
 
-    private func buildProfileArchiveWithIdentity(profilePath: String) throws -> (archive: Data, importedIdentity: ImportedMDMIdentity) {
+    private func buildProfileArchiveWithIdentity(profilePath: String, profileData: Data? = nil) throws -> (
+        archive: Data,
+        importedIdentity: ImportedMDMIdentity,
+        profileIdentifier: String
+    ) {
         guard dlopen(
             "/System/Library/PrivateFrameworks/ConfigurationProfiles.framework/Versions/A/ConfigurationProfiles",
             RTLD_LAZY
         ) != nil else {
             throw GuestInternalError.mdm("ConfigurationProfiles.framework is unavailable.")
         }
-        let profileData = try Data(contentsOf: URL(fileURLWithPath: profilePath))
-        guard let dictionary = try PropertyListSerialization.propertyList(from: profileData, options: [], format: nil) as? [String: Any] else {
+        let sourceData: Data
+        if let profileData {
+            sourceData = profileData
+        } else {
+            sourceData = try Data(contentsOf: URL(fileURLWithPath: profilePath))
+        }
+        guard let dictionary = try PropertyListSerialization.propertyList(from: sourceData, options: [], format: nil) as? [String: Any] else {
             throw GuestInternalError.mdm("Enrollment profile is not a property-list dictionary.")
+        }
+        guard let profileIdentifier = dictionary["PayloadIdentifier"] as? String,
+              !profileIdentifier.isEmpty,
+              profileIdentifier.utf8.count <= 255,
+              !profileIdentifier.contains("\0"),
+              profileIdentifier.trimmingCharacters(in: .whitespacesAndNewlines) == profileIdentifier else {
+            throw GuestInternalError.mdm("Enrollment profile identifier is invalid.")
         }
         var mdmOnly = dictionary
         let payloads = dictionary["PayloadContent"] as? [[String: Any]] ?? []
         let mdmPayloads = payloads.filter { $0["PayloadType"] as? String == "com.apple.mdm" }
-        guard !mdmPayloads.isEmpty else { throw GuestInternalError.mdm("Enrollment profile has no com.apple.mdm payload.") }
+        guard mdmPayloads.count == 1 else { throw GuestInternalError.mdm("Enrollment profile must contain exactly one com.apple.mdm payload.") }
         mdmOnly["PayloadContent"] = mdmPayloads
 
         guard let profileClass = NSClassFromString("CPProfile") else {
@@ -544,7 +711,7 @@ struct GuestMDMEnrollment {
             } catch {
                 archive = try NSKeyedArchiver.archivedData(withRootObject: profile, requiringSecureCoding: false)
             }
-            return (archive, importedIdentity)
+            return (archive, importedIdentity, profileIdentifier)
         } catch {
             do {
                 try importedIdentity.removeOnlyNewItems()
@@ -558,6 +725,7 @@ struct GuestMDMEnrollment {
     }
 
     private func importIdentityCertificate(profileDictionary: [String: Any], mdmPayload: [String: Any]) throws -> ImportedMDMIdentity {
+        identityImportObserver?()
         guard let identityUUID = mdmPayload["IdentityCertificateUUID"] as? String,
               let pkcs12 = (profileDictionary["PayloadContent"] as? [[String: Any]])?.first(where: {
                   $0["PayloadType"] as? String == "com.apple.security.pkcs12" && $0["PayloadUUID"] as? String == identityUUID
@@ -566,37 +734,30 @@ struct GuestMDMEnrollment {
             throw GuestInternalError.mdm("The MDM identity PKCS#12 payload is missing.")
         }
         let password = pkcs12["Password"] as? String ?? ""
-        SecKeychainSetUserInteractionAllowed(false)
-        var keychain: SecKeychain?
-        let openStatus = SecKeychainOpen("/private/var/db/ConfigurationProfiles/Store/MCXPrivate.keychain", &keychain)
-        if openStatus == errSecSuccess, let keychain {
-            _ = SecKeychainUnlock(keychain, 0, nil, true)
-        } else {
-            keychain = nil
+        var previousInteraction: DarwinBoolean = false
+        guard SecKeychainGetUserInteractionAllowed(&previousInteraction) == errSecSuccess,
+              SecKeychainSetUserInteractionAllowed(false) == errSecSuccess else {
+            throw GuestInternalError.mdm("Could not establish noninteractive MDM identity access.")
         }
-        let before = ImportedMDMIdentity.snapshot(in: keychain)
+        defer { SecKeychainSetUserInteractionAllowed(previousInteraction.boolValue) }
+        let keychain = try GuestMDMIdentityKeychain.openSelectedKeychain()
+        let before = try ImportedMDMIdentity.snapshot(in: keychain)
 
         var imported: CFArray?
-        var options: [CFString: Any] = [kSecImportExportPassphrase: password]
-        if let keychain { options[kSecImportExportKeychain] = keychain }
+        let options: [CFString: Any] = [
+            kSecImportExportPassphrase: password,
+            kSecImportExportKeychain: keychain
+        ]
         var status = SecPKCS12Import(pkcs12Data as CFData, options as CFDictionary, &imported)
-        if status != errSecSuccess || imported == nil {
-            imported = nil
-            status = SecPKCS12Import(
-                pkcs12Data as CFData,
-                [kSecImportExportPassphrase: password] as CFDictionary,
-                &imported
-            )
-        }
         guard status == errSecSuccess,
               let items = imported as? [[CFString: Any]],
               let identity = items.compactMap({ $0[kSecImportItemIdentity] as! SecIdentity? }).first else {
-            throw GuestInternalError.mdm("SecPKCS12Import failed with OSStatus \(status).")
+            throw GuestInternalError.mdmOutcomeUnknown
         }
         var certificate: SecCertificate?
         status = SecIdentityCopyCertificate(identity, &certificate)
         guard status == errSecSuccess, let certificate else {
-            throw GuestInternalError.mdm("SecIdentityCopyCertificate failed with OSStatus \(status).")
+            throw GuestInternalError.mdmOutcomeUnknown
         }
         var result: CFTypeRef?
         var query: [CFString: Any] = [
@@ -604,7 +765,7 @@ struct GuestMDMEnrollment {
             kSecValueRef: certificate,
             kSecReturnPersistentRef: true
         ]
-        if let keychain { query[kSecMatchSearchList] = [keychain] }
+        query[kSecMatchSearchList] = [keychain]
         status = SecItemCopyMatching(query as CFDictionary, &result)
         let persistentReference: Data
         if status == errSecSuccess, let data = result as? Data {
@@ -613,7 +774,7 @@ struct GuestMDMEnrollment {
             var legacyReference: CFData?
             status = SecKeychainItemCreatePersistentReference(unsafeBitCast(certificate, to: SecKeychainItem.self), &legacyReference)
             guard status == errSecSuccess, let legacyReference else {
-                throw GuestInternalError.mdm("Could not create the identity certificate persistent reference (OSStatus \(status)).")
+                throw GuestInternalError.mdmOutcomeUnknown
             }
             persistentReference = legacyReference as Data
         }
@@ -716,7 +877,7 @@ private struct ImportedMDMIdentity {
     private let newItems: [(CFString, Data)]
     private let keychain: SecKeychain?
 
-    static func snapshot(in keychain: SecKeychain?) -> Set<Data> {
+    static func snapshot(in keychain: SecKeychain?) throws -> Set<Data> {
         var references = Set<Data>()
         for itemClass in [kSecClassCertificate, kSecClassKey] {
             var query: [CFString: Any] = [
@@ -726,10 +887,12 @@ private struct ImportedMDMIdentity {
             ]
             if let keychain { query[kSecMatchSearchList] = [keychain] }
             var result: CFTypeRef?
-            if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-               let values = result as? [Data] {
-                references.formUnion(values)
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+            if status == errSecItemNotFound { continue }
+            guard status == errSecSuccess, let values = result as? [Data] else {
+                throw GuestInternalError.mdm("Could not establish the existing MDM identity baseline.")
             }
+            references.formUnion(values)
         }
         return references
     }
@@ -741,9 +904,11 @@ private struct ImportedMDMIdentity {
         }
         var privateKey: SecKey?
         let keyStatus = SecIdentityCopyPrivateKey(identity, &privateKey)
-        if keyStatus == errSecSuccess, let privateKey,
-           let reference = Self.persistentReference(for: privateKey, itemClass: kSecClassKey, keychain: keychain),
-           !before.contains(reference) {
+        guard keyStatus == errSecSuccess, let privateKey,
+              let reference = Self.persistentReference(for: privateKey, itemClass: kSecClassKey, keychain: keychain) else {
+            throw GuestInternalError.mdmOutcomeUnknown
+        }
+        if !before.contains(reference) {
             newItems.append((kSecClassKey, reference))
         }
         self.persistentReference = certificateReference

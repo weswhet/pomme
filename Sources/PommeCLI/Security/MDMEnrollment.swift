@@ -14,14 +14,24 @@ enum MDMProfileStaging {
             throw RunnerError.hostCommandFailed("MDM profile staging requires an absolute guest destination.")
         }
 
-        let resolved = URL(fileURLWithPath: candidate).standardizedFileURL.path
-        let root = URL(fileURLWithPath: guestDirectory).standardizedFileURL.path
+        let components = candidate.split(separator: "/", omittingEmptySubsequences: false)
+        guard !candidate.contains("\0"),
+              !components.dropFirst().contains(""),
+              !components.contains("."), !components.contains("..") else {
+            throw RunnerError.hostCommandFailed("MDM profile staging requires a canonical guest destination.")
+        }
+        // Guest paths are protocol values, not host filesystem URLs. On
+        // macOS 15 standardizedFileURL aliases /private/var to /var.
+        let resolved = candidate
+        let root = guestDirectory
         let resolvedURL = URL(fileURLWithPath: resolved)
         guard resolvedURL.deletingLastPathComponent().path == root,
               resolvedURL.lastPathComponent != ".",
-              resolvedURL.lastPathComponent != ".." else {
+              resolvedURL.lastPathComponent != "..",
+              !resolvedURL.lastPathComponent.hasPrefix(PommeMDMTemporaryHelperWorkspace.helperPrefix),
+              !resolvedURL.lastPathComponent.hasPrefix(".pomme-stage-") else {
             throw RunnerError.hostCommandFailed(
-                "mdm enroll --guest-path must name a new direct child of \(guestDirectory)."
+                "mdm --guest-path must name a new direct child of \(guestDirectory)."
             )
         }
         return resolved
@@ -97,7 +107,9 @@ struct PommeMDMEnrollmentTransaction: Sendable {
     let profileURL: URL
     let guestPath: String?
     let timeout: TimeInterval
+    let enrollmentMode: MDMEnrollmentMode
     let expectedExecutableDigest: String?
+    let temporaryHelper: (any PommeMDMTemporaryHelperTransport)?
 
     init(
         agent: any PommeMDMEnrollmentAgentTransport,
@@ -105,14 +117,18 @@ struct PommeMDMEnrollmentTransaction: Sendable {
         profileURL: URL,
         guestPath: String? = nil,
         timeout: TimeInterval,
-        expectedExecutableDigest: String? = nil
+        enrollmentMode: MDMEnrollmentMode = .unapproved,
+        expectedExecutableDigest: String? = nil,
+        temporaryHelper: (any PommeMDMTemporaryHelperTransport)? = nil
     ) {
         self.agent = agent
         self.state = state
         self.profileURL = profileURL
         self.guestPath = guestPath
         self.timeout = timeout
+        self.enrollmentMode = enrollmentMode
         self.expectedExecutableDigest = expectedExecutableDigest
+        self.temporaryHelper = temporaryHelper
     }
 
     func execute() async throws -> PommeMDMEnrollmentTransactionResult {
@@ -173,21 +189,53 @@ struct PommeMDMEnrollmentTransaction: Sendable {
                 throw PommeMDMEnrollmentError.invalidTransfer
             }
 
-            let enrollment: JSONValue
-            do {
-                enrollment = try await agent.perform(
-                    .enroll(profilePath: destination, timeout: timeout)
+            if let temporaryHelper {
+                do {
+                    let response = try await temporaryHelper.enroll(
+                        profile: receipt,
+                        mode: enrollmentMode,
+                        baseline: baseline,
+                        timeout: timeout
+                    )
+                    transactionResult = .init(
+                        profileIdentifier: response.profileIdentifier,
+                        transferredBytes: receipt.bytes,
+                        transferredSHA256: receipt.sha256,
+                        agentCapabilities: description.capabilities.sorted()
+                    )
+                } catch let error as PommeMDMEnrollmentError {
+                    throw error
+                } catch {
+                    throw PommeMDMEnrollmentError.enrollmentFailed
+                }
+            } else {
+                let enrollment: JSONValue
+                do {
+                    enrollment = try await agent.perform(
+                        .enroll(profilePath: destination, timeout: timeout)
+                    )
+                } catch {
+                    throw PommeMDMEnrollmentError.enrollmentFailed
+                }
+                let response = try PommeMDMEnrollmentAgentResponse.enrollment(enrollment)
+                transactionResult = .init(
+                    profileIdentifier: response.profileIdentifier,
+                    transferredBytes: receipt.bytes,
+                    transferredSHA256: receipt.sha256,
+                    agentCapabilities: description.capabilities.sorted()
                 )
-            } catch {
-                throw PommeMDMEnrollmentError.enrollmentFailed
             }
-            let response = try PommeMDMEnrollmentAgentResponse.enrollment(enrollment)
-            transactionResult = .init(
-                profileIdentifier: response.profileIdentifier,
-                transferredBytes: receipt.bytes,
-                transferredSHA256: receipt.sha256,
-                agentCapabilities: description.capabilities.sorted()
-            )
+            // Legacy persistent-agent enrollment is retained for existing
+            // protocol-v1 guests. It has no private helper mode field, so it
+            // performs approval only for the explicitly selected supervised
+            // mode. New helper requests carry the mode and approve internally.
+            if temporaryHelper == nil, enrollmentMode == .supervised,
+               let identifier = transactionResult?.profileIdentifier {
+                let approval = try await agent.perform(
+                    .approve(profileIdentifier: identifier, timeout: timeout)
+                )
+                try PommeMDMEnrollmentAgentResponse.approval(approval)
+            }
         } catch let error as PommeMDMEnrollmentError {
             operationError = error
         } catch {
@@ -199,11 +247,13 @@ struct PommeMDMEnrollmentTransaction: Sendable {
         // always the highest-precedence error because the VM's security/run
         // state is then unknown.
         var cleanupError = false
-        do {
-            let cleaned = try await agent.perform(.cleanup(profilePath: destination))
-            try PommeMDMEnrollmentAgentResponse.requireCleanup(cleaned)
-        } catch {
-            cleanupError = true
+        if operationError != .helperProcessTerminationUnproven {
+            do {
+                let cleaned = try await agent.perform(.cleanup(profilePath: destination))
+                try PommeMDMEnrollmentAgentResponse.requireCleanup(cleaned)
+            } catch {
+                cleanupError = true
+            }
         }
 
         var restorationError = false

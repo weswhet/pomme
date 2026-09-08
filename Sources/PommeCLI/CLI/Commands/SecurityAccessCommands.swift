@@ -122,59 +122,25 @@ struct AMFIDisableCommand: AsyncParsableCommand {
 struct MDMCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mdm",
-        abstract: "Manage MDM enrollment.",
-        subcommands: [MDMEnrollCommand.self, MDMApproveCommand.self]
+        abstract: "Enroll a VM in MDM and restore its security and run state."
     )
-}
-
-/// Reproduces the private Profiles approval transition for an installed MDM
-/// profile. This is intentionally explicit: the resulting state is technical
-/// `UserApprovedMDM` state, not proof that a human approved the enrollment.
-struct MDMApproveCommand: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "approve",
-        abstract: "Privileged synthetic transition: mark an installed MDM profile as user-intended."
-    )
-
-    @Argument var name: String?
-    @Option(name: .customLong("profile-identifier"), help: "Installed device MDM profile identifier.")
-    var profileIdentifier: String
-    @Flag(name: .customLong("acknowledge-synthetic-approval"), help: "Acknowledge that this bypasses the human-consent ceremony.")
-    var acknowledgeSyntheticApproval = false
-    @OptionGroup var timeout: TimeoutOptions
-    @OptionGroup var output: GlobalOptions
-
-    mutating func run() async throws {
-        guard acknowledgeSyntheticApproval else {
-            throw ValidationError(
-                "mdm approve is a privileged synthetic operation; pass --acknowledge-synthetic-approval explicitly."
-            )
-        }
-        let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
-        let result = try await PommeEnvironment.live().security.mdmApprove(
-            target,
-            profileIdentifier,
-            timeout.value()
-        )
-        try CLIOutputWriter.write(result, options: output)
-    }
-}
-
-struct MDMEnrollCommand: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "enroll", abstract: "Enroll a VM using a mobileconfig profile.")
 
     @Argument var name: String?
     @Option(name: .customLong("profile"), help: "Host path to the enrollment mobileconfig.")
     var profile: String
     @Option(name: .customLong("guest-path"), help: "Temporary absolute guest path for the profile.")
     var guestPath: String?
+    @Option(name: .customLong("enrollment-mode"), help: "Enrollment mode: supervised (user approved, default) or unapproved.")
+    var enrollmentMode: MDMEnrollmentMode = .supervised
+    @Flag(help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
+    var force = false
     @OptionGroup var timeout: TimeoutOptions
     @OptionGroup var output: GlobalOptions
 
     mutating func run() async throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
         let result = try await PommeEnvironment.live().security.mdmEnroll(
-            target, profile, guestPath, timeout.value()
+            target, profile, guestPath, timeout.value(), enrollmentMode, force
         )
         try CLIOutputWriter.write(result, options: output)
     }

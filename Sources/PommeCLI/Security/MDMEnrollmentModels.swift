@@ -12,7 +12,7 @@ enum MDMEnrollmentMethod: String, Sendable {
 
     static let defaultMethod: MDMEnrollmentMethod = .privateXPC
 
-    static func parse(_ value: String, flag: String = "mdm enroll method") throws -> MDMEnrollmentMethod {
+    static func parse(_ value: String, flag: String = "MDM transport method") throws -> MDMEnrollmentMethod {
         switch value {
         case "private-xpc", "privateXPC", "xpc":
             return .privateXPC
@@ -36,8 +36,29 @@ struct MDMEnrollmentRequest: Sendable {
 struct MDMEnrollmentAgentDescription: Equatable, Sendable {
     static let protocolName = "PommeAgentProtocol"
     static let protocolVersion = 1
-    static let normalRole = "normal"
-    static let requiredCapabilities: Set<String> = ["mdm.enrollment", "maintenance"]
+    /// The durable normal-boot daemon identifies itself as `persistent` on
+    /// the authenticated wire protocol.  Keep this distinct from the public
+    /// status projection's normal boot-mode vocabulary.
+    static let normalRole = "persistent"
+    /// Every operation used by the private helper transaction is required on
+    /// the same authenticated persistent agent.  Keeping this list closed
+    /// prevents an older daemon from accepting only the semantic MDM label
+    /// while lacking the file/process primitives used to stage and reap the
+    /// helper.
+    static let requiredCapabilities: Set<String> = [
+        "agent.describe",
+        "file.abort",
+        "file.commit",
+        "file.flush",
+        "file.open",
+        "file.write",
+        "mdm.enrollment",
+        "mdm.staging.cleanup",
+        "mdm.staging.prepare",
+        "process.signal",
+        "process.start",
+        "process.status",
+    ]
 
     let connected: Bool
     /// True only when the status comes from the authenticated persistent-agent
@@ -245,7 +266,7 @@ enum PommeMDMEnrollmentAgentOperation: Equatable, Sendable {
                 "timeout": .number(timeout)
             ])
         case let .cleanup(profilePath):
-            try Self.validateProfilePath(profilePath)
+            try Self.validateCleanupPath(profilePath)
             return .object(["profilePath": .string(profilePath)])
         }
     }
@@ -254,6 +275,14 @@ enum PommeMDMEnrollmentAgentOperation: Equatable, Sendable {
         guard (try? MDMProfileStaging.destination(requestedPath: path)) == path else {
             throw PommeMDMEnrollmentError.invalidRequest
         }
+    }
+
+    private static func validateCleanupPath(_ path: String) throws {
+        if (try? MDMProfileStaging.destination(requestedPath: path)) == path
+            || PommeMDMTemporaryHelperWorkspace.isArtifactPath(path) {
+            return
+        }
+        throw PommeMDMEnrollmentError.invalidRequest
     }
 
     private static func validateProfileIdentifier(_ identifier: String) throws {
@@ -269,6 +298,8 @@ enum PommeMDMEnrollmentAgentOperation: Equatable, Sendable {
 /// The file transport returns only transfer proof.  It never returns the
 /// profile bytes, profile path, or a retry token to the public result.
 struct PommeMDMProfileTransferReceipt: Equatable, Sendable {
+    static let maximumBytes = 16 * 1024 * 1024
+
     let destination: String
     let bytes: Int
     let sha256: String
@@ -276,6 +307,7 @@ struct PommeMDMProfileTransferReceipt: Equatable, Sendable {
     init(destination: String, bytes: Int, sha256: String) throws {
         guard (try? MDMProfileStaging.destination(requestedPath: destination)) == destination,
               bytes > 0,
+              bytes <= Self.maximumBytes,
               sha256.count == 64,
               sha256 == sha256.lowercased(),
               sha256.allSatisfy(\.isHexDigit) else {
@@ -384,6 +416,13 @@ enum PommeMDMEnrollmentError: Error, LocalizedError, Equatable, Sendable {
     case stagingPreparationFailed
     case transferFailed
     case enrollmentFailed
+    /// The helper may have committed the profile before its reply was lost.
+    /// Callers must inspect the guest enrollment state before retrying.
+    case enrollmentOutcomeUnknown
+    case evidenceUnavailable
+    /// A launched helper process could not be proven reaped. Its artifacts
+    /// must remain in place until an operator verifies termination.
+    case helperProcessTerminationUnproven
     case cleanupFailed
     case restorationFailed
 
@@ -398,8 +437,11 @@ enum PommeMDMEnrollmentError: Error, LocalizedError, Equatable, Sendable {
         case .stagingPreparationFailed: "The private MDM staging directory could not be prepared."
         case .transferFailed: "The MDM profile transfer failed."
         case .enrollmentFailed: "The PommeAgent MDM enrollment operation failed."
-        case .cleanupFailed: "The private MDM staging file could not be cleaned up."
-        case .restorationFailed: "The SIP, AMFI, and VM baseline could not be restored and verified."
+        case .enrollmentOutcomeUnknown: "The MDM enrollment outcome is unknown; verify the guest profile state before retrying."
+        case .evidenceUnavailable: "Independent MDM enrollment evidence is unavailable or invalid."
+        case .helperProcessTerminationUnproven: "The MDM helper process could not be proven terminated; staged artifacts were retained. Verify process termination and guest enrollment state before retrying."
+        case .cleanupFailed: "The private MDM staging file could not be cleaned up. Enrollment may have completed; verify the guest profile state before retrying."
+        case .restorationFailed: "The SIP, AMFI, and VM baseline could not be restored and verified. Enrollment may have completed; verify security and guest profile state before retrying."
         }
     }
 }

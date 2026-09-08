@@ -33,6 +33,15 @@ enum PommeBootstrap {
             Foundation.exit(exitCode)
         }
 
+        if arguments.first == "--pomme-mdm-staging-helper" {
+            Foundation.exit(PommeMDMStagingHelper.run(arguments: arguments))
+        }
+
+        if arguments.first == PommeMDMPrivateHelper.flag {
+            let exitCode = PommeMDMPrivateHelper.run(arguments: arguments)
+            Foundation.exit(exitCode)
+        }
+
         if arguments.first == "--pomme-runtime" {
             let exitCode = await PommeCore.runInternalHelper(arguments: arguments)
             Foundation.exit(exitCode)

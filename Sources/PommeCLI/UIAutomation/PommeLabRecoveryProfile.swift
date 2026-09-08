@@ -140,10 +140,16 @@ extension PommeRecoveryProfileSelector {
         guard evidence.manifestHash == .experimentalProfile(descriptor.digest) else {
             throw PommeRecoveryInputQualificationError.manifestHashMismatch
         }
-        let route: PommeRecoveryNavigationRoute =
-            descriptor.version == "26.6.2" && descriptor.build == "25G83"
-            ? .directTerminal
-            : .reviewedMenus
+        let route: PommeRecoveryNavigationRoute
+        if descriptor.version == "26.6.2", descriptor.build == "25G83" {
+            route = .directTerminal
+        } else if descriptor.version == "15.6.1", descriptor.build == "24G90" {
+            // This remains an experimental identity. Its alternate Options
+            // transition is not a reviewed-record extension.
+            route = .experimentalMenusOptionalLanguage
+        } else {
+            route = .reviewedMenus
+        }
         return .init(route: route)
     }
 }
@@ -165,6 +171,38 @@ struct PommeRecoveryNavigationEvent: Equatable, Sendable {
     let preEventFrame: PommeRecoveryFrame
     let key: PommeRecoveryVirtualKey
     let postEventFrame: PommeRecoveryFrame
+    /// A bounded experimental branch that is accepted only after the same
+    /// two-frame post-input observation as the primary transition. The
+    /// optional next index skips the recorded language chooser; it never
+    /// authorizes an additional key.
+    let alternatePostEventFrame: PommeRecoveryFrame?
+    let alternateNextEventIndex: Int?
+
+    init(
+        preEventFrame: PommeRecoveryFrame,
+        key: PommeRecoveryVirtualKey,
+        postEventFrame: PommeRecoveryFrame,
+        alternatePostEventFrame: PommeRecoveryFrame? = nil,
+        alternateNextEventIndex: Int? = nil
+    ) {
+        self.preEventFrame = preEventFrame
+        self.key = key
+        self.postEventFrame = postEventFrame
+        self.alternatePostEventFrame = alternatePostEventFrame
+        self.alternateNextEventIndex = alternateNextEventIndex
+    }
+
+    var acceptedPostEventFrames: [PommeRecoveryFrame] {
+        [postEventFrame] + (alternatePostEventFrame.map { [$0] } ?? [])
+    }
+
+    func nextEventIndex(after frame: PommeRecoveryFrame, defaultIndex: Int) -> Int? {
+        if frame == postEventFrame { return defaultIndex }
+        guard frame == alternatePostEventFrame,
+              let alternateNextEventIndex
+        else { return nil }
+        return alternateNextEventIndex
+    }
 }
 
 /// Qualified navigation traces. The direct route is intentionally opt-in and
@@ -172,6 +210,11 @@ struct PommeRecoveryNavigationEvent: Equatable, Sendable {
 enum PommeRecoveryNavigationRoute: Equatable, Sendable {
     case reviewedMenus
     case directTerminal
+    /// An experimental 15.6.1/24G90 trace. After Options, some observed
+    /// Recovery boots open the utilities window directly instead of showing
+    /// a language chooser. The branch is proved by two stable utilities
+    /// observations and skips the otherwise required Return.
+    case experimentalMenusOptionalLanguage
 
     /// The complete immutable trace for this route. Every event has exactly
     /// one key and the closed frame labels required around that key.
@@ -198,6 +241,26 @@ enum PommeRecoveryNavigationRoute: Equatable, Sendable {
                 .init(preEventFrame: .startupOptionsActivated, key: .return, postEventFrame: .languageEnglish),
                 .init(preEventFrame: .languageEnglish, key: .return, postEventFrame: .recoveryUtilities),
                 .init(preEventFrame: .recoveryUtilities, key: .shiftCommandT, postEventFrame: .terminal),
+            ]
+        case .experimentalMenusOptionalLanguage:
+            return [
+                .init(preEventFrame: .startupOptions, key: .right, postEventFrame: .startupIntermediate),
+                .init(preEventFrame: .startupIntermediate, key: .right, postEventFrame: .startupOptionsActivated),
+                .init(
+                    preEventFrame: .startupOptionsActivated,
+                    key: .return,
+                    postEventFrame: .languageEnglish,
+                    alternatePostEventFrame: .recoveryUtilities,
+                    alternateNextEventIndex: 4
+                ),
+                .init(preEventFrame: .languageEnglish, key: .return, postEventFrame: .recoveryUtilities),
+                .init(preEventFrame: .recoveryUtilities, key: .controlF2, postEventFrame: .applicationMenu),
+                .init(preEventFrame: .applicationMenu, key: .right, postEventFrame: .recoveryMenu),
+                .init(preEventFrame: .recoveryMenu, key: .right, postEventFrame: .fileMenu),
+                .init(preEventFrame: .fileMenu, key: .right, postEventFrame: .editMenu),
+                .init(preEventFrame: .editMenu, key: .right, postEventFrame: .utilitiesMenu),
+                .init(preEventFrame: .utilitiesMenu, key: .down, postEventFrame: .terminalMenuItem),
+                .init(preEventFrame: .terminalMenuItem, key: .shiftCommandT, postEventFrame: .terminal),
             ]
         }
     }
@@ -258,12 +321,18 @@ struct PommeTahoeReviewedInput: Sendable {
               postEventFrames[0] == postEventFrames[1],
               postEventFrames[0] != .unknown
         else { throw PommeTahoeReviewedInputError.unstablePostEventFrames }
-        guard let event = currentEvent, postEventFrames[0] == event.postEventFrame else {
+        guard let event = currentEvent,
+              let nextEventIndex = event.nextEventIndex(
+                after: postEventFrames[0],
+                defaultIndex: eventIndex + 1
+              ),
+              nextEventIndex <= route.eventTrace.count
+        else {
             throw PommeTahoeReviewedInputError.unexpectedPostEventFrame
         }
         outstandingKey = nil
         committedInputCount += 1
-        eventIndex += 1
+        eventIndex = nextEventIndex
     }
 
     var isComplete: Bool {

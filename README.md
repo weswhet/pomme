@@ -146,17 +146,28 @@ start when that state can be safely proved, otherwise the journal is retained
 and restoration is reported incomplete. `--force` confirms the fresh-owner
 branch only; it does not override credentials, ownership, native login
 protections, or cleanup barriers. MDM requires verified normal-agent
-capabilities. Remote Login and Screen Sharing are explicit, capability-gated
-operations.
+capabilities. `mdm VM --profile FILE` defaults to supervised, user-approved
+enrollment. It prepares SIP and AMFI automatically when needed, verifies the
+installed profile, approval, and supervision, then restores the original
+security settings and VM run state. `--enrollment-mode unapproved` selects
+enrollment without approval or supervision. Remote Login and Screen Sharing
+are explicit, capability-gated operations.
+
+For a VM that starts with SIP and AMFI enabled:
 
 ```sh
-pomme sip status dev
-pomme sip disable dev --final-state previous
-pomme amfi disable dev --final-state normal
-pomme amfi enable dev --final-state normal
-pomme sip enable dev --final-state previous
-pomme mdm enroll dev --profile ./enrollment.mobileconfig
+pomme mdm dev --profile ./enrollment.mobileconfig
+# Or request unapproved enrollment:
+pomme mdm dev --profile ./enrollment.mobileconfig --enrollment-mode unapproved
 ```
+
+The profile remains required when upgrading an existing unapproved enrollment.
+A matching enrollment is reused; an already-satisfied request avoids security
+changes. Conflicting profiles and downgrades from approved or supervised
+enrollment are rejected. Repeat the same command and mode to resume interrupted
+work from its journal. The former `mdm enroll` and `mdm approve` commands are
+removed. These modes use Pomme's profile enrollment flow; they do not implement
+Apple User Enrollment or Automated Device Enrollment.
 
 Pomme permits new OS versions as experimental Recovery attempts. It records the
 actual restore version/build and warns when that combination has not been

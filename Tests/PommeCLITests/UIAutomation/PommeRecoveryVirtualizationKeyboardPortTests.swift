@@ -71,6 +71,42 @@ struct PommeRecoveryVirtualizationKeyboardPortTests {
         #expect(classifications.value == 1)
     }
 
+    @Test("a cached mismatching frame remains available to timeout diagnostics")
+    func cachedMismatchRetainsLastObservedFrame() async throws {
+        let clock = RecoveryTestClock()
+        let captures = RecoveryCaptureScript(Array(repeating: .success(.init(digest: "picker")), count: 4))
+        let classifications = RecoveryClassificationCounter()
+        let readiness = PommeRecoveryObservationReadiness(
+            capture: { _ in try captures.next() },
+            classify: { _, _ in
+                classifications.increment()
+                return .startupOptions
+            },
+            sleep: { nanoseconds in
+                clock.advance(nanoseconds: nanoseconds)
+                clock.advance(nanoseconds: 1)
+            },
+            clock: { clock.now },
+            pollNanoseconds: 500_000_000
+        )
+
+        _ = try await readiness.waitForExpectedStablePair(
+            .startupOptions,
+            context: .unproven,
+            timeout: 1
+        )
+
+        await #expect(throws: PommeRecoveryVirtualizationPortError.observationTimedOut(.languageEnglish)) {
+            try await readiness.waitForExpectedStablePair(
+                .languageEnglish,
+                context: .unproven,
+                timeout: 0.6
+            )
+        }
+        #expect(classifications.value == 1)
+        #expect(await readiness.lastObservedFrameDiagnostic() == .some(.startupOptions))
+    }
+
     @Test("a new checkpoint can classify immediately after a recent checkpoint")
     func checkpointResetsClassificationCooldown() async throws {
         let clock = RecoveryTestClock()
@@ -132,7 +168,7 @@ struct PommeRecoveryVirtualizationKeyboardPortTests {
             capture: { _ in try captures.next() },
             classify: { _, _ in
                 classifications.increment()
-                return .unknown
+                return .languageEnglish
             },
             sleep: { nanoseconds in
                 clock.advance(nanoseconds: nanoseconds)
@@ -149,6 +185,7 @@ struct PommeRecoveryVirtualizationKeyboardPortTests {
             )
         }
         #expect(classifications.value == 2)
+        #expect(await readiness.lastObservedFrameDiagnostic() == .some(.languageEnglish))
     }
 
     @Test("waits through a blank transition and OCRs an identical stable frame once")
@@ -186,6 +223,28 @@ struct PommeRecoveryVirtualizationKeyboardPortTests {
         #expect(observed == .languageEnglish)
         #expect(classifications.value == 1)
         #expect(captures.remaining == 1)
+    }
+
+    @Test("an explicit alternate checkpoint still requires a stable pair")
+    func acceptsStableAlternateCheckpoint() async throws {
+        let clock = RecoveryTestClock()
+        let captures = RecoveryCaptureScript([
+            .success(.init(digest: "utilities")),
+            .success(.init(digest: "utilities")),
+        ])
+        let readiness = PommeRecoveryObservationReadiness(
+            capture: { _ in try captures.next() },
+            classify: { _, _ in .recoveryUtilities },
+            sleep: { clock.advance(nanoseconds: $0) },
+            clock: { clock.now }
+        )
+
+        let observed = try await readiness.waitForExpectedStablePair(
+            anyOf: [.languageEnglish, .recoveryUtilities],
+            context: .optionsActivated,
+            timeout: 1
+        )
+        #expect(observed == [.recoveryUtilities, .recoveryUtilities])
     }
 
     @Test("fails malformed framebuffer errors immediately instead of retrying")
@@ -266,6 +325,34 @@ struct PommeRecoveryVirtualizationKeyboardPortTests {
             )
         }
         #expect(classifications.value == 1)
+    }
+
+    @Test("a timeout before stable classification reports no observed closed frame")
+    func unstableFrameTimeoutHasNoObservedFrame() async {
+        let clock = RecoveryTestClock()
+        let captures = RecoveryCaptureScript([
+            .failure(VirtualizationPrivateHeadlessError(
+                .frameInvalid,
+                detail: "The framebuffer was blank.",
+                isBlankFrame: true
+            )),
+        ])
+        let readiness = PommeRecoveryObservationReadiness(
+            capture: { _ in try captures.next() },
+            classify: { _, _ in .startupOptions },
+            sleep: { clock.advance(nanoseconds: $0) },
+            clock: { clock.now },
+            pollNanoseconds: 500_000_000
+        )
+
+        await #expect(throws: PommeRecoveryVirtualizationPortError.observationTimedOut(.startupOptions)) {
+            try await readiness.waitForExpectedStablePair(
+                .startupOptions,
+                context: .unproven,
+                timeout: 0.2
+            )
+        }
+        #expect(await readiness.lastObservedFrameDiagnostic() == nil)
     }
 }
 

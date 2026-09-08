@@ -14,7 +14,7 @@ struct MDMEnrollmentTransactionTests {
 
         #expect(result.profileIdentifier == "com.example.mdm")
         #expect(result.transferredBytes == 4)
-        #expect(result.agentCapabilities == ["maintenance", "mdm.enrollment"])
+        #expect(result.agentCapabilities == MDMEnrollmentAgentDescription.requiredCapabilities.sorted())
         let recorded = await events.values()
         #expect(recorded.count == 8)
         #expect(recorded[0] == "describe")
@@ -41,7 +41,7 @@ struct MDMEnrollmentTransactionTests {
                 return .init(
                     connected: true,
                     authenticated: false,
-                    role: MDMEnrollmentAgentDescription.normalRole,
+                    role: "persistent",
                     protocolName: MDMEnrollmentAgentDescription.protocolName,
                     protocolVersion: MDMEnrollmentAgentDescription.protocolVersion,
                     executableDigest: String(repeating: "a", count: 64),
@@ -177,6 +177,31 @@ struct MDMEnrollmentTransactionTests {
         #expect(Array(recorded.suffix(2)) == ["restore", "verify"])
     }
 
+    @Test("Unproven helper termination retains the profile while checking the baseline")
+    func unprovenHelperRetainsProfile() async throws {
+        let profile = try makeProfile()
+        defer { try? FileManager.default.removeItem(at: profile) }
+        let events = EventRecorder()
+        let transaction = PommeMDMEnrollmentTransaction(
+            agent: makeAgent(events: events),
+            state: makeState(events: events),
+            profileURL: profile,
+            timeout: 60,
+            temporaryHelper: PommeMDMTemporaryHelperDependencies { _, _, _ in
+                throw PommeMDMEnrollmentError.helperProcessTerminationUnproven
+            }
+        )
+        do {
+            _ = try await transaction.execute()
+            Issue.record("Expected unproven helper termination")
+        } catch let error as PommeMDMEnrollmentError {
+            #expect(error == .helperProcessTerminationUnproven)
+        }
+        let recorded = await events.values()
+        #expect(!recorded.contains(where: { $0.hasPrefix("cleanup:") }))
+        #expect(Array(recorded.suffix(2)) == ["restore", "verify"])
+    }
+
     @Test("Typed operation payloads have closed names and fixed staging paths")
     func typedOperations() throws {
         let path = "\(MDMProfileStaging.guestDirectory)/profile.mobileconfig"
@@ -206,14 +231,13 @@ struct MDMEnrollmentTransactionTests {
     @Test("Describe parsing requires the exact authenticated evidence shape")
     func authenticatedDescribeParsing() throws {
         let value = JSONValue.object([
-            "role": .string("normal"),
+            "role": .string("persistent"),
             "protocol": .string("PommeAgentProtocol"),
             "version": .integer(1),
             "executableSHA256": .string(String(repeating: "a", count: 64)),
-            "capabilities": .array([
-                .string("maintenance"),
-                .string("mdm.enrollment")
-            ])
+            "capabilities": .array(
+                MDMEnrollmentAgentDescription.requiredCapabilities.sorted().map(JSONValue.string)
+            )
         ])
         let description = try MDMEnrollmentAgentDescription.fromAuthenticatedDescribe(value)
         #expect(description.authenticated)
@@ -356,7 +380,7 @@ struct MDMEnrollmentTransactionTests {
         .init(
             connected: true,
             authenticated: true,
-            role: MDMEnrollmentAgentDescription.normalRole,
+            role: "persistent",
             protocolName: MDMEnrollmentAgentDescription.protocolName,
             protocolVersion: MDMEnrollmentAgentDescription.protocolVersion,
             executableDigest: String(repeating: "a", count: 64),

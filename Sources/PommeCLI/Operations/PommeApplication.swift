@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import Security
 
 struct PommeOperationResult: Sendable {
     let title: String
@@ -745,6 +746,7 @@ enum PommeApplication {
     ) async throws -> PommeOperationResult {
         try await VMBundleMutationLease.withLease(name: name, inherited: lease) { acquiredLease in
             let reference = try namedReference(name)
+            try requireMDMWorkflowAvailable(reference: reference, lease: acquiredLease)
             if action != .status {
                 let operation: PommeSecurityWorkflowOperation = action == .enable ? .sipEnable : .sipDisable
                 let payload = try await PommeSecurityWorkflow.runLive(
@@ -808,6 +810,7 @@ enum PommeApplication {
     ) async throws -> PommeOperationResult {
         try await VMBundleMutationLease.withLease(name: name, inherited: lease) { acquiredLease in
             let reference = try namedReference(name)
+            try requireMDMWorkflowAvailable(reference: reference, lease: acquiredLease)
             if action != .status {
                 let operation: PommeSecurityWorkflowOperation = action == .enable ? .amfiEnable : .amfiDisable
                 let payload = try await PommeSecurityWorkflow.runLive(
@@ -918,16 +921,469 @@ enum PommeApplication {
         ]))
     }
 
+    /// Staging runs in the current signed guest bootstrap because older agents
+    /// use Foundation path standardization that aliases /private/var on macOS 15.
+    /// The bootstrap is separate from both the pinned agent and the privately
+    /// signed enrollment helper, and exists only for this CLI transaction.
+    private actor MDMStagingBootstrap {
+        let reference: VMReference
+        let requestID: String
+        var transferred = false
+        var terminationUnproven = false
+
+        init(reference: VMReference, requestID: UUID = UUID(), transferred: Bool = false) {
+            self.reference = reference
+            self.requestID = requestID.uuidString.lowercased()
+            self.transferred = transferred
+        }
+        var path: String { "/private/var/db/pomme-mdm-bootstrap-\(requestID).bin" }
+
+        func prepare() async throws -> JSONValue {
+            if !transferred {
+                let artifact = try currentCanonicalPommeArtifact()
+                let receipt = try await transferAuthenticatedFile(
+                    reference: reference, source: artifact.source, destination: path,
+                    maximumBytes: 128 * 1024 * 1024
+                )
+                transferred = true
+                guard receipt.sha256 == artifact.sha256 else {
+                    throw PommeMDMEnrollmentError.invalidTransfer
+                }
+                let mode = try await runMDMGuestProcess(
+                    reference: reference, path: "/bin/chmod",
+                    arguments: ["700", path], timeout: 15
+                )
+                guard mode.exitedSuccessfully, mode.stdout.isEmpty, mode.stderr.isEmpty else {
+                    throw PommeMDMEnrollmentError.stagingPreparationFailed
+                }
+            }
+            return try await invoke(action: "prepare")
+        }
+
+        func cleanup(_ profilePath: String) async throws -> JSONValue {
+            guard transferred else { return .object(["removed": .bool(true)]) }
+            return try await invoke(action: "cleanup", extra: [profilePath])
+        }
+
+        func remove() async throws {
+            guard transferred else { return }
+            guard !terminationUnproven else {
+                throw PommeMDMEnrollmentError.helperProcessTerminationUnproven
+            }
+            let value = try await invoke(action: "remove")
+            try PommeMDMEnrollmentAgentResponse.requireCleanup(value)
+            transferred = false
+        }
+
+        private func invoke(action: String, extra: [String] = []) async throws -> JSONValue {
+            let process: MDMGuestProcessResult
+            do {
+                process = try await runMDMGuestProcess(
+                    reference: reference, path: "/usr/bin/env",
+                    arguments: ["-i", path, "--pomme-mdm-staging-helper", requestID, action] + extra,
+                    timeout: 30
+                )
+            } catch {
+                if (error as? PommeMDMEnrollmentError) == .helperProcessTerminationUnproven {
+                    terminationUnproven = true
+                }
+                throw error
+            }
+            guard process.exitedSuccessfully, process.stderr.isEmpty,
+                  process.stdout.count <= 1024,
+                  let value = try? JSONDecoder().decode(JSONValue.self, from: process.stdout) else {
+                PommeCore.log("MDM staging bootstrap rejected operation [action=\(action), exit=\(process.exitCode ?? -1)].")
+                throw PommeMDMEnrollmentError.stagingPreparationFailed
+            }
+            return value
+        }
+    }
+
     static func mdmEnroll(
+        name: String, profilePath: String, guestPath: String?, timeout: TimeInterval,
+        enrollmentMode: MDMEnrollmentMode = .supervised, force: Bool = false
+    ) async throws -> PommeOperationResult {
+        guard timeout.isFinite, timeout >= 1, timeout <= 300 else {
+            throw RunnerError.invalidControlCommand("mdm timeout must be between 1 and 300 seconds")
+        }
+        return try await VMBundleMutationLease.withLease(name: name) { lease in
+            let reference = try namedReference(name)
+            let profileURL = URL(fileURLWithPath: PommeCore.absoluteHostPath(profilePath))
+            let plan = try PommeCore.securityProvisioningPlan(reference: reference)
+            let metadata = try PommeCore.provisioningRuntimeMetadata(for: plan)
+            guard let group = metadata.startupVolumeGroupUUID else {
+                throw PommeMDMEnrollmentWorkflowError.journalIdentityMismatch
+            }
+            let identity = try PommeSecurityWorkflowIdentity.capture(
+                vmName: name, bundle: reference.bundle, startupVolumeGroupUUID: group,
+                immutableProvisioningPlanDigest: plan.digest
+            )
+            let store = PommeMDMEnrollmentJournalStore(bundleURL: reference.bundle.rootURL)
+            let retained = try store.loadIfPresent(lease: lease)
+            let source = Result { try MDMEnrollmentEvidenceParser.parseProfileIdentity(
+                fromMobileconfig: readMDMSourceProfile(profileURL)) }
+            let profile: MDMEnrollmentProfileIdentity
+            let sourceError: (any Error)?
+            switch source {
+            case .success(let parsed):
+                profile = parsed
+                sourceError = nil
+            case .failure(let error):
+                guard let retained, retained.phase != .restorationComplete,
+                      retained.identity == identity, retained.enrollmentMode == enrollmentMode else { throw error }
+                profile = retained.profile
+                sourceError = error
+            }
+            let childStore = PommeSecurityWorkflowJournalStore(bundleURL: reference.bundle.rootURL)
+            if let child = try childStore.loadIfPresent(lease: lease),
+               child.phase != .restorationComplete, child.phase != .preflightRejected {
+                guard retained?.pendingChild == child.operation, child.identity.matches(identity) else {
+                    throw PommeMDMWorkflowFailure.competingSecurityOperation
+                }
+            }
+            let requestID = UUID()
+            let workspace = try PommeMDMTemporaryHelperWorkspace(requestID: requestID)
+            let profileDestination = try MDMProfileStaging.destination(requestedPath: guestPath)
+            let journal = try store.begin(
+                identity: identity, profile: profile, agentSHA256: plan.normalAgent.executableDigest,
+                enrollmentMode: enrollmentMode,
+                originalRunState: PommeCore.stableVMRunState(reference: reference),
+                ownedArtifacts: [workspace.helperPath, workspace.requestPath, workspace.entitlementsPath,
+                    "/private/var/db/pomme-mdm-bootstrap-\(requestID.uuidString.lowercased()).bin", profileDestination],
+                lease: lease
+            )
+            let progress = PommeMDMWorkflowProgress(journal, store: store, lease: lease)
+            let lastObservation = PommeMDMLastObservation()
+            let artifacts = try mdmArtifacts(journal)
+            if let guestPath, guestPath != artifacts.profile {
+                throw PommeMDMEnrollmentWorkflowError.journalIdentityMismatch
+            }
+            let ensureNormal: @Sendable () async throws -> Void = {
+                try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
+                let description = try await authenticatedMDMAgentDescription(reference: reference, timeout: timeout)
+                _ = try MDMEnrollmentAgentGate.verify(description, expectedExecutableDigest: journal.agentSHA256)
+            }
+            let observe: @Sendable () async throws -> PommeMDMObservedEnrollment = {
+                if progress.journal.phase == .captured, !progress.journal.stagedProfileOwned {
+                    try await requireMDMDestinationAbsent(reference: reference, destination: artifacts.profile)
+                }
+                let value = try await observeMDMEnrollment(reference: reference, timeout: timeout)
+                await lastObservation.record(value, phase: progress.journal.phase)
+                return value
+            }
+            let recovery = PommeSecurityRecoveryAdapter(
+                reference: reference, volumeGroupUUID: group, factory: try currentRecoveryIntegrationFactory()
+            )
+            let dependencies = PommeMDMWorkflowDependencies(
+                ensureNormal: ensureNormal,
+                observe: observe,
+                captureSecurity: {
+                    let normal = try await observeMDMNormalSecurity(reference: reference, timeout: timeout)
+                    let amfi = try await recovery.observe(.amfiDisable)
+                    PommeCore.log("MDM baseline: sipDisabled=\(normal.sipDisabled), amfiDisabled=\(amfi.disabled), baselinePresent=\(amfi.baselinePresent), phase=\(amfi.baselinePhase ?? "none"), reconciliationRequired=\(amfi.reconciliationRequired).")
+                    try PommeMDMWorkflowSecurityBaseline.validateOriginalAMFI(sipDisabled: normal.sipDisabled,
+                        activeBootArguments: normal.arguments, state: amfi)
+                    return .init(sipDisabled: normal.sipDisabled, amfiDisabled: amfi.disabled,
+                        activeBootArguments: normal.arguments, configuredBootArguments: normal.configured)
+                },
+                runSecurity: { operation in
+                    if operation == .amfiDisable,
+                       try childStore.loadIfPresent(lease: lease)?.operation != .amfiDisable {
+                        // Revalidate an enabled AMFI receipt after SIP has
+                        // reached its prerequisite state. This check is before
+                        // child creation or any AMFI mutation; failure can
+                        // still restore SIP without attempting an AMFI enable.
+                        do {
+                            let state = try await recovery.observe(.amfiDisable)
+                            guard !state.disabled, !state.baselinePresent, !state.reconciliationRequired else {
+                                throw PommeMDMWorkflowFailure.securityBaselineUnsupported
+                            }
+                        } catch {
+                            try progress.record(pendingChild: .some(nil), amfiChangeRequested: false)
+                            throw error
+                        }
+                    }
+                    try await PommeMDMChildScope.$vmName.withValue(name) {
+                        if operation.isSIP {
+                            _ = try await sipWorkflow(name: name, action: operation.requestsDisabled ? .disable : .enable,
+                                finalState: .normal, force: force, lease: lease)
+                        } else {
+                            _ = try await amfiWorkflow(name: name, action: operation.requestsDisabled ? .disable : .enable,
+                                finalState: .normal, force: force, lease: lease)
+                        }
+                    }
+                },
+                enroll: {
+                    try await cleanupMDMArtifacts(reference: reference, journal: progress.journal)
+                    _ = try await mdmHelperEnrollment(
+                        name: name, profilePath: profileURL.path, guestPath: artifacts.profile,
+                        timeout: timeout, enrollmentMode: enrollmentMode, lease: lease,
+                        operationID: artifacts.workspace.requestID, progress: progress
+                    )
+                },
+                cleanup: { try await cleanupMDMArtifacts(reference: reference, journal: progress.journal) },
+                requireHelperStopped: { try await requireMDMHelpersStopped(reference: reference, journal: progress.journal) },
+                verifySecurity: { baseline in
+                    let observed = try await observeMDMNormalSecurity(reference: reference, timeout: timeout)
+                    guard observed.sipDisabled == baseline.sipWasDisabled,
+                          observed.arguments == baseline.normalBootArguments,
+                          observed.configured == baseline.configuredBootArguments else {
+                        throw PommeMDMWorkflowFailure.restorationIncomplete
+                    }
+                },
+                restoreRunState: { state in
+                    try await PommeCore.restoreStableVMRunState(state, reference: reference)
+                    guard try PommeCore.provesStableVMRunState(state, reference: reference) else {
+                        throw PommeMDMWorkflowFailure.restorationIncomplete
+                    }
+                },
+                awaitEnrollment: {
+                    let deadline = Date().addingTimeInterval(timeout)
+                    while true {
+                        do {
+                            let value = try await observeMDMEnrollment(reference: reference,
+                                timeout: max(0, deadline.timeIntervalSinceNow))
+                            await lastObservation.record(value, phase: progress.journal.phase)
+                            try value.requireRequestedState(profile: profile, mode: enrollmentMode)
+                            return value
+                        } catch {
+                            guard Date() < deadline else { throw PommeMDMWorkflowFailure.evidenceUnavailable }
+                            try Task.checkCancellation()
+                            try await Task.sleep(nanoseconds: 250_000_000)
+                        }
+                    }
+                },
+                reportSecurityFailure: { failure in
+                    await lastObservation.recordFailure(failure)
+                    PommeCore.log("MDM security workflow failure: \(failure.localizedDescription)")
+                }
+            )
+            let observed: PommeMDMObservedEnrollment
+            do { observed = try await PommeMDMWorkflowExecution(progress: progress, dependencies: dependencies).run(preflightError: sourceError) }
+            catch {
+                let retained = progress.journal
+                var details: [String: Any] = [
+                    "enrollmentMode": enrollmentMode.rawValue, "profileIdentifier": profile.identifier,
+                    "enrolled": NSNull(), "userApproved": NSNull(), "supervised": NSNull(),
+                    "enrollmentOutcome": retained.enrollmentDispatched && !retained.enrollmentVerified ? "unknown" : "incomplete",
+                    "securityRestored": [.securityRestored, .runStateRestorationIntent, .restorationComplete].contains(retained.phase),
+                    "runStateRestored": (try? PommeCore.provesStableVMRunState(retained.originalRunState, reference: reference)) == true,
+                    "artifactsCleaned": retained.phase == .restorationComplete,
+                    "phase": retained.phase.rawValue
+                ]
+                if let (last, phase) = await lastObservation.snapshot() {
+                    details["lastObserved"] = ["enrolled": last.status.enrolled, "userApproved": last.status.userApproved,
+                        "supervised": last.supervised, "phase": phase.rawValue]
+                }
+                let securityFailures = await lastObservation.securityFailures()
+                if !securityFailures.isEmpty {
+                    details["securityFailures"] = securityFailures.map(\.localizedDescription)
+                }
+                return mdmResult(title: "MDM enrollment", operation: "mdm", reference: reference, ok: false,
+                    agent: [:], steps: [], result: details, error: error.localizedDescription)
+            }
+            return mdmResult(title: "MDM enrollment", operation: "mdm", reference: reference, ok: true,
+                agent: ["role": "normal", "protocol": PommeAgentProtocol.name, "version": PommeAgentProtocol.version],
+                steps: [], result: [
+                    "enrollmentMode": enrollmentMode.rawValue, "profileIdentifier": profile.identifier,
+                    "enrolled": observed.status.enrolled, "userApproved": observed.status.userApproved,
+                    "supervised": observed.supervised, "securityRestored": true,
+                    "runStateRestored": true, "artifactsCleaned": true
+                ])
+        }
+    }
+
+    private static func requireMDMWorkflowAvailable(reference: VMReference, lease: VMBundleMutationLease) throws {
+        guard PommeMDMChildScope.vmName != reference.displayName else { return }
+        if let journal = try PommeMDMEnrollmentJournalStore(bundleURL: reference.bundle.rootURL).loadIfPresent(lease: lease),
+           journal.phase != .restorationComplete || (journal.enrollmentDispatched && !journal.enrollmentVerified) {
+            throw PommeMDMWorkflowFailure.competingSecurityOperation
+        }
+    }
+
+    private static func readMDMSourceProfile(_ url: URL) throws -> Data {
+        let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw PommeMDMEnrollmentError.invalidProfile }
+        defer { _ = Darwin.close(fd) }
+        var before = stat()
+        guard fstat(fd, &before) == 0, before.st_mode & S_IFMT == S_IFREG,
+              before.st_nlink == 1, before.st_size > 0,
+              before.st_size <= off_t(PommeMDMTemporaryHelperRequest.maximumProfileBytes) else {
+            throw PommeMDMEnrollmentError.invalidProfile
+        }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 32 * 1024)
+        while true {
+            let count = Darwin.read(fd, &buffer, buffer.count)
+            if count == 0 { break }
+            if count < 0, errno == EINTR { continue }
+            guard count > 0, data.count + count <= PommeMDMTemporaryHelperRequest.maximumProfileBytes else {
+                throw PommeMDMEnrollmentError.invalidProfile
+            }
+            data.append(contentsOf: buffer.prefix(count))
+        }
+        var after = stat()
+        guard fstat(fd, &after) == 0, data.count == Int(before.st_size),
+              after.st_size == before.st_size, after.st_mtimespec.tv_sec == before.st_mtimespec.tv_sec,
+              after.st_mtimespec.tv_nsec == before.st_mtimespec.tv_nsec else {
+            throw PommeMDMEnrollmentError.invalidProfile
+        }
+        return data
+    }
+
+    private static func mdmArtifacts(_ journal: PommeMDMEnrollmentJournal) throws -> (
+        workspace: PommeMDMTemporaryHelperWorkspace, profile: String, bootstrap: String
+    ) {
+        let prefix = "/private/var/db/pomme-mdm-bootstrap-"
+        guard let bootstrap = journal.ownedArtifacts.first(where: { $0.hasPrefix(prefix) && $0.hasSuffix(".bin") }),
+              let id = UUID(uuidString: String(bootstrap.dropFirst(prefix.count).dropLast(4))) else {
+            throw PommeMDMEnrollmentWorkflowError.malformedJournal
+        }
+        let workspace = try PommeMDMTemporaryHelperWorkspace(requestID: id)
+        let profiles = journal.ownedArtifacts.filter { $0 != bootstrap && !workspace.owns($0) }
+        guard journal.ownedArtifacts.count == 5, profiles.count == 1,
+              try MDMProfileStaging.destination(requestedPath: profiles[0]) == profiles[0],
+              Set(journal.ownedArtifacts) == Set([
+                bootstrap, workspace.helperPath, workspace.entitlementsPath, workspace.requestPath, profiles[0]
+              ]) else { throw PommeMDMEnrollmentWorkflowError.malformedJournal }
+        return (workspace, profiles[0], bootstrap)
+    }
+
+    private static func observeMDMEnrollment(reference: VMReference, timeout: TimeInterval) async throws -> PommeMDMObservedEnrollment {
+        let deadline = Date().addingTimeInterval(timeout)
+        func capture(_ path: String, _ arguments: [String], acceptsDaemonDiagnostic: Bool = false) async throws -> Data {
+            guard deadline.timeIntervalSinceNow >= 1 else { throw PommeMDMWorkflowFailure.evidenceUnavailable }
+            let process = try await runMDMGuestProcess(reference: reference, path: path,
+                arguments: arguments, timeout: min(timeout, deadline.timeIntervalSinceNow))
+            let daemonDiagnostic = Data("[ERROR] Unable to target 'local user' via XPC when running as daemon\n".utf8)
+            guard process.exitedSuccessfully,
+                  process.stderr.isEmpty || (acceptsDaemonDiagnostic && process.stderr == daemonDiagnostic) else {
+                throw PommeMDMWorkflowFailure.evidenceUnavailable
+            }
+            return process.stdout
+        }
+        let status = try MDMEnrollmentEvidenceParser.parseEnrollmentStatus(
+            fromProfilesStatus: await capture("/usr/bin/profiles", ["status", "-type", "enrollment"]))
+        let profiles = try await capture("/usr/bin/profiles", ["show", "-type", "configuration", "-output", "stdout-xml"])
+        let installed: MDMInstalledProfileIdentity?
+        do { installed = try MDMEnrollmentEvidenceParser.parseInstalledProfileIdentity(fromProfilesShow: profiles) }
+        catch MDMEnrollmentEvidenceError.missingEvidence {
+            // Explicit, well-formed empty device profile output can establish
+            // absence before a fresh install, but never successful enrollment.
+            var format = PropertyListSerialization.PropertyListFormat.openStep
+            guard !status.enrolled,
+                  let root = try? PropertyListSerialization.propertyList(from: profiles, options: [], format: &format) as? [String: Any],
+                  format == .xml, root.isEmpty || root["_computerlevel"] is [Any] else { throw PommeMDMWorkflowFailure.evidenceUnavailable }
+            installed = nil
+        }
+        let supervision = try MDMEnrollmentEvidenceParser.parseDeviceSupervision(
+            fromMDMClient: await capture("/usr/libexec/mdmclient", ["QueryDeviceInformation"], acceptsDaemonDiagnostic: true))
+        return .init(installed: installed, status: status, supervised: supervision.isSupervised)
+    }
+
+    private static func observeMDMNormalSecurity(reference: VMReference, timeout: TimeInterval) async throws -> (sipDisabled: Bool, arguments: Data, configured: Data) {
+        let sip = try await runMDMGuestProcess(reference: reference, path: "/usr/bin/csrutil", arguments: ["status"], timeout: timeout)
+        let args = try await runMDMGuestProcess(reference: reference, path: "/usr/sbin/sysctl", arguments: ["-n", "kern.bootargs"], timeout: timeout)
+        let nvram = try await runMDMGuestProcess(reference: reference, path: "/usr/sbin/nvram", arguments: ["-xp"], timeout: timeout)
+        guard sip.exitedSuccessfully, sip.stderr.isEmpty, args.exitedSuccessfully, args.stderr.isEmpty,
+              args.stdout.last == 0x0a, !args.stdout.contains(0),
+              sip.stdout == Data("System Integrity Protection status: enabled.\n".utf8)
+                || sip.stdout == Data("System Integrity Protection status: disabled.\n".utf8) else {
+            throw PommeMDMWorkflowFailure.securityBaselineUnsupported
+        }
+        var format = PropertyListSerialization.PropertyListFormat.openStep
+        guard nvram.exitedSuccessfully, nvram.stderr.isEmpty,
+              let root = try? PropertyListSerialization.propertyList(from: nvram.stdout, options: [], format: &format) as? [String: Any],
+              format == .xml else { throw PommeMDMWorkflowFailure.securityBaselineUnsupported }
+        let configuredBytes: Data?
+        switch root["boot-args"] {
+        case nil: configuredBytes = nil
+        case let data as Data: configuredBytes = data
+        case let string as String: configuredBytes = Data(string.utf8)
+        default: throw PommeMDMWorkflowFailure.securityBaselineUnsupported
+        }
+        let active = Data(args.stdout.dropLast())
+        // A pending boot-argument change would make a reboot change the
+        // captured security state. Reject it before any security mutation.
+        guard (configuredBytes ?? Data()) == active else {
+            throw PommeMDMWorkflowFailure.securityBaselineUnsupported
+        }
+        let configured = try PommeProvisioningCoding.encode(
+            configuredBytes.map { JSONValue.string($0.base64EncodedString()) } ?? .null)
+        return (sip.stdout == Data("System Integrity Protection status: disabled.\n".utf8), active, configured)
+    }
+
+    private static func requireMDMHelpersStopped(reference: VMReference, journal: PommeMDMEnrollmentJournal) async throws {
+        let state = try PommeCore.stableVMRunState(reference: reference)
+        guard state == .running(.normal) || state == .paused(previousBootMode: .normal) else { return }
+        if state == .paused(previousBootMode: .normal) {
+            try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
+        }
+        _ = try MDMEnrollmentAgentGate.verify(
+            await authenticatedMDMAgentDescription(reference: reference, timeout: 30), expectedExecutableDigest: journal.agentSHA256)
+        let artifacts = try mdmArtifacts(journal)
+        for path in [artifacts.workspace.helperPath, artifacts.bootstrap] {
+            let process = try await runMDMGuestProcess(reference: reference, path: "/usr/bin/pgrep", arguments: ["-f", path], timeout: 15)
+            guard process.exited, process.exitCode == 1, process.stderr.isEmpty, process.stdout.isEmpty else {
+                throw PommeMDMEnrollmentError.helperProcessTerminationUnproven
+            }
+        }
+    }
+
+    private static func cleanupMDMArtifacts(reference: VMReference, journal: PommeMDMEnrollmentJournal) async throws {
+        let artifacts = try mdmArtifacts(journal)
+        try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
+        _ = try MDMEnrollmentAgentGate.verify(
+            await authenticatedMDMAgentDescription(reference: reference, timeout: 30), expectedExecutableDigest: journal.agentSHA256)
+        func exists(_ path: String) async throws -> Bool {
+            for flag in ["-e", "-L"] {
+                let result = try await runMDMGuestProcess(reference: reference, path: "/bin/test", arguments: [flag, path], timeout: 15)
+                guard result.exited, result.exitCode == 0 || result.exitCode == 1, result.stdout.isEmpty, result.stderr.isEmpty else {
+                    throw PommeMDMEnrollmentError.cleanupFailed
+                }
+                if result.exitCode == 0 { return true }
+            }
+            return false
+        }
+        var present: [String] = []
+        let ownedPaths = journal.ownedArtifacts.filter { $0 != artifacts.profile || journal.stagedProfileOwned }
+        for path in ownedPaths where try await exists(path) { present.append(path) }
+        guard !present.isEmpty else { return }
+        let hasBootstrap = present.contains(artifacts.bootstrap)
+        if hasBootstrap {
+            let signature = try await runMDMGuestProcess(reference: reference, path: "/usr/bin/codesign",
+                arguments: ["--verify", "--strict", "-R", PommeAgentArtifactStore.signingRequirement, artifacts.bootstrap], timeout: 30)
+            guard signature.exitedSuccessfully else { throw PommeMDMEnrollmentError.cleanupFailed }
+            let chmod = try await runMDMGuestProcess(reference: reference, path: "/bin/chmod", arguments: ["700", artifacts.bootstrap], timeout: 15)
+            guard chmod.exitedSuccessfully else { throw PommeMDMEnrollmentError.cleanupFailed }
+        }
+        let staging = MDMStagingBootstrap(reference: reference, requestID: artifacts.workspace.requestID, transferred: hasBootstrap)
+        if !hasBootstrap { _ = try await staging.prepare() }
+        for path in present where path != artifacts.bootstrap {
+            if path == artifacts.workspace.helperPath {
+                let chmod = try await runMDMGuestProcess(reference: reference, path: "/bin/chmod", arguments: ["600", path], timeout: 15)
+                guard chmod.exitedSuccessfully else { throw PommeMDMEnrollmentError.cleanupFailed }
+            }
+            try PommeMDMEnrollmentAgentResponse.requireCleanup(await staging.cleanup(path))
+        }
+        try await staging.remove()
+        for path in ownedPaths where try await exists(path) { throw PommeMDMEnrollmentError.cleanupFailed }
+    }
+
+    private static func mdmHelperEnrollment(
         name: String,
         profilePath: String,
         guestPath: String?,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        enrollmentMode: MDMEnrollmentMode,
+        lease: VMBundleMutationLease,
+        operationID: UUID,
+        progress: PommeMDMWorkflowProgress
     ) async throws -> PommeOperationResult {
         guard timeout.isFinite, timeout >= 1, timeout <= 300 else {
             throw RunnerError.invalidControlCommand("mdm.enroll timeout")
         }
-        return try await VMBundleMutationLease.withLease(name: name) { _ in
+        return try await VMBundleMutationLease.withLease(name: name, inherited: lease) { _ in
             let reference = try namedReference(name)
             let profileURL = URL(fileURLWithPath: PommeCore.absoluteHostPath(profilePath)).standardizedFileURL
             guard regularFile(profileURL) else {
@@ -936,6 +1392,12 @@ enum PommeApplication {
             let expectedDigest = try PommeCore.expectedProvisionedAgentDigest(
                 reference: reference
             )
+            let workspace = try PommeMDMTemporaryHelperWorkspace(requestID: operationID)
+            let destination = try MDMProfileStaging.destination(
+                requestedPath: guestPath
+                    ?? "\(MDMProfileStaging.guestDirectory)/profile-\(operationID.uuidString.lowercased()).mobileconfig"
+            )
+            let staging = MDMStagingBootstrap(reference: reference, requestID: operationID)
             let transport = PommeMDMEnrollmentAgentDependencies(
                 describe: {
                     try await authenticatedMDMAgentDescription(
@@ -954,30 +1416,65 @@ enum PommeApplication {
                             expectedExecutableDigest: expectedDigest
                         )
                     }
-                    return try performAuthenticatedAgentOperation(
-                        reference: reference,
-                        operation: operation.wireName,
-                        payload: try operation.payload()
-                    )
+                    switch operation {
+                    case .prepareStaging: return try await staging.prepare()
+                    case .cleanup(let path):
+                        guard progress.journal.stagedProfileOwned else {
+                            // A rejected pre-existing custom destination was
+                            // never claimed by this transaction.
+                            return .object(["removed": .bool(true)])
+                        }
+                        return try await staging.cleanup(path)
+                    default:
+                        return try performAuthenticatedAgentOperation(
+                            reference: reference, operation: operation.wireName,
+                            payload: try operation.payload()
+                        )
+                    }
                 },
                 transferProfile: { source, destination in
-                    try transferMDMProfile(
+                    try await requireMDMDestinationAbsent(reference: reference, destination: destination)
+                    try progress.record(stagedProfileOwned: true)
+                    let receipt = try await transferMDMProfile(
                         reference: reference,
                         source: source,
                         destination: destination
                     )
+                    guard receipt.sha256 == progress.journal.profile.digest else {
+                        throw PommeMDMEnrollmentError.invalidTransfer
+                    }
+                    return receipt
                 }
+            )
+            let temporaryHelper = makeLiveMDMTemporaryHelper(
+                reference: reference,
+                expectedExecutableDigest: expectedDigest,
+                staging: staging,
+                workspace: workspace,
+                onLaunch: { try progress.record(enrollmentDispatched: true) }
             )
             let state = makeLiveMDMStatePort(reference: reference)
             let transaction = PommeMDMEnrollmentTransaction(
                 agent: transport,
                 state: state,
                 profileURL: profileURL,
-                guestPath: guestPath,
+                guestPath: destination,
                 timeout: timeout,
-                expectedExecutableDigest: expectedDigest
+                enrollmentMode: enrollmentMode,
+                expectedExecutableDigest: expectedDigest,
+                temporaryHelper: temporaryHelper
             )
-            let enrolled = try await transaction.execute()
+            let enrolled: PommeMDMEnrollmentTransactionResult
+            do {
+                enrolled = try await transaction.execute()
+            } catch {
+                let original = error
+                if (error as? PommeMDMEnrollmentError) == .helperProcessTerminationUnproven { throw error }
+                do { try await staging.remove() }
+                catch { throw PommeMDMEnrollmentError.cleanupFailed }
+                throw original
+            }
+            try await staging.remove()
             let agent: [String: Any] = [
                 "role": GuestAgentStatusV1.Role.normal.rawValue,
                 "protocol": PommeAgentProtocol.name,
@@ -1021,6 +1518,11 @@ enum PommeApplication {
             ],
             bundle: reference.bundle
         )
+        if operation == "mdm.staging.prepare" || operation == "mdm.staging.cleanup" {
+            let accepted = response["ok"] as? Bool == true
+            let resultPresent = response["result"] != nil
+            PommeCore.log("MDM staging receipt [operation=\(operation), accepted=\(accepted), resultPresent=\(resultPresent)].")
+        }
         guard response["ok"] as? Bool == true,
               PommeCore.hostExitCode(from: response) == 0,
               let result = response["result"] else {
@@ -1057,114 +1559,87 @@ enum PommeApplication {
         reference: VMReference,
         source: URL,
         destination: String
-    ) throws -> PommeMDMProfileTransferReceipt {
+    ) async throws -> PommeMDMProfileTransferReceipt {
         guard try MDMProfileStaging.destination(requestedPath: destination) == destination else {
             throw PommeMDMEnrollmentError.invalidTransfer
         }
-        let descriptor = Darwin.open(source.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
-        guard descriptor >= 0 else { throw PommeMDMEnrollmentError.invalidProfile }
-        defer { _ = Darwin.close(descriptor) }
-        var before = stat()
-        guard fstat(descriptor, &before) == 0,
-              before.st_mode & S_IFMT == S_IFREG,
-              before.st_nlink == 1,
-              before.st_size > 0 else {
-            throw PommeMDMEnrollmentError.invalidProfile
-        }
+        let generic = try await transferAuthenticatedFile(
+            reference: reference,
+            source: source,
+            destination: destination,
+            maximumBytes: PommeMDMTemporaryHelperRequest.maximumProfileBytes
+        )
+        return try .init(
+            destination: generic.destination,
+            bytes: generic.bytes,
+            sha256: generic.sha256
+        )
+    }
 
+    private static func transferMDMHelperFile(
+        reference: VMReference,
+        source: URL,
+        destination: String
+    ) async throws -> PommeMDMAuthenticatedFileTransferReceipt {
+        guard PommeMDMTemporaryHelperWorkspace.isArtifactPath(destination) else {
+            throw PommeMDMEnrollmentError.invalidTransfer
+        }
+        return try await transferAuthenticatedFile(
+            reference: reference,
+            source: source,
+            destination: destination,
+            maximumBytes: 128 * 1024 * 1024
+        )
+    }
+
+    private static func transferMDMHelperData(
+        reference: VMReference,
+        data: Data,
+        destination: String
+    ) async throws -> PommeMDMAuthenticatedFileTransferReceipt {
+        guard PommeMDMTemporaryHelperWorkspace.isArtifactPath(destination),
+              !data.isEmpty,
+              data.count <= PommeAgentProtocol.maximumFrameBytes * 64 else {
+            throw PommeMDMEnrollmentError.invalidTransfer
+        }
         var remoteFileID: String?
         do {
-            let opened = try performAuthenticatedAgentOperation(
+            try await requireMDMDestinationAbsent(
                 reference: reference,
-                operation: "file.open",
-                payload: .object([
-                    "path": .string(destination),
-                    "mode": .string("stageWrite")
-                ])
+                destination: destination
             )
-            guard let openObject = opened.objectValue,
-                  Set(openObject.keys) == ["fileID", "staged"],
-                  let fileID = openObject["fileID"]?.stringValue,
-                  let canonicalID = UUID(uuidString: fileID),
-                  canonicalID.uuidString.lowercased() == fileID,
-                  openObject["staged"] == .bool(true) else {
-                throw PommeMDMEnrollmentError.invalidTransfer
-            }
+            let fileID = try openMDMStageFile(reference: reference, destination: destination)
             remoteFileID = fileID
-
             var hasher = SHA256()
             var transferred = 0
-            var buffer = [UInt8](
-                repeating: 0,
-                count: PommeAgentProtocol.maximumFileChunkBytes
-            )
-            while true {
-                let count = buffer.withUnsafeMutableBytes { bytes in
-                    Darwin.read(descriptor, bytes.baseAddress, bytes.count)
-                }
-                if count < 0, errno == EINTR { continue }
-                guard count >= 0 else { throw PommeMDMEnrollmentError.transferFailed }
-                if count == 0 { break }
-                let chunk = Data(buffer.prefix(count))
+            var offset = 0
+            while offset < data.count {
+                let end = min(data.count, offset + PommeAgentProtocol.maximumFileChunkBytes)
+                let chunk = data.subdata(in: offset..<end)
                 hasher.update(data: chunk)
-                let written = try performAuthenticatedAgentOperation(
-                    reference: reference,
-                    operation: "file.write",
-                    payload: .object([
-                        "fileID": .string(fileID),
-                        "dataBase64": .string(chunk.base64EncodedString())
-                    ])
+                try requireMDMWrite(
+                    try performAuthenticatedAgentOperation(
+                        reference: reference,
+                        operation: "file.write",
+                        payload: .object([
+                            "fileID": .string(fileID),
+                            "dataBase64": .string(chunk.base64EncodedString())
+                        ])
+                    ),
+                    count: chunk.count
                 )
-                guard let object = written.objectValue,
-                      Set(object.keys) == ["count"],
-                      object["count"] == .integer(Int64(count)) else {
-                    throw PommeMDMEnrollmentError.invalidTransfer
-                }
-                transferred += count
+                offset = end
+                transferred += chunk.count
             }
-            let flushed = try performAuthenticatedAgentOperation(
+            try finishMDMTransfer(
                 reference: reference,
-                operation: "file.flush",
-                payload: .object(["fileID": .string(fileID)])
-            )
-            guard flushed == .object([:]) else {
-                throw PommeMDMEnrollmentError.invalidTransfer
-            }
-
-            var after = stat()
-            guard fstat(descriptor, &after) == 0,
-                  before.st_dev == after.st_dev,
-                  before.st_ino == after.st_ino,
-                  before.st_size == after.st_size,
-                  before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
-                  before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
-                  transferred == Int(before.st_size) else {
-                throw PommeMDMEnrollmentError.invalidTransfer
-            }
-
-            let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
-            let committed = try performAuthenticatedAgentOperation(
-                reference: reference,
-                operation: "file.commit",
-                payload: .object([
-                    "fileID": .string(fileID),
-                    "expectedBytes": .integer(Int64(transferred)),
-                    "expectedSHA256": .string(digest)
-                ])
-            )
-            guard committed == .object([
-                "committed": .bool(true),
-                "bytes": .integer(Int64(transferred)),
-                "sha256": .string(digest)
-            ]) else {
-                throw PommeMDMEnrollmentError.invalidTransfer
-            }
-            remoteFileID = nil
-            return try .init(
-                destination: destination,
+                fileID: fileID,
                 bytes: transferred,
-                sha256: digest
+                sha256: hasher.finalize().map { String(format: "%02x", $0) }.joined()
             )
+            let digest = PommeMDMTemporaryHelperRequest.digest(of: data)
+            remoteFileID = nil
+            return try .init(destination: destination, bytes: data.count, sha256: digest)
         } catch {
             if let remoteFileID {
                 _ = try? performAuthenticatedAgentOperation(
@@ -1178,192 +1653,807 @@ enum PommeApplication {
         }
     }
 
+    private static func transferAuthenticatedFile(
+        reference: VMReference,
+        source: URL,
+        destination: String,
+        maximumBytes: Int
+    ) async throws -> PommeMDMAuthenticatedFileTransferReceipt {
+        guard isAllowedMDMTransferPath(destination) else {
+            throw PommeMDMEnrollmentError.invalidTransfer
+        }
+        let descriptor = Darwin.open(source.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw PommeMDMEnrollmentError.invalidProfile }
+        defer { _ = Darwin.close(descriptor) }
+        var before = stat()
+        guard fstat(descriptor, &before) == 0,
+              before.st_mode & S_IFMT == S_IFREG,
+              before.st_nlink == 1,
+              before.st_size > 0,
+              before.st_size <= off_t(maximumBytes) else {
+            throw PommeMDMEnrollmentError.invalidProfile
+        }
+
+        var remoteFileID: String?
+        do {
+            try await requireMDMDestinationAbsent(
+                reference: reference,
+                destination: destination
+            )
+            let fileID = try openMDMStageFile(reference: reference, destination: destination)
+            remoteFileID = fileID
+            var hasher = SHA256()
+            var transferred = 0
+            var buffer = [UInt8](repeating: 0, count: PommeAgentProtocol.maximumFileChunkBytes)
+            while true {
+                let count = buffer.withUnsafeMutableBytes { bytes in
+                    Darwin.read(descriptor, bytes.baseAddress, bytes.count)
+                }
+                if count < 0, errno == EINTR { continue }
+                guard count >= 0 else { throw PommeMDMEnrollmentError.transferFailed }
+                if count == 0 { break }
+                let chunk = Data(buffer.prefix(count))
+                hasher.update(data: chunk)
+                try requireMDMWrite(
+                    try performAuthenticatedAgentOperation(
+                        reference: reference,
+                        operation: "file.write",
+                        payload: .object([
+                            "fileID": .string(fileID),
+                            "dataBase64": .string(chunk.base64EncodedString())
+                        ])
+                    ),
+                    count: count
+                )
+                transferred += count
+            }
+            var after = stat()
+            guard fstat(descriptor, &after) == 0,
+                  before.st_dev == after.st_dev,
+                  before.st_ino == after.st_ino,
+                  before.st_size == after.st_size,
+                  before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
+                  before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
+                  transferred == Int(before.st_size) else {
+                throw PommeMDMEnrollmentError.invalidTransfer
+            }
+            let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+            try finishMDMTransfer(
+                reference: reference,
+                fileID: fileID,
+                bytes: transferred,
+                sha256: digest
+            )
+            remoteFileID = nil
+            return try .init(destination: destination, bytes: transferred, sha256: digest)
+        } catch {
+            if let remoteFileID {
+                _ = try? performAuthenticatedAgentOperation(
+                    reference: reference,
+                    operation: "file.abort",
+                    payload: .object(["fileID": .string(remoteFileID)])
+                )
+            }
+            if let error = error as? PommeMDMEnrollmentError { throw error }
+            throw PommeMDMEnrollmentError.transferFailed
+        }
+    }
+
+    private static func isAllowedMDMTransferPath(_ path: String) -> Bool {
+        (try? MDMProfileStaging.destination(requestedPath: path)) == path
+            || PommeMDMTemporaryHelperWorkspace.isArtifactPath(path)
+            || PommeMDMStagingHelper.isBootstrapPath(path)
+    }
+
+    /// The generic agent commit operation deliberately supports replacing an
+    /// existing regular file. MDM destinations are one-shot artifacts, so
+    /// reject a known existing path through the authenticated guest process
+    /// boundary before opening the stage. Generated UUID paths keep the
+    /// remaining preflight-to-commit interval scoped to this CLI lease; the
+    /// agent commit still refuses symlinks.
+    private static func requireMDMDestinationAbsent(
+        reference: VMReference,
+        destination: String
+    ) async throws {
+        for flag in ["-e", "-L"] {
+            let result = try await runMDMGuestProcess(
+                reference: reference,
+                path: "/bin/test",
+                arguments: [flag, destination],
+                timeout: 15
+            )
+            guard result.exited,
+                  !result.timedOut,
+                  !result.cancelled,
+                  result.outputComplete,
+                  !result.stdoutTruncated,
+                  !result.stderrTruncated,
+                  result.signal == nil,
+                  result.stdout.isEmpty,
+                  result.stderr.isEmpty,
+                  result.exitCode == 1 else {
+                throw PommeMDMEnrollmentError.invalidTransfer
+            }
+        }
+    }
+
+    private static func openMDMStageFile(
+        reference: VMReference,
+        destination: String
+    ) throws -> String {
+        let opened = try performAuthenticatedAgentOperation(
+            reference: reference,
+            operation: "file.open",
+            payload: .object([
+                "path": .string(destination),
+                "mode": .string("stageWrite")
+            ])
+        )
+        guard let openObject = opened.objectValue,
+              Set(openObject.keys) == ["fileID", "staged"],
+              let fileID = openObject["fileID"]?.stringValue,
+              let canonicalID = UUID(uuidString: fileID),
+              canonicalID.uuidString.lowercased() == fileID,
+              openObject["staged"] == .bool(true) else {
+            throw PommeMDMEnrollmentError.invalidTransfer
+        }
+        return fileID
+    }
+
+    private static func requireMDMWrite(_ value: JSONValue, count: Int) throws {
+        guard let object = value.objectValue,
+              Set(object.keys) == ["count"],
+              object["count"] == .integer(Int64(count)) else {
+            throw PommeMDMEnrollmentError.invalidTransfer
+        }
+    }
+
+    private static func finishMDMTransfer(
+        reference: VMReference,
+        fileID: String,
+        bytes: Int,
+        sha256: String
+    ) throws {
+        let flushed = try performAuthenticatedAgentOperation(
+            reference: reference,
+            operation: "file.flush",
+            payload: .object(["fileID": .string(fileID)])
+        )
+        guard flushed == .object([:]) else {
+            throw PommeMDMEnrollmentError.invalidTransfer
+        }
+        let committed = try performAuthenticatedAgentOperation(
+            reference: reference,
+            operation: "file.commit",
+            payload: .object([
+                "fileID": .string(fileID),
+                "expectedBytes": .integer(Int64(bytes)),
+                "expectedSHA256": .string(sha256)
+            ])
+        )
+        guard committed == .object([
+            "committed": .bool(true),
+            "bytes": .integer(Int64(bytes)),
+            "sha256": .string(sha256)
+        ]) else {
+            throw PommeMDMEnrollmentError.invalidTransfer
+        }
+    }
+
+    private static let mdmTemporaryHelperIdentifier = "com.github.weswhet.pomme.mdm-helper"
+    private static let mdmTemporaryHelperOutputLimit = 64 * 1024
+
+    private struct MDMGuestProcessResult: Sendable {
+        let jobID: UUID
+        let exited: Bool
+        let exitCode: Int32?
+        let signal: Int32?
+        let timedOut: Bool
+        let cancelled: Bool
+        let outputComplete: Bool
+        let stdoutTruncated: Bool
+        let stderrTruncated: Bool
+        let stdout: Data
+        let stderr: Data
+
+        var exitedSuccessfully: Bool {
+            exited && !timedOut && !cancelled && outputComplete
+                && !stdoutTruncated && !stderrTruncated
+                && exitCode == 0 && signal == nil
+        }
+    }
+
+    /// Resolves the executable that invoked this CLI, then verifies its exact
+    /// Pomme Developer ID requirement and stable bytes before it enters guest
+    /// staging. The pinned guest-agent digest is intentionally not used as a
+    /// source selector: old VMs may retain an earlier agent without the
+    /// temporary helper entrypoint.
+    private static func currentCanonicalPommeArtifact() throws -> PommeMDMTemporaryHelperArtifact {
+        var size: UInt32 = 0
+        guard _NSGetExecutablePath(nil, &size) == -1, size > 0 else {
+            throw PommeMDMEnrollmentError.invalidRequest
+        }
+        var buffer = [CChar](repeating: 0, count: Int(size) + 1)
+        guard buffer.withUnsafeMutableBufferPointer({ pointer in
+            _NSGetExecutablePath(pointer.baseAddress, &size) == 0
+        }) else {
+            throw PommeMDMEnrollmentError.invalidRequest
+        }
+        let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        let source = URL(fileURLWithPath: String(decoding: bytes, as: UTF8.self))
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        guard source.path.hasPrefix("/"), source.path == source.standardizedFileURL.path else {
+            throw PommeMDMEnrollmentError.invalidRequest
+        }
+
+        var before = stat()
+        guard lstat(source.path, &before) == 0,
+              before.st_mode & S_IFMT == S_IFREG,
+              before.st_uid == geteuid(),
+              before.st_nlink == 1,
+              before.st_mode & 0o022 == 0,
+              before.st_size > 0,
+              before.st_size <= off_t(PommeAgentArtifactStore.maximumExecutableBytes) else {
+            throw PommeMDMEnrollmentError.invalidRequest
+        }
+
+        var code: SecStaticCode?
+        var requirement: SecRequirement?
+        guard SecStaticCodeCreateWithPath(source as CFURL, [], &code) == errSecSuccess,
+              let code,
+              SecRequirementCreateWithString(
+                  PommeAgentArtifactStore.signingRequirement as CFString,
+                  [],
+                  &requirement
+              ) == errSecSuccess,
+              let requirement,
+              SecStaticCodeCheckValidity(
+                  code,
+                  SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures),
+                  requirement
+              ) == errSecSuccess else {
+            throw PommeMDMEnrollmentError.invalidRequest
+        }
+
+        let descriptor = Darwin.open(source.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw PommeMDMEnrollmentError.invalidRequest }
+        defer { _ = Darwin.close(descriptor) }
+        var opened = stat()
+        guard fstat(descriptor, &opened) == 0,
+              opened.st_dev == before.st_dev,
+              opened.st_ino == before.st_ino,
+              opened.st_size == before.st_size else {
+            throw PommeMDMEnrollmentError.invalidRequest
+        }
+        var data = Data(count: Int(opened.st_size))
+        let read = data.withUnsafeMutableBytes { rawBuffer -> Int in
+            guard let base = rawBuffer.baseAddress else { return 0 }
+            var offset = 0
+            while offset < rawBuffer.count {
+                let count = Darwin.read(
+                    descriptor,
+                    base.advanced(by: offset),
+                    rawBuffer.count - offset
+                )
+                if count < 0, errno == EINTR { continue }
+                guard count > 0 else { return offset }
+                offset += count
+            }
+            return offset
+        }
+        var after = stat()
+        guard read == data.count,
+              lstat(source.path, &after) == 0,
+              after.st_dev == opened.st_dev,
+              after.st_ino == opened.st_ino,
+              after.st_size == opened.st_size else {
+            throw PommeMDMEnrollmentError.invalidRequest
+        }
+        return try .init(source: source, sha256: PommeMDMTemporaryHelperRequest.digest(of: data))
+    }
+
+    private static func makeLiveMDMTemporaryHelper(
+        reference: VMReference,
+        expectedExecutableDigest: String,
+        staging: MDMStagingBootstrap,
+        workspace: PommeMDMTemporaryHelperWorkspace,
+        onLaunch: @escaping @Sendable () throws -> Void
+    ) -> any PommeMDMTemporaryHelperTransport {
+        PommeMDMTemporaryHelperHost(dependencies: .init(
+            canonicalArtifact: {
+                try currentCanonicalPommeArtifact()
+            },
+            prepare: { _ in
+                let value = try await staging.prepare()
+                try PommeMDMEnrollmentAgentResponse.requireStagingReady(value)
+            },
+            transferFile: { source, destination in
+                try await transferMDMHelperFile(
+                    reference: reference,
+                    source: source,
+                    destination: destination
+                )
+            },
+            transferData: { data, destination in
+                try await transferMDMHelperData(
+                    reference: reference,
+                    data: data,
+                    destination: destination
+                )
+            },
+            resignAndVerify: { workspace in
+                PommeCore.log("MDM helper phase: guest signing.")
+                let digest = try await resignAndVerifyMDMHelper(reference: reference, workspace: workspace)
+                PommeCore.log("MDM helper phase: guest signature verified.")
+                return digest
+            },
+            launch: { workspace, request, requestSHA256, timeout in
+                PommeCore.log("MDM helper phase: launch.")
+                try onLaunch()
+                let process: MDMGuestProcessResult
+                do {
+                    process = try await runMDMGuestProcess(
+                        reference: reference,
+                        path: "/usr/bin/env",
+                        arguments: [
+                            "-i",
+                            workspace.helperPath,
+                            PommeMDMPrivateHelper.flag,
+                            request.requestID,
+                            requestSHA256,
+                        ],
+                        timeout: timeout
+                    )
+                } catch {
+                    // The request may have reached the helper even when the
+                    // foreground transport failed to return a terminal
+                    // response. Treat every post-launch transport failure as
+                    // an unknown enrollment outcome.
+                    if (error as? PommeMDMEnrollmentError)
+                        == .helperProcessTerminationUnproven {
+                        throw error
+                    }
+                    throw PommeMDMEnrollmentError.enrollmentOutcomeUnknown
+                }
+                guard process.stderr.isEmpty,
+                      process.stdout.count <= mdmTemporaryHelperOutputLimit,
+                      process.exited,
+                      !process.timedOut,
+                      !process.cancelled,
+                      process.outputComplete,
+                      !process.stdoutTruncated,
+                      !process.stderrTruncated,
+                      process.signal == nil else {
+                    // Once the signed helper has been launched, a timeout,
+                    // signal, or incomplete response cannot prove whether
+                    // finalInstallProfile committed. Keep that outcome
+                    // distinct so callers verify state before retrying.
+                    throw PommeMDMEnrollmentError.enrollmentOutcomeUnknown
+                }
+                let lines = process.stdout.split(
+                    separator: 0x0a,
+                    omittingEmptySubsequences: true
+                )
+                guard lines.count == 1,
+                      let value = try? JSONDecoder().decode(
+                          JSONValue.self,
+                          from: Data(lines[0])
+                      ) else {
+                    throw PommeMDMEnrollmentError.enrollmentOutcomeUnknown
+                }
+                if process.exitCode != 0 {
+                    guard case .object(let object) = value,
+                          object["completed"] == .bool(false) else {
+                        throw PommeMDMEnrollmentError.enrollmentOutcomeUnknown
+                    }
+                }
+                if let code = value.objectValue?["errorCode"]?.stringValue,
+                   PommeMDMPrivateHelper.FailureCode(rawValue: code) != nil {
+                    PommeCore.log("MDM helper closed failure: \(code).")
+                }
+                return value
+            },
+            cleanup: { workspace in
+                var failed = false
+                do {
+                    _ = try await runMDMGuestProcess(
+                        reference: reference,
+                        path: "/bin/chmod",
+                        arguments: ["600", workspace.helperPath],
+                        timeout: 15
+                    )
+                } catch {
+                    failed = true
+                }
+
+                // Each artifact is a known UUID-derived direct child. The
+                // authenticated staging operation proves owner, group, mode,
+                // regular-file identity, unlink, fsync, and post-removal
+                // absence; no recursive or generic delete is reachable here.
+                for path in [workspace.helperPath, workspace.entitlementsPath, workspace.requestPath] {
+                    do {
+                        let value = try await staging.cleanup(path)
+                        try PommeMDMEnrollmentAgentResponse.requireCleanup(value)
+                    } catch {
+                        failed = true
+                    }
+                }
+                if failed { throw PommeMDMEnrollmentError.cleanupFailed }
+            },
+            now: Date.init
+        ), workspace: workspace)
+    }
+
+    private static func resignAndVerifyMDMHelper(
+        reference: VMReference,
+        workspace: PommeMDMTemporaryHelperWorkspace
+    ) async throws -> String {
+        let sign = try await runMDMGuestProcess(
+            reference: reference,
+            path: "/usr/bin/codesign",
+            arguments: [
+                "--force", "--sign", "-",
+                "--identifier", mdmTemporaryHelperIdentifier,
+                "--options", "runtime",
+                "--entitlements", workspace.entitlementsPath,
+                workspace.helperPath,
+            ],
+            timeout: 30
+        )
+        PommeCore.log("MDM helper sign receipt [accepted=\(sign.exitedSuccessfully)].")
+        guard sign.exitedSuccessfully else {
+            throw PommeMDMEnrollmentError.enrollmentFailed
+        }
+
+        let verify = try await runMDMGuestProcess(
+            reference: reference,
+            path: "/usr/bin/codesign",
+            arguments: ["--verify", "--strict", "--all-architectures", workspace.helperPath],
+            timeout: 30
+        )
+        PommeCore.log("MDM helper signature receipt [accepted=\(verify.exitedSuccessfully)].")
+        guard verify.exitedSuccessfully else {
+            throw PommeMDMEnrollmentError.enrollmentFailed
+        }
+
+        let entitlements = try await runMDMGuestProcess(
+            reference: reference,
+            path: "/usr/bin/codesign",
+            arguments: ["--display", "--entitlements", "/dev/stdout", "--xml", workspace.helperPath],
+            timeout: 30
+        )
+        PommeCore.log("MDM helper entitlements receipt [accepted=\(entitlements.exitedSuccessfully), stderrMatched=\(exactMDMHelperEntitlementStderr(entitlements.stderr, helperPath: workspace.helperPath)), entitlementsMatched=\(exactMDMHelperEntitlements(entitlements.stdout))].")
+        guard entitlements.exitedSuccessfully,
+              exactMDMHelperEntitlementStderr(
+                  entitlements.stderr,
+                  helperPath: workspace.helperPath
+              ),
+              exactMDMHelperEntitlements(entitlements.stdout) else {
+            throw PommeMDMEnrollmentError.enrollmentFailed
+        }
+
+        let details = try await runMDMGuestProcess(
+            reference: reference,
+            path: "/usr/bin/codesign",
+            arguments: ["--display", "--verbose=4", workspace.helperPath],
+            timeout: 30
+        )
+        PommeCore.log("MDM helper signing details receipt [accepted=\(details.exitedSuccessfully), matched=\(validMDMHelperSigningDetails(details.stdout, stderr: details.stderr))].")
+        guard details.exitedSuccessfully,
+              validMDMHelperSigningDetails(details.stdout, stderr: details.stderr) else {
+            throw PommeMDMEnrollmentError.enrollmentFailed
+        }
+
+        let chmod = try await runMDMGuestProcess(
+            reference: reference,
+            path: "/bin/chmod",
+            arguments: ["700", workspace.helperPath],
+            timeout: 15
+        )
+        guard chmod.exitedSuccessfully else {
+            throw PommeMDMEnrollmentError.enrollmentFailed
+        }
+
+        let digest = try await runMDMGuestProcess(
+            reference: reference,
+            path: "/sbin/sha256",
+            arguments: ["-q", workspace.helperPath],
+            timeout: 30
+        )
+        guard digest.exitedSuccessfully,
+              digest.stderr.isEmpty,
+              let value = String(data: digest.stdout, encoding: .utf8)?.trimmingCharacters(
+                  in: .whitespacesAndNewlines
+              ),
+              PommeMDMTemporaryHelperRequest.isDigest(value) else {
+            throw PommeMDMEnrollmentError.enrollmentFailed
+        }
+        return value
+    }
+
+    private static func exactMDMHelperEntitlements(_ data: Data) -> Bool {
+        guard let plist = try? PropertyListSerialization.propertyList(
+            from: data,
+            options: [],
+            format: nil
+        ),
+        let values = plist as? [String: Any],
+        Set(values.keys) == PommeMDMTemporaryHelperHost.requiredPrivateEntitlements,
+        values.values.allSatisfy({ ($0 as? Bool) == true }) else {
+            return false
+        }
+        return true
+    }
+
+    static func validMDMHelperSigningDetails(_ stdout: Data, stderr: Data) -> Bool {
+        let text = String(
+            data: stdout + stderr,
+            encoding: .utf8
+        ) ?? ""
+        guard text.contains("Identifier=\(mdmTemporaryHelperIdentifier)"),
+              text.range(of: #"(?m)^CodeDirectory\b[^\r\n]*\bflags=0x[0-9a-fA-F]+\([^\r\n)]*\bruntime\b[^\r\n)]*\)(?:[ \t]|$)"#, options: .regularExpression) != nil,
+              text.contains("Signature=adhoc") || text.contains("Authority=adhoc"),
+              text.split(whereSeparator: \.isNewline).contains(where: {
+                  $0 == "TeamIdentifier=not set"
+              }) else {
+            return false
+        }
+        return true
+    }
+
+    private static func exactMDMHelperEntitlementStderr(
+        _ data: Data,
+        helperPath: String
+    ) -> Bool {
+        String(data: data, encoding: .utf8) == "Executable=\(helperPath)\n"
+    }
+
+    private static func runMDMGuestProcess(
+        reference: VMReference,
+        path: String,
+        arguments: [String],
+        timeout: TimeInterval
+    ) async throws -> MDMGuestProcessResult {
+        guard path.hasPrefix("/"), !path.contains("\0"),
+              arguments.allSatisfy({ !$0.contains("\0") }),
+              timeout.isFinite, timeout >= 1, timeout <= 300 else {
+            throw PommeMDMEnrollmentError.invalidRequest
+        }
+        let response: [String: Any]
+        do {
+            response = try PommeCore.sendForegroundControlObject(
+                [
+                    "command": "agent.perform",
+                    "operation": "process.start",
+                    "payload": [
+                        "path": path,
+                        "arguments": arguments,
+                        "timeout": timeout,
+                        "detached": false,
+                    ],
+                ],
+                bundle: reference.bundle
+            )
+        } catch {
+            // A foreground request may have started the process before the
+            // control response was lost. Do not let helper cleanup unlink a
+            // path while that process might still hold it open.
+            throw PommeMDMEnrollmentError.helperProcessTerminationUnproven
+        }
+        guard let terminal = response["result"] as? [String: Any],
+              let rawJobID = terminal["jobID"] as? String,
+              let jobID = UUID(uuidString: rawJobID),
+              let exited = terminal["exited"] as? Bool else {
+            throw PommeMDMEnrollmentError.helperProcessTerminationUnproven
+        }
+
+        let timedOut = terminal["timedOut"] as? Bool == true
+        let cancelled = terminal["cancelled"] as? Bool == true
+        if timedOut || cancelled || !exited {
+            try await terminateMDMGuestJob(
+                reference: reference,
+                jobID: jobID,
+                timeout: min(15, max(1, timeout))
+            )
+        }
+
+        let output = try decodeMDMGuestOutput(response)
+        let exitCode = integerMDMField(terminal["exitCode"])
+        let signal = integerMDMField(terminal["signal"])
+        let outputComplete = terminal["outputComplete"] as? Bool == true
+        let stdoutTruncated = terminal["stdoutTruncated"] as? Bool == true
+        let stderrTruncated = terminal["stderrTruncated"] as? Bool == true
+        return .init(
+            jobID: jobID,
+            exited: exited,
+            exitCode: exitCode,
+            signal: signal,
+            timedOut: timedOut,
+            cancelled: cancelled,
+            outputComplete: outputComplete,
+            stdoutTruncated: stdoutTruncated,
+            stderrTruncated: stderrTruncated,
+            stdout: output.stdout,
+            stderr: output.stderr
+        )
+    }
+
+    private static func decodeMDMGuestOutput(
+        _ response: [String: Any]
+    ) throws -> (stdout: Data, stderr: Data) {
+        guard let rawFrames = response["streamFrames"] as? [[String: Any]] else {
+            throw PommeMDMEnrollmentError.enrollmentFailed
+        }
+        var stdout = Data()
+        var stderr = Data()
+        for frame in rawFrames {
+            guard let stream = frame["stream"] as? String else {
+                throw PommeMDMEnrollmentError.enrollmentFailed
+            }
+            guard stream == "stdout" || stream == "stderr",
+                  let encoded = frame["dataBase64"] as? String,
+                  let data = Data(base64Encoded: encoded) else {
+                throw PommeMDMEnrollmentError.enrollmentFailed
+            }
+            if stream == "stdout" {
+                guard stdout.count <= mdmTemporaryHelperOutputLimit - data.count else {
+                    throw PommeMDMEnrollmentError.enrollmentFailed
+                }
+                stdout.append(data)
+            } else {
+                guard stderr.count <= mdmTemporaryHelperOutputLimit - data.count else {
+                    throw PommeMDMEnrollmentError.enrollmentFailed
+                }
+                stderr.append(data)
+            }
+        }
+        return (stdout, stderr)
+    }
+
+    private static func integerMDMField(_ value: Any?) -> Int32? {
+        guard let value, let decoded = try? JSONValue(any: value),
+              case .integer(let integer) = decoded else { return nil }
+        return Int32(exactly: integer)
+    }
+
+    private static func terminateMDMGuestJob(
+        reference: VMReference,
+        jobID: UUID,
+        timeout: TimeInterval
+    ) async throws {
+        let id = jobID.uuidString.lowercased()
+        _ = try? performAuthenticatedAgentOperation(
+            reference: reference,
+            operation: "process.signal",
+            payload: .object([
+                "jobID": .string(id),
+                "signal": .integer(Int64(SIGTERM)),
+            ])
+        )
+        if try await pollMDMGuestJob(reference: reference, jobID: jobID, timeout: timeout) {
+            return
+        }
+        _ = try? performAuthenticatedAgentOperation(
+            reference: reference,
+            operation: "process.signal",
+            payload: .object([
+                "jobID": .string(id),
+                "signal": .integer(Int64(SIGKILL)),
+            ])
+        )
+        guard try await pollMDMGuestJob(reference: reference, jobID: jobID, timeout: timeout) else {
+            throw PommeMDMEnrollmentError.helperProcessTerminationUnproven
+        }
+    }
+
+    private static func pollMDMGuestJob(
+        reference: VMReference,
+        jobID: UUID,
+        timeout: TimeInterval
+    ) async throws -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        let id = jobID.uuidString.lowercased()
+        while Date() < deadline {
+            do {
+                let value = try performAuthenticatedAgentOperation(
+                    reference: reference,
+                    operation: "process.status",
+                    payload: .object(["jobID": .string(id)])
+                )
+                guard let object = value.objectValue,
+                      Set(object.keys).isSuperset(of: ["jobID", "pid", "exited"]),
+                      object["jobID"]?.stringValue == id,
+                      object["exited"] != nil else {
+                    throw PommeMDMEnrollmentError.enrollmentFailed
+                }
+                if object["exited"] == .bool(true) { return true }
+            } catch {
+                // Keep polling only for a bounded process lifetime. A lost
+                // status receipt remains a cleanup failure after the bound.
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return false
+    }
+
     private static func makeLiveMDMStatePort(
         reference: VMReference
     ) -> PommeMDMEnrollmentStateDependencies {
         let proof = PommeMDMRestorationProof()
         return .init(
             capture: {
-                let runState = try PommeCore.stableVMRunState(reference: reference)
-                guard runState == .running(.normal) else {
-                    throw PommeMDMEnrollmentError.baselineCaptureFailed
-                }
                 do {
-                    let sip = try await recoverySecurityStatusOutput(
-                        reference: reference,
-                        operation: .sip(.status),
-                        finalState: .normal
-                    )
-                    let amfi = try await recoverySecurityStatusOutput(
-                        reference: reference,
-                        operation: .amfi(.status),
-                        finalState: .normal
-                    )
-                    return .init(sip: sip, amfi: amfi, runState: runState)
+                    let runState = try PommeCore.stableVMRunState(reference: reference)
+                    return try await normalMDMSecurityBaseline(reference: reference, runState: runState)
                 } catch {
-                    // Baseline capture has not returned yet, so the outer MDM
-                    // transaction cannot restore it. Rescue the independently
-                    // captured lifecycle state here and prove it before
-                    // surfacing a redacted baseline failure.
-                    do {
-                        if try !PommeCore.provesStableVMRunState(
-                            runState,
-                            reference: reference
-                        ) {
-                            try await PommeCore.restoreStableVMRunState(
-                                runState,
-                                reference: reference
-                            )
-                        }
-                        guard try PommeCore.provesStableVMRunState(
-                            runState,
-                            reference: reference
-                        ) else { throw PommeMDMEnrollmentError.restorationFailed }
-                    } catch {
-                        throw PommeMDMEnrollmentError.restorationFailed
-                    }
                     throw PommeMDMEnrollmentError.baselineCaptureFailed
                 }
             },
             restore: { baseline in
-                try await PommeCore.restoreStableVMRunState(
-                    baseline.runState,
-                    reference: reference
-                )
-                let finalState = mdmFinalState(for: baseline.runState)
-                let sip = try await recoverySecurityStatusOutput(
-                    reference: reference,
-                    operation: .sip(.status),
-                    finalState: finalState
-                )
-                let amfi = try await recoverySecurityStatusOutput(
-                    reference: reference,
-                    operation: .amfi(.status),
-                    finalState: finalState
-                )
-                guard sip == baseline.sip, amfi == baseline.amfi else {
-                    throw PommeMDMEnrollmentError.restorationFailed
+                // Enrollment has no security mutation path. Recheck the same
+                // authenticated normal-guest evidence rather than rebooting
+                // through Recovery to read the same unchanged configuration.
+                if try !PommeCore.provesStableVMRunState(baseline.runState, reference: reference) {
+                    try await PommeCore.restoreStableVMRunState(baseline.runState, reference: reference)
                 }
+                let observed = try await normalMDMSecurityBaseline(
+                    reference: reference,
+                    runState: baseline.runState
+                )
+                guard observed == baseline else { throw PommeMDMEnrollmentError.restorationFailed }
                 await proof.recordSecurityMatch()
             },
             verify: { baseline in
                 guard await proof.isSecurityMatched() else { return false }
-                return try PommeCore.provesStableVMRunState(
-                    baseline.runState,
-                    reference: reference
-                )
+                return try PommeCore.provesStableVMRunState(baseline.runState, reference: reference)
             }
         )
     }
 
-    private static func mdmFinalState(for state: VMRunStateSnapshot) -> VMFinalState {
-        switch state {
-        case .stopped: .stopped
-        case .running(.normal): .normal
-        case .running(.recovery): .recovery
-        case .paused: .paused
-        }
-    }
-
-    private static func recoverySecurityStatusOutput(
+    /// Configuration evidence only: the normal agent proves SIP plus configured
+    /// and active AMFI boot arguments. This does not claim to inspect LocalPolicy
+    /// or establish live kernel enforcement. SIP/AMFI commands own those changes.
+    private static func normalMDMSecurityBaseline(
         reference: VMReference,
-        operation: PommeRecoveryOperation,
-        finalState: VMFinalState
-    ) async throws -> Data {
-        let integration = try await currentRecoveryIntegrationFactory().make(
-            reference: reference,
-            operation: operation
+        runState: VMRunStateSnapshot
+    ) async throws -> PommeMDMEnrollmentStateBaseline {
+        guard runState == .running(.normal),
+              try PommeCore.provesStableVMRunState(runState, reference: reference) else {
+            throw PommeMDMEnrollmentError.baselineCaptureFailed
+        }
+        let expectedDigest = try PommeCore.expectedProvisionedAgentDigest(reference: reference)
+        _ = try MDMEnrollmentAgentGate.verify(
+            try await authenticatedMDMAgentDescription(reference: reference, timeout: 15),
+            expectedExecutableDigest: expectedDigest
         )
-        let execution: PommeRecoveryExecutionResult
-        switch operation {
-        case .sip(.status):
-            execution = try await integration.sip(
-                action: .status,
-                payload: Data(),
-                finalState: finalState
+        func observe(_ path: String, _ arguments: [String]) async throws -> Data {
+            let result = try await runMDMGuestProcess(
+                reference: reference,
+                path: "/usr/bin/env",
+                arguments: ["-i", path] + arguments,
+                timeout: 15
             )
-        case .amfi(.status):
-            execution = try await integration.amfi(
-                action: .status,
-                payload: Data(),
-                finalState: finalState
-            )
-        default:
-            throw PommeMDMEnrollmentError.baselineCaptureFailed
-        }
-        guard execution.evidence.authenticated,
-              execution.evidence.requestBound,
-              execution.evidence.credentialConsumed,
-              execution.evidence.lifecycle == .finalized,
-              execution.cleanup.isComplete,
-              execution.finalState == finalState else {
-            throw PommeMDMEnrollmentError.baselineCaptureFailed
-        }
-        let value = try JSONDecoder().decode(JSONValue.self, from: execution.output)
-        guard let object = value.objectValue,
-              object["verified"] == .bool(true) else {
-            throw PommeMDMEnrollmentError.baselineCaptureFailed
-        }
-        switch operation {
-        case .sip(.status):
-            guard Set(object.keys) == ["operation", "sipEnabled", "sipDisabled", "verified"],
-                  object["operation"] == .string("sip.status") else {
+            guard result.exitedSuccessfully, result.exited,
+                  result.outputComplete, !result.stdoutTruncated, !result.stderrTruncated,
+                  result.stderr.isEmpty, result.stdout.count <= 16 * 1024 else {
                 throw PommeMDMEnrollmentError.baselineCaptureFailed
             }
-        case .amfi(.status):
-            guard Set(object.keys) == [
-                "operation", "amfiBootArgActive", "amfiDisabled",
-                "bootPolicyAllowsCustomBootArgs", "securityMode", "verified"
-            ], object["operation"] == .string("amfi.status") else {
-                throw PommeMDMEnrollmentError.baselineCaptureFailed
-            }
-        default:
+            return result.stdout
+        }
+        let sip = try await observe("/usr/bin/csrutil", ["status"])
+        let nvram = try await observe("/usr/sbin/nvram", ["-x", "boot-args"])
+        let active = try await observe("/usr/sbin/sysctl", ["-n", "kern.bootargs"])
+        _ = try MDMEnrollmentAgentGate.verify(
+            try await authenticatedMDMAgentDescription(reference: reference, timeout: 15),
+            expectedExecutableDigest: expectedDigest
+        )
+        guard try PommeCore.provesStableVMRunState(runState, reference: reference) else {
             throw PommeMDMEnrollmentError.baselineCaptureFailed
         }
-        return try PommeProvisioningCoding.encode(value)
-    }
-
-    static func mdmApprove(
-        name: String,
-        profileIdentifier: String,
-        timeout: TimeInterval
-    ) async throws -> PommeOperationResult {
-        guard timeout.isFinite, timeout >= 1, timeout <= 300, !profileIdentifier.isEmpty else {
-            throw RunnerError.invalidControlCommand("mdm.approve request")
-        }
-        return try await VMBundleMutationLease.withLease(name: name) { _ in
-            let reference = try namedReference(name)
-            let description = try await authenticatedMDMAgentDescription(
-                reference: reference,
-                timeout: timeout
-            )
-            let expectedDigest = try PommeCore.expectedProvisionedAgentDigest(
-                reference: reference
-            )
-            let agent = try MDMEnrollmentAgentGate.verify(
-                description,
-                expectedExecutableDigest: expectedDigest
-            )
-            let operation = PommeMDMEnrollmentAgentOperation.approve(
-                profileIdentifier: profileIdentifier,
-                timeout: timeout
-            )
-            let response = try performAuthenticatedAgentOperation(
-                reference: reference,
-                operation: operation.wireName,
-                payload: try operation.payload()
-            )
-            try PommeMDMEnrollmentAgentResponse.approval(response)
-            return mdmResult(
-                title: "MDM user-intent approval",
-                operation: "mdm-user-approval",
-                reference: reference,
-                ok: true,
-                agent: agent,
-                steps: [["name": "verifyPommeAgent", "ok": true], ["name": "approve", "ok": true]],
-                result: response.publicValue
-            )
-        }
+        return try PommeMDMNormalSecurityEvidence.baseline(
+            csrutil: sip, nvram: nvram, activeBootArguments: active, runState: runState
+        )
     }
 
     private static func mdmResult(
