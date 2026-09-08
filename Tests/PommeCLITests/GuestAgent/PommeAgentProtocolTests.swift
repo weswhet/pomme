@@ -149,6 +149,33 @@ struct PommeAgentProtocolTests {
         #expect(response.result == nil)
     }
 
+    @Test("Remote Login failures expose only closed, actionable codes and messages")
+    func remoteLoginFailureIsClosedAndActionable() async throws {
+        let connection = try PommeAgentConnection(token: String(repeating: "a", count: 64), lifetime: .persistent)
+        let auth = PommeAgentProtocol.Envelope.request(
+            operation: "authenticate",
+            payload: .object(["challenge": .string(String(repeating: "b", count: 64))])
+        )
+        _ = await connection.receive(try PommeAgentProtocol.encode(auth).dropLast()) { _ in .object([:]) }
+
+        let expected: [(PommeAgentOperationError, String, String)] = [
+            (.remoteLoginFullDiskAccessRequired,
+             "remote-login-full-disk-access-required",
+             "Full Disk Access is required to change Remote Login."),
+            (.remoteLoginVerificationFailed,
+             "remote-login-verification-failed",
+             "Remote Login could not be verified after the requested change.")
+        ]
+        for (error, code, message) in expected {
+            let request = PommeAgentProtocol.Envelope.request(operation: "remoteLogin.set")
+            let line = await connection.receive(try PommeAgentProtocol.encode(request).dropLast()) { _ in throw error }
+            let response = try PommeAgentProtocol.decode(Data(line.dropLast()))
+            #expect(response.error?.code == code)
+            #expect(response.error?.message == message)
+            #expect(response.error?.message.contains("Full Disk Access") == (code == "remote-login-full-disk-access-required"))
+        }
+    }
+
     @Test("Recovery security errors use a closed code and fixed protocol message")
     func recoverySecurityFailureIsClosed() async throws {
         let connection = try PommeAgentConnection(

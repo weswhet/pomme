@@ -94,14 +94,14 @@ actor PommeAgent {
     private var update: PommeAgentUpdateJournal?
     private let journalPath: String
     private let executablePath: String
-    private let remoteLoginTransaction: @Sendable (Bool) throws -> Void
+    private let remoteLoginTransaction: @Sendable (Bool) throws -> Bool
     private let writeChunk: @Sendable (Int32, Data, Int) -> Int
     private let recoveryInstaller: PommeAgentRecoveryInstaller?
     private let recoverySecurity: PommeGuestRecoverySecurityOperations
 
     init(role: PommeAgentRole, executableSHA256: String, journalPath: String = PommeAgentInstall.journal,
          executablePath: String = PommeAgentInstall.executable,
-         remoteLoginTransaction: @escaping @Sendable (Bool) throws -> Void = PommeRemoteLogin.apply,
+         remoteLoginTransaction: @escaping @Sendable (Bool) throws -> Bool = PommeRemoteLogin.apply,
          writeChunk: @escaping @Sendable (Int32, Data, Int) -> Int = PommeAgent.writeChunk,
          recoveryInstaller: PommeAgentRecoveryInstaller? = nil,
          recoverySecurity: PommeGuestRecoverySecurityOperations = .init(),
@@ -510,8 +510,9 @@ actor PommeAgent {
     }
     private func remoteLogin(_ payload: JSONValue) throws -> JSONValue {
         let values = try object(payload); guard let enabled = bool(values["enabled"]) else { throw PommeAgentOperationError.invalid }
-        try remoteLoginTransaction(enabled)
-        return .object(["enabled": .bool(enabled)])
+        let observed = try remoteLoginTransaction(enabled)
+        guard observed == enabled else { throw PommeAgentOperationError.remoteLoginVerificationFailed }
+        return .object(["enabled": .bool(observed)])
     }
     private func mdmEnrollment(_ payload: JSONValue) throws -> JSONValue {
         let values = try object(payload)
@@ -836,18 +837,157 @@ actor PommeAgent {
     }
 }
 
-enum PommeAgentOperationError: Error { case unsupported, activationPending, invalid, notFound, io }
+enum PommeAgentOperationError: Error, Equatable {
+    case unsupported, activationPending, invalid, notFound, io
+    case remoteLoginFullDiskAccessRequired, remoteLoginVerificationFailed
+}
 
-/// launchd changes a single service-enable record atomically.  We only report
-/// success after launchctl exits successfully; callers can inject this seam in
-/// offline tests without altering host access state.
+/// Remote Login's public status is `systemsetup -getremotelogin`; mutations
+/// use that same setting and verify its observed value before reporting success.
 enum PommeRemoteLogin {
-    static func apply(enabled: Bool) throws {
+    struct CommandOutput: Equatable, Sendable {
+        let stdout: String
+        let stderr: String
+    }
+
+    static let commandTimeout: TimeInterval = 15
+    static let maximumOutputBytes = 64 * 1024
+
+    static func apply(enabled: Bool) throws -> Bool {
+        try apply(enabled: enabled, run: runSystemSetup)
+    }
+
+    static func apply(
+        enabled: Bool,
+        run: ([String]) throws -> CommandOutput
+    ) throws -> Bool {
+        try rejectFullDiskAccessDenial(in: run(["-f", "-setremotelogin", enabled ? "on" : "off"]))
+        let observed = try state(from: run(["-getremotelogin"]))
+        guard observed == enabled else { throw PommeAgentOperationError.remoteLoginVerificationFailed }
+        return observed
+    }
+
+    static func state(from output: CommandOutput) throws -> Bool {
+        try rejectFullDiskAccessDenial(in: output)
+        guard output.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw PommeAgentOperationError.remoteLoginVerificationFailed
+        }
+        switch output.stdout.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "Remote Login: On": return true
+        case "Remote Login: Off": return false
+        default: throw PommeAgentOperationError.remoteLoginVerificationFailed
+        }
+    }
+
+    private static func rejectFullDiskAccessDenial(in output: CommandOutput) throws {
+        guard !output.stdout.localizedCaseInsensitiveContains("full disk access"),
+              !output.stderr.localizedCaseInsensitiveContains("full disk access")
+        else { throw PommeAgentOperationError.remoteLoginFullDiskAccessRequired }
+    }
+
+    private static func runSystemSetup(arguments: [String]) throws -> CommandOutput {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = [enabled ? "enable" : "disable", "system/com.openssh.sshd"]
-        try process.run(); process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw PommeAgentOperationError.io }
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/systemsetup")
+        process.arguments = arguments
+        process.environment = ["LC_ALL": "C", "LANG": "C"]
+        process.standardInput = FileHandle.nullDevice
+        let standardOutput = Pipe()
+        let standardError = Pipe()
+        process.standardOutput = standardOutput
+        process.standardError = standardError
+        do { try process.run() } catch { throw PommeAgentOperationError.io }
+
+        let stdoutDescriptor = standardOutput.fileHandleForReading.fileDescriptor
+        let stderrDescriptor = standardError.fileHandleForReading.fileDescriptor
+        guard makeNonBlocking(stdoutDescriptor), makeNonBlocking(stderrDescriptor) else {
+            guard terminateAndReap(process) else { throw PommeAgentOperationError.io }
+            throw PommeAgentOperationError.io
+        }
+
+        var stdout = Data()
+        var stderr = Data()
+        var stdoutEOF = false
+        var stderrEOF = false
+        let deadline = ProcessInfo.processInfo.systemUptime + commandTimeout
+        while process.isRunning || !stdoutEOF || !stderrEOF {
+            let stdoutOverflow = drain(
+                stdoutDescriptor, into: &stdout, eof: &stdoutEOF, maximumBytes: maximumOutputBytes
+            )
+            let stderrOverflow = drain(
+                stderrDescriptor, into: &stderr, eof: &stderrEOF, maximumBytes: maximumOutputBytes
+            )
+            if stdoutOverflow || stderrOverflow || ProcessInfo.processInfo.systemUptime >= deadline {
+                guard terminateAndReap(process) else { throw PommeAgentOperationError.io }
+                throw PommeAgentOperationError.io
+            }
+            if !process.isRunning && stdoutEOF && stderrEOF { break }
+            usleep(10_000)
+        }
+        process.waitUntilExit()
+        guard let stdoutText = String(data: stdout, encoding: .utf8),
+              let stderrText = String(data: stderr, encoding: .utf8)
+        else { throw PommeAgentOperationError.io }
+        let captured = CommandOutput(stdout: stdoutText, stderr: stderrText)
+        try rejectFullDiskAccessDenial(in: captured)
+        guard process.terminationReason == .exit, process.terminationStatus == 0 else {
+            throw PommeAgentOperationError.io
+        }
+        return captured
+    }
+
+    private static func makeNonBlocking(_ descriptor: Int32) -> Bool {
+        let flags = fcntl(descriptor, F_GETFL)
+        return flags >= 0 && fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0
+    }
+
+    private static func drain(
+        _ descriptor: Int32,
+        into data: inout Data,
+        eof: inout Bool,
+        maximumBytes: Int
+    ) -> Bool {
+        guard !eof else { return false }
+        var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+        while true {
+            let count = Darwin.read(descriptor, &buffer, buffer.count)
+            if count > 0 {
+                let available = maximumBytes - data.count
+                guard available >= count else { return true }
+                data.append(contentsOf: buffer.prefix(count))
+            } else if count == 0 {
+                eof = true
+                return false
+            } else if errno == EINTR {
+                continue
+            } else if errno == EAGAIN || errno == EWOULDBLOCK {
+                return false
+            } else {
+                return true
+            }
+        }
+    }
+
+    private static func terminateAndReap(_ process: Process) -> Bool {
+        guard process.isRunning else {
+            process.waitUntilExit()
+            return true
+        }
+        process.terminate()
+        let gracefulDeadline = ProcessInfo.processInfo.systemUptime + 0.25
+        while process.isRunning, ProcessInfo.processInfo.systemUptime < gracefulDeadline {
+            usleep(10_000)
+        }
+        if process.isRunning {
+            let pid = process.processIdentifier
+            guard pid > 0, Darwin.kill(pid, SIGKILL) == 0 else { return false }
+            let forcedDeadline = ProcessInfo.processInfo.systemUptime + 1
+            while process.isRunning, ProcessInfo.processInfo.systemUptime < forcedDeadline {
+                usleep(10_000)
+            }
+        }
+        guard !process.isRunning else { return false }
+        process.waitUntilExit()
+        return true
     }
 }
 
