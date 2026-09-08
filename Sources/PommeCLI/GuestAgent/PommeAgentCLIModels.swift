@@ -717,6 +717,40 @@ struct ScreenSharingRequest: Sendable {
     }
 }
 
+/// Screen Sharing is dispatched only after a fresh, authenticated persistent
+/// agent receipt declares the exact capability. A status projection cannot
+/// establish either the authenticated role or the guest implementation.
+enum ScreenSharingAgentCapabilityGate {
+    static let capability = "ui.screenSharing"
+
+    static func verifyAuthenticatedDescribe(_ value: JSONValue) throws {
+        guard let object = value.objectValue,
+              Set(object.keys) == Set(["role", "protocol", "version", "executableSHA256", "capabilities"]),
+              object["role"]?.stringValue == "persistent",
+              object["protocol"]?.stringValue == PommeAgentProtocol.name,
+              object["version"] == .integer(Int64(PommeAgentProtocol.version)),
+              let digest = object["executableSHA256"]?.stringValue,
+              digest.utf8.count == 64,
+              digest.utf8.allSatisfy({
+                  ($0 >= 0x30 && $0 <= 0x39)
+                      || ($0 >= 0x41 && $0 <= 0x46)
+                      || ($0 >= 0x61 && $0 <= 0x66)
+              }),
+              let values = object["capabilities"]?.arrayValue,
+              values.allSatisfy({ $0.stringValue != nil }),
+              values.compactMap(\.stringValue).contains(capability)
+        else { throw RunnerError.guestScreenSharingUnavailable }
+    }
+
+    static func perform<T>(
+        describe: () throws -> JSONValue,
+        dispatch: () throws -> T
+    ) throws -> T {
+        try verifyAuthenticatedDescribe(describe())
+        return try dispatch()
+    }
+}
+
 /// A process result. Stream frames are folded into this value by the operation
 /// layer; each individual frame remains at most one stream chunk.
 struct GuestCommandResult: Sendable {

@@ -102,6 +102,41 @@ struct PommeAgentCLIModelsTests {
         #expect(try ScreenSharingRequest.parse(from: screen.controlPayload).action == .status)
     }
 
+    @Test("Screen Sharing requires a fresh persistent agent capability receipt")
+    func screenSharingCapabilityGate() throws {
+        try ScreenSharingAgentCapabilityGate.verifyAuthenticatedDescribe(
+            screenSharingDescribe(capabilities: ["ui.screenSharing"])
+        )
+        #expect(throws: RunnerError.self) {
+            try ScreenSharingAgentCapabilityGate.verifyAuthenticatedDescribe(
+                screenSharingDescribe(capabilities: [])
+            )
+        }
+        #expect(throws: RunnerError.self) {
+            try ScreenSharingAgentCapabilityGate.verifyAuthenticatedDescribe(
+                screenSharingDescribe(role: "recovery", capabilities: ["ui.screenSharing"])
+            )
+        }
+        #expect(throws: RunnerError.self) {
+            try ScreenSharingAgentCapabilityGate.verifyAuthenticatedDescribe(.object([
+                "role": .string("persistent"),
+                "capabilities": .array([.string("ui.screenSharing")])
+            ]))
+        }
+        #expect(throws: RunnerError.self) {
+            try ScreenSharingAgentCapabilityGate.verifyAuthenticatedDescribe(
+                screenSharingDescribe(
+                    digest: String(repeating: "ａ", count: 64),
+                    capabilities: ["ui.screenSharing"]
+                )
+            )
+        }
+        #expect(
+            RunnerError.guestScreenSharingUnavailable.localizedDescription
+                == "Screen Sharing is unavailable through Pomme because this guest agent does not support it. Configure it in the guest’s Sharing settings instead."
+        )
+    }
+
     @Test("Process result accepts a bounded start result and rejects oversized output")
     func processResultParsing() throws {
         let id = "00000000-0000-0000-0000-000000000042"
@@ -136,4 +171,18 @@ struct PommeAgentCLIModelsTests {
             _ = try GuestCommandResult.parse(from: ["ok": true, "stdoutDataBase64": oversized])
         }
     }
+}
+
+private func screenSharingDescribe(
+    role: String = "persistent",
+    digest: String = String(repeating: "a", count: 64),
+    capabilities: [String]
+) -> JSONValue {
+    .object([
+        "role": .string(role),
+        "protocol": .string(PommeAgentProtocol.name),
+        "version": .integer(Int64(PommeAgentProtocol.version)),
+        "executableSHA256": .string(digest),
+        "capabilities": .array(capabilities.map(JSONValue.string))
+    ])
 }

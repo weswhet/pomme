@@ -38,6 +38,7 @@ enum RunnerError: LocalizedError {
     case guestAgentTimedOut(String)
     case guestAgentError(String)
     case guestAgentProtocol(String)
+    case guestScreenSharingUnavailable
     case invalidControlResponse(String)
     case incompatibleHelperProtocol(expected: Int, actual: Int?)
     case controlCapabilityUnavailable(String)
@@ -129,6 +130,8 @@ enum RunnerError: LocalizedError {
             "Agent error: \(message)"
         case .guestAgentProtocol(let message):
             "PommeAgentProtocol error: \(message)"
+        case .guestScreenSharingUnavailable:
+            "Screen Sharing is unavailable through Pomme because this guest agent does not support it. Configure it in the guest’s Sharing settings instead."
         case .invalidControlResponse(let response):
             "The VM helper returned an invalid response: \(response)"
         case .incompatibleHelperProtocol(let expected, let actual):

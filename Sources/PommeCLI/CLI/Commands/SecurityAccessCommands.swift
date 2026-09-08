@@ -227,7 +227,7 @@ struct RemoteLoginDisableCommand: ParsableCommand {
 struct ScreenSharingCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "screen-sharing",
-        abstract: "Manage Screen Sharing.",
+        abstract: "Manage Screen Sharing. Requires a guest agent with Screen Sharing support.",
         subcommands: [
             ScreenSharingStatusCommand.self,
             ScreenSharingEnableCommand.self,
