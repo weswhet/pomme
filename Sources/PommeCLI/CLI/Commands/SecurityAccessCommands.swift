@@ -137,6 +137,12 @@ struct MDMCommand: AsyncParsableCommand {
     @OptionGroup var timeout: TimeoutOptions
     @OptionGroup var output: GlobalOptions
 
+    func validate() throws {
+        guard timeout.timeout.isFinite, (1...300).contains(timeout.timeout) else {
+            throw ValidationError("--timeout must be between 1 and 300 seconds.")
+        }
+    }
+
     mutating func run() async throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
         let result = try await PommeEnvironment.live().security.mdmEnroll(
