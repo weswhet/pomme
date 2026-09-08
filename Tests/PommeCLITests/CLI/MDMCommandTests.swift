@@ -24,6 +24,21 @@ struct MDMCommandTests {
         #expect(command.guestPath?.hasSuffix("/test.mobileconfig") == true)
     }
 
+    @Test(arguments: [1.0, 1.5, 300.0])
+    func acceptsTimeoutWithinMDMRange(_ value: Double) throws {
+        let command = try MDMCommand.parse([
+            "dev", "--profile", "enrollment.mobileconfig", "--timeout", String(value)
+        ])
+        #expect(try command.timeout.value() == value)
+    }
+
+    @Test(arguments: ["-1", "0", "0.1", "300.1", "-inf", "nan", "inf"])
+    func rejectsTimeoutOutsideMDMRange(_ value: String) {
+        #expect(throws: (any Error).self) {
+            try MDMCommand.parse(["dev", "--profile", "enrollment.mobileconfig", "--timeout", value])
+        }
+    }
+
     @Test(arguments: [
         ["dev"],
         ["dev", "--profile", "p", "--enrollment-mode", "automatic"],
