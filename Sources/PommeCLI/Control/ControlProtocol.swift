@@ -437,7 +437,7 @@ struct PommeUIControlRequest: Sendable {
         case .settingsAI:
             // The existing planner depends on a guest/host accessibility
             // bridge that is intentionally outside this direct HID boundary.
-            throw RunnerError.invalidUICommand("guest-ui settings-ai is unavailable through the direct Virtualization UI bridge.")
+            throw RunnerError.invalidUICommand(PommeUICapabilities.settingsAIUnavailableReason)
         }
 
         return .init(
