@@ -332,7 +332,7 @@ enum PommeAgentDaemon {
                 }
                 let response = await connection.receive(line) { request in
                     do {
-                        let result = try await agent.perform(request)
+                        let result = try await agent.performAsynchronously(request)
                         if allowedOperation != nil { try oneShotCleanup() }
                         return result
                     } catch {
@@ -351,7 +351,11 @@ enum PommeAgentDaemon {
                    let responseEnvelope = try? decodeResponse(response),
                    responseEnvelope.ok == true,
                    let jobID = processJobID(request: request, response: responseEnvelope),
-                   let events = try? await agent.streamEvents(jobID: jobID, requestID: request.requestID) {
+                   let events = try? await processEvents(
+                    request: request,
+                    jobID: jobID,
+                    agent: agent
+                   ) {
                     for event in events {
                         let frame = PommeAgentJobStreamFrame(jobID: jobID, frame: event)
                         guard let encoded = try? PommeAgentProtocol.encode(frame.envelope()),
@@ -375,8 +379,21 @@ enum PommeAgentDaemon {
     }
 
     private static let processOperations: Set<String> = [
-        "process.start", "process.status", "process.signal"
+        "process.start", "process.status", "process.signal", "process.output", "process.wait"
     ]
+
+    private static func processEvents(
+        request: PommeAgentProtocol.Envelope,
+        jobID: UUID,
+        agent: PommeAgent
+    ) async throws -> [PommeAgentStreamFrame] {
+        switch request.operation {
+        case "process.output", "process.wait":
+            return try await agent.retainedLogEvents(jobID: jobID, requestID: request.requestID)
+        default:
+            return try await agent.streamEvents(jobID: jobID, requestID: request.requestID)
+        }
+    }
 
     private static func decodeResponse(_ data: Data) throws -> PommeAgentProtocol.Envelope {
         guard data.last == 0x0A else { throw PommeAgentProtocol.Error.invalidResponse }

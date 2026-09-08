@@ -112,6 +112,19 @@ enum CLIOutputWriter {
                 }
                 if result.ok, result.payload["operation"] as? String == "file.read" {
                     try writeBytes(fileOutput(result.payload), to: STDOUT_FILENO)
+                } else if ["process.output", "process.wait"].contains(result.payload["operation"] as? String ?? ""),
+                          result.payload["streamFrames"] is [[String: Any]] {
+                    for output in try backgroundJobOutput(result.payload) {
+                        try writeBytes(output.data, to: output.descriptor)
+                    }
+                    if let metadata = result.payload["result"] as? [String: Any] {
+                        for channel in ["stdout", "stderr"] where metadata[channel + "Truncated"] as? Bool == true {
+                            try writeBytes(Data("Earlier \(channel) output was discarded; showing the last 64 KiB.\n".utf8), to: STDERR_FILENO)
+                        }
+                    }
+                    if let error = result.payload["error"] as? String {
+                        try writeBytes(Data((error + "\n").utf8), to: STDERR_FILENO)
+                    }
                 } else if result.payload["foreground"] as? Bool == true {
                     for output in try foregroundOutput(result.payload) {
                         try writeBytes(output.data, to: output.descriptor)
@@ -158,6 +171,22 @@ enum CLIOutputWriter {
             else { throw RunnerError.invalidControlResponse("Invalid foreground output frame.") }
             return (kind == "stdout" ? STDOUT_FILENO : STDERR_FILENO, data)
         }
+    }
+
+    /// Retained job logs include an exit frame after the two byte streams.
+    /// Keep binary stdout/stderr exact rather than printing a synthetic OK.
+    static func backgroundJobOutput(_ payload: [String: Any]) throws -> [(descriptor: Int32, data: Data)] {
+        guard let frames = payload["streamFrames"] as? [[String: Any]] else {
+            throw RunnerError.invalidControlResponse("Missing background job output frames.")
+        }
+        let bytes = try frames.filter { frame in
+            guard let stream = frame["stream"] as? String,
+                  ["stdout", "stderr", "exit"].contains(stream) else {
+                throw RunnerError.invalidControlResponse("Invalid background job output frame.")
+            }
+            return stream != "exit"
+        }
+        return try foregroundOutput(["streamFrames": bytes])
     }
 
     private static func writeBytes(_ data: Data, to descriptor: Int32) throws {

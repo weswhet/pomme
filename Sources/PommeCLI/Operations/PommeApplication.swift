@@ -612,6 +612,11 @@ enum PommeApplication {
         request: GuestCLIRequest,
         title: String
     ) throws -> PommeOperationResult {
+        if case .jobWait = request {
+            // The wait acquires the bundle lease for each short exchange.
+            // Holding it across the entire wait would prevent jobs kill.
+            return try guestRequestUnchecked(name: name, request: request, title: title)
+        }
         return try VMBundleMutationLease.withLease(name: name) { _ in
             try guestRequestUnchecked(name: name, request: request, title: title)
         }
@@ -631,9 +636,40 @@ enum PommeApplication {
         case .cat(let cat):
             let payload = try transfer.cat(cat)
             return result(title: title, reference: reference, payload: payload, text: "")
+        case .jobWait(let jobID, let timeout):
+            let waiter = PommeGuestJobWait(perform: { poll, remaining in
+                let deadline = ProcessInfo.processInfo.systemUptime + remaining
+                return try VMBundleMutationLease.withLease(name: name) { _ in
+                    try PommeCore.sendControlObject(poll.controlPayload, bundle: reference.bundle,
+                                                   timeout: deadline - ProcessInfo.processInfo.systemUptime)
+                }
+            })
+            let payload = try waiter.wait(jobID: jobID, timeout: timeout)
+            return result(title: title, reference: reference, payload: payload,
+                          text: agentResponseText(payload))
         default: break
         }
-        let payload = try PommeCore.sendControlObject(request.controlPayload, bundle: reference.bundle)
+        var payload = try PommeCore.sendControlObject(request.controlPayload, bundle: reference.bundle)
+        if case .jobOutput = request {
+            payload["operation"] = "process.output"
+            return result(title: title, reference: reference, payload: payload,
+                          text: agentResponseText(payload))
+        }
+        if case .jobList = request, payload["ok"] as? Bool == true {
+            guard let response = payload["result"] as? [String: Any],
+                  let jobs = response["jobs"] as? [[String: Any]] else {
+                throw RunnerError.invalidControlResponse("Invalid background job list.")
+            }
+            var lines = jobs.map { job -> String in
+                var summary = job
+                summary["state"] = job["exited"] as? Bool == true ? "exited" : "running"
+                return jobSummary(summary)
+            }
+            if lines.isEmpty { lines = ["No background jobs."] }
+            if response["truncated"] as? Bool == true { lines.append("The job list is truncated.") }
+            return result(title: title, reference: reference, payload: payload,
+                          text: lines.joined(separator: "\n"))
+        }
         let text = payload["stdout"] as? String
             ?? payload["error"] as? String
             ?? payload["state"] as? String

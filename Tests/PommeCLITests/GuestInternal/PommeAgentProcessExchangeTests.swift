@@ -186,6 +186,111 @@ struct PommeAgentProcessExchangeTests: Sendable {
         }
     }
 
+    @Test("Detached jobs list, retain tail logs, and replay them without consumption")
+    func detachedJobsListAndReplayLogs() async throws {
+        try await withDaemon { context in
+            try await authenticate(using: context.wire)
+            let started = try await exchange(.request(
+                operation: "process.start",
+                payload: .object([
+                    "path": .string("/bin/sh"),
+                    "arguments": .array([
+                        .string("-c"),
+                        .string("dd if=/dev/zero bs=65536 count=3 2>/dev/null; printf tail; exit 7")
+                    ]),
+                    "detached": .bool(true)
+                ])
+            ), using: context.wire)
+            let jobText = try #require(started.response.result?.objectValue?["jobID"]?.stringValue)
+            let jobID = try #require(UUID(uuidString: jobText))
+
+            let listed = try await exchange(.request(operation: "process.list"), using: context.wire)
+            let jobs = try #require(listed.response.result?.objectValue?["jobs"]?.arrayValue)
+            #expect(jobs.contains { $0.objectValue?["jobID"]?.stringValue == jobID.uuidString.lowercased() })
+            #expect(listed.streams.isEmpty)
+
+            let waited = try await exchange(.request(
+                operation: "process.wait",
+                payload: .object([
+                    "jobID": .string(jobID.uuidString.lowercased()),
+                    "timeout": .integer(3)
+                ])
+            ), using: context.wire, timeout: 4)
+            let terminal = try #require(waited.response.result?.objectValue)
+            #expect(terminal["exited"] == .bool(true))
+            #expect(terminal["exitCode"] == .integer(7))
+            #expect(terminal["timedOut"] == .bool(false))
+            #expect(terminal["outputComplete"] == .bool(true))
+            #expect(terminal["stdoutBytes"] == .integer(3 * 65536 + 4))
+            #expect(terminal["stdoutTruncated"] == .bool(true))
+            let waitedOutput = waited.streams.filter { $0.frame.stream == .stdout }
+            #expect(waitedOutput.reduce(0) { $0 + ($1.frame.data?.count ?? 0) } == PommeAgent.maximumRetainedJobLogBytes)
+            #expect(waitedOutput.last?.frame.data?.suffix(4) == Data("tail".utf8))
+            #expect(waited.streams.last?.frame.stream == .exit)
+
+            let output = PommeAgentProtocol.Envelope.request(
+                operation: "process.output",
+                payload: .object(["jobID": .string(jobID.uuidString.lowercased())])
+            )
+            let firstLogs = try await exchange(output, using: context.wire)
+            let secondLogs = try await exchange(.request(
+                operation: "process.output",
+                payload: .object(["jobID": .string(jobID.uuidString.lowercased())])
+            ), using: context.wire)
+            #expect(firstLogs.response.result?.objectValue?["outputComplete"] == .bool(true))
+            #expect(firstLogs.response.result == secondLogs.response.result)
+            #expect(firstLogs.streams.map { $0.frame.stream } == secondLogs.streams.map { $0.frame.stream })
+            #expect(firstLogs.streams.map { $0.frame.data } == secondLogs.streams.map { $0.frame.data })
+            #expect(firstLogs.streams.map { $0.frame.signal } == secondLogs.streams.map { $0.frame.signal })
+            #expect(firstLogs.streams.map { $0.frame.data } == waited.streams.map { $0.frame.data })
+            #expect(firstLogs.response.result?.objectValue?["stdoutTruncated"] == .bool(true))
+        }
+    }
+
+    @Test("Detached wait times out without terminating the job and job requests reject unknown or malformed input")
+    func detachedWaitTimeoutAndValidation() async throws {
+        try await withDaemon { context in
+            try await authenticate(using: context.wire)
+            let started = try await exchange(.request(
+                operation: "process.start",
+                payload: .object([
+                    "path": .string("/bin/sh"),
+                    "arguments": .array([.string("-c"), .string("sleep 2; printf still-ran")]),
+                    "detached": .bool(true)
+                ])
+            ), using: context.wire)
+            let jobText = try #require(started.response.result?.objectValue?["jobID"]?.stringValue)
+
+            let timeout = try await exchange(.request(
+                operation: "process.wait",
+                payload: .object(["jobID": .string(jobText), "timeout": .integer(1)])
+            ), using: context.wire, timeout: 2)
+            #expect(timeout.response.ok == true)
+            #expect(timeout.response.result?.objectValue?["timedOut"] == .bool(true))
+            #expect(timeout.response.result?.objectValue?["exited"] == .bool(false))
+
+            let unknown = try await exchange(.request(
+                operation: "process.output",
+                payload: .object(["jobID": .string("00000000-0000-0000-0000-000000000042")])
+            ), using: context.wire)
+            #expect(unknown.response.error?.code == "not-found")
+            #expect(unknown.streams.isEmpty)
+
+            let malformed = try await exchange(.request(
+                operation: "process.wait",
+                payload: .object(["jobID": .string(jobText), "timeout": .string("one")])
+            ), using: context.wire)
+            #expect(malformed.response.error?.code == "invalid-operation")
+            #expect(malformed.streams.isEmpty)
+
+            let killed = try await exchange(.request(
+                operation: "process.signal",
+                payload: .object(["jobID": .string(jobText), "signal": .integer(Int64(SIGKILL))])
+            ), using: context.wire)
+            #expect(killed.response.ok == true)
+        }
+    }
+
     private func authenticate(using wire: PommeAgentVSOCKWire) async throws {
         let request = PommeAgentProtocol.Envelope.request(
             operation: "authenticate",
@@ -198,11 +303,12 @@ struct PommeAgentProcessExchangeTests: Sendable {
 
     private func exchange(
         _ request: PommeAgentProtocol.Envelope,
-        using wire: PommeAgentVSOCKWire
+        using wire: PommeAgentVSOCKWire,
+        timeout: TimeInterval = 1
     ) async throws -> ExchangeResult {
         let encoded = try PommeAgentProtocol.encode(request)
         let delivered = try await Task.detached(priority: .utility) {
-            try wire.exchange(encoded, timeout: 1)
+            try wire.exchange(encoded, timeout: timeout)
         }.value
         return try decodeExchange(delivered, for: request)
     }

@@ -31,7 +31,17 @@ actor PommeAgent {
         "sip.status", "sip.disable", "sip.enable",
         "amfi.status", "amfi.disable", "amfi.enable"
     ]
-    static let persistentCapabilities = ["agent.describe", "agent.health", "process.start", "process.status", "process.signal", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize"] + normalAMFIOperations
+    static let persistentCapabilities = ["agent.describe", "agent.health", "process.start", "process.status", "process.signal", "process.list", "process.output", "process.wait", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize"] + normalAMFIOperations
+    /// Detached-job logs retain their trailing bytes so an already streamed
+    /// status response never makes `process.output` destructive. The agent
+    /// keeps this bounded per channel and tells callers when earlier bytes
+    /// have fallen out of the retained tail.
+    static let maximumRetainedJobLogBytes = 64 * 1024
+    static let maximumListedJobs = 256
+    /// A logs or wait request may catch up a writer, but no one request can
+    /// monopolize the agent while a child continuously produces output.
+    static let maximumJobCaptureBytes = 512 * 1024
+    static let maximumJobCaptureDuration = Duration.milliseconds(50)
     struct Job: Sendable {
         let id: UUID
         let pid: Int32
@@ -48,6 +58,12 @@ actor PommeAgent {
         /// cannot establish completion.
         var outputEOF: Set<Int32>
         let detached: Bool
+        var stdoutLog: Data
+        var stderrLog: Data
+        var stdoutLogTruncated: Bool
+        var stderrLogTruncated: Bool
+        var stdoutBytes: Int64
+        var stderrBytes: Int64
     }
 
     private struct OpenFile {
@@ -160,6 +176,9 @@ actor PommeAgent {
         case "process.start": return try start(request.payload)
         case "process.status": return try status(request.payload)
         case "process.signal": return try signal(request.payload)
+        case "process.list": return try list(request.payload)
+        case "process.output": return try output(request.payload)
+        case "process.wait": throw PommeAgentOperationError.unsupported
         case "file.open": return try open(request.payload)
         case "file.read": return try read(request.payload)
         case "file.write": return try write(request.payload)
@@ -181,6 +200,17 @@ actor PommeAgent {
         }
     }
 
+    /// `process.wait` yields while it drains bounded pipe chunks. The daemon
+    /// uses this entry point so ordinary synchronous in-process operation
+    /// seams remain usable for file and process tests.
+    func performAsynchronously(_ request: PommeAgentProtocol.Envelope) async throws -> JSONValue {
+        if role == .persistent, request.operation == "process.wait" {
+            guard !activationPending else { throw PommeAgentOperationError.activationPending }
+            return try await wait(request.payload)
+        }
+        return try perform(request)
+    }
+
     private func start(_ payload: JSONValue) throws -> JSONValue {
         let object = try object(payload)
         let path = try string(object, "path")
@@ -197,7 +227,7 @@ actor PommeAgent {
             pty: pty,
             options: options
         )
-        let job = Job(id: UUID(), pid: launched.pid, startedAt: Date(), exited: false, status: nil, ptyMaster: launched.ptyMaster, stdin: launched.stdin, stdout: launched.stdout, stderr: launched.stderr, outputEOF: [], detached: detached)
+        let job = Job(id: UUID(), pid: launched.pid, startedAt: Date(), exited: false, status: nil, ptyMaster: launched.ptyMaster, stdin: launched.stdin, stdout: launched.stdout, stderr: launched.stderr, outputEOF: [], detached: detached, stdoutLog: Data(), stderrLog: Data(), stdoutLogTruncated: false, stderrLogTruncated: false, stdoutBytes: 0, stderrBytes: 0)
         jobs[job.id] = job
         var result: [String: JSONValue] = [
             "jobID": .string(job.id.uuidString.lowercased()),
@@ -212,19 +242,88 @@ actor PommeAgent {
     private func status(_ payload: JSONValue) throws -> JSONValue {
         let id = try jobID(payload)
         let job = try refreshStatus(for: id)
-        let outputPending = hasPendingOutput(job)
+        return .object(statusResult(for: job, id: id))
+    }
+
+    private func statusResult(for job: Job, id: UUID) -> [String: JSONValue] {
         var result: [String: JSONValue] = [
             "jobID": .string(id.uuidString.lowercased()),
             "pid": .integer(Int64(job.pid)),
             "exited": .bool(job.exited),
-            "outputPending": .bool(outputPending)
+            "outputPending": .bool(hasPendingOutput(job))
         ]
         if let rawStatus = job.status {
             let terminal = terminalStatus(rawStatus)
             if let exitCode = terminal.exitCode { result["exitCode"] = .integer(Int64(exitCode)) }
             if let signal = terminal.signal { result["signal"] = .integer(Int64(signal)) }
         }
+        return result
+    }
+
+    private func list(_ payload: JSONValue) throws -> JSONValue {
+        guard try object(payload).isEmpty else { throw PommeAgentOperationError.invalid }
+        var listed: [(id: UUID, job: Job)] = []
+        for id in Array(jobs.keys) {
+            let job = try refreshStatus(for: id)
+            if job.detached { listed.append((id, job)) }
+        }
+        listed.sort { $0.job.startedAt < $1.job.startedAt }
+        let retained = listed.prefix(Self.maximumListedJobs)
+        return .object([
+            "jobs": .array(retained.map { entry in
+                var result = statusResult(for: entry.job, id: entry.id)
+                result["detached"] = .bool(true)
+                return .object(result)
+            }),
+            "truncated": .bool(listed.count > Self.maximumListedJobs)
+        ])
+    }
+
+    private func output(_ payload: JSONValue) throws -> JSONValue {
+        let id = try detachedJobID(payload, keys: ["jobID"])
+        _ = try refreshStatus(for: id)
+        _ = try captureAvailableOutput(jobID: id)
+        guard let job = jobs[id] else { throw PommeAgentOperationError.notFound }
+        var result = statusResult(for: job, id: id)
+        result["outputComplete"] = .bool(outputIsDrained(job))
+        result["stdoutBytes"] = .integer(job.stdoutBytes)
+        result["stderrBytes"] = .integer(job.stderrBytes)
+        result["stdoutTruncated"] = .bool(job.stdoutLogTruncated)
+        result["stderrTruncated"] = .bool(job.stderrLogTruncated)
         return .object(result)
+    }
+
+    private func wait(_ payload: JSONValue) async throws -> JSONValue {
+        let values = try object(payload)
+        guard Set(values.keys) == ["jobID", "timeout"] else { throw PommeAgentOperationError.invalid }
+        let id = try detachedJobID(payload, keys: ["jobID", "timeout"])
+        let deadline = ContinuousClock.now.advanced(by: .seconds(try timeout(values, "timeout")))
+        while true {
+            _ = try refreshStatus(for: id)
+            _ = try captureAvailableOutput(jobID: id)
+            guard let current = jobs[id] else { throw PommeAgentOperationError.notFound }
+            if current.exited, outputIsDrained(current) {
+                var result = statusResult(for: current, id: id)
+                result["outputComplete"] = .bool(true)
+                result["timedOut"] = .bool(false)
+                result["stdoutBytes"] = .integer(current.stdoutBytes)
+                result["stderrBytes"] = .integer(current.stderrBytes)
+                result["stdoutTruncated"] = .bool(current.stdoutLogTruncated)
+                result["stderrTruncated"] = .bool(current.stderrLogTruncated)
+                return .object(result)
+            }
+            if ContinuousClock.now >= deadline {
+                var result = statusResult(for: current, id: id)
+                result["outputComplete"] = .bool(outputIsDrained(current))
+                result["timedOut"] = .bool(true)
+                result["stdoutBytes"] = .integer(current.stdoutBytes)
+                result["stderrBytes"] = .integer(current.stderrBytes)
+                result["stdoutTruncated"] = .bool(current.stdoutLogTruncated)
+                result["stderrTruncated"] = .bool(current.stderrLogTruncated)
+                return .object(result)
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
     }
 
     private func refreshStatus(for id: UUID) throws -> Job {
@@ -516,6 +615,24 @@ actor PommeAgent {
         return output
     }
 
+    /// Drains repeated bounded reads for a logs or direct wait request. A
+    /// completed child has no remaining writer, so continuing through empty
+    /// reads records EOF and makes `outputComplete` reliable. A live writer
+    /// stops at the byte or wall-clock budget and is retried by a later poll.
+    private func captureAvailableOutput(jobID: UUID) throws -> [PommeAgentStreamFrame] {
+        let deadline = ContinuousClock.now.advanced(by: Self.maximumJobCaptureDuration)
+        var captured: [PommeAgentStreamFrame] = []
+        var byteCount = 0
+        while byteCount < Self.maximumJobCaptureBytes, ContinuousClock.now < deadline {
+            let frames = try drainPTY(jobID: jobID, requestID: UUID())
+            captured += frames
+            let read = frames.reduce(0) { $0 + ($1.data?.count ?? 0) }
+            byteCount += read
+            if read == 0 { break }
+        }
+        return captured
+    }
+
     private func drain(
         descriptor: Int32,
         stream: PommeAgentProtocol.Stream,
@@ -545,7 +662,9 @@ actor PommeAgent {
         // One read per descriptor is intentional. A normal exchange may
         // therefore contain at most one 64 KiB stdout and one 64 KiB stderr
         // frame, leaving room under the 256 KiB envelope limit.
-        return [try .init(requestID: requestID, stream: stream, data: Data(buffer.prefix(count)))]
+        let data = Data(buffer.prefix(count))
+        retainOutput(data, stream: stream, jobID: jobID)
+        return [try .init(requestID: requestID, stream: stream, data: data)]
     }
 
     private func hasPendingOutput(_ job: Job) -> Bool {
@@ -564,6 +683,33 @@ actor PommeAgent {
     private func markOutputEOF(_ descriptor: Int32, jobID: UUID) {
         guard var job = jobs[jobID] else { return }
         job.outputEOF.insert(descriptor)
+        jobs[jobID] = job
+    }
+
+    private func retainOutput(_ data: Data, stream: PommeAgentProtocol.Stream, jobID: UUID) {
+        guard var job = jobs[jobID], job.detached else { return }
+        switch stream {
+        case .stdout:
+            job.stdoutBytes += Int64(data.count)
+            let combined = job.stdoutLog + data
+            if combined.count > Self.maximumRetainedJobLogBytes {
+                job.stdoutLog = Data(combined.suffix(Self.maximumRetainedJobLogBytes))
+                job.stdoutLogTruncated = true
+            } else {
+                job.stdoutLog = combined
+            }
+        case .stderr:
+            job.stderrBytes += Int64(data.count)
+            let combined = job.stderrLog + data
+            if combined.count > Self.maximumRetainedJobLogBytes {
+                job.stderrLog = Data(combined.suffix(Self.maximumRetainedJobLogBytes))
+                job.stderrLogTruncated = true
+            } else {
+                job.stderrLog = combined
+            }
+        case .stdin, .eof, .resize, .signal, .exit:
+            return
+        }
         jobs[jobID] = job
     }
 
@@ -613,6 +759,37 @@ actor PommeAgent {
         return frames
     }
 
+    /// Replays the bounded retained tail for a detached job. This is separate
+    /// from `streamEvents`: a logs or wait request must be repeatable and must
+    /// never consume the pipe data a later logs request needs.
+    func retainedLogEvents(jobID: UUID, requestID: UUID) throws -> [PommeAgentStreamFrame] {
+        guard role == .persistent else { throw PommeAgentOperationError.unsupported }
+        guard let job = jobs[jobID] else { throw PommeAgentOperationError.notFound }
+        guard job.detached else { throw PommeAgentOperationError.invalid }
+        var frames: [PommeAgentStreamFrame] = []
+        frames += try logFrames(data: job.stdoutLog, stream: .stdout, requestID: requestID)
+        frames += try logFrames(data: job.stderrLog, stream: .stderr, requestID: requestID)
+        if job.exited, outputIsDrained(job), let rawStatus = job.status {
+            frames.append(try .init(requestID: requestID, stream: .exit, signal: terminalStatus(rawStatus).signal))
+        }
+        return frames
+    }
+
+    private func logFrames(
+        data: Data,
+        stream: PommeAgentProtocol.Stream,
+        requestID: UUID
+    ) throws -> [PommeAgentStreamFrame] {
+        var frames: [PommeAgentStreamFrame] = []
+        var offset = 0
+        while offset < data.count {
+            let end = min(offset + PommeAgentProtocol.maximumStreamChunkBytes, data.count)
+            frames.append(try .init(requestID: requestID, stream: stream, data: Data(data[offset..<end])))
+            offset = end
+        }
+        return frames
+    }
+
     private func object(_ value: JSONValue) throws -> [String: JSONValue] { guard let object = value.objectValue else { throw PommeAgentOperationError.invalid }; return object }
     private func string(_ object: [String: JSONValue], _ key: String) throws -> String { guard let value = object[key]?.stringValue, !value.isEmpty else { throw PommeAgentOperationError.invalid }; return value }
     private func strings(_ value: JSONValue?) throws -> [String] { guard let values = value?.arrayValue else { throw PommeAgentOperationError.invalid }; return try values.map { guard let value = $0.stringValue, !value.contains("\0") else { throw PommeAgentOperationError.invalid }; return value } }
@@ -637,6 +814,14 @@ actor PommeAgent {
     }
     private func uuid(_ object: [String: JSONValue], _ key: String) throws -> UUID { guard let value = object[key]?.stringValue, let uuid = UUID(uuidString: value) else { throw PommeAgentOperationError.invalid }; return uuid }
     private func jobID(_ value: JSONValue) throws -> UUID { try uuid(try object(value), "jobID") }
+    private func detachedJobID(_ value: JSONValue, keys: Set<String>) throws -> UUID {
+        let values = try object(value)
+        guard Set(values.keys) == keys else { throw PommeAgentOperationError.invalid }
+        let id = try uuid(values, "jobID")
+        guard let job = jobs[id] else { throw PommeAgentOperationError.notFound }
+        guard job.detached else { throw PommeAgentOperationError.invalid }
+        return id
+    }
     private func file(_ object: [String: JSONValue]) throws -> OpenFile { let id = try uuid(object, "fileID"); guard let file = files[id] else { throw PommeAgentOperationError.notFound }; return file }
 
     private static func writeChunk(_ descriptor: Int32, _ data: Data, _ offset: Int) -> Int {
