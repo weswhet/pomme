@@ -302,6 +302,9 @@ enum PommeProvisioningError: Error, Equatable, LocalizedError, Sendable {
     case generationFailure
     case unexpectedEvent
     case ownershipMismatch
+    case nothingToRepair(vmName: String)
+    case repairUnavailable(phase: PommeProvisioningPhase, vmName: String)
+    case repairInterrupted(phase: PommeProvisioningPhase, vmName: String)
     case phaseFailed(PommeProvisioningPhase, vmName: String? = nil)
     case unavailableIntegration(String)
 
@@ -315,6 +318,12 @@ enum PommeProvisioningError: Error, Equatable, LocalizedError, Sendable {
         case .generationFailure: "Pomme provisioning journal generation is stale or non-monotonic."
         case .unexpectedEvent: "Pomme provisioning journal has an invalid phase transition."
         case .ownershipMismatch: "The VM is not the exact Pomme-owned VM bound to this plan."
+        case .nothingToRepair(let vmName):
+            "Nothing to repair for \(vmName): agent provisioning is complete. Agent repair does not reconcile SIP or AMFI security transactions."
+        case .repairUnavailable(let phase, let vmName):
+            "Agent repair is unavailable during provisioning phase \(phase.rawValue). Resume creation with `pomme create \(vmName) --resume`."
+        case .repairInterrupted(let phase, let vmName):
+            "Agent repair cannot reconcile an interrupted \(phase.rawValue) intent for \(vmName). The VM and journal were retained; inspect `pomme agent status \(vmName)` and obtain recovery assistance before retrying."
         case .phaseFailed(let phase, let vmName):
             "\(vmName.map { "\($0) " } ?? "")provisioning phase \(phase.rawValue) failed; the VM and journal were retained."
         case .unavailableIntegration(let operation): "Pomme integration is unavailable for \(operation)."
@@ -565,6 +574,20 @@ enum PommeProvisioningCoordinator {
         }
         guard let phase = PommeProvisioningPhase.allCases.first(where: { !completed.contains($0) }) else { return nil }
         return (phase, (attempts[phase] ?? 0) + 1)
+    }
+
+    /// Classify valid journals before capturing runtime state or starting Recovery.
+    static func repairPhase(in journal: PommeProvisioningJournal) throws -> (phase: PommeProvisioningPhase, attempt: UInt64) {
+        guard let next = try nextPhase(in: journal) else {
+            throw PommeProvisioningError.nothingToRepair(vmName: journal.plan.vm.name)
+        }
+        guard journal.events.last?.kind != .intent else {
+            throw PommeProvisioningError.repairInterrupted(phase: next.phase, vmName: journal.plan.vm.name)
+        }
+        guard next.phase == .installRecoveryAgent else {
+            throw PommeProvisioningError.repairUnavailable(phase: next.phase, vmName: journal.plan.vm.name)
+        }
+        return next
     }
 
     static func appendingIntent(to journal: PommeProvisioningJournal, phase: PommeProvisioningPhase, attempt: UInt64, signer: PommeProvisioningJournalSigner) throws -> PommeProvisioningJournal {

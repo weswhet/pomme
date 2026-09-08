@@ -3498,6 +3498,13 @@ struct PommeCore {
         let signer = try provisioningSigner(bundleURL: reference.bundle.rootURL)
         let repository = try provisioningRepository(bundleURL: reference.bundle.rootURL, signer: signer)
         let journal = try repository.load()
+        let effects = provisioningEffects(firstBootLease: lease)
+        let ownership = try await effects.verifyOwnership(journal.plan.vm)
+        guard ownership == journal.plan.vm else {
+            throw PommeProvisioningError.ownershipMismatch
+        }
+        let next = try PommeProvisioningCoordinator.repairPhase(in: journal)
+
         let state: PommeProvisioningFinalState
         switch finalState {
         case .previous:
@@ -3506,17 +3513,6 @@ struct PommeCore {
             // The latter is often `.normalRunning` even when a failed
             // bootstrap left the VM stopped.
             state = try capturedProvisioningFinalState(reference: reference)
-        }
-
-        let effects = provisioningEffects(firstBootLease: lease)
-        let ownership = try await effects.verifyOwnership(journal.plan.vm)
-        guard ownership == journal.plan.vm else {
-            throw PommeProvisioningError.ownershipMismatch
-        }
-        guard let next = try PommeProvisioningCoordinator.nextPhase(in: journal),
-              next.phase == .installRecoveryAgent
-        else {
-            throw PommeProvisioningError.unexpectedEvent
         }
 
         // Repair is an external Recovery effect too: journal its intent before
