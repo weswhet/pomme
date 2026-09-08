@@ -1205,7 +1205,8 @@ struct PommeCore {
 
     // MARK: Pomme control protocol bridge
 
-    static func sendControlObject(_ payload: [String: Any], bundle: BundleLayout) throws -> [String: Any] {
+    static func sendControlObject(_ payload: [String: Any], bundle: BundleLayout, timeout: TimeInterval? = nil) throws -> [String: Any] {
+        let deadline = timeout.map { ProcessInfo.processInfo.systemUptime + $0 }
         let request = try makeControlRequest(from: payload)
         let record = try runtimeRecord(for: bundle)
         let identity = PommeRuntimeIdentity(
@@ -1213,7 +1214,8 @@ struct PommeCore {
             pid: record.pid,
             startedAt: record.startedAt
         )
-        let result = try PommeControlSocketClient(identity: identity).send(request)
+        let remaining = deadline.map { $0 - ProcessInfo.processInfo.systemUptime }
+        let result = try PommeControlSocketClient(identity: identity).send(request, timeout: remaining)
         guard let object = result.objectValue else {
             return ["ok": true, "response": result.publicValue, "hostExitCode": 0]
         }

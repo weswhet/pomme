@@ -46,7 +46,7 @@ enum ControlWireCodec {
         return frame
     }
 
-    static func writeFrame(_ data: Data, to fileDescriptor: Int32) throws {
+    static func writeFrame(_ data: Data, to fileDescriptor: Int32, deadline: TimeInterval? = nil) throws {
         try validateFrameSize(data)
         var noSigPipe: Int32 = 1
         guard Darwin.setsockopt(
@@ -62,9 +62,11 @@ enum ControlWireCodec {
             guard let base = bytes.baseAddress else { return }
             var offset = 0
             while offset < bytes.count {
+                if let deadline { try waitForDescriptor(fileDescriptor, events: Int16(POLLOUT), deadline: deadline) }
                 let written = Darwin.write(fileDescriptor, base.advanced(by: offset), bytes.count - offset)
                 if written > 0 { offset += written }
                 else if written < 0, errno == EINTR { continue }
+                else if written < 0, deadline != nil, errno == EAGAIN { continue }
                 else { try throwPOSIX("write") }
             }
         }
@@ -73,7 +75,7 @@ enum ControlWireCodec {
     struct FrameReader: Sendable {
         private var buffered = Data()
 
-        mutating func readFrame(from fileDescriptor: Int32) throws -> Data {
+        mutating func readFrame(from fileDescriptor: Int32, deadline: TimeInterval? = nil) throws -> Data {
             while true {
                 if let newline = buffered.firstIndex(of: 0x0A) {
                     let frame = Data(buffered[...newline])
@@ -86,10 +88,35 @@ enum ControlWireCodec {
                 }
                 let remaining = PommeControlProtocol.maximumFrameBytes - buffered.count
                 var bytes = [UInt8](repeating: 0, count: min(4_096, remaining))
+                if let deadline {
+                    try ControlWireCodec.waitForDescriptor(fileDescriptor, events: Int16(POLLIN), deadline: deadline)
+                }
                 let count = bytes.withUnsafeMutableBytes { Darwin.read(fileDescriptor, $0.baseAddress, $0.count) }
                 if count > 0 { buffered.append(contentsOf: bytes.prefix(count)) }
                 else if count == 0 { throw RunnerError.invalidControlResponse("Pomme control socket closed before a complete JSONL frame.") }
+                else if deadline != nil, errno == EAGAIN { continue }
                 else if errno != EINTR { try throwPOSIX("read") }
+            }
+        }
+    }
+
+    /// One monotonic deadline applies to every partial read/write, rather than
+    /// restarting the timeout whenever another byte becomes available.
+    static func waitForDescriptor(_ descriptor: Int32, events: Int16, deadline: TimeInterval) throws {
+        guard deadline.isFinite else { throw POSIXError(.EINVAL) }
+        while true {
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { throw POSIXError(.ETIMEDOUT) }
+            let milliseconds = Int32(min(Double(Int32.max), max(1, (remaining * 1_000).rounded(.up))))
+            var item = pollfd(fd: descriptor, events: events, revents: 0)
+            let ready = Darwin.poll(&item, 1, milliseconds)
+            if ready > 0 {
+                if item.revents & Int16(POLLNVAL) != 0 { throw POSIXError(.EBADF) }
+                if item.revents & (events | Int16(POLLHUP) | Int16(POLLERR)) != 0 { return }
+            } else if ready == 0 {
+                throw POSIXError(.ETIMEDOUT)
+            } else if errno != EINTR {
+                try throwPOSIX("poll")
             }
         }
     }

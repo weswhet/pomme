@@ -12,11 +12,16 @@ struct PommeControlSocketClient: Sendable {
     private static let helloCache = Mutex<[PommeRuntimeIdentity: PommeControlHello]>([:])
     let identity: PommeRuntimeIdentity
 
-    func send(_ request: PommeControlRequest) throws -> JSONValue {
-        let hello = try negotiatedHello()
+    func send(_ request: PommeControlRequest, timeout: TimeInterval? = nil) throws -> JSONValue {
+        let deadline: TimeInterval?
+        if let timeout {
+            guard timeout.isFinite, timeout > 0 else { throw POSIXError(.ETIMEDOUT) }
+            deadline = ProcessInfo.processInfo.systemUptime + timeout
+        } else { deadline = nil }
+        let hello = try negotiatedHello(deadline: deadline)
         let routed = try PommeVMControlRouter.route(request)
         guard hello.features.contains(routed.requiredFeature) else { throw RunnerError.controlCapabilityUnavailable(routed.requiredFeature.rawValue) }
-        let responseData = try exchange(try ControlWireCodec.encodeLine(request))
+        let responseData = try exchange(try ControlWireCodec.encodeLine(request), deadline: deadline)
         let response: PommeControlResponse
         do { response = try ControlWireCodec.decodeResponse(responseData, matching: request.id) }
         catch { throw incompatibleError(from: responseData) }
@@ -27,9 +32,9 @@ struct PommeControlSocketClient: Sendable {
         return result
     }
 
-    func negotiatedHello() throws -> PommeControlHello {
+    func negotiatedHello(deadline: TimeInterval? = nil) throws -> PommeControlHello {
         if let cached = Self.helloCache.withLock({ $0[identity] }) { return cached }
-        let data = try exchange(try ControlWireCodec.encodeLine(PommeControlHello(features: [])))
+        let data = try exchange(try ControlWireCodec.encodeLine(PommeControlHello(features: [])), deadline: deadline)
         let hello: PommeControlHello
         do { hello = try ControlWireCodec.decodeHello(data) }
         catch { throw incompatibleError(from: data) }
@@ -51,22 +56,34 @@ struct PommeControlSocketClient: Sendable {
         .incompatibleHelperProtocol(expected: PommeControlProtocol.version, actual: ControlWireCodec.protocolVersion(in: data))
     }
 
-    private func exchange(_ frame: Data) throws -> Data {
-        let fd = try connect()
+    private func exchange(_ frame: Data, deadline: TimeInterval? = nil) throws -> Data {
+        let fd = try connect(deadline: deadline)
         defer { Darwin.close(fd) }
-        try ControlWireCodec.writeFrame(frame, to: fd)
+        try ControlWireCodec.writeFrame(frame, to: fd, deadline: deadline)
         Darwin.shutdown(fd, SHUT_WR)
         var reader = ControlWireCodec.FrameReader()
-        return try reader.readFrame(from: fd)
+        return try reader.readFrame(from: fd, deadline: deadline)
     }
 
-    private func connect() throws -> Int32 {
+    private func connect(deadline: TimeInterval? = nil) throws -> Int32 {
         let url = URL(fileURLWithPath: identity.socketPath)
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { try throwPOSIX("socket") }
         do {
+            if deadline != nil {
+                let flags = fcntl(fd, F_GETFL)
+                guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else { try throwPOSIX("fcntl") }
+            }
             try withUnixSocketAddress(path: identity.socketPath) { address, length in
                 guard Darwin.connect(fd, address, length) == 0 else {
+                    if let deadline, errno == EINPROGRESS {
+                        try ControlWireCodec.waitForDescriptor(fd, events: Int16(POLLOUT), deadline: deadline)
+                        var status: Int32 = 0
+                        var size = socklen_t(MemoryLayout<Int32>.size)
+                        guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &status, &size) == 0 else { try throwPOSIX("getsockopt") }
+                        if status == 0 { return }
+                        throw POSIXError(POSIXErrorCode(rawValue: status) ?? .EIO)
+                    }
                     if errno == ENOENT || errno == ECONNREFUSED { throw RunnerError.noRunningVM(url) }
                     try throwPOSIX("connect")
                 }

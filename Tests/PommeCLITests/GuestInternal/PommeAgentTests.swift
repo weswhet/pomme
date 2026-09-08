@@ -58,6 +58,9 @@ struct PommeAgentTests {
         let journal = try PommeAgentUpdateJournal(phase: .activationPending, sourceSHA256: String(repeating: "a", count: 64), targetSHA256: String(repeating: "b", count: 64), targetBytes: 1)
         let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64), recoveredJournal: journal)
         await #expect(throws: PommeAgentOperationError.self) { _ = try await agent.perform(.request(operation: "agent.health")) }
+        await #expect(throws: PommeAgentOperationError.self) {
+            _ = try await agent.performAsynchronously(.request(operation: "process.wait"))
+        }
     }
 
     @Test("Journal is digest-bound and transactional")
