@@ -34,9 +34,13 @@ struct PommeGuestJobWait {
                         throw RunnerError.invalidControlResponse("Background job output is incomplete.")
                     }
                     let exitCode: Int
-                    if let code = completed["exitCode"] as? Int, (0...255).contains(code) {
+                    if let rawCode = integerValue(completed["exitCode"]),
+                       (0...255).contains(rawCode),
+                       let code = Int(exactly: rawCode) {
                         exitCode = code
-                    } else if let signal = completed["signal"] as? Int, (1...127).contains(signal) {
+                    } else if let rawSignal = integerValue(completed["signal"]),
+                              (1...127).contains(rawSignal),
+                              let signal = Int(exactly: rawSignal) {
                         exitCode = 128 + signal
                     } else {
                         throw RunnerError.invalidControlResponse("Missing background job exit status.")
@@ -89,5 +93,15 @@ struct PommeGuestJobWait {
             throw RunnerError.invalidControlResponse("Missing background job response status.")
         }
         return ok
+    }
+
+    /// `PommeCore.sendControlObject` preserves protocol integers as `Int64`
+    /// through `JSONValue.publicValue`. Decode the JSON type before narrowing
+    /// so completed job statuses are accepted from the real transport shape
+    /// while booleans, strings, and fractional numbers remain invalid.
+    private func integerValue(_ value: Any?) -> Int64? {
+        guard let value, let decoded = try? JSONValue(any: value),
+              case .integer(let integer) = decoded else { return nil }
+        return integer
     }
 }

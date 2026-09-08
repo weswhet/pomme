@@ -165,6 +165,20 @@ struct PommeGuestJobWaitTests {
             }
         })
         #expect(throws: (any Error).self) { try incomplete.wait(jobID: jobID, timeout: 1) }
+
+        let malformedExitCodes: [Any] = [true, 1.5, "0", Int64(-1), Int64(256)]
+        for malformedExitCode in malformedExitCodes {
+            let malformed = PommeGuestJobWait(perform: { _, _ in
+                var result = response(exited: true, pending: false)
+                var completed = try #require(result["result"] as? [String: Any])
+                completed["exitCode"] = malformedExitCode
+                result["result"] = completed
+                return result
+            })
+            #expect(throws: (any Error).self) {
+                try malformed.wait(jobID: jobID, timeout: 1)
+            }
+        }
     }
 
     @Test("Wait maps signal termination to shell exit status")
@@ -173,7 +187,7 @@ struct PommeGuestJobWaitTests {
             var result = response(exited: true, pending: false)
             var status = try #require(result["result"] as? [String: Any])
             status.removeValue(forKey: "exitCode")
-            status["signal"] = 15
+            status["signal"] = Int64(15)
             result["result"] = status
             return result
         })
@@ -199,9 +213,12 @@ struct PommeGuestJobWaitTests {
     private func response(exited: Bool, pending: Bool, code: Int = 0,
                           frames: [[String: Any]] = []) -> [String: Any] {
         ["ok": true, "hostExitCode": 0, "streamFrames": frames, "result": [
-            "jobID": jobID, "pid": 42, "exited": exited,
+            // PommeCore.sendControlObject exposes JSONValue integer fields as
+            // Int64. Keep this fixture aligned with the actual control path;
+            // native Int values would hide a production numeric-cast bug.
+            "jobID": jobID, "pid": Int64(42), "exited": exited,
             "outputPending": pending, "outputComplete": exited && !pending,
-            "exitCode": code, "stdoutTruncated": false, "stderrTruncated": false
+            "exitCode": Int64(code), "stdoutTruncated": false, "stderrTruncated": false
         ]]
     }
 }
