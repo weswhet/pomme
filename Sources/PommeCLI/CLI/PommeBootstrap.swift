@@ -33,6 +33,10 @@ enum PommeBootstrap {
             Foundation.exit(exitCode)
         }
 
+        if arguments.first == "--pomme-exec-helper" {
+            Foundation.exit(PommeProcess.runIdentityHelper(arguments: arguments))
+        }
+
         if arguments.first == "--pomme-mdm-staging-helper" {
             Foundation.exit(PommeMDMStagingHelper.run(arguments: arguments))
         }
