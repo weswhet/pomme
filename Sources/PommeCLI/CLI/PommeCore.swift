@@ -1541,7 +1541,89 @@ struct PommeCore {
     }
 
     static func startRequiredSnapshotRestorePayload(reference: VMReference) throws -> [String: Any] {
-        try controlCommandPayload(.resume, reference: reference)
+        let bundle = reference.bundle
+        guard FileManager.default.fileExists(atPath: bundle.requiredSnapshotRestoreURL.path),
+              FileManager.default.fileExists(atPath: bundle.saveStateURL.path)
+        else {
+            throw RunnerError.virtualMachineState(
+                "A required named snapshot restore is incomplete; its saved-state artifacts must be repaired before startup."
+            )
+        }
+        try waitForRequiredSnapshotRestoreHelperStop(reference: reference)
+        try waitForRequiredSnapshotRestoreAuxiliaryStorageRelease(reference: reference)
+        return try launchRequiredSnapshotRestore(
+            launchNormal: {
+                try startRuntimeInBackground(
+                    reference: reference,
+                    bootMode: .normal,
+                    timeout: Constants.defaultRecoveryAgentTimeout
+                )
+            },
+            helperIsRunning: { pid in
+                do {
+                    return try runtimeRecord(for: bundle).pid == pid
+                } catch RunnerError.noRunningVM {
+                    return false
+                }
+            },
+            pollStatus: { try vmStatusPayload(reference: reference) }
+        )
+    }
+
+    /// A stopped helper removes its runtime record only after it has written
+    /// the lifecycle response. Do not reuse that short-lived helper to start
+    /// a required saved-state restore.
+    private static func waitForRequiredSnapshotRestoreHelperStop(reference: VMReference) throws {
+        let deadline = Date().addingTimeInterval(Constants.gracefulStopTimeoutSeconds)
+        while Date() < deadline {
+            do {
+                _ = try runtimeRecord(for: reference.bundle)
+            } catch RunnerError.noRunningVM {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        throw RunnerError.virtualMachineState(
+            "The previous VM helper did not stop before the named snapshot restore."
+        )
+    }
+
+    /// Runtime-record removal happens before the foreground helper releases
+    /// its last Virtualization objects. Probe the same lock used by Recovery
+    /// before constructing a replacement helper, with one bounded retry.
+    private static func waitForRequiredSnapshotRestoreAuxiliaryStorageRelease(
+        reference: VMReference
+    ) throws {
+        var retries = 0
+        while liveRecoveryAuxiliaryStorageHasConflictingLock(reference.bundle.auxiliaryStorageURL) {
+            guard retries < 1 else {
+                throw RunnerError.virtualMachineState(
+                    "The previous VM runtime still owns auxiliary storage; named snapshot restore was not retried."
+                )
+            }
+            retries += 1
+            Thread.sleep(forTimeInterval: 2)
+        }
+    }
+
+    static func launchRequiredSnapshotRestore(
+        launchNormal: () throws -> [String: Any],
+        helperIsRunning: (Int32) throws -> Bool,
+        pollStatus: () throws -> [String: Any]
+    ) throws -> [String: Any] {
+        let launch = try launchNormal()
+        guard let processID = launch["pid"] as? Int,
+              let helperPID = Int32(exactly: processID), helperPID > 0
+        else {
+            throw RunnerError.invalidControlResponse(
+                "Snapshot restore helper launch did not identify its process."
+            )
+        }
+        return try waitForRequiredSnapshotRestorePausedNormal(
+            helperPID: helperPID,
+            helperIsRunning: { try helperIsRunning(helperPID) },
+            pollStatus: pollStatus
+        )
     }
 
     static func runInternalHelper(bundlePath: String, name: String?, bootMode: BootMode) async throws {
@@ -3052,8 +3134,9 @@ struct PommeCore {
                     await exitSignal.requestExit()
                 }
                 return try jsonLine(["ok": true, "operation": command.rawValue, "hostExitCode": 0])
-            case .snapshotSave:
-                throw RunnerError.controlCapabilityUnavailable("snapshot-save")
+            case .snapshotSave(let request):
+                try await runtime.saveSnapshotMachineState(in: request.stageName)
+                return try jsonLine(["ok": true, "operation": "snapshot-save", "hostExitCode": 0])
             case .status:
                 return try jsonLine(await runtime.statusPayload(bundle: bundle, inspect: false))
             case .inspect:
@@ -3781,7 +3864,7 @@ struct PommeCore {
         helperPID: Int32,
         timeout: TimeInterval = 30,
         pollInterval: TimeInterval = 0.25,
-        helperIsRunning: () -> Bool,
+        helperIsRunning: () throws -> Bool,
         pollStatus: () throws -> [String: Any],
         now: () -> Date = Date.init,
         sleep: (TimeInterval) -> Void = Thread.sleep
@@ -3793,7 +3876,7 @@ struct PommeCore {
         let deadline = now().addingTimeInterval(timeout)
         var lastObservation = "no control status received"
         while true {
-            guard helperIsRunning() else {
+            guard try helperIsRunning() else {
                 throw RequiredSnapshotRestoreStartupError.helperExited(
                     pid: helperPID,
                     lastObservation: lastObservation
@@ -3804,8 +3887,12 @@ struct PommeCore {
                 let vmState = status["vmState"] as? String ?? "unknown"
                 let bootMode = status["bootMode"] as? String ?? "unknown"
                 let helperRunning = (status["helperRunning"] as? Bool).map(String.init) ?? "unknown"
-                lastObservation = "vmState=\(vmState) bootMode=\(bootMode) helperRunning=\(helperRunning)"
-                if vmState == "paused", bootMode == BootMode.normal.rawValue {
+                let operationOK = (status["ok"] as? Bool).map(String.init) ?? "unknown"
+                lastObservation = "vmState=\(vmState) bootMode=\(bootMode) helperRunning=\(helperRunning) ok=\(operationOK)"
+                if vmState == "paused",
+                   bootMode == BootMode.normal.rawValue,
+                   (status["helperRunning"] as? Bool) == true,
+                   (status["ok"] as? Bool) != false {
                     return status
                 }
             } catch {

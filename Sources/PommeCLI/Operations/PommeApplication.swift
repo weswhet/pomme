@@ -349,19 +349,20 @@ enum PommeApplication {
             var pausedForCapture = false
             do {
                 if didPause {
-                    _ = try pause(name: name, lease: lease)
+                    try requireSnapshotLifecycleSucceeded(pause(name: name, lease: lease))
                     pausedForCapture = true
                 }
-                _ = try PommeCore.sendControlObject([
+                let capture = try PommeCore.sendControlObject([
                     "command": "snapshot-save",
                     "stageName": stage.lastPathComponent
                 ], bundle: reference.bundle)
+                try VMSnapshotStore.confirmCapture(response: capture, stage: stage)
                 let record = try VMSnapshotStore.complete(
                     bundle: reference.bundle, name: snapshot, stage: stage,
                     sourceState: didPause ? "running" : "paused"
                 )
                 if didPause {
-                    _ = try resume(name: name, lease: lease)
+                    try requireSnapshotLifecycleSucceeded(resume(name: name, lease: lease))
                     pausedForCapture = false
                 }
                 let payload: [String: Any] = [
@@ -375,7 +376,7 @@ enum PommeApplication {
                 try? FileManager.default.removeItem(at: stage)
                 if pausedForCapture {
                     do {
-                        _ = try resume(name: name, lease: lease)
+                        try requireSnapshotLifecycleSucceeded(resume(name: name, lease: lease))
                     } catch let resumeError {
                         throw RunnerError.virtualMachineState(
                             "Snapshot creation failed and the original running state could not be restored: \(error.localizedDescription); resume: \(resumeError.localizedDescription)"
@@ -418,15 +419,16 @@ enum PommeApplication {
                 if helperWasRunning {
                     rollback = try VMSnapshotStore.prepareRollback(bundle: reference.bundle)
                     if priorState == "running" {
-                        _ = try pause(name: name, lease: lease)
+                        try requireSnapshotLifecycleSucceeded(pause(name: name, lease: lease))
                         pausedForRollbackCapture = true
                     }
-                    _ = try PommeCore.sendControlObject([
+                    let capture = try PommeCore.sendControlObject([
                         "command": "snapshot-save",
                         "stageName": rollback!.lastPathComponent
                     ], bundle: reference.bundle)
+                    try VMSnapshotStore.confirmCapture(response: capture, stage: rollback!)
                     rollbackCaptured = true
-                    _ = try stop(name: name, force: true, lease: lease)
+                    try requireSnapshotLifecycleSucceeded(stop(name: name, force: true, lease: lease))
                     helperStopped = true
                     pausedForRollbackCapture = false
                 }
@@ -444,7 +446,7 @@ enum PommeApplication {
                 if !helperStopped {
                     if pausedForRollbackCapture {
                         do {
-                            _ = try resume(name: name, lease: lease)
+                            try requireSnapshotLifecycleSucceeded(resume(name: name, lease: lease))
                         } catch let resumeError {
                             throw RunnerError.virtualMachineState(
                                 "Snapshot restore failed before stopping the original VM, and its running state could not be restored: \(restoreError.localizedDescription); resume: \(resumeError.localizedDescription)"
@@ -459,13 +461,13 @@ enum PommeApplication {
                     // A named helper may have reached paused state before a
                     // later host-side failure. Prove it stopped before either
                     // cleanup or rollback installation.
-                    _ = try stop(name: name, force: true, lease: lease)
+                    try requireSnapshotLifecycleSucceeded(stop(name: name, force: true, lease: lease))
                     try VMSnapshotStore.removeRequiredRestoreArtifacts(bundle: reference.bundle)
                     if let rollback, rollbackCaptured {
                         try VMSnapshotStore.installRollbackMachineState(bundle: reference.bundle, stage: rollback)
                         _ = try PommeCore.startRequiredSnapshotRestorePayload(reference: reference)
                         if priorState == "running" {
-                            _ = try resume(name: name, lease: lease)
+                            try requireSnapshotLifecycleSucceeded(resume(name: name, lease: lease))
                         }
                         try FileManager.default.removeItem(at: rollback)
                     } else if let rollback {
@@ -488,6 +490,13 @@ enum PommeApplication {
             let payload: [String: Any] = ["ok": true, "operation": "snapshot-delete", "name": name, "snapshot": snapshot, "hostExitCode": 0]
             return result(title: "Snapshot Delete", reference: reference, payload: payload,
                           text: "Deleted snapshot \(snapshot).")
+        }
+    }
+
+    static func requireSnapshotLifecycleSucceeded(_ result: PommeOperationResult) throws {
+        guard result.ok, result.hostExitCode == 0 else {
+            throw RunnerError.virtualMachineState(
+                result.payload["error"] as? String ?? "Snapshot VM state transition failed.")
         }
     }
 
