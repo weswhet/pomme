@@ -69,7 +69,7 @@ actor PommeRuntimeUIController {
             // a direct HID contract. Keep it explicit until that contract is
             // rebuilt on top of this controller; never route it through an
             // agent or host-window fallback.
-            throw RunnerError.invalidUICommand("guest-ui settings-ai is unavailable through the direct Virtualization UI bridge.")
+            throw RunnerError.invalidUICommand(PommeUICapabilities.settingsAIUnavailableReason)
         }
     }
 

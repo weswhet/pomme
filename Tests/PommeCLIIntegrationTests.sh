@@ -175,6 +175,47 @@ expect_failure "MDM rejects removed approve syntax" "$runner" mdm approve missin
 expect_failure "MDM rejects removed acknowledgement" "$runner" mdm missing --profile missing --acknowledge-synthetic-approval
 expect_failure "unknown root command is rejected" "$runner" definitely-not-a-command
 
+expect_success "tools expose UI capability discovery" "$runner" tools --format json
+if python3 -c 'import json,sys; p=json.load(sys.stdin)["uiCapabilities"]; assert p["settingsAI"]["available"] is False; assert "unavailable" in p["settingsAI"]["reason"]; assert "settings-ai" not in p["implementedOperations"]' <"$work/stdout"; then
+  pass "AI unavailability is machine readable"
+else
+  fail "AI unavailability is machine readable"
+fi
+expect_success "AI settings help" "$runner" ui ai settings --help
+if grep -qi 'unavailable' "$work/stdout"; then
+  pass "AI help exposes unavailable bridge"
+else
+  fail "AI help exposes unavailable bridge"
+fi
+for mode in suggest step loop; do
+  expect_failure "AI $mode rejects before VM access" env POMME_VM_NAME=pomme-test-nonexistent \
+    "$runner" ui ai settings 'Open Keyboard settings' --mode "$mode" --max-steps 1 \
+    --confidence 0.5 --model-timeout 1 --deterministic-fallback --no-open \
+    --settings-url x-apple.systempreferences:com.apple.Keyboard-Settings.extension \
+    --until-text Keyboard --screenshot-output "$work/no-ai-output" --timeout 5 --format json --debug
+  if grep -q 'UI AI Settings automation is unavailable in this build' "$work/stderr" && [[ ! -e "$work/no-ai-output" ]]; then
+    pass "AI $mode reports capability without output side effects"
+  else
+    fail "AI $mode reports capability without output side effects"
+  fi
+done
+for action in key key-sequence; do
+  expect_failure "$action accepts a single environment-target action" env POMME_VM_NAME=invalid/name \
+    "$runner" ui "$action" return --format json
+  if grep -q 'Invalid VM name invalid/name' "$work/stderr"; then
+    pass "$action reaches target validation"
+  else
+    fail "$action reaches target validation"
+  fi
+done
+expect_failure "key sequence rejects ambiguous environment target" env POMME_VM_NAME=pomme-test-nonexistent \
+  "$runner" ui key-sequence return right
+if grep -q 'ambiguous' "$work/stderr" && grep -q -- '--vm' "$work/stderr"; then
+  pass "key sequence explains target disambiguation"
+else
+  fail "key sequence explains target disambiguation"
+fi
+
 if [[ $failures -ne 0 ]]; then
   printf '%d of %d contract checks failed\n' "$failures" "$checks" >&2
   exit 1

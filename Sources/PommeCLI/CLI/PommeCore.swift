@@ -1441,6 +1441,7 @@ struct PommeCore {
             "name": reference.name as Any,
             "guestAgent": agent,
             "capabilities": agent["capabilities"] ?? [],
+            "uiCapabilities": PommeUICapabilities.publicPayload,
             "hostExitCode": status["ok"] as? Bool == true ? 0 : 1
         ]
     }
