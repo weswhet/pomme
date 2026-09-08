@@ -186,6 +186,25 @@ struct PommeAgentSessionFailureTests {
         #expect(!failure.localizedDescription.contains("must-never-escape"))
     }
 
+    @Test("Closed Remote Login failures retain actionable, redacted messages")
+    func remoteLoginFailureCodeSurvivesRedaction() async throws {
+        let expected = [
+            ("remote-login-full-disk-access-required", "Full Disk Access is required to change Remote Login."),
+            ("remote-login-verification-failed", "Remote Login could not be verified after the requested change.")
+        ]
+        for (code, message) in expected {
+            let harness = try SessionHarness { request in
+                try encodedFailure(for: request, code: code, message: message)
+            }
+            try await harness.authenticate()
+            let failure = try await captureGuestFailure {
+                _ = try await harness.session.request(operation: "remoteLogin.set")
+            }
+            #expect(failure.code == code)
+            #expect(failure.message == message)
+        }
+    }
+
     @Test("Unknown Recovery failure codes retain the generic compatibility path")
     func unknownRecoveryFailureCodeIsGeneric() async throws {
         let harness = try SessionHarness { request in

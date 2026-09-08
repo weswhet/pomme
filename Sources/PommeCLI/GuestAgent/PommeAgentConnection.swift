@@ -67,7 +67,8 @@ final class PommeAgentConnection: @unchecked Sendable {
                 do {
                     response = .response(to: request, result: try await handler(request))
                 } catch {
-                    response = .failure(to: request, code: operationCode(error), message: "The requested operation could not be completed.")
+                    let failure = operationFailure(error)
+                    response = .failure(to: request, code: failure.code, message: failure.message)
                 }
             }
             return try PommeAgentProtocol.encode(response)
@@ -86,17 +87,23 @@ final class PommeAgentConnection: @unchecked Sendable {
         if lifetime == .oneShot { consumed = true }
     }
 
-    private func operationCode(_ error: Error) -> String {
+    private func operationFailure(_ error: Error) -> (code: String, message: String) {
         if let recoveryError = error as? PommeGuestRecoverySecurityError {
-            return recoveryError.recoveryFailureCode.rawValue
+            return (recoveryError.recoveryFailureCode.rawValue, "The requested operation could not be completed.")
         }
-        guard let operationError = error as? PommeAgentOperationError else { return "operation-failed" }
+        guard let operationError = error as? PommeAgentOperationError else {
+            return ("operation-failed", "The requested operation could not be completed.")
+        }
         switch operationError {
-        case .unsupported: return "unsupported-operation"
-        case .activationPending: return "activation-pending"
-        case .invalid: return "invalid-operation"
-        case .notFound: return "not-found"
-        case .io: return "operation-failed"
+        case .unsupported: return ("unsupported-operation", "The requested operation could not be completed.")
+        case .activationPending: return ("activation-pending", "The requested operation could not be completed.")
+        case .invalid: return ("invalid-operation", "The requested operation could not be completed.")
+        case .notFound: return ("not-found", "The requested operation could not be completed.")
+        case .io: return ("operation-failed", "The requested operation could not be completed.")
+        case .remoteLoginFullDiskAccessRequired:
+            return ("remote-login-full-disk-access-required", "Full Disk Access is required to change Remote Login.")
+        case .remoteLoginVerificationFailed:
+            return ("remote-login-verification-failed", "Remote Login could not be verified after the requested change.")
         }
     }
 }

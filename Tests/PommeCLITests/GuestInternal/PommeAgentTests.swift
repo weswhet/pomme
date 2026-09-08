@@ -59,9 +59,58 @@ struct PommeAgentTests {
 
     @Test("Remote Login only reports success after its transaction succeeds")
     func remoteLoginTransaction() async throws {
-        let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64), remoteLoginTransaction: { enabled in #expect(enabled) })
+        let agent = try PommeAgent(
+            role: .persistent,
+            executableSHA256: String(repeating: "a", count: 64),
+            remoteLoginTransaction: { enabled in
+                #expect(enabled)
+                return true
+            }
+        )
         let value = try await agent.perform(.request(operation: "remoteLogin.set", payload: .object(["enabled": .bool(true)])))
         #expect(value.objectValue?["enabled"] == .bool(true))
+    }
+
+    @Test("Remote Login uses systemsetup's verified status surface")
+    func remoteLoginUsesVerifiedSystemSetupState() throws {
+        var invocations: [[String]] = []
+        let observed = try PommeRemoteLogin.apply(enabled: false) { arguments in
+            invocations.append(arguments)
+            if arguments == ["-f", "-setremotelogin", "off"] {
+                return .init(stdout: "", stderr: "")
+            }
+            return .init(stdout: "Remote Login: Off\n", stderr: "")
+        }
+        #expect(!observed)
+        #expect(invocations == [
+            ["-f", "-setremotelogin", "off"],
+            ["-getremotelogin"]
+        ])
+    }
+
+    @Test("Remote Login rejects FDA denial and unverifiable state without exposing command output")
+    func remoteLoginRejectsUnverifiedState() {
+        #expect(throws: PommeAgentOperationError.remoteLoginFullDiskAccessRequired) {
+            try PommeRemoteLogin.apply(enabled: true) { _ in
+                .init(stdout: "", stderr: "Turning Remote Login on requires Full Disk Access.")
+            }
+        }
+        #expect(throws: PommeAgentOperationError.remoteLoginVerificationFailed) {
+            try PommeRemoteLogin.apply(enabled: true) { arguments in
+                .init(
+                    stdout: arguments == ["-getremotelogin"] ? "Remote Login: Off\n" : "",
+                    stderr: ""
+                )
+            }
+        }
+        #expect(throws: PommeAgentOperationError.remoteLoginVerificationFailed) {
+            try PommeRemoteLogin.apply(enabled: true) { _ in
+                .init(stdout: "Remote Login status unavailable", stderr: "")
+            }
+        }
+        #expect(throws: PommeAgentOperationError.io) {
+            try PommeRemoteLogin.apply(enabled: true) { _ in throw PommeAgentOperationError.io }
+        }
     }
 
     @Test("An unresolved activation journal survives restart and fails closed")

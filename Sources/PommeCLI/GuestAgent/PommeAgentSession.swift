@@ -22,7 +22,8 @@ struct PommeAgentSessionError: Error, Equatable, LocalizedError, Sendable {
         switch code {
         case "replayed-request", "authentication-required", "authentication-rejected",
              "authentication-replayed", "credential-expired", "unsupported-operation",
-             "activation-pending", "invalid-operation", "not-found", "operation-failed":
+             "activation-pending", "invalid-operation", "not-found", "operation-failed",
+             "remote-login-full-disk-access-required", "remote-login-verification-failed":
             return code
         default:
             return "guest-failure"
