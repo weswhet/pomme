@@ -26,6 +26,10 @@ actor PommeAgent {
     /// agent.  Hosts require this additive describe field before starting a
     /// credential-bearing process so older pinned daemons cannot run it.
     static let privatePTYInputVersion = 1
+
+    /// Version of the public PTY echo contract. Hosts must preflight this
+    /// additive describe receipt before requesting normal terminal echo.
+    static let publicPTYEchoVersion = 1
     static let recoveryCapabilities = [
         "agent.install",
         "sip.status", "sip.disable", "sip.enable",
@@ -158,6 +162,9 @@ actor PommeAgent {
             ]
             if request.payload.objectValue?["includePrivatePTYCapabilities"] == .bool(true) {
                 description["privatePTYInputVersion"] = .integer(Int64(Self.privatePTYInputVersion))
+            }
+            if request.payload.objectValue?["includePublicPTYCapabilities"] == .bool(true) {
+                description["publicPTYEchoVersion"] = .integer(Int64(Self.publicPTYEchoVersion))
             }
             if request.payload.objectValue?["includeNormalAMFICapabilities"] == .bool(true) {
                 description["normalAMFIWorkflowVersion"] = .integer(Int64(Self.normalAMFIWorkflowVersion))
@@ -900,26 +907,31 @@ enum PommeProcess {
         let stdinPath: String?
         let stdoutPath: String?
         let stderrPath: String?
+        /// Echo is disabled unless an authenticated public-terminal caller
+        /// explicitly opts in. Private PTYs must never inherit echo.
+        let ptyEcho: Bool
 
         init(
             cwd: String? = nil,
             environment: [String: String] = [:],
             stdinPath: String? = nil,
             stdoutPath: String? = nil,
-            stderrPath: String? = nil
+            stderrPath: String? = nil,
+            ptyEcho: Bool = false
         ) {
             self.cwd = cwd
             self.environment = environment
             self.stdinPath = stdinPath
             self.stdoutPath = stdoutPath
             self.stderrPath = stderrPath
+            self.ptyEcho = ptyEcho
         }
 
         init(payload: [String: JSONValue], pty: Bool) throws {
             let allowed: Set<String> = [
                 "path", "arguments", "timeout", "stdinDataBase64", "attachStdin",
                 "pty", "cwd", "environment", "user", "uid", "group", "gid",
-                "stdinPath", "stdoutPath", "stderrPath", "detached"
+                "stdinPath", "stdoutPath", "stderrPath", "detached", "ptyEcho"
             ]
             guard Set(payload.keys).isSubset(of: allowed) else {
                 throw PommeAgentOperationError.invalid
@@ -929,8 +941,10 @@ enum PommeProcess {
             let stdoutPath = try Self.path(payload["stdoutPath"])
             let stderrPath = try Self.path(payload["stderrPath"])
             let attachedStdin = try Self.boolean(payload["attachStdin"])
+            let ptyEcho = try Self.boolean(payload["ptyEcho"])
             guard !(attachedStdin && stdinPath != nil),
-                  !(pty && (stdinPath != nil || stdoutPath != nil || stderrPath != nil))
+                  !(pty && (stdinPath != nil || stdoutPath != nil || stderrPath != nil)),
+                  !ptyEcho || pty
             else {
                 throw PommeAgentOperationError.invalid
             }
@@ -939,7 +953,8 @@ enum PommeProcess {
                 environment: try Self.environment(payload["environment"]),
                 stdinPath: stdinPath,
                 stdoutPath: stdoutPath,
-                stderrPath: stderrPath
+                stderrPath: stderrPath,
+                ptyEcho: ptyEcho
             )
         }
 
@@ -1040,16 +1055,19 @@ enum PommeProcess {
         var stdinPipe: [Int32] = [-1, -1]; var stdoutPipe: [Int32] = [-1, -1]; var stderrPipe: [Int32] = [-1, -1]
         if pty {
             guard openpty(&master, &slave, nil, nil, nil) == 0 else { throw PommeAgentOperationError.io }
-            // A private PTY may carry a credential after a prompt.  Disable
-            // terminal echo before the child opens the slave so a password is
-            // never returned as output.  Failure is fail-closed: a PTY with
-            // unknown echo state is unsafe for streamed secrets.
+            // Establish the requested echo policy before the child opens the
+            // slave. Private PTYs may carry credentials, so their default is
+            // fail-closed no-echo; public callers must explicitly opt in.
             var attributes = termios()
             guard tcgetattr(slave, &attributes) == 0 else {
                 _ = Darwin.close(master); _ = Darwin.close(slave)
                 throw PommeAgentOperationError.io
             }
-            attributes.c_lflag &= ~tcflag_t(ECHO | ECHONL)
+            if options.ptyEcho {
+                attributes.c_lflag |= tcflag_t(ECHO | ECHONL)
+            } else {
+                attributes.c_lflag &= ~tcflag_t(ECHO | ECHONL)
+            }
             guard tcsetattr(slave, TCSANOW, &attributes) == 0 else {
                 _ = Darwin.close(master); _ = Darwin.close(slave)
                 throw PommeAgentOperationError.io
@@ -1155,11 +1173,9 @@ enum PommeProcess {
             throw PommeAgentOperationError.io
         }
 
-        let spawnFlags = Int16(POSIX_SPAWN_CLOEXEC_DEFAULT)
-            | Int16(pty ? POSIX_SPAWN_SETSID : POSIX_SPAWN_SETPGROUP)
-        guard posix_spawnattr_setflags(&attributes, spawnFlags) == 0,
-              (pty || posix_spawnattr_setpgroup(&attributes, 0) == 0)
-        else {
+        do {
+            try configureSpawnAttributes(&attributes, pty: pty)
+        } catch {
             closeDescriptors(master: master, slave: slave, stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe, pty: pty)
             [helperStatusPipe, helperEnvironmentPipe].flatMap { $0 }.filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
             throw PommeAgentOperationError.io
@@ -1231,7 +1247,7 @@ enum PommeProcess {
                 stdin: nil,
                 stdout: nil,
                 stderr: nil,
-                ptyEchoDisabled: true
+                ptyEchoDisabled: !options.ptyEcho
             )
         }
         [stdinPipe[0], stdoutPipe[1], stderrPipe[1]].filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
@@ -1244,6 +1260,34 @@ enum PommeProcess {
             stderr: stderrPipe[0],
             ptyEchoDisabled: false
         )
+    }
+
+    /// Makes every executed command interruptible even when the launchd
+    /// daemon inherited an ignored or blocked SIGINT disposition. This is
+    /// applied through posix_spawn attributes, never in a post-fork path.
+    static func configureSpawnAttributes(
+        _ attributes: inout posix_spawnattr_t?,
+        pty: Bool
+    ) throws {
+        var defaults = sigset_t()
+        var mask = sigset_t()
+        guard sigemptyset(&defaults) == 0,
+              sigaddset(&defaults, SIGINT) == 0,
+              sigemptyset(&mask) == 0,
+              posix_spawnattr_setsigdefault(&attributes, &defaults) == 0,
+              posix_spawnattr_setsigmask(&attributes, &mask) == 0
+        else {
+            throw PommeAgentOperationError.io
+        }
+        let flags = Int16(POSIX_SPAWN_CLOEXEC_DEFAULT)
+            | Int16(pty ? POSIX_SPAWN_SETSID : POSIX_SPAWN_SETPGROUP)
+            | Int16(POSIX_SPAWN_SETSIGDEF)
+            | Int16(POSIX_SPAWN_SETSIGMASK)
+        guard posix_spawnattr_setflags(&attributes, flags) == 0,
+              (pty || posix_spawnattr_setpgroup(&attributes, 0) == 0)
+        else {
+            throw PommeAgentOperationError.io
+        }
     }
 
     /// Runs in the already-execed, signed Pomme executable.  This is never a

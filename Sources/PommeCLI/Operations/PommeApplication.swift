@@ -596,7 +596,11 @@ enum PommeApplication {
         try VMBundleMutationLease.withLease(name: name) { _ in
         let reference = try namedReference(name)
         var payload = try request.pty
-            ? PommeCore.sendControlObject(request.controlPayload, bundle: reference.bundle)
+            ? PommeCore.sendPublicPTYControlObject(
+                request.controlPayload,
+                bundle: reference.bundle,
+                timeout: request.timeout
+            )
             : PommeCore.sendForegroundControlObject(request.controlPayload, bundle: reference.bundle)
         payload["operation"] = "process.start"
         payload["name"] = name

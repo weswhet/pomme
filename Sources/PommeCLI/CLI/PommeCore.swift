@@ -1236,6 +1236,30 @@ struct PommeCore {
         return try collectForegroundResponse(receive: stream.receiveEvent)
     }
 
+    /// A public PTY is a full-duplex terminal bridge, unlike buffered
+    /// foreground execution which closes input before collecting output.
+    static func sendPublicPTYControlObject(
+        _ payload: [String: Any],
+        bundle: BundleLayout,
+        timeout: TimeInterval
+    ) throws -> [String: Any] {
+        let request = try makeControlRequest(from: payload)
+        let record = try runtimeRecord(for: bundle)
+        let identity = PommeRuntimeIdentity(socketPath: record.socketPath, pid: record.pid, startedAt: record.startedAt)
+        let stream = try PommeControlSocketClient(identity: identity).openStream(request, timeout: timeout)
+        let bridge = PommePublicPTYTerminalBridge(
+            transport: .init(
+                send: { kind, data, framePayload, eof in
+                    try stream.send(stream: kind, data: data, payload: framePayload, eof: eof)
+                },
+                receive: { timeout in
+                    try stream.receiveEventIfAvailable(timeout: timeout)
+                }
+            )
+        )
+        return try bridge.run(timeout: timeout)
+    }
+
     static func collectForegroundResponse(
         maximumOutputBytes: Int = 16 * 1024 * 1024,
         receive: () throws -> PommeControlStreamEvent
@@ -3021,6 +3045,13 @@ struct PommeCore {
                     runtime: runtime
                 )
             }
+            if isPublicPTY(operation) {
+                return try await publicPTYControlResponse(
+                    operation,
+                    stream: stream,
+                    runtime: runtime
+                )
+            }
             if isBufferedForeground(operation) {
                 return try await foregroundControlResponse(operation, runtime: runtime) { frames in
                     try sendControlFrames(frames, through: stream)
@@ -3303,6 +3334,70 @@ struct PommeCore {
         request.operation == "process.start"
             && request.payload?.objectValue?["detached"] != .bool(true)
             && request.payload?.objectValue?["pty"] != .bool(true)
+    }
+
+    private static func isPublicPTY(_ request: PommeAgentPerformRequest) -> Bool {
+        request.operation == "process.start"
+            && request.payload?.objectValue?["detached"] != .bool(true)
+            && request.payload?.objectValue?["pty"] == .bool(true)
+            && !isSecurityPrivatePTY(request)
+    }
+
+    private static func publicPTYControlResponse(
+        _ request: PommeAgentPerformRequest,
+        stream: PommeControlStreamSession,
+        runtime: PommeVMRuntime
+    ) async throws -> String {
+        guard var values = request.payload?.objectValue else {
+            throw RunnerError.invalidGuestCommand("Invalid public PTY command payload.")
+        }
+        // Interactive commands must retain normal terminal echo. The guest
+        // defaults to echo-disabled PTYs for the private credential runner;
+        // the relay verifies the matching start receipt before input flows.
+        values["ptyEcho"] = .bool(true)
+        let payload = JSONValue.object(values)
+        let capability = try await runtime.performGuestOperationCorrelated(
+            "agent.describe",
+            payload: .object(["includePublicPTYCapabilities": .bool(true)])
+        )
+        guard PommePublicPTYRelay.supportsPublicEcho(capability.result) else {
+            // An older persistent agent may otherwise reject ptyEcho only
+            // after process.start routing. Refuse before any guest process is
+            // created and require the explicit capability plus its start
+            // receipt below.
+            throw PommePublicPTYRelay.Error.publicEchoUnavailable
+        }
+        let timeout: TimeInterval
+        switch payload.objectValue?["timeout"] {
+        case .number(let value): timeout = value
+        case .integer(let value): timeout = TimeInterval(value)
+        case nil: timeout = Constants.defaultGuestCommandTimeout
+        default: throw RunnerError.invalidGuestCommand("Invalid public PTY command timeout.")
+        }
+        let result = try await PommePublicPTYRelay.run(
+            payload: payload,
+            timeout: timeout,
+            perform: { operation, values in
+                try await runtime.performGuestOperationCorrelated(operation, payload: values)
+            },
+            sendStream: { jobID, kind, data, dimensions, signal in
+                try await runtime.sendGuestStream(
+                    jobID: jobID,
+                    stream: kind,
+                    requestID: UUID(),
+                    data: data,
+                    dimensions: dimensions,
+                    signal: signal
+                )
+            },
+            receiveControl: { timeout in
+                try stream.receiveIfAvailable(timeout: timeout)
+            },
+            onFrames: { frames in
+                try sendControlFrames(frames, through: stream)
+            }
+        )
+        return try foregroundResultJSON(result)
     }
 
     private static func foregroundControlResponse(

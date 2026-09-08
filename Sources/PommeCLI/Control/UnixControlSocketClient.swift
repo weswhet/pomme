@@ -42,12 +42,27 @@ struct PommeControlSocketClient: Sendable {
         return hello
     }
 
-    func openStream(_ request: PommeControlRequest) throws -> PommeControlSocketStream {
-        guard try negotiatedHello().features.contains(.streaming) else { throw RunnerError.controlCapabilityUnavailable(PommeControlFeature.streaming.rawValue) }
-        let fd = try connect()
+    func openStream(_ request: PommeControlRequest, timeout: TimeInterval? = nil) throws -> PommeControlSocketStream {
+        let deadline: TimeInterval?
+        if let timeout {
+            guard timeout.isFinite, timeout > 0 else { throw POSIXError(.ETIMEDOUT) }
+            deadline = ProcessInfo.processInfo.systemUptime + timeout
+        } else { deadline = nil }
+        guard try negotiatedHello(deadline: deadline).features.contains(.streaming) else { throw RunnerError.controlCapabilityUnavailable(PommeControlFeature.streaming.rawValue) }
+        let fd = try connect(deadline: deadline)
         let streaming = PommeControlRequest(id: request.id, command: request.command, payload: request.payload, streaming: true)
         do {
-            try ControlWireCodec.writeFrame(try ControlWireCodec.encodeLine(streaming), to: fd)
+            try ControlWireCodec.writeFrame(try ControlWireCodec.encodeLine(streaming), to: fd, deadline: deadline)
+            // `connect(deadline:)` uses O_NONBLOCK only to bound the initial
+            // handshake. Restore normal blocking stream semantics before the
+            // interactive session starts so later input writes retain their
+            // established partial-write behavior under backpressure.
+            if deadline != nil {
+                let flags = fcntl(fd, F_GETFL)
+                guard flags >= 0, fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0 else {
+                    try throwPOSIX("fcntl")
+                }
+            }
             return .init(id: streaming.id, fileDescriptor: fd)
         } catch { Darwin.close(fd); throw error }
     }
@@ -105,8 +120,10 @@ final class PommeControlSocketStream: @unchecked Sendable {
     func send(stream: PommeControlStreamFrame.Stream, data: Data? = nil, payload: JSONValue? = nil, eof: Bool? = nil) throws { try session.send(stream: stream, data: data, payload: payload, eof: eof) }
     func receive() throws -> PommeControlStreamFrame { try session.receive() }
     func receive(timeout: TimeInterval) throws -> PommeControlStreamFrame { try session.receive(timeout: timeout) }
+    func receiveIfAvailable(timeout: TimeInterval) throws -> PommeControlStreamFrame? { try session.receiveIfAvailable(timeout: timeout) }
     func receiveEvent() throws -> PommeControlStreamEvent { try session.receiveEvent() }
     func receiveEvent(timeout: TimeInterval) throws -> PommeControlStreamEvent { try session.receiveEvent(timeout: timeout) }
+    func receiveEventIfAvailable(timeout: TimeInterval) throws -> PommeControlStreamEvent? { try session.receiveEventIfAvailable(timeout: timeout) }
     func closeInput() throws { try session.closeInput() }
     func finish() throws -> PommeControlResponse { try session.closeInput(); return try session.receiveResponse() }
 }
