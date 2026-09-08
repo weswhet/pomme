@@ -112,6 +112,11 @@ struct CreateCommand: AsyncParsableCommand {
             if parallel || parallelLimit != nil {
                 throw ValidationError("--parallel is available only with --config.")
             }
+            for (flag, value) in [("--disk-size", diskSize), ("--memory", memory)] {
+                guard let bytes = ByteSizeParser.parse(value), bytes > 0 else {
+                    throw ValidationError("\(flag) requires a valid size greater than zero.")
+                }
+            }
         }
         if let parallelLimit, parallelLimit < 1 {
             throw ValidationError("--parallel-limit must be greater than zero.")

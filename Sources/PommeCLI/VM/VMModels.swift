@@ -103,7 +103,8 @@ struct ByteSizeParser {
         default: return nil
         }
         let bytes = parsed * Double(factor)
-        guard bytes.isFinite, bytes >= 1, bytes <= Double(UInt64.max) else { return nil }
+        // Double rounds UInt64.max up to 2^64, which cannot convert to UInt64.
+        guard bytes.isFinite, bytes >= 1, bytes < Double(UInt64.max) else { return nil }
         return UInt64(bytes.rounded(.down))
     }
 }
