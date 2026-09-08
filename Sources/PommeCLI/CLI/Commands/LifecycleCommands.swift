@@ -109,6 +109,12 @@ struct CreateCommand: AsyncParsableCommand {
             if version != nil, restoreImage != nil {
                 throw ValidationError("Choose either --version or --restore-image.")
             }
+            if let restoreImage, restoreImage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw ValidationError("--restore-image requires a file path.")
+            }
+            if restoreImage != nil, ipswDevice != nil {
+                throw ValidationError("--ipsw-device is available only with --version.")
+            }
             if parallel || parallelLimit != nil {
                 throw ValidationError("--parallel is available only with --config.")
             }
@@ -142,7 +148,8 @@ struct CreateCommand: AsyncParsableCommand {
 
         let vmName = try validateVMName(name!)
         let restoreArguments: [String]
-        let selectedProfile: PommeCreateRecoveryProfileDescriptor
+        var selectedProfile: PommeCreateRecoveryProfileDescriptor?
+        var resolvedLocalRestoreImage: PommeLocalRestoreImageIdentity?
         if let version {
             let firmware = try await PommeCore.resolveIPSWFirmware(
                 selection: version,
@@ -158,24 +165,41 @@ struct CreateCommand: AsyncParsableCommand {
             }
             restoreArguments = ["--version", firmware.buildid]
                 + (ipswDevice.map { ["--ipsw-device", $0] } ?? [])
-        } else if restoreImage != nil {
-            // A host-path IPSW has no trustworthy identity at this boundary.
-            // Keep the public operation fail-closed until the core exposes a
-            // signed image identity reader; never let an unqualified image
-            // reach the create executor.
-            throw ValidationError(
-                "--restore-image requires a verified restore-image identity; this Pomme build cannot qualify local images."
-            )
+        } else if let restoreImage {
+            restoreArguments = ["--restore-image", restoreImage]
+            if dryRun {
+                let identity = try await PommeCore.inspectLocalRestoreImage(path: restoreImage)
+                selectedProfile = identity.recoveryProfile
+                resolvedLocalRestoreImage = identity
+                if identity.recoveryProfile.qualification == .experimental {
+                    PommeCore.log(
+                        "Warning: macOS \(identity.version) (\(identity.build)) has not been qualified for Recovery automation; creation will attempt it with observed-screen checks.",
+                        vmName: vmName
+                    )
+                }
+            }
         } else {
             throw ValidationError("Direct creation requires --version or a verified --restore-image.")
         }
         if dryRun {
+            guard let selectedProfile else {
+                throw RunnerError.hostCommandFailed("Pomme could not qualify the requested restore image.")
+            }
+            let dryRunVersion: Any
+            let dryRunRestoreImage: Any
+            if let resolvedLocalRestoreImage {
+                dryRunVersion = resolvedLocalRestoreImage.version
+                dryRunRestoreImage = resolvedLocalRestoreImage.canonicalPath
+            } else {
+                dryRunVersion = version as Any
+                dryRunRestoreImage = restoreImage as Any
+            }
             let payload: [String: Any] = [
                 "ok": true,
                 "dryRun": true,
                 "name": vmName,
-                "version": version as Any,
-                "restoreImage": restoreImage as Any,
+                "version": dryRunVersion,
+                "restoreImage": dryRunRestoreImage,
                 "ipswDevice": ipswDevice as Any,
                 "diskSize": diskSize,
                 "memory": memory,

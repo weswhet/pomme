@@ -123,6 +123,16 @@ expect_failure "create resume rejects restore options" \
 expect_failure "create resume rejects boot options" \
   "$runner" create example --resume --boot normal
 
+expect_failure "local restore image dry-run rejects a missing file" \
+  "$runner" create example --restore-image "$work/missing.ipsw" --dry-run
+if grep -qi 'does not exist' "$work/stderr"; then
+  pass "local restore image reaches file validation"
+else
+  fail "local restore image reaches file validation"
+fi
+expect_failure "local restore image rejects a network device selector" \
+  "$runner" create example --restore-image "$work/missing.ipsw" --ipsw-device VirtualMac2,1 --dry-run
+
 removed_ingest="im""port"
 expect_failure "removed bundle-ingestion command is rejected" \
   "$runner" "$removed_ingest" "$work/missing.bundle"

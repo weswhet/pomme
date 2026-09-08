@@ -78,6 +78,16 @@ struct PommeProvisioningInput: Codable, Sendable {
     }
 }
 
+/// A local restore image identity that is safe to expose during direct-create
+/// planning. The Virtualization objects used to read it remain private to the
+/// provisioning implementation.
+struct PommeLocalRestoreImageIdentity: Equatable, Sendable {
+    let canonicalPath: String
+    let version: String
+    let build: String
+    let recoveryProfile: PommeCreateRecoveryProfileDescriptor
+}
+
 /// Non-secret identity exposed to the request-bound Recovery factory. The
 /// durable VM UUID comes from the immutable provisioning plan; the APFS group
 /// is optional until Recovery has observed and recorded it.
@@ -1574,6 +1584,13 @@ struct PommeCore {
         let restoreImage: URL
     }
 
+    /// Keeps the configuration requirements beside the durable identity so
+    /// provisioning does not reload an image after it has qualified it.
+    private struct RestoreImageQualification {
+        let identity: PommeLocalRestoreImageIdentity
+        let requirements: VZMacOSConfigurationRequirements
+    }
+
     private static func createProvisioningPayload(
         config: VMCreationConfigV1?,
         arguments: CLIOptions,
@@ -1663,23 +1680,18 @@ struct PommeCore {
         reference: VMReference
     ) async throws -> ProvisioningPreparation {
         let restoreImageURL = try await resolveCreateRestoreImageURL(arguments)
-        guard FileManager.default.fileExists(atPath: restoreImageURL.path) else {
-            throw RunnerError.hostCommandFailed("The restore image does not exist: \(restoreImageURL.path)")
-        }
-        let canonicalRestoreImage = restoreImageURL.resolvingSymlinksInPath().standardizedFileURL
-        let restoreImage = try await loadRestoreImage(from: canonicalRestoreImage)
-        let version = "\(restoreImage.operatingSystemVersion.majorVersion).\(restoreImage.operatingSystemVersion.minorVersion).\(restoreImage.operatingSystemVersion.patchVersion)"
-        let build = restoreImage.buildVersion
-        let profileDescriptor = try PommeRecoveryProfileSelector.descriptor(version: version, build: build)
+        let restoreQualification = try await qualifyRestoreImage(at: restoreImageURL)
+        let canonicalRestoreImage = URL(fileURLWithPath: restoreQualification.identity.canonicalPath)
+        let version = restoreQualification.identity.version
+        let build = restoreQualification.identity.build
+        let profileDescriptor = restoreQualification.identity.recoveryProfile
         if profileDescriptor.qualification == .experimental {
             log(
                 "Warning: Recovery support for macOS \(version) (\(build)) is experimental. Creation will attempt the observed-screen navigation and stop if it does not match.",
                 vmName: reference.name ?? reference.bundle.rootURL.deletingPathExtension().lastPathComponent
             )
         }
-        guard let requirements = restoreImage.mostFeaturefulSupportedConfiguration else {
-            throw RunnerError.noSupportedConfiguration
-        }
+        let requirements = restoreQualification.requirements
 
         let memory = arguments.sizeOptions.memorySizeBytes
         try validateMemorySize(memory, requirements: requirements)
@@ -1779,6 +1791,35 @@ struct PommeCore {
         ).url
     }
 
+    /// Reads a local restore image without starting creation. This is used only
+    /// for direct-create dry runs; execution repeats the check immediately
+    /// before it writes a provisioning bundle.
+    static func inspectLocalRestoreImage(path: String) async throws -> PommeLocalRestoreImageIdentity {
+        try await qualifyRestoreImage(at: URL(fileURLWithPath: path)).identity
+    }
+
+    private static func qualifyRestoreImage(at url: URL) async throws -> RestoreImageQualification {
+        let canonicalURL = url.resolvingSymlinksInPath().standardizedFileURL
+        guard isRegularFile(canonicalURL) else {
+            throw RunnerError.hostCommandFailed("The restore image does not exist: \(canonicalURL.path)")
+        }
+        let image = try await loadRestoreImage(from: canonicalURL)
+        let version = "\(image.operatingSystemVersion.majorVersion).\(image.operatingSystemVersion.minorVersion).\(image.operatingSystemVersion.patchVersion)"
+        let identity = PommeLocalRestoreImageIdentity(
+            canonicalPath: canonicalURL.path,
+            version: version,
+            build: image.buildVersion,
+            recoveryProfile: try PommeRecoveryProfileSelector.descriptor(
+                version: version,
+                build: image.buildVersion
+            )
+        )
+        guard let requirements = image.mostFeaturefulSupportedConfiguration else {
+            throw RunnerError.noSupportedConfiguration
+        }
+        return .init(identity: identity, requirements: requirements)
+    }
+
     private static func loadRestoreImage(from url: URL) async throws -> VZMacOSRestoreImage {
         try await withCheckedThrowingContinuation { continuation in
             VZMacOSRestoreImage.load(from: url) { result in
@@ -1826,6 +1867,15 @@ struct PommeCore {
             hasher.update(data: Data(buffer.prefix(count)))
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Binds an installer input to the immutable restore-image digest recorded
+    /// in the provisioning plan. Resume must reject a same-version image whose
+    /// bytes changed after planning.
+    static func verifyRestoreImageDigest(at url: URL, expected: String) throws {
+        guard PommeProvisioningDigest.isSHA256(expected),
+              try sha256File(url) == expected
+        else { throw PommeProvisioningError.invalidPlan }
     }
 
     private static func isRegularFile(_ url: URL) -> Bool {
@@ -2044,6 +2094,7 @@ struct PommeCore {
               requirements.hardwareModel.dataRepresentation == input.hardwareModelData
         else { throw PommeProvisioningError.invalidPlan }
         try validateMemorySize(input.memorySizeBytes, requirements: requirements)
+        try verifyRestoreImageDigest(at: imageURL, expected: plan.restore.restoreImageDigest)
 
         let hardwareModel: VZMacHardwareModel
         guard let restoredHardwareModel = VZMacHardwareModel(dataRepresentation: input.hardwareModelData),
