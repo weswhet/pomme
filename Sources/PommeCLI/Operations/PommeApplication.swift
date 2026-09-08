@@ -619,6 +619,20 @@ enum PommeApplication {
 
     private static func guestRequestUnchecked(name: String, request: GuestCLIRequest, title: String) throws -> PommeOperationResult {
         let reference = try namedReference(name)
+        try request.validate()
+        let transfer = PommeGuestFileTransfer { operation, payload in
+            try performAuthenticatedAgentOperation(reference: reference, operation: operation, payload: payload)
+        }
+        switch request {
+        case .copy(let copy):
+            let receipt = try transfer.copy(copy)
+            return result(title: title, reference: reference, payload: receipt.payload,
+                          text: "Copied \(receipt.bytes) bytes.")
+        case .cat(let cat):
+            let payload = try transfer.cat(cat)
+            return result(title: title, reference: reference, payload: payload, text: "")
+        default: break
+        }
         let payload = try PommeCore.sendControlObject(request.controlPayload, bundle: reference.bundle)
         let text = payload["stdout"] as? String
             ?? payload["error"] as? String

@@ -110,7 +110,9 @@ enum CLIOutputWriter {
                     let name = result.vmName ?? "unknown"
                     print("\(name):")
                 }
-                if result.payload["foreground"] as? Bool == true {
+                if result.ok, result.payload["operation"] as? String == "file.read" {
+                    try writeBytes(fileOutput(result.payload), to: STDOUT_FILENO)
+                } else if result.payload["foreground"] as? Bool == true {
                     for output in try foregroundOutput(result.payload) {
                         try writeBytes(output.data, to: output.descriptor)
                     }
@@ -129,6 +131,16 @@ enum CLIOutputWriter {
         if let failed = results.first(where: { !$0.ok || $0.hostExitCode != 0 }) {
             throw ExitCode(failed.hostExitCode)
         }
+    }
+
+    /// Cat emits exact bytes, including binary data and files without a newline.
+    static func fileOutput(_ payload: [String: Any]) throws -> Data {
+        guard let encoded = payload["dataBase64"] as? String,
+              let data = Data(base64Encoded: encoded),
+              data.count <= PommeAgentProtocol.maximumFileChunkBytes else {
+            throw RunnerError.invalidControlResponse("Invalid file output.")
+        }
+        return data
     }
 
     /// Keep command bytes separate from presentation text: no replacement

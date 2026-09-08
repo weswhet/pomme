@@ -734,17 +734,42 @@ enum PommeAgentFileTransaction {
         try PommeAgentInstallJournalStore.remove(at: journalURL)
     }
 
+    enum CommitError: Error, Equatable, LocalizedError {
+        case destinationPublishedCleanupFailed
+
+        var errorDescription: String? {
+            "The destination was replaced, but retirement of its prior entry could not be verified; a prior entry may remain at the staging path."
+        }
+    }
+
     /// Commit only an adjacent, known staging file. RENAME_EXCL prevents a
     /// creation race; RENAME_SWAP replaces a symlink rather than following it.
-    static func commit(stage: URL, destination: URL) throws {
+    static func commit(stage: URL, destination: URL, beforePublish: () throws -> Void = {}) throws {
         guard stage.deletingLastPathComponent().path == destination.deletingLastPathComponent().path else { throw PommeAgentProtocol.Error.invalidRequest }
         try withVerifiedParent(of: destination) { parent, destinationName in
             let stageName = try leafName(stage)
             var info = stat(); let exists = fstatat(parent, destinationName, &info, AT_SYMLINK_NOFOLLOW) == 0
-            if exists, (info.st_mode & S_IFMT) == S_IFLNK { throw PommeAgentProtocol.Error.invalidRequest }
+            if exists, (info.st_mode & S_IFMT) != S_IFREG { throw PommeAgentProtocol.Error.invalidRequest }
+            if !exists, errno != ENOENT { throw PommeAgentProtocol.Error.invalidRequest }
+            var staged = stat()
+            guard fstatat(parent, stageName, &staged, AT_SYMLINK_NOFOLLOW) == 0,
+                  staged.st_mode & S_IFMT == S_IFREG, staged.st_nlink == 1 else {
+                throw PommeAgentProtocol.Error.invalidRequest
+            }
+            try beforePublish()
             let flag: UInt32 = exists ? UInt32(RENAME_SWAP) : UInt32(RENAME_EXCL)
             guard renameatx_np(parent, stageName, parent, destinationName, flag) == 0 else { throw PommeAgentProtocol.Error.invalidRequest }
-            if exists { guard unlinkat(parent, stageName, 0) == 0 else { throw PommeAgentProtocol.Error.invalidRequest } }
+            // Publication has happened. Never treat a retirement failure as a
+            // pre-publication error, nor unlink an entry substituted by a race.
+            if exists {
+                var retired = stat()
+                guard fstatat(parent, stageName, &retired, AT_SYMLINK_NOFOLLOW) == 0,
+                      retired.st_dev == info.st_dev, retired.st_ino == info.st_ino,
+                      retired.st_mode & S_IFMT == S_IFREG,
+                      unlinkat(parent, stageName, 0) == 0 else {
+                    throw CommitError.destinationPublishedCleanupFailed
+                }
+            }
         }
     }
 
@@ -752,8 +777,11 @@ enum PommeAgentFileTransaction {
         let descriptor = try openRegular(url, flags: O_RDONLY)
         defer { _ = Darwin.close(descriptor) }
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
-        let data = try handle.readToEnd() ?? Data()
-        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: PommeAgentProtocol.maximumFileChunkBytes), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     static func validatedRegularFile(_ url: URL) throws -> UInt64 {
@@ -790,7 +818,8 @@ enum PommeAgentFileTransaction {
 
     static func openRegular(_ url: URL, flags: Int32) throws -> Int32 {
         try withVerifiedParent(of: url) { parent, name in
-            let descriptor = openat(parent, name, flags | O_CLOEXEC | O_NOFOLLOW)
+            // A substituted FIFO must not block before fstat can reject it.
+            let descriptor = openat(parent, name, flags | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
             guard descriptor >= 0 else { throw PommeAgentProtocol.Error.invalidRequest }
             var info = stat()
             guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { _ = Darwin.close(descriptor); throw PommeAgentProtocol.Error.invalidRequest }
@@ -834,11 +863,11 @@ enum PommeAgentFileTransaction {
         var pieces = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         guard let leaf = pieces.last, !leaf.isEmpty, leaf != ".", leaf != ".." else { throw PommeAgentProtocol.Error.invalidRequest }
 
-        // macOS keeps these two compatibility aliases at the filesystem root.
+        // macOS keeps these compatibility aliases at the filesystem root.
         // Resolve only the fixed aliases lexically, then continue walking every
         // component through an fd with O_NOFOLLOW.  Arbitrary user-controlled
         // ancestor symlinks remain rejected by the descriptor-relative walk.
-        if let first = pieces.first, first == "var" || first == "tmp" {
+        if let first = pieces.first, first == "var" || first == "tmp" || first == "etc" {
             pieces.insert("private", at: 0)
         }
 
