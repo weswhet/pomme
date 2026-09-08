@@ -3,6 +3,82 @@ import Testing
 
 @Suite("Pomme security workflow engine", .serialized)
 struct PommeSecurityWorkflowTests {
+    @Test("Failed autologin intent resumes the same transaction and releases security ownership on success")
+    func retainedAutologinFailureResumes() async throws {
+        let harness = try WorkflowHarness()
+        defer { harness.cleanup() }
+        let lease = try VMBundleMutationLease.acquire(name: harness.vmName)
+        defer { lease.release() }
+        let credential = try PommeOwnerCredentialReference(
+            identity: harness.identity, account: "pomme", generatedUID: harness.generatedUID)
+        let owner = try PommeSecurityWorkflowOwnerRecord(
+            accountUsername: "pomme", ownerPreparation: .new, generatedUID: harness.generatedUID)
+        let progress = try harness.progress(
+            operation: .sipDisable, originalRunState: .stopped,
+            requestedFinalState: .stopped, owner: owner, credential: credential, lease: lease)
+        for phase: PommeSecurityWorkflowPhase in [
+            .credentialStored, .accountCreationIntent, .accountCreationVerified, .autologinIntent
+        ] { try progress.advance(phase) }
+        let retained = progress.journal
+        let state = PommeSecurityWorkflowState(
+            disabled: false, baselinePresent: false, reconciliationRequired: false, baselinePhase: nil)
+        let failed = WorkflowRecorder()
+        do {
+            _ = try await PommeSecurityWorkflow.run(
+                progress: progress,
+                dependencies: harness.dependencies(
+                    operation: .sipDisable, state: state, recorder: failed, failure: .prepareOwner))
+            Issue.record("Owner failure unexpectedly completed")
+        } catch {
+            #expect(error as? WorkflowDependencyFailure == .prepareOwner)
+        }
+        #expect(failed.events == [.observe, .prepareOwner, .restore(.stopped)])
+        #expect(try harness.store.load(lease: lease) == retained)
+        #expect(throws: PommeSecurityWorkflowJournalError.conflictingOperation) {
+            _ = try harness.progress(operation: .amfiEnable, originalRunState: .stopped,
+                                     requestedFinalState: .stopped, lease: lease)
+        }
+        #expect(throws: PommeSecurityWorkflowJournalError.immutableRequestMismatch) {
+            _ = try harness.progress(operation: .sipDisable, originalRunState: .stopped,
+                                     requestedFinalState: .previous, lease: lease)
+        }
+        // Reconstruct the public command's begin/run sequence from the durable store.
+        let resumed = try harness.progress(
+            operation: .sipDisable, originalRunState: .running(.normal),
+            requestedFinalState: .stopped, lease: lease)
+        #expect(resumed.journal == retained)
+        let completed = WorkflowRecorder()
+        let dependencies = PommeSecurityWorkflowDependencies(
+            observe: { completed.record(.observe); return state },
+            prepareOwner: { cursor in
+                completed.record(.prepareOwner)
+                #expect(cursor.journal.phase == .autologinIntent)
+                #expect(cursor.journal.owner == owner)
+                #expect(cursor.journal.credential == credential)
+                // Guest effects are injected; native reconciliation is covered separately.
+                try cursor.advance(.autologinVerified)
+                return try PommeGuestSecurityCredentials(username: "pomme", password: "offline-test-secret")
+            },
+            mutate: { _ in
+                completed.record(.mutate)
+                return .object(["verified": .bool(true), "sipDisabled": .bool(true)])
+            },
+            verifyNormalBoot: { completed.record(.verifyNormalBoot) },
+            restore: { completed.record(.restore($0)) }, log: { _ in })
+        _ = try await PommeSecurityWorkflow.run(progress: resumed, dependencies: dependencies)
+        #expect(completed.events == [.observe, .prepareOwner, .mutate, .verifyNormalBoot, .restore(.stopped)])
+        let receipt = try harness.store.load(lease: lease)
+        #expect(receipt.phase == .restorationComplete)
+        #expect(receipt.originalRunState == .stopped)
+        #expect(receipt.credential == credential)
+        #expect(receipt.owner == owner)
+        #expect(receipt.normalBootVerified)
+        // A later operation can begin only once the retained operation has completed.
+        let next = try harness.progress(operation: .amfiEnable, originalRunState: .stopped,
+                                        requestedFinalState: .stopped, lease: lease)
+        #expect(next.journal.operation == .amfiEnable)
+    }
+
     @Test("Fresh owner retries require current desktop proof before security mutation")
     func freshOwnerDesktopProofRetryPhases() {
         #expect(PommeSecurityWorkflow.freshOwnerDesktopProofRequired(for: .autologinVerified))

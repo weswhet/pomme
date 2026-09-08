@@ -147,6 +147,14 @@ expect_failure "removed policy selector is rejected" \
 
 expect_success "config help" "$runner" config --help
 expect_success "IPSW help" "$runner" ipsw --help
+for security_command in sip amfi; do
+  expect_success "$security_command help" "$runner" "$security_command" --help
+  if grep -qi 'resume' "$work/stdout" && grep -q -- '--final-state' "$work/stdout"; then
+    pass "$security_command help explains retained transaction resume"
+  else
+    fail "$security_command help explains retained transaction resume"
+  fi
+done
 expect_success "Screen Sharing help" "$runner" screen-sharing --help
 if grep -qi 'guest agent' "$work/stdout"; then
   pass "Screen Sharing help explains guest support requirement"
