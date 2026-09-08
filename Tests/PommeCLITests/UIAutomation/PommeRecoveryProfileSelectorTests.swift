@@ -26,6 +26,93 @@ struct PommeRecoveryProfileSelectorTests {
         #expect(input.route.keys == [.right, .right, .return, .return, .shiftCommandT])
     }
 
+    @Test("the experimental Sequoia Utilities branch completes without a language Return")
+    func experimentalSequoiaUtilitiesBranch() throws {
+        var input = try PommeRecoveryProfileSelector.inputForAttempt(
+            for: experimentalSequoiaEvidence
+        )
+        #expect(input.route == .experimentalMenusOptionalLanguage)
+
+        let trace = input.route.eventTrace
+        for event in trace.prefix(2) {
+            let key = try input.authorize(
+                preEventFrames: [event.preEventFrame, event.preEventFrame]
+            )
+            try input.commit(
+                .init(key: key, deliveredEventCount: 1),
+                postEventFrames: [event.postEventFrame, event.postEventFrame]
+            )
+        }
+
+        let optionsKey = try input.authorize(
+            preEventFrames: [.startupOptionsActivated, .startupOptionsActivated]
+        )
+        #expect(optionsKey == .return)
+        try input.commit(
+            .init(key: optionsKey, deliveredEventCount: 1),
+            postEventFrames: [.recoveryUtilities, .recoveryUtilities]
+        )
+
+        #expect(input.committedInputCount == 3)
+        for event in trace.dropFirst(4) {
+            let key = try input.authorize(
+                preEventFrames: [event.preEventFrame, event.preEventFrame]
+            )
+            try input.commit(
+                .init(key: key, deliveredEventCount: 1),
+                postEventFrames: [event.postEventFrame, event.postEventFrame]
+            )
+        }
+        #expect(input.isComplete)
+        #expect(input.committedInputCount == trace.count - 1)
+    }
+
+    @Test("the experimental Sequoia language path retains the recorded Return")
+    func experimentalSequoiaLanguagePathCompletes() throws {
+        var input = try PommeRecoveryProfileSelector.inputForAttempt(
+            for: experimentalSequoiaEvidence
+        )
+        for event in input.route.eventTrace {
+            let key = try input.authorize(
+                preEventFrames: [event.preEventFrame, event.preEventFrame]
+            )
+            try input.commit(
+                .init(key: key, deliveredEventCount: 1),
+                postEventFrames: [event.postEventFrame, event.postEventFrame]
+            )
+        }
+        #expect(input.isComplete)
+    }
+
+    @Test("the experimental Sequoia branch rejects mixed Utilities and language observations")
+    func experimentalSequoiaMixedPostFramesAreRejected() throws {
+        var input = PommeTahoeReviewedInput(route: .experimentalMenusOptionalLanguage)
+        let trace = input.route.eventTrace
+        for event in trace.prefix(2) {
+            let key = try input.authorize(
+                preEventFrames: [event.preEventFrame, event.preEventFrame]
+            )
+            try input.commit(
+                .init(key: key, deliveredEventCount: 1),
+                postEventFrames: [event.postEventFrame, event.postEventFrame]
+            )
+        }
+        let key = try input.authorize(
+            preEventFrames: [.startupOptionsActivated, .startupOptionsActivated]
+        )
+        #expect(throws: PommeTahoeReviewedInputError.unstablePostEventFrames) {
+            try input.commit(
+                .init(key: key, deliveredEventCount: 1),
+                postEventFrames: [.recoveryUtilities, .languageEnglish]
+            )
+        }
+        #expect(throws: PommeTahoeReviewedInputError.inputOutstanding) {
+            _ = try input.authorize(
+                preEventFrames: [.recoveryUtilities, .recoveryUtilities]
+            )
+        }
+    }
+
     @Test("only the live-qualified experimental identity selects direct Terminal")
     func routeSelectionKeepsOtherIdentitiesReviewed() throws {
         let reviewed = try PommeRecoveryProfileSelector.reviewedTahoeInput(for: tahoeEvidence)
@@ -257,6 +344,21 @@ struct PommeRecoveryProfileSelectorTests {
         let descriptor = try! PommeRecoveryProfileSelector.descriptor(
             version: "26.6.2",
             build: "25G84"
+        )
+        return .init(
+            build: .experimental(version: descriptor.version, build: descriptor.build),
+            locale: .english,
+            geometry: .pixels1280x800,
+            privateHostABI: .qualifiedRecoveryInputV1,
+            manifestHash: .experimentalProfile(descriptor.digest),
+            ownership: .verified
+        )
+    }
+
+    private var experimentalSequoiaEvidence: PommeRecoveryProfileEvidence {
+        let descriptor = try! PommeRecoveryProfileSelector.descriptor(
+            version: "15.6.1",
+            build: "24G90"
         )
         return .init(
             build: .experimental(version: descriptor.version, build: descriptor.build),

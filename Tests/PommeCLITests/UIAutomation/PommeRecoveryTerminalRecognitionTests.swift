@@ -103,6 +103,41 @@ struct PommeRecoveryTerminalRecognitionTests {
         #expect(recorder.requests[1].displaySize == SettingsAIOCRRecognizer.recoveryTerminalProofCrop.size)
     }
 
+    @Test("marker proof diagnostic retains the exact-marker and fresh-prompt gates")
+    func markerProofDiagnosticIsClosedAndStrict() {
+        let complete = RecoveryUIObservation(lines: terminalLines(
+            includeMarkerAndPrompt: true,
+            includeTerminalIdentity: true
+        )).terminalMarkerProofDiagnostic(marker)
+        #expect(complete == .init(
+            terminalWindow: true,
+            exactMarker: true,
+            freshPromptAfterMarker: true
+        ))
+        #expect(complete.isVerified)
+
+        let stalePrompt = RecoveryUIObservation(lines: [
+            SettingsAIOCRLine(
+                text: "Terminal", confidence: 1,
+                rect: CGRect(x: 24, y: 18, width: 72, height: 18)
+            ),
+            SettingsAIOCRLine(
+                text: "-bash-3.2#", confidence: 1,
+                rect: CGRect(x: 24, y: 48, width: 100, height: 18)
+            ),
+            SettingsAIOCRLine(
+                text: marker, confidence: 1,
+                rect: CGRect(x: 24, y: 100, width: 120, height: 18)
+            ),
+        ]).terminalMarkerProofDiagnostic(marker)
+        #expect(stalePrompt == .init(
+            terminalWindow: true,
+            exactMarker: true,
+            freshPromptAfterMarker: false
+        ))
+        #expect(!stalePrompt.isVerified)
+    }
+
     private func terminalLines(
         includeMarkerAndPrompt: Bool,
         includeTerminalIdentity: Bool

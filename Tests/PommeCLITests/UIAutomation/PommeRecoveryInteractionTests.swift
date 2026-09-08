@@ -328,6 +328,20 @@ struct PommeRecoveryInteractionTests {
     )
   }
 
+  @Test("Sequoia Recovery Utilities anchor classifies without language context")
+  func sequoiaUtilitiesAnchorClassifies() throws {
+    let image = try makeClassifierImage()
+    let lines = [ocrLine("Reinstall macOS Sequoia")]
+
+    #expect(
+      PommeRecoveryFrameClassifier.classify(
+        image: image,
+        lines: lines,
+        context: .unproven
+      ) == .recoveryUtilities
+    )
+  }
+
   @Test("launcher preflight permits only direct keyboard characters")
   func keyboardSafeLauncherPreflight() {
     #expect(PommeRecoveryTerminalCommand.isKeyboardSafe("/bin/echo POMME_READY"))

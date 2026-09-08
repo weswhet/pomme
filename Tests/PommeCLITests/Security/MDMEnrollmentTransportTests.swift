@@ -3,23 +3,26 @@ import Testing
 
 @Suite("MDM enrollment PommeAgent gate")
 struct MDMEnrollmentAgentGateTests {
-    @Test("A verified normal PommeAgent with protocol v1 and required capabilities is accepted")
-    func acceptsVerifiedAgent() throws {
-        let payload = try MDMEnrollmentAgentGate.verify(agent())
+    @Test("An authenticated persistent agent.describe receipt is accepted")
+    func acceptsPersistentAgentDescribeRole() throws {
+        let payload = try MDMEnrollmentAgentGate.verify(agent(role: "persistent"))
 
         #expect(payload["agent"] as? String == "PommeAgent")
-        #expect(payload["role"] as? String == MDMEnrollmentAgentDescription.normalRole)
+        #expect(payload["role"] as? String == "persistent")
         #expect(payload["version"] as? Int == 1)
-        #expect((payload["capabilities"] as? [String]) == ["maintenance", "mdm.enrollment"])
+        #expect((payload["capabilities"] as? [String]) == MDMEnrollmentAgentDescription.requiredCapabilities.sorted())
     }
 
-    @Test("Disconnected, non-normal, and incompatible agents fail before staging")
+    @Test("Status-projection and Recovery role spellings fail before staging")
     func rejectsConnectionRoleAndProtocol() {
         #expect(throws: RunnerError.self) {
             try MDMEnrollmentAgentGate.verify(agent(connected: false))
         }
         #expect(throws: RunnerError.self) {
             try MDMEnrollmentAgentGate.verify(agent(role: "recovery"))
+        }
+        #expect(throws: RunnerError.self) {
+            try MDMEnrollmentAgentGate.verify(agent(role: "normal"))
         }
         #expect(throws: RunnerError.self) {
             try MDMEnrollmentAgentGate.verify(agent(protocolVersion: 2))
@@ -73,7 +76,7 @@ struct MDMEnrollmentAgentGateTests {
     private func agent(
         connected: Bool = true,
         authenticated: Bool = true,
-        role: String = MDMEnrollmentAgentDescription.normalRole,
+        role: String = "persistent",
         protocolVersion: Int = MDMEnrollmentAgentDescription.protocolVersion,
         executableDigest: String? = String(repeating: "a", count: 64),
         capabilities: Set<String> = MDMEnrollmentAgentDescription.requiredCapabilities

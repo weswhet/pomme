@@ -137,6 +137,18 @@ expect_failure "removed policy selector is rejected" \
 
 expect_success "config help" "$runner" config --help
 expect_success "IPSW help" "$runner" ipsw --help
+expect_success "direct MDM help" "$runner" mdm --help
+if grep -q -- '--enrollment-mode' "$work/stdout" && grep -q -- '--profile' "$work/stdout" \
+  && ! grep -q 'SUBCOMMANDS:' "$work/stdout"; then
+  pass "MDM exposes direct enrollment options"
+else
+  fail "MDM exposes direct enrollment options"
+fi
+expect_failure "MDM requires profile" "$runner" mdm missing
+expect_failure "MDM rejects invalid mode" "$runner" mdm missing --profile missing --enrollment-mode invalid
+expect_failure "MDM rejects removed enroll syntax" "$runner" mdm enroll missing --profile missing
+expect_failure "MDM rejects removed approve syntax" "$runner" mdm approve missing --profile-identifier missing
+expect_failure "MDM rejects removed acknowledgement" "$runner" mdm missing --profile missing --acknowledge-synthetic-approval
 expect_failure "unknown root command is rejected" "$runner" definitely-not-a-command
 
 if [[ $failures -ne 0 ]]; then

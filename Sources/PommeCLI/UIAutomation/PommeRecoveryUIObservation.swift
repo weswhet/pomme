@@ -12,6 +12,19 @@ enum RecoveryUIScreenState: Equatable, Sendable {
   case unknown
 }
 
+/// A closed, redacted breakdown of a non-secret Recovery Terminal proof.
+/// It intentionally contains no recognized strings, screen geometry, image
+/// data, or marker value.
+struct RecoveryTerminalMarkerProofDiagnostic: Equatable, Sendable {
+  let terminalWindow: Bool
+  let exactMarker: Bool
+  let freshPromptAfterMarker: Bool
+
+  var isVerified: Bool {
+    terminalWindow && exactMarker && freshPromptAfterMarker
+  }
+}
+
 struct RecoveryUIObservation: Sendable {
   let lines: [SettingsAIOCRLine]
 
@@ -151,8 +164,21 @@ struct RecoveryUIObservation: Sendable {
   /// This prevents a stale prompt in terminal scrollback from being used as
   /// evidence for the current marker.
   func containsExactMarkerFollowedByShellPrompt(_ marker: String) -> Bool {
+    terminalMarkerProofDiagnostic(marker).freshPromptAfterMarker
+  }
+
+  /// Splits a marker proof into a fixed set of booleans for debug diagnostics.
+  /// This preserves the proof rule: Terminal must be recognized, the marker
+  /// must be exact, and a shell prompt must occur below that marker.
+  func terminalMarkerProofDiagnostic(_ marker: String) -> RecoveryTerminalMarkerProofDiagnostic {
     let expected = Self.normalize(marker)
-    guard !expected.isEmpty else { return false }
+    guard !expected.isEmpty else {
+      return .init(
+        terminalWindow: isLikelyTerminalWindow,
+        exactMarker: false,
+        freshPromptAfterMarker: false
+      )
+    }
     let compactExpected = expected.replacingOccurrences(of: " ", with: "")
     let markers = lines.filter {
       Self.isExactMarkerLine(
@@ -162,11 +188,16 @@ struct RecoveryUIObservation: Sendable {
       )
     }
     let prompts = lines.filter { Self.isShellPromptLine($0.text) }
-    return markers.contains { markerLine in
+    let hasFreshPromptAfterMarker = markers.contains { markerLine in
       prompts.contains { promptLine in
         promptLine.rect.minY >= markerLine.rect.maxY - 2
       }
     }
+    return .init(
+      terminalWindow: isLikelyTerminalWindow,
+      exactMarker: !markers.isEmpty,
+      freshPromptAfterMarker: hasFreshPromptAfterMarker
+    )
   }
 
   private var normalizedText: String {

@@ -61,6 +61,11 @@ actor PommeRecoveryObservationReadiness {
   private var classifications: [CacheKey: PommeRecoveryFrame] = [:]
   private var priorDigest: String?
   private var stableCaptureCount = 0
+  /// This remains nil until a stable pair reaches the closed classifier.
+  /// It distinguishes unstable/raw-frame timeouts from a classified
+  /// `.unknown` result without retaining OCR text, image data, or a
+  /// framebuffer digest beyond the active checkpoint.
+  private var lastObservedFrame: PommeRecoveryFrame?
   private var isObserving = false
 
   init(
@@ -85,6 +90,14 @@ actor PommeRecoveryObservationReadiness {
     classifications.removeAll(keepingCapacity: false)
     priorDigest = nil
     stableCaptureCount = 0
+    lastObservedFrame = nil
+  }
+
+  /// The most recent stable, classified Recovery frame for the active
+  /// checkpoint. A nil result means no stable frame reached classification;
+  /// `.unknown` means the closed classifier did run and rejected the frame.
+  func lastObservedFrameDiagnostic() -> PommeRecoveryFrame? {
+    lastObservedFrame
   }
 
   func waitForExpected(
@@ -109,12 +122,34 @@ actor PommeRecoveryObservationReadiness {
     context: PommeRecoveryFrameClassificationContext,
     timeout: TimeInterval
   ) async throws -> [PommeRecoveryFrame] {
+    try await waitForExpectedStablePair(
+      anyOf: [expected],
+      context: context,
+      timeout: timeout
+    )
+  }
+
+  /// Accepts only an explicitly enumerated set of closed states. Each state
+  /// still requires a fresh, stable two-frame observation before the caller
+  /// can decide whether to advance its single-receipt trace.
+  func waitForExpectedStablePair(
+    anyOf expectedFrames: [PommeRecoveryFrame],
+    context: PommeRecoveryFrameClassificationContext,
+    timeout: TimeInterval
+  ) async throws -> [PommeRecoveryFrame] {
     guard !isObserving else {
       throw PommeRecoveryVirtualizationPortError.unprovenFrame
     }
     isObserving = true
     defer { isObserving = false }
-    guard timeout.isFinite, timeout > 0 else {
+    let acceptedFrames = expectedFrames.reduce(into: [PommeRecoveryFrame]()) { unique, frame in
+      if !unique.contains(frame) { unique.append(frame) }
+    }
+    guard !acceptedFrames.isEmpty,
+          !acceptedFrames.contains(.unknown),
+          timeout.isFinite,
+          timeout > 0
+    else {
       throw PommeRecoveryVirtualizationPortError.invalidObservationTimeout
     }
     // Every call represents an independent fresh checkpoint. Require two
@@ -122,6 +157,7 @@ actor PommeRecoveryObservationReadiness {
     // at a previous checkpoint.
     priorDigest = nil
     stableCaptureCount = 0
+    lastObservedFrame = nil
     // Cooldown applies to unsuccessful retries within this checkpoint only.
     // A newly delivered input must be eligible for immediate OCR even when
     // the preceding checkpoint was classified moments ago.
@@ -131,7 +167,7 @@ actor PommeRecoveryObservationReadiness {
       try Task.checkCancellation()
       let remaining = deadline.timeIntervalSince(clock())
       guard remaining > 0 else {
-        throw PommeRecoveryVirtualizationPortError.observationTimedOut(expected)
+        throw PommeRecoveryVirtualizationPortError.observationTimedOut(acceptedFrames[0])
       }
 
       do {
@@ -149,11 +185,13 @@ actor PommeRecoveryObservationReadiness {
           context: context.cacheKey
         )
         if stableCaptureCount >= 2, let cached = classifications[key] {
-          if cached == expected { return [cached, cached] }
+          lastObservedFrame = cached
+          if acceptedFrames.contains(cached) { return [cached, cached] }
         } else if stableCaptureCount >= 2,
           lastClassificationAt.map({ clock().timeIntervalSince($0) >= 2 }) ?? true
         {
           let classified = try classify(captured, context)
+          lastObservedFrame = classified
           lastClassificationAt = clock()
           if classifications.count >= 128,
              let oldest = classifications.keys.first
@@ -161,7 +199,7 @@ actor PommeRecoveryObservationReadiness {
             classifications.removeValue(forKey: oldest)
           }
           classifications[key] = classified
-          if classified == expected { return [classified, classified] }
+          if acceptedFrames.contains(classified) { return [classified, classified] }
         }
       } catch let error as VirtualizationPrivateHeadlessError
         where VirtualizationPrivateHeadlessBackend.isTransientRecoveryCaptureFailure(error)
@@ -174,7 +212,7 @@ actor PommeRecoveryObservationReadiness {
 
       let afterCapture = deadline.timeIntervalSince(clock())
       guard afterCapture > 0 else {
-        throw PommeRecoveryVirtualizationPortError.observationTimedOut(expected)
+        throw PommeRecoveryVirtualizationPortError.observationTimedOut(acceptedFrames[0])
       }
       let sleepNanoseconds = min(
         pollNanoseconds,
@@ -198,6 +236,18 @@ private extension PommeRecoveryFrameClassificationContext {
 /// only long enough for Vision to reduce it to a closed frame state.  This
 /// type never writes a screenshot or exposes OCR text.
 actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
+  private struct NavigationExpectation {
+    let logicalFrames: [PommeRecoveryFrame]
+    let coarseFrames: [PommeRecoveryFrame]
+    let context: PommeRecoveryFrameClassificationContext
+
+    func logicalFrame(for coarseFrame: PommeRecoveryFrame) -> PommeRecoveryFrame? {
+      logicalFrames.first { logical in
+        PommeRecoveryVirtualizationKeyboardPort.coarseFrame(for: logical) == coarseFrame
+      }
+    }
+  }
+
   private enum Timing {
     // OCR-backed checkpoints wait for the guest to publish the new screen.
     // Only focus transitions whose labels are intentionally inferred from the
@@ -217,7 +267,8 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
   private let log: @Sendable (String) -> Void
   private var navigationRoute: PommeRecoveryNavigationRoute = .reviewedMenus
   private var hasObservedOrDelivered = false
-  private var deliveredKeys: [PommeRecoveryVirtualKey] = []
+  private var navigationEventIndex = 0
+  private var pendingPostEvent: PommeRecoveryNavigationEvent?
 
   init(
     backend: VirtualizationPrivateHeadlessBackend,
@@ -312,32 +363,62 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
 
   func nextRecoveryFramePair() async throws -> [PommeRecoveryFrame] {
     hasObservedOrDelivered = true
-    guard let expected = expectedCoarseFrame else {
+    guard let expectation = navigationExpectation else {
       throw PommeRecoveryVirtualizationPortError.unprovenFrame
     }
-    let context = classificationContext
-    let coarsePair = try await readiness.waitForExpectedStablePair(
-      expected,
-      context: context,
-      timeout: timeout
-    )
-    return try coarsePair.map { try frameFromNavigationTrace(coarse: $0) }
+    do {
+      let coarsePair = try await readiness.waitForExpectedStablePair(
+        anyOf: expectation.coarseFrames,
+        context: expectation.context,
+        timeout: timeout
+      )
+      guard let observedCoarse = coarsePair.first,
+            let logicalFrame = expectation.logicalFrame(for: observedCoarse)
+      else {
+        throw PommeRecoveryVirtualizationPortError.unprovenFrame
+      }
+      if let pendingPostEvent {
+        guard let nextIndex = pendingPostEvent.nextEventIndex(
+          after: logicalFrame,
+          defaultIndex: navigationEventIndex + 1
+        ), nextIndex <= navigationRoute.eventTrace.count
+        else { throw PommeRecoveryVirtualizationPortError.unprovenFrame }
+        navigationEventIndex = nextIndex
+        self.pendingPostEvent = nil
+      }
+      return [logicalFrame, logicalFrame]
+    } catch let error as PommeRecoveryVirtualizationPortError {
+      if case .observationTimedOut = error {
+        let lastObserved = await readiness.lastObservedFrameDiagnostic()
+        log(
+          "Recovery navigation observation timed out "
+            + "[expected=\(Self.diagnosticFrameNames(expectation.logicalFrames)), "
+            + "lastObserved=\(Self.diagnosticFrameName(lastObserved))]."
+        )
+      }
+      throw error
+    }
   }
 
   func deliverRecoveryKey(
     _ key: PommeRecoveryVirtualKey
   ) async throws -> PommeRecoveryDurableInputReceipt {
     hasObservedOrDelivered = true
-    guard let expectedKey, key == expectedKey else {
+    guard pendingPostEvent == nil,
+          let event = currentNavigationEvent,
+          key == event.key
+    else {
       throw PommeRecoveryVirtualizationPortError.unexpectedKey
     }
     let inputStart = PommeRecoveryPerformanceMetrics.now()
     defer { metrics.record(.input, since: inputStart) }
     _ = try await backend.awaitInputReadiness(timeout: timeout)
     _ = try await backend.sendKey(name: Self.backendKeyName(for: key), timeout: timeout)
-    let coarseFrameBeforeDelivery = expectedCoarseFrame
-    deliveredKeys.append(key)
-    let coarseFrameAfterDelivery = expectedCoarseFrame
+    let coarseFrameBeforeDelivery = Self.coarseFrame(for: event.preEventFrame)
+    pendingPostEvent = event
+    let coarseFrameAfterDelivery = event.acceptedPostEventFrames
+      .compactMap(Self.coarseFrame(for:))
+      .first
     let settleNanoseconds = coarseFrameBeforeDelivery == coarseFrameAfterDelivery
       ? Timing.inferredFocusSettleNanoseconds
       : 0
@@ -371,7 +452,14 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
       throw PommeRecoveryVirtualizationPortError.unsafeMarker
     }
     for attempt in 0..<Timing.markerAttempts {
-      if try await recognizesTerminalMarker(marker) { return true }
+      let proof = try await recognizesTerminalMarker(marker)
+      log(
+        "Recovery Terminal marker proof "
+          + "[attempt=\(attempt + 1), terminalWindow=\(proof.terminalWindow), "
+          + "exactMarker=\(proof.exactMarker), "
+          + "freshPromptAfterMarker=\(proof.freshPromptAfterMarker)]."
+      )
+      if proof.isVerified { return true }
       if attempt + 1 < Timing.markerAttempts {
         try await sleep(Timing.markerRetryNanoseconds)
       }
@@ -385,7 +473,9 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     try await sleep(Timing.terminalCommandSettleNanoseconds)
   }
 
-  private func recognizesTerminalMarker(_ marker: String) async throws -> Bool {
+  private func recognizesTerminalMarker(
+    _ marker: String
+  ) async throws -> RecoveryTerminalMarkerProofDiagnostic {
     let captureStart = PommeRecoveryPerformanceMetrics.now()
     let image: CGImage
     do {
@@ -401,8 +491,7 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
       marker: marker
     )
     let observation = RecoveryUIObservation(lines: lines)
-    return observation.isLikelyTerminalWindow
-      && observation.containsExactMarkerFollowedByShellPrompt(marker)
+    return observation.terminalMarkerProofDiagnostic(marker)
   }
 
   private func sleep(_ nanoseconds: UInt64) async throws {
@@ -411,47 +500,27 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     try await Task.sleep(nanoseconds: nanoseconds)
   }
 
-  private var expectedKey: PommeRecoveryVirtualKey? {
-    guard deliveredKeysMatchRoutePrefix,
-      deliveredKeys.count < navigationRoute.eventTrace.count
-    else { return nil }
-    return navigationRoute.eventTrace[deliveredKeys.count].key
+  private var currentNavigationEvent: PommeRecoveryNavigationEvent? {
+    guard navigationEventIndex < navigationRoute.eventTrace.count else { return nil }
+    return navigationRoute.eventTrace[navigationEventIndex]
   }
 
-  private var expectedCoarseFrame: PommeRecoveryFrame? {
-    guard let logicalFrame = expectedLogicalFrame else { return nil }
-    return Self.coarseFrame(for: logicalFrame)
-  }
-
-  private var expectedLogicalFrame: PommeRecoveryFrame? {
-    guard deliveredKeysMatchRoutePrefix else { return nil }
-    let events = navigationRoute.eventTrace
-    if deliveredKeys.count < events.count {
-      return events[deliveredKeys.count].preEventFrame
+  private var navigationExpectation: NavigationExpectation? {
+    let logicalFrames: [PommeRecoveryFrame]
+    if let pendingPostEvent {
+      logicalFrames = pendingPostEvent.acceptedPostEventFrames
+    } else if let event = currentNavigationEvent {
+      logicalFrames = [event.preEventFrame]
+    } else {
+      return nil
     }
-    guard deliveredKeys.count == events.count else { return nil }
-    return events.last?.postEventFrame
-  }
-
-  private var classificationContext: PommeRecoveryFrameClassificationContext {
-    expectedLogicalFrame == .languageEnglish ? .optionsActivated : .unproven
-  }
-
-  private var deliveredKeysMatchRoutePrefix: Bool {
-    let routeKeys = navigationRoute.keys
-    guard deliveredKeys.count <= routeKeys.count else { return false }
-    return routeKeys.prefix(deliveredKeys.count).elementsEqual(deliveredKeys)
-  }
-
-  private func frameFromNavigationTrace(
-    coarse: PommeRecoveryFrame
-  ) throws -> PommeRecoveryFrame {
-    guard let logicalFrame = expectedLogicalFrame,
-      coarse == Self.coarseFrame(for: logicalFrame)
-    else {
-      throw PommeRecoveryVirtualizationPortError.unprovenFrame
-    }
-    return logicalFrame
+    let coarseFrames = Self.uniqueFrames(logicalFrames.compactMap { Self.coarseFrame(for: $0) })
+    guard !coarseFrames.isEmpty else { return nil }
+    return .init(
+      logicalFrames: logicalFrames,
+      coarseFrames: coarseFrames,
+      context: logicalFrames.contains(.languageEnglish) ? .optionsActivated : .unproven
+    )
   }
 
   private static func coarseFrame(for logicalFrame: PommeRecoveryFrame) -> PommeRecoveryFrame? {
@@ -478,6 +547,38 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     case .return: "return"
     case .shiftCommandT: "shift-command-t"
     }
+  }
+
+  private static func uniqueFrames(_ frames: [PommeRecoveryFrame]) -> [PommeRecoveryFrame] {
+    frames.reduce(into: []) { unique, frame in
+      if !unique.contains(frame) { unique.append(frame) }
+    }
+  }
+
+  /// Keep Recovery diagnostics constrained to the fixed frame vocabulary.
+  /// In particular, do not log OCR output, frame hashes, pixels, command
+  /// text, or any state that could occur after launcher submission.
+  private static func diagnosticFrameName(_ frame: PommeRecoveryFrame?) -> String {
+    guard let frame else { return "none" }
+    return switch frame {
+    case .startupOptions: "startupOptions"
+    case .startupIntermediate: "startupIntermediate"
+    case .startupOptionsActivated: "startupOptionsActivated"
+    case .languageEnglish: "languageEnglish"
+    case .recoveryUtilities: "recoveryUtilities"
+    case .applicationMenu: "applicationMenu"
+    case .recoveryMenu: "recoveryMenu"
+    case .fileMenu: "fileMenu"
+    case .editMenu: "editMenu"
+    case .utilitiesMenu: "utilitiesMenu"
+    case .terminalMenuItem: "terminalMenuItem"
+    case .terminal: "terminal"
+    case .unknown: "unknown"
+    }
+  }
+
+  private static func diagnosticFrameNames(_ frames: [PommeRecoveryFrame]) -> String {
+    frames.map { diagnosticFrameName($0) }.joined(separator: "|")
   }
 }
 

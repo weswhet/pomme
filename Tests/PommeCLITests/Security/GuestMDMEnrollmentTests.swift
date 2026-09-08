@@ -4,10 +4,55 @@ import Testing
 
 @Suite("Guest MDM enrollment")
 struct GuestMDMEnrollmentTests {
+    @Test("Missing private keychain uses the explicit guest System keychain")
+    func missingPrivateKeychainSelectsSystem() throws {
+        var paths: [String] = []
+        let selected = try GuestMDMIdentityKeychain.select(operations: GuestMDMIdentityKeychainOperations<String>(
+            open: { path in
+                paths.append(path)
+                return path == GuestMDMIdentityKeychain.privatePath ? (errSecNoSuchKeychain, nil) : (errSecSuccess, "system")
+            },
+            status: { _ in (errSecSuccess, kSecUnlockStateStatus | kSecReadPermStatus) }
+        ))
+        #expect(selected == "system")
+        #expect(paths == [GuestMDMIdentityKeychain.privatePath, GuestMDMIdentityKeychain.systemPath])
+    }
+
+    @Test("Sequoia reports missing private keychain during status and defers System access to securityd")
+    func deferredMissingKeychain() throws {
+        var paths: [String] = []
+        let selected = try GuestMDMIdentityKeychain.select(operations: GuestMDMIdentityKeychainOperations<String>(
+            open: { path in paths.append(path); return (errSecSuccess, path) },
+            status: { path in path == GuestMDMIdentityKeychain.privatePath
+                ? (errSecNoSuchKeychain, 0) : (errSecSuccess, kSecReadPermStatus) }
+        ))
+        #expect(selected == GuestMDMIdentityKeychain.systemPath)
+        #expect(paths == [GuestMDMIdentityKeychain.privatePath, GuestMDMIdentityKeychain.systemPath])
+    }
+
+    @Test("Existing private keychain errors never fall back and locked keychains are rejected")
+    func privateKeychainFailsClosed() {
+        for failure in [errSecAuthFailed, errSecInteractionNotAllowed] {
+            var paths: [String] = []
+            #expect(throws: GuestInternalError.self) {
+                _ = try GuestMDMIdentityKeychain.select(operations: GuestMDMIdentityKeychainOperations<String>(
+                    open: { path in paths.append(path); return (failure, nil) },
+                    status: { _ in (errSecSuccess, kSecUnlockStateStatus) }
+                ))
+            }
+            #expect(paths == [GuestMDMIdentityKeychain.privatePath])
+        }
+        #expect(throws: GuestInternalError.self) {
+            _ = try GuestMDMIdentityKeychain.select(operations: GuestMDMIdentityKeychainOperations<String>(
+                open: { _ in (errSecSuccess, "private") },
+                status: { _ in (errSecSuccess, 0) }
+            ))
+        }
+    }
+
     @Test("Two-phase XPC success extracts response fields")
     func success() throws {
         var commands: [String] = []
-        var cleanupCount = 0
         let enrollment = GuestMDMEnrollment(requestTimeout: 1, request: { request, _ in
             commands.append(request["Command"] as? String ?? "")
             if request["Command"] as? String == "InstallMDMv1Profile" {
@@ -17,14 +62,209 @@ struct GuestMDMEnrollmentTests {
                 "__Success__": true,
                 "Response": ["ProfileIdentifier": "com.example.mdm", "ServerSupportsPerUserConnections": true]
             ]
-        }, profileArchiveOverride: Data([1, 2, 3]), cleanupImportedIdentityOverride: {
-            cleanupCount += 1
-        })
-        let result = try enrollment.enroll(profilePath: "\(GuestMDMEnrollment.stagingDirectory)/profile.mobileconfig")
+        }, profileArchiveOverride: Data([1, 2, 3]))
+        let result = try enrollment.enroll(
+            profilePath: "\(GuestMDMEnrollment.stagingDirectory)/profile.mobileconfig",
+            mode: .unapproved
+        )
         #expect(result.exitCode == 0)
         #expect(commands == ["InstallMDMv1Profile", "InstallProfile"])
         #expect(result.payload["profileIdentifier"] as? String == "com.example.mdm")
-        #expect(cleanupCount == 0)
+    }
+
+    @Test("Supervised enrollment approves the installed profile after the install reply")
+    func supervisedEnrollmentApprovesAfterInstall() throws {
+        var commands: [String] = []
+        let enrollment = GuestMDMEnrollment(
+            requestTimeout: 1,
+            request: { request, _ in
+                let command = request["Command"] as? String ?? ""
+                commands.append(command)
+                switch command {
+                case "InstallMDMv1Profile":
+                    return ["__Success__": true, "Response": ["UpdatedMDMProfileArchive": Data([4, 5, 6])]]
+                case "InstallProfile":
+                    return ["__Success__": true, "Response": ["ProfileIdentifier": "com.example.mdm"]]
+                case "FlagAsUserIntended":
+                    return ["__Success__": true]
+                default:
+                    return ["__Success__": false]
+                }
+            },
+            profileArchiveOverride: Data([1, 2, 3])
+        )
+
+        let result = try enrollment.enroll(
+            profilePath: "\(GuestMDMEnrollment.stagingDirectory)/profile.mobileconfig",
+            mode: .supervised
+        )
+        #expect(result.exitCode == 0)
+        #expect(commands == ["InstallMDMv1Profile", "InstallProfile", "FlagAsUserIntended"])
+        #expect(result.payload["approvalCommand"] as? String == "FlagAsUserIntended")
+        #expect(result.payload["technicalUserApproval"] as? Bool == true)
+    }
+
+    @Test("Fresh supervised install observes the exact profile before approval")
+    func freshSupervisedInstallObservesBeforeApproval() throws {
+        let expected = Self.profileIdentity()
+        var commands: [String] = []
+        var observations = 0
+        let enrollment = GuestMDMEnrollment(
+            request: { request, _ in
+                let command = request["Command"] as? String ?? ""
+                commands.append(command)
+                switch command {
+                case "InstallMDMv1Profile":
+                    return ["__Success__": true, "Response": ["UpdatedMDMProfileArchive": Data([4, 5, 6])]]
+                case "InstallProfile":
+                    return ["__Success__": true, "Response": ["ProfileIdentifier": expected.identifier]]
+                case "FlagAsUserIntended":
+                    #expect(observations == 2)
+                    return ["__Success__": true]
+                default:
+                    return ["__Success__": false]
+                }
+            },
+            profileArchiveOverride: Data([1, 2, 3]),
+            profileIdentityOverride: expected,
+            installedProfileObservation: { identity, _ in
+                observations += 1
+                #expect(identity == expected)
+                return observations == 1 ? nil : Self.installedIdentity(matching: expected)
+            }
+        )
+
+        let result = try enrollment.enroll(
+            profilePath: "\(GuestMDMEnrollment.stagingDirectory)/profile.mobileconfig",
+            mode: .supervised
+        )
+        #expect(commands == ["InstallMDMv1Profile", "InstallProfile", "FlagAsUserIntended"])
+        #expect(observations == 2)
+        #expect(result.payload["approvalCommand"] as? String == "FlagAsUserIntended")
+    }
+
+    @Test("Matching unapproved enrollment reuses the installed profile without XPC")
+    func matchingUnapprovedEnrollmentReusesInstalledProfile() throws {
+        let expected = Self.profileIdentity()
+        var requestCount = 0
+        var observations = 0
+        let enrollment = GuestMDMEnrollment(
+            request: { _, _ in
+                requestCount += 1
+                return ["__Success__": false]
+            },
+            profileArchiveOverride: Data([1, 2, 3]),
+            profileIdentityOverride: expected,
+            installedProfileObservation: { identity, _ in
+                observations += 1
+                #expect(identity == expected)
+                return Self.installedIdentity(matching: expected)
+            }
+        )
+
+        let result = try enrollment.enroll(
+            profilePath: "\(GuestMDMEnrollment.stagingDirectory)/profile.mobileconfig",
+            mode: .unapproved
+        )
+        #expect(requestCount == 0)
+        #expect(observations == 1)
+        #expect(result.payload["reused"] as? Bool == true)
+        #expect(result.payload["profileIdentifier"] as? String == expected.identifier)
+    }
+
+    @Test("Matching supervised upgrade emits only FlagAsUserIntended")
+    func matchingSupervisedUpgradeOnlyApprovesInstalledProfile() throws {
+        let expected = Self.profileIdentity()
+        var commands: [String] = []
+        var observations = 0
+        let enrollment = GuestMDMEnrollment(
+            request: { request, _ in
+                let command = request["Command"] as? String ?? ""
+                commands.append(command)
+                return ["__Success__": command == "FlagAsUserIntended"]
+            },
+            profileArchiveOverride: Data([1, 2, 3]),
+            profileIdentityOverride: expected,
+            installedProfileObservation: { identity, _ in
+                observations += 1
+                #expect(identity == expected)
+                return Self.installedIdentity(matching: expected)
+            }
+        )
+
+        let result = try enrollment.enroll(
+            profilePath: "\(GuestMDMEnrollment.stagingDirectory)/profile.mobileconfig",
+            mode: .supervised
+        )
+        #expect(commands == ["FlagAsUserIntended"])
+        #expect(observations == 1)
+        #expect(result.payload["reused"] as? Bool == true)
+        #expect(result.payload["approvalCommand"] as? String == "FlagAsUserIntended")
+    }
+
+    @Test("Conflicting installed identity rejects before XPC or identity import")
+    func conflictingInstalledIdentityHasNoSideEffects() {
+        let expected = Self.profileIdentity()
+        var requestCount = 0
+        var importAttempts = 0
+        let enrollment = GuestMDMEnrollment(
+            request: { _, _ in
+                requestCount += 1
+                return ["__Success__": true]
+            },
+            profileArchiveOverride: Data([1, 2, 3]),
+            profileIdentityOverride: expected,
+            installedProfileObservation: { _, _ in
+                Self.installedIdentity(
+                    identifier: "org.example.conflict",
+                    uuid: expected.uuid,
+                    serverURL: expected.serverURL
+                )
+            },
+            identityImportObserver: {
+                importAttempts += 1
+            }
+        )
+
+        #expect(throws: GuestInternalError.self) {
+            try enrollment.enroll(
+                profilePath: "\(GuestMDMEnrollment.stagingDirectory)/profile.mobileconfig",
+                mode: .unapproved
+            )
+        }
+        #expect(requestCount == 0)
+        #expect(importAttempts == 0)
+    }
+
+    @Test("Setup rejection never advances to final install")
+    func setupRejectionDoesNotInstall() {
+        var commands: [String] = []
+        let enrollment = GuestMDMEnrollment(request: { request, _ in
+            commands.append(request["Command"] as? String ?? "")
+            return ["__Success__": false, "Response": ["UpdatedMDMProfileArchive": Data([4])]]
+        }, profileArchiveOverride: Data([1]))
+        #expect(throws: GuestInternalError.self) {
+            try enrollment.enroll(profilePath: "\(GuestMDMEnrollment.stagingDirectory)/profile.mobileconfig")
+        }
+        #expect(commands == ["InstallMDMv1Profile"])
+    }
+
+    @Test("Lost final install reply reports unknown outcome without retrying")
+    func lostFinalReplyRetainsIdentity() {
+        let enrollment = GuestMDMEnrollment(request: { request, _ in
+            if request["Command"] as? String == "InstallMDMv1Profile" {
+                return ["__Success__": true, "Response": ["UpdatedMDMProfileArchive": Data([4])]]
+            }
+            throw GuestInternalError.timedOut
+        }, profileArchiveOverride: Data([1]))
+        do {
+            _ = try enrollment.enroll(profilePath: "\(GuestMDMEnrollment.stagingDirectory)/profile.mobileconfig")
+            Issue.record("Expected unknown enrollment outcome")
+        } catch GuestInternalError.mdmOutcomeUnknown {
+            // Expected: daemon state is not safe to undo or retry.
+        } catch {
+            Issue.record("Expected the closed unknown-outcome error")
+        }
     }
 
     @Test("User-intent approval sends the private daemon command explicitly")
@@ -293,34 +533,6 @@ struct GuestMDMEnrollmentTests {
         }
     }
 
-    @Test("A failed enrollment removes only its newly imported identity")
-    func failedEnrollmentCleanup() {
-        var cleanupCount = 0
-        let enrollment = GuestMDMEnrollment(
-            requestTimeout: 1,
-            request: { _, _ in throw GuestInternalError.mdm("injected install failure") },
-            profileArchiveOverride: Data([1]),
-            cleanupImportedIdentityOverride: { cleanupCount += 1 }
-        )
-        #expect(throws: GuestInternalError.self) {
-            try enrollment.enroll(profilePath: "\(GuestMDMEnrollment.stagingDirectory)/profile.mobileconfig")
-        }
-        #expect(cleanupCount == 1)
-    }
-
-    @Test("Identity cleanup failure is reported with the enrollment failure")
-    func cleanupFailure() {
-        let enrollment = GuestMDMEnrollment(
-            requestTimeout: 1,
-            request: { _, _ in throw GuestInternalError.mdm("injected install failure") },
-            profileArchiveOverride: Data([1]),
-            cleanupImportedIdentityOverride: { throw CleanupFailure() }
-        )
-        #expect(throws: GuestInternalError.self) {
-            try enrollment.enroll(profilePath: "\(GuestMDMEnrollment.stagingDirectory)/profile.mobileconfig")
-        }
-    }
-
     @Test("State restoration runs after successful enrollment work")
     func stateRestorationOnSuccess() throws {
         let restorer = RecordingRestorer()
@@ -372,6 +584,33 @@ struct GuestMDMEnrollmentTests {
 
     private struct CleanupFailure: Error {}
     private struct EnrollmentFailure: Error {}
+
+    private static func profileIdentity() -> MDMEnrollmentProfileIdentity {
+        MDMEnrollmentProfileIdentity(
+            identifier: "org.example.mdm",
+            uuid: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+            serverURL: "https://mdm.example.test/server",
+            digest: String(repeating: "a", count: 64)
+        )
+    }
+
+    private static func installedIdentity(
+        matching expected: MDMEnrollmentProfileIdentity
+    ) -> MDMInstalledProfileIdentity {
+        installedIdentity(
+            identifier: expected.identifier,
+            uuid: expected.uuid,
+            serverURL: expected.serverURL
+        )
+    }
+
+    private static func installedIdentity(
+        identifier: String,
+        uuid: UUID,
+        serverURL: String
+    ) -> MDMInstalledProfileIdentity {
+        MDMInstalledProfileIdentity(identifier: identifier, uuid: uuid, serverURL: serverURL)
+    }
 
     private final class RecordingRestorer: @unchecked Sendable, MDMEnrollmentStateRestoring {
         var events: [String] = []
