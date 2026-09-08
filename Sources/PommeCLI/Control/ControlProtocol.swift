@@ -194,8 +194,26 @@ final class PommeControlStreamSession: @unchecked Sendable {
     /// uses this after forwarding a password prompt so a silent control client
     /// cannot hold the guest process beyond the runner's cleanup deadline.
     func receive(timeout: TimeInterval) throws -> PommeControlStreamFrame {
-        try waitForReadable(timeout: timeout)
-        return try receive()
+        guard let event = try receiveEventIfAvailable(timeout: timeout) else {
+            throw RunnerError.invalidControlResponse("Pomme control stream receive timed out.")
+        }
+        switch event {
+        case .stream(let frame): return frame
+        case .response:
+            throw RunnerError.invalidControlResponse("Pomme control stream reached its terminal response.")
+        }
+    }
+
+    /// Returns no frame when the bounded wait elapsed.  Long-lived terminal
+    /// relays use this to continue draining their guest process while the
+    /// caller has not typed another byte.
+    func receiveIfAvailable(timeout: TimeInterval) throws -> PommeControlStreamFrame? {
+        guard let event = try receiveEventIfAvailable(timeout: timeout) else { return nil }
+        switch event {
+        case .stream(let frame): return frame
+        case .response:
+            throw RunnerError.invalidControlResponse("Pomme control stream reached its terminal response.")
+        }
     }
 
     func send(stream: PommeControlStreamFrame.Stream, data: Data? = nil, payload: JSONValue? = nil, eof: Bool? = nil) throws {
@@ -257,29 +275,50 @@ final class PommeControlStreamSession: @unchecked Sendable {
     }
 
     func receiveEvent(timeout: TimeInterval) throws -> PommeControlStreamEvent {
-        try waitForReadable(timeout: timeout)
-        return try receiveEvent()
+        guard let event = try receiveEventIfAvailable(timeout: timeout) else {
+            throw RunnerError.invalidControlResponse("Pomme control stream receive timed out.")
+        }
+        return event
     }
 
-    private func waitForReadable(timeout: TimeInterval) throws {
+    /// Returns no event when the bounded wait elapsed without changing stream
+    /// state.  This keeps a PTY bidirectional: host input can be idle while
+    /// guest output and status continue to make progress.
+    func receiveEventIfAvailable(timeout: TimeInterval) throws -> PommeControlStreamEvent? {
         guard timeout.isFinite, timeout > 0 else {
             throw RunnerError.invalidControlResponse("Pomme control stream timeout is invalid.")
         }
-        let milliseconds = Int32(
-            min(Double(Int32.max), max(1, (timeout * 1_000).rounded(.up)))
-        )
-        var descriptor = pollfd(
-            fd: fileDescriptor,
-            events: Int16(POLLIN),
-            revents: 0
-        )
-        while true {
-            let result = Darwin.poll(&descriptor, 1, milliseconds)
-            if result > 0 { return }
-            if result == 0 {
-                throw RunnerError.invalidControlResponse("Pomme control stream receive timed out.")
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        return try receiveLock.withLock { state in
+            guard state.finalResponse == nil else {
+                throw RunnerError.invalidControlResponse("Pomme control stream was already terminated.")
             }
-            if errno != EINTR { try throwPOSIX("poll") }
+            let data: Data?
+            do {
+                data = try reader.withLock { reader in
+                    if reader.hasCompleteFrame {
+                        return try reader.readFrame(from: fileDescriptor)
+                    }
+                    return try reader.readFrame(from: fileDescriptor, deadline: deadline)
+                }
+            } catch let error as POSIXError where error.code == .ETIMEDOUT {
+                // A partial JSONL frame stays buffered inside FrameReader and
+                // remains subject to the caller's next bounded deadline.
+                return nil
+            }
+            guard let data else { return nil }
+            switch ControlWireCodec.envelopeType(in: data) {
+            case "stream":
+                let frame = try ControlWireCodec.decodeStreamFrame(data)
+                try inbound.withLock { try $0.accept(frame) }
+                return .stream(frame)
+            case "response":
+                let response = try ControlWireCodec.decodeResponse(data, matching: id)
+                state.finalResponse = response
+                return .response(response)
+            default:
+                throw RunnerError.invalidControlResponse("Expected a Pomme control stream or response envelope.")
+            }
         }
     }
 

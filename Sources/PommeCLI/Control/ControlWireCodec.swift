@@ -75,6 +75,12 @@ enum ControlWireCodec {
     struct FrameReader: Sendable {
         private var buffered = Data()
 
+        /// A complete buffered frame must be consumed before polling again:
+        /// a previous socket read may have brought in more than one JSONL
+        /// envelope, leaving the descriptor non-readable despite a frame
+        /// already being available.
+        var hasCompleteFrame: Bool { buffered.contains(0x0A) }
+
         mutating func readFrame(from fileDescriptor: Int32, deadline: TimeInterval? = nil) throws -> Data {
             while true {
                 if let newline = buffered.firstIndex(of: 0x0A) {

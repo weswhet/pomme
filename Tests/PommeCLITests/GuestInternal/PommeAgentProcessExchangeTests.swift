@@ -2,7 +2,11 @@ import Darwin
 import Foundation
 import Testing
 
-@Suite("Pomme agent process exchanges")
+/// Each test starts a real daemon whose descriptor read blocks synchronously
+/// between exchanges. Serialize the suite so concurrent tests cannot occupy
+/// every cooperative worker thread; this suite does not assert daemon
+/// cross-test concurrency.
+@Suite("Pomme agent process exchanges", .serialized)
 struct PommeAgentProcessExchangeTests: Sendable {
     @Test("Successful process exchanges put bounded output before the response")
     func processOutputPrecedesResponse() async throws {
@@ -142,6 +146,145 @@ struct PommeAgentProcessExchangeTests: Sendable {
             #expect(completed)
             #expect(frames.contains { $0.frame.stream == .stdout && $0.frame.data == Data("stream-out".utf8) })
             #expect(frames.contains { $0.frame.stream == .stderr && $0.frame.data == Data("stream-err".utf8) })
+        }
+    }
+
+    @Test("PTY exchanges retain input, large terminal output, and nonzero exit status")
+    func ptyOutputAndInputRemainCorrelated() async throws {
+        try await withDaemon { context in
+            try await authenticate(using: context.wire)
+            let started = try await exchange(.request(
+                operation: "process.start",
+                payload: .object([
+                    "path": .string("/bin/sh"),
+                    "arguments": .array([
+                        .string("-c"),
+                        .string("read line; dd if=/dev/zero bs=65536 count=2 2>/dev/null; printf 'pty-marker:%s' \"$line\"; exit 7")
+                    ]),
+                    "pty": .bool(true)
+                ])
+            ), using: context.wire)
+            let jobText = try #require(started.response.result?.objectValue?["jobID"]?.stringValue)
+            let jobID = try #require(UUID(uuidString: jobText))
+
+            let inputRequestID = UUID()
+            let input = try PommeAgentJobStreamFrame(
+                jobID: jobID,
+                frame: .init(requestID: inputRequestID, stream: .stdin, data: Data("value\n".utf8))
+            ).envelope()
+            let acknowledged = try await exchange(input, using: context.wire)
+            #expect(acknowledged.response.ok == true)
+            #expect(acknowledged.response.requestID == inputRequestID)
+
+            var frames = started.streams + acknowledged.streams
+            var terminal: PommeAgentProtocol.Envelope?
+            let clock = ContinuousClock()
+            let startedAt = clock.now
+            let deadline = startedAt.advanced(by: .seconds(15))
+            var polls = 0
+            while !frames.contains(where: { $0.frame.stream == .exit }), clock.now < deadline {
+                let status = PommeAgentProtocol.Envelope.request(
+                    operation: "process.status",
+                    payload: .object(["jobID": .string(jobID.uuidString.lowercased())])
+                )
+                let remaining = deadline - clock.now
+                let remainingSeconds = Double(remaining.components.seconds)
+                    + Double(remaining.components.attoseconds) / 1_000_000_000_000_000_000
+                let result = try await exchange(
+                    status,
+                    using: context.wire,
+                    timeout: min(remainingSeconds, 1)
+                )
+                polls += 1
+                frames += result.streams
+                terminal = result.response
+                if !frames.contains(where: { $0.frame.stream == .exit }) {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+            }
+
+            var stdout = Data()
+            for frame in frames where frame.frame.stream == .stdout {
+                #expect((frame.frame.data?.count ?? 0) <= PommeAgentProtocol.maximumStreamChunkBytes)
+                stdout.append(frame.frame.data ?? Data())
+            }
+            let marker = Data("pty-marker:value".utf8)
+            let diagnostics = "polls=\(polls), stdoutBytes=\(stdout.count), elapsed=\(clock.now - startedAt)"
+            #expect(frames.allSatisfy { $0.jobID == jobID })
+            #expect(frames.contains { $0.frame.stream == .exit }, Comment(rawValue: diagnostics))
+            #expect(stdout.count == 2 * 65536 + marker.count, Comment(rawValue: diagnostics))
+            #expect(stdout.prefix(2 * 65536) == Data(repeating: 0, count: 2 * 65536), Comment(rawValue: diagnostics))
+            #expect(stdout.suffix(marker.count) == marker, Comment(rawValue: diagnostics))
+            #expect(terminal?.result?.objectValue?["exitCode"] == .integer(7), Comment(rawValue: diagnostics))
+        }
+    }
+
+    @Test("PTY echo is opt-in and private input remains absent from streams")
+    func ptyEchoRequiresExplicitPublicOptIn() async throws {
+        try await withDaemon { context in
+            try await authenticate(using: context.wire)
+
+            let privateStart = try await exchange(.request(
+                operation: "process.start",
+                payload: .object([
+                    "path": .string("/bin/sh"),
+                    "arguments": .array([.string("-c"), .string("read line; printf 'private-marker'; exit 0")]),
+                    "pty": .bool(true)
+                ])
+            ), using: context.wire)
+            #expect(privateStart.response.result?.objectValue?["ptyEchoDisabled"] == .bool(true))
+            let privateText = try #require(privateStart.response.result?.objectValue?["jobID"]?.stringValue)
+            let privateID = try #require(UUID(uuidString: privateText))
+            let privateInput = try PommeAgentJobStreamFrame(
+                jobID: privateID,
+                frame: .init(requestID: UUID(), stream: .stdin, data: Data("private-secret\n".utf8))
+            ).envelope()
+            let privateAcknowledged = try await exchange(privateInput, using: context.wire)
+            var privateFrames = privateStart.streams + privateAcknowledged.streams
+
+            let publicStart = try await exchange(.request(
+                operation: "process.start",
+                payload: .object([
+                    "path": .string("/bin/sh"),
+                    "arguments": .array([.string("-c"), .string("read line; printf 'public-marker'; exit 0")]),
+                    "pty": .bool(true),
+                    "ptyEcho": .bool(true)
+                ])
+            ), using: context.wire)
+            #expect(publicStart.response.result?.objectValue?["ptyEchoDisabled"] == .bool(false))
+            let publicText = try #require(publicStart.response.result?.objectValue?["jobID"]?.stringValue)
+            let publicID = try #require(UUID(uuidString: publicText))
+            let publicInput = try PommeAgentJobStreamFrame(
+                jobID: publicID,
+                frame: .init(requestID: UUID(), stream: .stdin, data: Data("public-input\n".utf8))
+            ).envelope()
+            let publicAcknowledged = try await exchange(publicInput, using: context.wire)
+            var publicFrames = publicStart.streams + publicAcknowledged.streams
+
+            for _ in 0..<32 where !privateFrames.contains(where: { $0.frame.stream == .exit }) || !publicFrames.contains(where: { $0.frame.stream == .exit }) {
+                for (jobID, frames) in [(privateID, privateFrames), (publicID, publicFrames)] where !frames.contains(where: { $0.frame.stream == .exit }) {
+                    let result = try await exchange(.request(
+                        operation: "process.status",
+                        payload: .object(["jobID": .string(jobID.uuidString.lowercased())])
+                    ), using: context.wire)
+                    if jobID == privateID { privateFrames += result.streams }
+                    else { publicFrames += result.streams }
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+
+            let privateOutput = privateFrames
+                .filter { $0.frame.stream == .stdout }
+                .reduce(into: Data()) { $0.append($1.frame.data ?? Data()) }
+            let publicOutput = publicFrames
+                .filter { $0.frame.stream == .stdout }
+                .reduce(into: Data()) { $0.append($1.frame.data ?? Data()) }
+            #expect(privateFrames.allSatisfy { $0.jobID == privateID })
+            #expect(publicFrames.allSatisfy { $0.jobID == publicID })
+            #expect(privateOutput == Data("private-marker".utf8))
+            #expect(privateOutput.range(of: Data("private-secret".utf8)) == nil)
+            #expect(publicOutput.range(of: Data("public-input".utf8)) != nil)
+            #expect(publicOutput.range(of: Data("public-marker".utf8)) != nil)
         }
     }
 

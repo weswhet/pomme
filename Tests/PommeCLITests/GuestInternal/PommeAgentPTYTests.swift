@@ -4,6 +4,30 @@ import Testing
 
 @Suite("Pomme agent PTY safety")
 struct PommeAgentPTYTests: Sendable {
+    @Test("Process spawn attributes reset inherited SIGINT state")
+    func spawnAttributesResetSIGINT() throws {
+        for pty in [false, true] {
+            var attributes: posix_spawnattr_t?
+            try #require(posix_spawnattr_init(&attributes) == 0)
+            defer { _ = posix_spawnattr_destroy(&attributes) }
+
+            try PommeProcess.configureSpawnAttributes(&attributes, pty: pty)
+
+            var flags: Int16 = 0
+            #expect(posix_spawnattr_getflags(&attributes, &flags) == 0)
+            #expect(flags & Int16(pty ? POSIX_SPAWN_SETSID : POSIX_SPAWN_SETPGROUP) != 0)
+            #expect(flags & Int16(POSIX_SPAWN_SETSIGDEF) != 0)
+            #expect(flags & Int16(POSIX_SPAWN_SETSIGMASK) != 0)
+
+            var defaults = sigset_t()
+            var mask = sigset_t()
+            #expect(posix_spawnattr_getsigdefault(&attributes, &defaults) == 0)
+            #expect(posix_spawnattr_getsigmask(&attributes, &mask) == 0)
+            #expect(sigismember(&defaults, SIGINT) == 1)
+            #expect(sigismember(&mask, SIGINT) == 0)
+        }
+    }
+
     @Test("PTY input is not echoed to the output stream")
     func ptyDisablesEcho() throws {
         let spawned = try PommeProcess.spawn(

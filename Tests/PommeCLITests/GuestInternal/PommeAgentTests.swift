@@ -19,13 +19,24 @@ struct PommeAgentTests {
         let describe = try await agent.perform(.request(operation: "agent.describe"))
         #expect(describe.objectValue?["role"]?.stringValue == "persistent")
         #expect(describe.objectValue.map { Set($0.keys) } == Set(["role", "protocol", "version", "executableSHA256", "capabilities"]))
+        #expect(describe.objectValue?["publicPTYEchoVersion"] == nil)
         #expect(describe.objectValue?["privatePTYInputVersion"] == nil)
+        let mdmDescription = try MDMEnrollmentAgentDescription.fromAuthenticatedDescribe(describe)
+        #expect(mdmDescription.role == "persistent")
         let privatePTYDescribe = try await agent.perform(.request(
             operation: "agent.describe",
             payload: .object(["includePrivatePTYCapabilities": .bool(true)])
         ))
         #expect(privatePTYDescribe.objectValue.map { Set($0.keys) } == Set(["role", "protocol", "version", "executableSHA256", "capabilities", "privatePTYInputVersion"]))
         #expect(privatePTYDescribe.objectValue?["privatePTYInputVersion"] == .integer(Int64(PommeAgent.privatePTYInputVersion)))
+        let publicPTYDescribe = try await agent.perform(.request(
+            operation: "agent.describe",
+            payload: .object(["includePublicPTYCapabilities": .bool(true)])
+        ))
+        #expect(publicPTYDescribe.objectValue.map { Set($0.keys) } == Set([
+            "role", "protocol", "version", "executableSHA256", "capabilities", "publicPTYEchoVersion"
+        ]))
+        #expect(publicPTYDescribe.objectValue?["publicPTYEchoVersion"] == .integer(Int64(PommeAgent.publicPTYEchoVersion)))
         let normalAMFIDescribe = try await agent.perform(.request(
             operation: "agent.describe",
             payload: .object(["includeNormalAMFICapabilities": .bool(true)])
