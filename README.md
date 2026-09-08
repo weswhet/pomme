@@ -42,7 +42,7 @@ never chooses a machine merely because it is the only running one.
 ```text
 create, list|ls, start, stop, restart, pause, resume, delete|rm,
 status, inspect, exec, shell, jobs, cp, cat, agent, sip, amfi,
-mdm, remote-login, screen-sharing, config, ipsw, ui, tui
+mdm, remote-login, screen-sharing, snapshot, config, ipsw, ui, tui
 ```
 
 Create is a durable provisioning workflow, not only an installation command:
