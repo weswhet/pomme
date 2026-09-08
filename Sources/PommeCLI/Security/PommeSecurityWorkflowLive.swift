@@ -38,14 +38,37 @@ extension PommeSecurityWorkflow {
     let store = PommeSecurityWorkflowJournalStore(bundleURL: reference.bundle.rootURL)
     let recovery = PommeSecurityRecoveryAdapter(
       reference: reference, volumeGroupUUID: group, factory: recoveryFactory)
+    func resumeGuided(_ error: Error) -> Error {
+      guard let retained = PommeSecurityWorkflowResumeGuidance.latestTrustedRetainedJournal(
+        store: store, identity: identity, lease: lease
+      ) else {
+        return error
+      }
+      return PommeSecurityWorkflowResumeGuidance.appendingGuidance(
+        to: error, journal: retained)
+    }
     // Journal the original state before even a read-only Recovery boot.
     // A rejected prerequisite is terminal only after restoration is proven;
     // it never becomes a receipt for the requested security configuration.
     let retained = try store.loadIfPresent(lease: lease)
-    let journal = try store.begin(
-      operation: operation, identity: identity,
-      originalRunState: original, requestedFinalState: finalState,
-      lease: lease, preflight: !operation.isSIP)
+    let journal: PommeSecurityWorkflowJournal
+    do {
+      journal = try store.begin(
+        operation: operation, identity: identity,
+        originalRunState: original, requestedFinalState: finalState,
+        lease: lease, preflight: !operation.isSIP)
+    } catch {
+      guard let journalError = error as? PommeSecurityWorkflowJournalError,
+        journalError == .conflictingOperation || journalError == .immutableRequestMismatch,
+        let retained = PommeSecurityWorkflowResumeGuidance.latestTrustedRetainedJournal(
+          store: store, identity: identity, lease: lease
+        )
+      else {
+        throw error
+      }
+      throw PommeSecurityWorkflowResumeGuidance.appendingGuidance(
+        to: error, journal: retained)
+    }
     let progress = PommeSecurityWorkflowProgress(journal, store: store, lease: lease)
     let initialAMFIObservation: PommeSecurityAMFIPreflightObservation?
     if operation.isSIP {
@@ -71,7 +94,7 @@ extension PommeSecurityWorkflow {
         if (error as? PommeRecoverySessionError) == .cleanupFailed
           || (error as? PommeLiveRecoveryIntegration.Error) == .cleanupFailed
           || (error as? PommeSecurityWorkflowError) == .restorationIncomplete {
-          throw PommeSecurityWorkflowError.restorationIncomplete
+          throw resumeGuided(PommeSecurityWorkflowError.restorationIncomplete)
         }
         do {
           try await PommeCore.restoreStableVMRunState(journal.originalRunState, reference: reference)
@@ -81,8 +104,8 @@ extension PommeSecurityWorkflow {
           if progress.journal.phase == .preflightIntent {
             try progress.advance(.preflightRejected)
           }
-        } catch { throw PommeSecurityWorkflowError.restorationIncomplete }
-        throw primary
+        } catch { throw resumeGuided(PommeSecurityWorkflowError.restorationIncomplete) }
+        throw resumeGuided(primary)
       }
     }
     let normal = PommeSecurityNormalAgent(
@@ -162,11 +185,15 @@ extension PommeSecurityWorkflow {
         return try await changeNormalBootArguments()
       }
     )
-    if case .retainedNormalCheckpoint? = initialAMFIObservation {
-      return try await resumeRetainedAMFINormalCheckpoint(
-        progress: progress, dependencies: dependencies)
+    do {
+      if case .retainedNormalCheckpoint? = initialAMFIObservation {
+        return try await resumeRetainedAMFINormalCheckpoint(
+          progress: progress, dependencies: dependencies)
+      }
+      return try await run(progress: progress, dependencies: dependencies)
+    } catch {
+      throw resumeGuided(error)
     }
-    return try await run(progress: progress, dependencies: dependencies)
   }
 }
 

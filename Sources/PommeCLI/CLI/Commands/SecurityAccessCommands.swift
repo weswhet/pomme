@@ -5,13 +5,13 @@ import Foundation
 struct SIPCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "sip",
-        abstract: "Manage System Integrity Protection.",
+        abstract: "Manage System Integrity Protection; repeat the same enable/disable action and --final-state to resume a retained operation.",
         subcommands: [SIPStatusCommand.self, SIPEnableCommand.self, SIPDisableCommand.self]
     )
 }
 
 private struct SecurityWorkflowOptions: ParsableArguments {
-    @Option(name: .customLong("final-state"), help: "Final VM state: previous, stopped, normal, recovery, or paused.")
+    @Option(name: .customLong("final-state"), help: "Final VM state: previous, stopped, normal, recovery, or paused. For a retained enable/disable operation, repeat the same action and --final-state to resume.")
     var finalState: VMFinalState = .previous
 
     @OptionGroup var output: GlobalOptions
@@ -67,7 +67,7 @@ struct SIPDisableCommand: AsyncParsableCommand {
 struct AMFICommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "amfi",
-        abstract: "Manage AMFI policy and boot-argument configuration.",
+        abstract: "Manage AMFI policy and boot-argument configuration; repeat the same enable/disable action and --final-state to resume a retained operation.",
         subcommands: [AMFIStatusCommand.self, AMFIEnableCommand.self, AMFIDisableCommand.self]
     )
 }
