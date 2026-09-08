@@ -178,7 +178,7 @@ enum PommeHelp {
             Commands:
               create, list, start, stop, restart, pause, resume, delete
               status, inspect, exec, shell, jobs, cp, cat, agent
-              sip, amfi, mdm, remote-login, screen-sharing, config, ipsw, ui, tui
+              sip, amfi, mdm, remote-login, screen-sharing, snapshot, config, ipsw, ui, tui
 
             Run `pomme <command> --help` for command-specific help.
             """
@@ -187,7 +187,7 @@ enum PommeHelp {
         case .tools:
             "Usage: pomme tools [--format table|json|jsonl|raw]"
         case .agentHelp:
-            "pomme-agent-help v1; targets are positional; env=POMME_VM_NAME; agent=status|repair"
+            "pomme-agent-help v1; targets are positional; env=POMME_VM_NAME; agent=status|repair; snapshot=create|list|restore|delete"
         case .create:
             "Usage: pomme create NAME (--version SELECTOR|--restore-image PATH) [--boot none|normal|recovery]\n       pomme create NAME --resume"
         case .config:

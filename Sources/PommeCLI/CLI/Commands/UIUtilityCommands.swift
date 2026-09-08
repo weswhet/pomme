@@ -206,7 +206,7 @@ enum CommandCatalog {
     }
 
     static let groups: [Group] = [
-        Group(name: "vm", commands: ["create", "list|ls", "start", "stop", "restart", "pause", "resume", "delete|rm", "status", "inspect"]),
+        Group(name: "vm", commands: ["create", "list|ls", "start", "stop", "restart", "pause", "resume", "delete|rm", "status", "inspect", "snapshot"]),
         Group(name: "agent", commands: ["agent status", "agent repair"]),
         Group(name: "guest", commands: ["exec", "shell", "jobs", "cp", "cat"]),
         Group(name: "security", commands: ["sip", "amfi", "mdm"]),
@@ -217,7 +217,8 @@ enum CommandCatalog {
 
     static let agentHelp = """
     pomme-agent-help v1; target=<vm>|POMME_VM_NAME; output=--format table|json|jsonl|raw|--json; common=--debug|--help|-h
-    vm=create|list|ls|start|stop|restart|pause|resume|delete|rm|status|inspect; agent=status|repair
+    vm=create|list|ls|start|stop|restart|pause|resume|delete|rm|status|inspect|snapshot; agent=status|repair
+    snapshot=create|list|restore|delete
     guest=exec|shell|jobs|cp|cat; security=sip|amfi|mdm; access=remote-login|screen-sharing
     ui=click|key|key-sequence|type|screenshot|ai settings
     config=config init|validate|render; ipsw=list|download; utility=tui|tools|agent-help
