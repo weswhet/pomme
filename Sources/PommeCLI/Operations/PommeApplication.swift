@@ -653,7 +653,22 @@ enum PommeApplication {
                           text: agentResponseText(payload))
         default: break
         }
-        var payload = try PommeCore.sendControlObject(request.controlPayload, bundle: reference.bundle)
+        var payload: [String: Any]
+        if case .screenSharing = request {
+            payload = try ScreenSharingAgentCapabilityGate.perform(
+                describe: {
+                    try performAuthenticatedAgentOperation(
+                        reference: reference,
+                        operation: "agent.describe"
+                    )
+                },
+                dispatch: {
+                    try PommeCore.sendControlObject(request.controlPayload, bundle: reference.bundle)
+                }
+            )
+        } else {
+            payload = try PommeCore.sendControlObject(request.controlPayload, bundle: reference.bundle)
+        }
         if case .jobOutput = request {
             payload["operation"] = "process.output"
             return result(title: title, reference: reference, payload: payload,

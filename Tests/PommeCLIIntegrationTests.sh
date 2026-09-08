@@ -147,6 +147,12 @@ expect_failure "removed policy selector is rejected" \
 
 expect_success "config help" "$runner" config --help
 expect_success "IPSW help" "$runner" ipsw --help
+expect_success "Screen Sharing help" "$runner" screen-sharing --help
+if grep -qi 'guest agent' "$work/stdout"; then
+  pass "Screen Sharing help explains guest support requirement"
+else
+  fail "Screen Sharing help explains guest support requirement"
+fi
 expect_success "direct MDM help" "$runner" mdm --help
 if grep -q -- '--enrollment-mode' "$work/stdout" && grep -q -- '--profile' "$work/stdout" \
   && ! grep -q 'SUBCOMMANDS:' "$work/stdout"; then
