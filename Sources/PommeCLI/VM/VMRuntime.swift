@@ -103,12 +103,22 @@ final class PommeVMRuntime: @unchecked Sendable {
     }
 
     private func startOrRestore() async throws {
+        let requiredRestore = FileManager.default.fileExists(atPath: requiredSnapshotRestoreURL.path)
+        guard !requiredRestore || FileManager.default.fileExists(atPath: saveStateURL.path) else {
+            throw RunnerError.virtualMachineState(
+                "Named snapshot restore is incomplete; its saved VM state is missing and the VM was not cold-started."
+            )
+        }
         if FileManager.default.fileExists(atPath: saveStateURL.path) {
-            let requiredRestore = FileManager.default.fileExists(atPath: requiredSnapshotRestoreURL.path)
             do {
                 try configuration.validateSaveRestoreSupport()
                 try await PommeCore.restoreMachineState(vm, from: saveStateURL, on: queue)
-                if requiredRestore { return }
+                if requiredRestore {
+                    try VMSnapshotStore.consumeRequiredRestore(
+                        bundle: BundleLayout(rootURL: saveStateURL.deletingLastPathComponent())
+                    )
+                    return
+                }
                 try await PommeCore.resume(vm, on: queue)
                 try? FileManager.default.removeItem(at: saveStateURL)
                 return

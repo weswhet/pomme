@@ -124,6 +124,28 @@ enum VMSnapshotStore {
         return target
     }
 
+    /// A control reply is not a saved-state receipt until the helper reports
+    /// completion and its confined stage contains the artifact. Restore uses
+    /// this before stopping the original VM or trusting rollback capture.
+    static func confirmCapture(response: [String: Any], stage: URL) throws {
+        let receipt = try JSONValue(any: response).objectValue ?? [:]
+        if receipt["ok"] == .bool(false) {
+            throw RunnerError.hostCommandFailed(
+                receipt["error"]?.stringValue ?? "Snapshot saved-state capture failed.")
+        }
+        guard receipt["ok"] == .bool(true),
+              receipt["operation"] == .string("snapshot-save"),
+              receipt["hostExitCode"] == .integer(0) else {
+            throw RunnerError.invalidControlResponse("Snapshot capture did not return a completion receipt.")
+        }
+        try requireDirectory(stage)
+        let state = machineStateURL(in: stage)
+        try requireRegularFile(state)
+        guard byteCount(state) > 0 else {
+            throw RunnerError.hostCommandFailed("Snapshot saved-state capture produced an empty artifact.")
+        }
+    }
+
     static func complete(
         bundle: BundleLayout,
         name: String,
@@ -223,6 +245,18 @@ enum VMSnapshotStore {
         for url in [bundle.saveStateURL, bundle.requiredSnapshotRestoreURL] where FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
         }
+        try syncDirectory(bundle.rootURL)
+    }
+
+    /// Called only after Virtualization has restored the required state.
+    /// Remove the state durably before its guard: interrupted cleanup must
+    /// never convert a required paused restore into an automatic resume.
+    static func consumeRequiredRestore(bundle: BundleLayout) throws {
+        try requireRegularFile(bundle.saveStateURL)
+        try requireRegularFile(bundle.requiredSnapshotRestoreURL)
+        try FileManager.default.removeItem(at: bundle.saveStateURL)
+        try syncDirectory(bundle.rootURL)
+        try FileManager.default.removeItem(at: bundle.requiredSnapshotRestoreURL)
         try syncDirectory(bundle.rootURL)
     }
 
