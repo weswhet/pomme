@@ -426,6 +426,12 @@ enum PommeLiveRecoveryIntegration {
             // credentials, creating staging, stopping the VM, or constructing
             // any auxiliary-storage-backed Virtualization object.
             let profile = try await dependencies.recoveryProfileEvidence(reference)
+            switch operation {
+            case .sip, .amfi:
+                try PommeRecoverySecurityQualification.require(profile: profile)
+            case .installAgent:
+                break
+            }
             let installMode: InstallMode?
             if case .installAgent = operation {
                 installMode = try dependencies.resolveInstallMode(reference, payload)
