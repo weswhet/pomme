@@ -467,6 +467,15 @@ struct PommeSecurityOwnerPreparation: Sendable {
   private static let miniBuddyLaunchKey = "MiniBuddyLaunch"
   private static let ownerPreferenceOutputLimit = 4 * 1024
   private static let ownerSetupAssistantCleanupTimeout: TimeInterval = 5
+  // A malformed APFS observation can be transient immediately after account
+  // creation. Re-observe the complete read-only evidence set for a bounded
+  // interval; this is scoped to the fresh create path and never replays
+  // account creation or credentials.
+  // This is a retry-admission window. An in-flight read-only collection may
+  // finish after its deadline, but no new collection starts after it expires.
+  private static let freshOwnerAPFSReobserveRetryWindow: TimeInterval = 30
+  private static let freshOwnerAPFSReobserveInterval: TimeInterval = 1
+  private static let freshOwnerAPFSReobserveMaximumRetries = 3
 
   private enum AutoLoginStatus: Equatable {
     case enabled(username: String)
@@ -523,19 +532,31 @@ struct PommeSecurityOwnerPreparation: Sendable {
   private let executeGuest: GuestCommandExecutor
   private let executePrivatePTY: PrivatePTYExecutor
   private let reportPhase: PhaseReporter
+  private let waitForFreshOwnerAPFS: @Sendable (TimeInterval) async throws -> Void
+  private let now: @Sendable () -> TimeInterval
 
   init(
     identity: PommeSecurityOwnerIdentity = .pomme,
     freshnessRequirements: PommeSecurityOwnerFreshnessRequirements = .unverified,
     executeGuest: @escaping GuestCommandExecutor,
     executePrivatePTY: @escaping PrivatePTYExecutor,
-    reportPhase: @escaping PhaseReporter = { _, _ in }
+    reportPhase: @escaping PhaseReporter = { _, _ in },
+    waitForFreshOwnerAPFS: @escaping @Sendable (TimeInterval) async throws -> Void = {
+      interval in
+      let milliseconds = Int64(max(1, min(interval, 60) * 1_000))
+      try await Task.sleep(for: .milliseconds(milliseconds))
+    },
+    now: @escaping @Sendable () -> TimeInterval = {
+      ProcessInfo.processInfo.systemUptime
+    }
   ) {
     self.identity = identity
     self.freshnessRequirements = freshnessRequirements
     self.executeGuest = executeGuest
     self.executePrivatePTY = executePrivatePTY
     self.reportPhase = reportPhase
+    self.waitForFreshOwnerAPFS = waitForFreshOwnerAPFS
+    self.now = now
   }
 
   /// Convenience initializer for callers that want to expose an unavailable
@@ -631,7 +652,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
       throw PommeSecurityOwnerPreparationError.commandFailed(.createOwner, exitCode: Int(status))
     }
     try phase(.createOwner, .receipt)
-    return try await verifyOwner(password: password, requireFullName: true)
+    return try await verifyFreshOwnerAfterCreation(password: password)
   }
 
   /// Authenticates the password through a PTY prompt, then verifies the
@@ -645,6 +666,26 @@ struct PommeSecurityOwnerPreparation: Sendable {
     guard !password.isEmpty else { throw PommeSecurityOwnerPreparationError.credentialRequired }
     try phase(.verifyOwner, .intent)
 
+    try await authenticateOwner(password: password)
+    let evidence = try collectEvidence()
+    let verification = try verifyOwnerEvidence(
+      evidence: evidence, requireFullName: requireFullName)
+    try phase(.verifyOwner, .receipt)
+    return verification
+  }
+
+  private func verifyFreshOwnerAfterCreation(
+    password: String
+  ) async throws -> PommeSecurityOwnerVerification {
+    try phase(.verifyOwner, .intent)
+    try await authenticateOwner(password: password)
+    let evidence = try await collectFreshOwnerEvidence()
+    let verification = try verifyOwnerEvidence(evidence: evidence, requireFullName: true)
+    try phase(.verifyOwner, .receipt)
+    return verification
+  }
+
+  private func authenticateOwner(password: String) async throws {
     let authCommand = PommeSecurityOwnerPTYCommand(
       executable: "/usr/bin/dscl",
       arguments: [".", "-authonly", identity.username]
@@ -658,8 +699,38 @@ struct PommeSecurityOwnerPreparation: Sendable {
     guard authStatus == 0 else {
       throw PommeSecurityOwnerPreparationError.passwordVerificationFailed
     }
+  }
 
-    let evidence = try collectEvidence()
+  private func collectFreshOwnerEvidence() async throws -> PommeSecurityOwnerEvidence {
+    let deadline = now() + Self.freshOwnerAPFSReobserveRetryWindow
+    var retries = 0
+    while true {
+      try Task.checkCancellation()
+      if retries > 0, now() >= deadline {
+        throw PommeSecurityOwnerPreparationError.malformedEvidence(.apfsUsers)
+      }
+      do {
+        // Every attempt refreshes local-account, startup-volume, APFS,
+        // Secure Token, and administrator evidence. Nothing is carried over
+        // from an earlier malformed APFS observation.
+        return try collectEvidence()
+      } catch let error as PommeSecurityOwnerPreparationError {
+        guard case .malformedEvidence(.apfsUsers) = error else { throw error }
+        let remaining = deadline - now()
+        guard retries < Self.freshOwnerAPFSReobserveMaximumRetries,
+          remaining > 0
+        else { throw error }
+        retries += 1
+        try await waitForFreshOwnerAPFS(
+          min(Self.freshOwnerAPFSReobserveInterval, remaining))
+      }
+    }
+  }
+
+  private func verifyOwnerEvidence(
+    evidence: PommeSecurityOwnerEvidence,
+    requireFullName: Bool
+  ) throws -> PommeSecurityOwnerVerification {
     guard let target = evidence.targetUser,
       target.recordName == identity.username,
       target.isNormalLocalUser,
@@ -682,8 +753,6 @@ struct PommeSecurityOwnerPreparation: Sendable {
     else {
       throw PommeSecurityOwnerPreparationError.ownerVerificationFailed
     }
-
-    try phase(.verifyOwner, .receipt)
     return .init(
       username: identity.username,
       generatedUID: target.generatedUID,

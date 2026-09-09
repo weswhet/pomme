@@ -276,6 +276,176 @@ struct PommeSecurityOwnerPreparationTests {
     #expect(phases.values.contains { $0 == (.createOwner, .receipt) })
   }
 
+  @Test("Fresh creation re-observes transient malformed APFS evidence")
+  func freshCreationRetriesTransientAPFSEvidence() async throws {
+    let fixture = OwnerPreparationFixture()
+    fixture.apfsOutputSequence = [
+      "No cryptographic users for disk1s1\n",
+      fixture.ambiguousAPFSUsersPlist,
+      fixture.apfsUsers,
+    ]
+    let phases = PhaseRecorder()
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: fixture.execute,
+      executePrivatePTY: fixture.executePTY,
+      reportPhase: phases.record,
+      waitForFreshOwnerAPFS: { _ in }
+    )
+
+    let probe = try preparation.probe()
+    let verification = try await preparation.createOwner(
+      password: "opaque-owner-secret",
+      probe: probe
+    )
+
+    #expect(verification.isAPFSVolumeOwner)
+    #expect(fixture.ptyCommands.filter { $0.arguments.first == "-addUser" }.count == 1)
+    #expect(fixture.apfsOutputSequence.isEmpty)
+    #expect(phases.values.contains { $0 == (.verifyOwner, .receipt) })
+  }
+
+  @Test("Persistent malformed post-create APFS evidence fails after bounded retries")
+  func persistentMalformedPostCreateAPFSEvidenceFailsClosed() async throws {
+    let fixture = OwnerPreparationFixture()
+    fixture.apfsOutputSequence = [
+      "No cryptographic users for disk1s1\n",
+    ] + Array(repeating: fixture.ambiguousAPFSUsersPlist, count: 4)
+    let phases = PhaseRecorder()
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: fixture.execute,
+      executePrivatePTY: fixture.executePTY,
+      reportPhase: phases.record,
+      waitForFreshOwnerAPFS: { _ in }
+    )
+
+    let probe = try preparation.probe()
+    await #expect(
+      throws: PommeSecurityOwnerPreparationError.malformedEvidence(.apfsUsers)
+    ) {
+      try await preparation.createOwner(password: "opaque-owner-secret", probe: probe)
+    }
+
+    #expect(fixture.ptyCommands.filter { $0.arguments.first == "-addUser" }.count == 1)
+    #expect(fixture.apfsOutputSequence.isEmpty)
+    #expect(!phases.values.contains { $0 == (.verifyOwner, .receipt) })
+  }
+
+  @Test("Malformed initial APFS evidence is rejected before fresh creation")
+  func malformedInitialAPFSEvidenceDoesNotCreateOwner() {
+    let fixture = OwnerPreparationFixture()
+    fixture.apfsOutput = fixture.ambiguousAPFSUsersPlist
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: fixture.execute,
+      executePrivatePTY: fixture.executePTY,
+      waitForFreshOwnerAPFS: { _ in throw CancellationError() }
+    )
+
+    #expect(throws: PommeSecurityOwnerPreparationError.malformedEvidence(.apfsUsers)) {
+      try preparation.probe()
+    }
+    #expect(fixture.ptyCommands.isEmpty)
+  }
+
+  @Test("A non-APFS evidence error is not retried after fresh creation")
+  func nonAPFSEvidenceErrorIsNotRetried() async throws {
+    let fixture = OwnerPreparationFixture()
+    fixture.apfsOutputSequence = [
+      "No cryptographic users for disk1s1\n",
+      fixture.apfsUsers,
+    ]
+    let phases = PhaseRecorder()
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: fixture.execute,
+      executePrivatePTY: { command, password in
+        let status = try await fixture.executePTY(command, password)
+        if command.arguments.first == "-addUser" {
+          fixture.invalidNegativeUID = true
+        }
+        return status
+      },
+      reportPhase: phases.record,
+      waitForFreshOwnerAPFS: { _ in throw CancellationError() }
+    )
+
+    let probe = try preparation.probe()
+    await #expect(throws: PommeSecurityOwnerPreparationError.malformedEvidence(.localUsers)) {
+      try await preparation.createOwner(password: "opaque-owner-secret", probe: probe)
+    }
+
+    #expect(fixture.ptyCommands.filter { $0.arguments.first == "-addUser" }.count == 1)
+    #expect(fixture.apfsOutputSequence == [fixture.apfsUsers])
+    #expect(!phases.values.contains { $0 == (.verifyOwner, .receipt) })
+  }
+
+  @Test("Cancellation during APFS re-observation stops fresh verification")
+  func cancellationDuringFreshAPFSReobservationStopsVerification() async throws {
+    let fixture = OwnerPreparationFixture()
+    fixture.apfsOutputSequence = [
+      "No cryptographic users for disk1s1\n",
+      fixture.ambiguousAPFSUsersPlist,
+      fixture.apfsUsers,
+    ]
+    let phases = PhaseRecorder()
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: fixture.execute,
+      executePrivatePTY: fixture.executePTY,
+      reportPhase: phases.record,
+      waitForFreshOwnerAPFS: { _ in throw CancellationError() }
+    )
+
+    let probe = try preparation.probe()
+    await #expect(throws: CancellationError.self) {
+      try await preparation.createOwner(password: "opaque-owner-secret", probe: probe)
+    }
+
+    #expect(fixture.ptyCommands.filter { $0.arguments.first == "-addUser" }.count == 1)
+    #expect(fixture.apfsOutputSequence == [fixture.apfsUsers])
+    #expect(!phases.values.contains { $0 == (.verifyOwner, .receipt) })
+  }
+
+  @Test("No APFS re-observation starts after its retry deadline")
+  func freshAPFSReobservationHonorsRetryDeadline() async throws {
+    let fixture = OwnerPreparationFixture()
+    fixture.apfsOutputSequence = [
+      "No cryptographic users for disk1s1\n",
+      fixture.ambiguousAPFSUsersPlist,
+      fixture.apfsUsers,
+    ]
+    let clock = MonotonicClock()
+    let phases = PhaseRecorder()
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: fixture.execute,
+      executePrivatePTY: fixture.executePTY,
+      reportPhase: phases.record,
+      waitForFreshOwnerAPFS: { _ in clock.advance(to: 30) },
+      now: { clock.value }
+    )
+
+    let probe = try preparation.probe()
+    await #expect(
+      throws: PommeSecurityOwnerPreparationError.malformedEvidence(.apfsUsers)
+    ) {
+      try await preparation.createOwner(password: "opaque-owner-secret", probe: probe)
+    }
+
+    #expect(clock.value == 30)
+    #expect(fixture.ptyCommands.filter { $0.arguments.first == "-addUser" }.count == 1)
+    #expect(fixture.apfsOutputSequence == [fixture.apfsUsers])
+    #expect(!phases.values.contains { $0 == (.verifyOwner, .receipt) })
+  }
+
   @Test("Autologin refusal classifier accepts only closed native markers")
   func classifiesNativeAutologinRefusals() {
     let cases: [(String, PommeSecurityOwnerAutologinRefusal)] = [
@@ -338,6 +508,32 @@ struct PommeSecurityOwnerPreparationTests {
     )
     #expect(fixture.ptyCommands.count == ptyCount + 1)
     #expect(fixture.ptyCommands.last?.arguments == [".", "-authonly", "pomme"])
+  }
+
+  @Test("An existing owner never uses fresh-create APFS re-observation")
+  func existingOwnerMalformedAPFSEvidenceIsNotRetried() async throws {
+    let fixture = OwnerPreparationFixture()
+    fixture.markCreated()
+    fixture.apfsOutputSequence = [
+      fixture.apfsUsers, fixture.ambiguousAPFSUsersPlist, fixture.apfsUsers,
+    ]
+    let phases = PhaseRecorder()
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: fixture.execute,
+      executePrivatePTY: fixture.executePTY,
+      reportPhase: phases.record,
+      waitForFreshOwnerAPFS: { _ in throw CancellationError() }
+    )
+    let probe = try preparation.probe()
+    await #expect(throws: PommeSecurityOwnerPreparationError.malformedEvidence(.apfsUsers)) {
+      try await preparation.createOwner(
+        password: "opaque-owner-secret", probe: probe, retryIntent: true)
+    }
+    #expect(!fixture.ptyCommands.contains { $0.arguments.first == "-addUser" })
+    #expect(fixture.apfsOutputSequence == [fixture.apfsUsers])
+    #expect(!phases.values.contains { $0 == (.verifyOwner, .receipt) })
   }
 
   @Test("Retry verification accepts an exact existing owner with a custom home")
@@ -1574,6 +1770,19 @@ private final class PhaseRecorder: @unchecked Sendable {
   }
 }
 
+private final class MonotonicClock: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storedValue: TimeInterval = 0
+
+  var value: TimeInterval {
+    lock.withLock { storedValue }
+  }
+
+  func advance(to value: TimeInterval) {
+    lock.withLock { storedValue = value }
+  }
+}
+
 private enum ManagedPreferencesPathState: Equatable, Sendable {
   case absent
   case directory
@@ -1611,6 +1820,7 @@ private final class OwnerPreparationFixture: @unchecked Sendable {
   private var includeDeterministicHighUIDUserValue = false
   private var duplicateLocalRecordValue = false
   private var apfsOutputValue: String?
+  private var apfsOutputSequenceValue: [String] = []
   private var managedPreferencesPresentValue = false
   private var managedPreferencesPathStateValue = ManagedPreferencesPathState.absent
   private var managedPreferencesFindExitValue: Int32 = 0
@@ -1760,6 +1970,10 @@ private final class OwnerPreparationFixture: @unchecked Sendable {
   var apfsOutput: String? {
     get { lock.withLock { apfsOutputValue } }
     set { lock.withLock { apfsOutputValue = newValue } }
+  }
+  var apfsOutputSequence: [String] {
+    get { lock.withLock { apfsOutputSequenceValue } }
+    set { lock.withLock { apfsOutputSequenceValue = newValue } }
   }
   var managedPreferencesPresent: Bool {
     get { lock.withLock { managedPreferencesPresentValue } }
@@ -2254,10 +2468,14 @@ private final class OwnerPreparationFixture: @unchecked Sendable {
       response = (0, rootInfoPlist)
     } else if request.path == "/usr/sbin/diskutil", request.arguments == ["apfs", "listUsers", "/"]
     {
-      response = (
-        0,
-        apfsOutput ?? (created ? apfsUsers : "No cryptographic users for disk1s1\n")
-      )
+      let output = lock.withLock {
+        if !apfsOutputSequenceValue.isEmpty {
+          return apfsOutputSequenceValue.removeFirst()
+        }
+        if let apfsOutputValue { return apfsOutputValue }
+        return createdValue ? apfsUsers : "No cryptographic users for disk1s1\n"
+      }
+      response = (0, output)
     } else if request.path == "/usr/sbin/sysadminctl",
       request.arguments == ["-autologin", "status"]
     {
@@ -2562,7 +2780,7 @@ private final class OwnerPreparationFixture: @unchecked Sendable {
     """
   }
 
-  private var apfsUsers: String {
+  var apfsUsers: String {
     """
     Cryptographic user for disk1s1 (1 found)
     +-- \(generatedUID.uuidString)
