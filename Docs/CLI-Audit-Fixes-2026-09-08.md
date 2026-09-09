@@ -164,6 +164,41 @@ verification took 56 seconds. Both candidate operations returned structured
 results without hanging. The exact historical hang remains unconfirmed; the
 reproduced unbounded control wait is now covered by a passing regression.
 
+## 4. Resume rejects an interrupted provisioning intent
+
+On fresh 40GB/4GB Tahoe VM `pomme-agent-resumefix-0908-e38c5d`, creation was
+interrupted after the Recovery capability-probe output. Buffered debug delivery
+lagged actual progress: the authoritative retained journal had receipts for
+installation, first normal boot, Recovery-agent installation, and normal-agent
+verification, followed by an open `restoreFinalState` intent at attempt 1.
+The VM was already stopped; the journal had generation 10 and nine events.
+
+The signed `09771c47` baseline immediately reproduced the exact public resume
+error, `Pomme provisioning journal has an invalid phase transition.` It left
+the journal and stopped state unchanged. Separately, a focused regression for
+an interrupted Recovery-agent installation intent failed with `unexpectedEvent`
+against the unchanged production code; the other 12 provisioning tests passed.
+
+Resume tried to append a new intent while the prior intent remained open.
+The fix validates the complete history, then reuses the existing intent and
+attempt only for Recovery-agent installation and final-state restoration.
+The former reconciles its guest installation journal; the latter proves the
+immutable requested state before recording its receipt. Other interrupted
+phases remain rejected without effects or journal changes. Plan, ownership,
+credential, and pinned executable checks remain intact.
+
+Validation: all 16 provisioning tests and all 47 CLI contract checks pass.
+The canonical signed candidate is
+`5143586498f9519b6743a485a5a301e5331dd19d3f71d722bd10c9b37d424d3b`.
+On the same retained VM/journal rejected by the baseline, candidate resume
+returned exit 0 in about four seconds. It preserved the original nine events
+and appended only the `restoreFinalState` receipt at attempt 1 (generation 11,
+ten events). The original agent pin remained `09771c47`; final state remained
+stopped. A second identical resume returned exit 0 without changing the
+journal. Recovery-install pending-intent handling is covered by regression
+tests and installer reconciliation review; the live interrupted phase was
+final-state restoration.
+
 ## Disposable lab cleanup notes
 
 The first lab VM was stopped and deleted after the baseline evidence was
@@ -172,4 +207,13 @@ captured. Its bundle was removed, but the public delete command reported
 The deleted VM UUID is `1ea03a6a-052f-4b66-9867-3bd4a5ea401d`.
 Possible orphan credential cleanup remains unverified; no Keychain permissions
 were broadened and no credential reset or replacement was attempted.
-The five pre-existing VMs remained stopped and unchanged.
+The SIP/AMFI test VM `pomme-agent-sipfix-0908-d27e4b` was subsequently deleted
+through the public CLI with exit 0; its credential cleanup succeeded without
+intervention. The five pre-existing VMs remained stopped and unchanged.
+
+The final resume-test VM `pomme-agent-resumefix-0908-e38c5d` was deleted
+through the public signed CLI with exit 0 and no credential error. Its owned
+empty temporary directory and runtime socket are absent. Final inventory
+contains exactly the original five stopped VMs; available capacity is 52 GiB.
+No disposable test VM remains. The first deleted VM’s possible orphan Keychain
+credential noted above remains unverified.

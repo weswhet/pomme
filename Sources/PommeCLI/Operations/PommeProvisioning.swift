@@ -634,28 +634,67 @@ struct PommeProvisioningOrchestrator: Sendable {
         var journal = try repository.load()
         if let expectedPlan, journal.plan != expectedPlan { throw PommeProvisioningError.invalidPlan }
         try journal.plan.validate()
+        try PommeProvisioningCoordinator.validate(events: journal.events)
         _ = try await exactOwnership(journal.plan.vm)
+        if let pending = journal.events.last, pending.kind == .intent {
+            guard pending.phase == .installRecoveryAgent || pending.phase == .restoreFinalState else {
+                throw PommeProvisioningError.unexpectedEvent
+            }
+            journal = try await executeEffect(
+                phase: pending.phase,
+                attempt: pending.attempt,
+                in: journal
+            )
+        }
         while let next = try PommeProvisioningCoordinator.nextPhase(in: journal) {
             let intent = try PommeProvisioningCoordinator.appendingIntent(to: journal, phase: next.phase, attempt: next.attempt, signer: signer)
             try repository.commit(intent, replacing: journal.generation)
             journal = intent
-            do {
-                let receipt = try await effect(next.phase, plan: journal.plan)
-                guard PommeProvisioningDigest.isSHA256(receipt) else { throw PommeProvisioningError.phaseFailed(next.phase) }
-                let completed = try PommeProvisioningCoordinator.appendingResult(to: journal, kind: .receipt, phase: next.phase, attempt: next.attempt, receiptDigest: receipt, signer: signer)
-                try repository.commit(completed, replacing: journal.generation)
-                journal = completed
-            } catch {
-                PommeCore.log(
-                    "provisioning phase \(next.phase.rawValue) failed "
-                        + "[code=\(PommeProvisioningFailureDiagnostic.code(for: error))].",
-                    vmName: journal.plan.vm.name
-                )
-                let digest = PommeProvisioningDigest.sha256(Data(String(describing: error).utf8))
-                let failed = try PommeProvisioningCoordinator.appendingResult(to: journal, kind: .failure, phase: next.phase, attempt: next.attempt, receiptDigest: digest, signer: signer)
-                try repository.commit(failed, replacing: journal.generation)
-                throw PommeProvisioningError.phaseFailed(next.phase, vmName: journal.plan.vm.name)
+            journal = try await executeEffect(
+                phase: next.phase,
+                attempt: next.attempt,
+                in: journal
+            )
+        }
+    }
+
+    private func executeEffect(
+        phase: PommeProvisioningPhase,
+        attempt: UInt64,
+        in journal: PommeProvisioningJournal
+    ) async throws -> PommeProvisioningJournal {
+        do {
+            let receipt = try await effect(phase, plan: journal.plan)
+            guard PommeProvisioningDigest.isSHA256(receipt) else {
+                throw PommeProvisioningError.phaseFailed(phase)
             }
+            let completed = try PommeProvisioningCoordinator.appendingResult(
+                to: journal,
+                kind: .receipt,
+                phase: phase,
+                attempt: attempt,
+                receiptDigest: receipt,
+                signer: signer
+            )
+            try repository.commit(completed, replacing: journal.generation)
+            return completed
+        } catch {
+            PommeCore.log(
+                "provisioning phase \(phase.rawValue) failed "
+                    + "[code=\(PommeProvisioningFailureDiagnostic.code(for: error))].",
+                vmName: journal.plan.vm.name
+            )
+            let digest = PommeProvisioningDigest.sha256(Data(String(describing: error).utf8))
+            let failed = try PommeProvisioningCoordinator.appendingResult(
+                to: journal,
+                kind: .failure,
+                phase: phase,
+                attempt: attempt,
+                receiptDigest: digest,
+                signer: signer
+            )
+            try repository.commit(failed, replacing: journal.generation)
+            throw PommeProvisioningError.phaseFailed(phase, vmName: journal.plan.vm.name)
         }
     }
 
