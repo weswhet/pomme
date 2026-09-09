@@ -611,6 +611,11 @@ struct PommeSecurityNormalAgent: Sendable {
       return result
     case .failure(let diagnostic):
       Self.log(diagnostic, vmName: reference.displayName)
+      if diagnostic.reason == .timedOut {
+        PommeCore.log(
+          Self.timeoutStateSummary(for: response, stage: proofStage),
+          vmName: reference.displayName)
+      }
       throw diagnostic
     }
   }
@@ -686,6 +691,30 @@ struct PommeSecurityNormalAgent: Sendable {
     stage: PommeSecurityNormalAgentProofStage
   ) -> PommeSecurityNormalAgentDiagnostic {
     .init(stage: stage, reason: .transport)
+  }
+
+  /// Summarizes only the closed process-state booleans needed to distinguish a
+  /// running timed-out job from one that exited without a complete output
+  /// receipt. Missing or wrongly typed fields remain explicitly unknown; no
+  /// guest-provided process identity or output crosses this boundary.
+  static func timeoutStateSummary(
+    for response: [String: Any],
+    stage: PommeSecurityNormalAgentProofStage
+  ) -> String {
+    let terminal = response["result"] as? [String: Any] ?? [:]
+
+    func boolean(_ key: String) -> String {
+      guard let value = terminal[key],
+        let decoded = try? JSONValue(any: value),
+        case .bool(let value) = decoded
+      else { return "unknown" }
+      return value ? "true" : "false"
+    }
+
+    return "Normal desktop proof timeout state: stage=\(stage.rawValue), "
+      + "exited=\(boolean("exited")), "
+      + "outputComplete=\(boolean("outputComplete")), "
+      + "terminationRequested=\(boolean("terminationRequested"))."
   }
 
   private static func log(
