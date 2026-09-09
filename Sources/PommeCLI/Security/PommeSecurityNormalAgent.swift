@@ -133,6 +133,11 @@ struct PommeSecurityNormalAgent: Sendable {
   static let maximumRebootTimeout: TimeInterval = 300
   private static let rebootRequestTimeout: TimeInterval = 15
   private static let bootIdentityRequestTimeout: TimeInterval = 15
+  // The guest process deadline controls when PommeAgent requests termination;
+  // the helper still needs a short bounded interval to deliver that terminal
+  // frame across the control socket.
+  private static let foregroundTransportGrace: TimeInterval =
+    3 * Constants.agentRoundTripTimeout
   private static let rebootPollInterval: TimeInterval = 0.25
   private static let maximumBootIdentityBytes = 4 * 1024
 
@@ -172,7 +177,9 @@ struct PommeSecurityNormalAgent: Sendable {
   /// Require support before policy mutation. A later `performAMFI` call still
   /// performs its own same-session capability and digest proof because a
   /// separate preflight request cannot pin a future connection by itself.
-  func requireAMFIWorkflowSupport() throws {
+  func requireAMFIWorkflowSupport(
+    timeout: TimeInterval = Constants.defaultGuestCommandTimeout
+  ) throws {
     guard PommeProvisioningDigest.isSHA256(expectedExecutableDigest),
       expectedExecutableDigest == expectedExecutableDigest.lowercased(),
       try PommeCore.stableVMRunState(reference: reference) == .running(.normal)
@@ -184,7 +191,7 @@ struct PommeSecurityNormalAgent: Sendable {
         "command": "agent.perform",
         "operation": "agent.describe",
         "payload": ["includeNormalAMFICapabilities": true],
-      ], bundle: reference.bundle)
+      ], bundle: reference.bundle, timeout: timeout)
     } catch {
       throw PommeSecurityWorkflowError.agentUnverified
     }
@@ -206,7 +213,12 @@ struct PommeSecurityNormalAgent: Sendable {
   /// authenticated pinned session. The helper must describe and verify the
   /// exact persistent role/protocol/digest/capability on that same session
   /// before forwarding the stripped payload to PommeAgent.
-  func performAMFI(operation: String, volumeGroupUUID: UUID) throws -> JSONValue {
+  func performAMFI(
+    operation: String,
+    volumeGroupUUID: UUID,
+    timeout: TimeInterval = Constants.defaultRecoveryAgentTimeout
+      + 3 * Constants.agentRoundTripTimeout
+  ) throws -> JSONValue {
     guard Self.normalAMFIOperations.contains(operation) else {
       throw PommeSecurityNormalAgentError.invalidAMFIOperation
     }
@@ -224,7 +236,7 @@ struct PommeSecurityNormalAgent: Sendable {
           "volumeGroupUUID": volumeGroupUUID.uuidString.lowercased(),
           Self.normalAMFIDigestMarker: expectedExecutableDigest,
         ],
-      ], bundle: reference.bundle)
+      ], bundle: reference.bundle, timeout: timeout)
     } catch {
       throw PommeSecurityNormalAgentError.unverifiedAMFIResponse
     }
@@ -247,14 +259,22 @@ struct PommeSecurityNormalAgent: Sendable {
     guard try PommeCore.stableVMRunState(reference: reference) == .running(.normal) else {
       throw PommeSecurityWorkflowError.agentUnverified
     }
-    let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
+    guard timeout.isFinite, timeout > 0 else {
+      throw PommeSecurityWorkflowError.agentUnverified
+    }
+    let deadline = ProcessInfo.processInfo.systemUptime + timeout
+    func remainingTimeout() throws -> TimeInterval {
+      let remaining = deadline - ProcessInfo.processInfo.systemUptime
+      guard remaining > 0 else { throw PommeSecurityWorkflowError.agentUnverified }
+      return remaining
+    }
     while true {
       do {
         let response = try PommeCore.sendControlObject(
           [
             "command": "agent.perform", "operation": "agent.describe",
             "payload": requirePrivateInput ? ["includePrivatePTYCapabilities": true] : [:],
-          ], bundle: reference.bundle)
+          ], bundle: reference.bundle, timeout: try remainingTimeout())
         guard response["ok"] as? Bool == true,
           let result = response["result"],
           let object = try JSONValue(any: result).objectValue,
@@ -273,7 +293,7 @@ struct PommeSecurityNormalAgent: Sendable {
         return
       } catch {
         if (error as? PommeSecurityWorkflowError) == .privateInputUnsupported { throw error }
-        guard ContinuousClock.now < deadline else {
+        guard ProcessInfo.processInfo.systemUptime < deadline else {
           throw PommeSecurityWorkflowError.agentUnverified
         }
         try Task.checkCancellation()
@@ -567,7 +587,8 @@ struct PommeSecurityNormalAgent: Sendable {
       throw PommeSecurityNormalAgentError.invalidRebootTimeout
     }
     let payload = try request.validatedControlPayload(detached: true)
-    let response = try PommeCore.sendControlObject(payload, bundle: reference.bundle)
+    let response = try PommeCore.sendControlObject(
+      payload, bundle: reference.bundle, timeout: timeout)
     guard isVerifiedDetachedRebootStart(response) else {
       throw PommeSecurityNormalAgentError.rebootRequestFailed
     }
@@ -578,7 +599,9 @@ struct PommeSecurityNormalAgent: Sendable {
       throw PommeSecurityWorkflowError.agentUnverified
     }
     let response = try PommeCore.sendForegroundControlObject(
-      request.controlPayload, bundle: reference.bundle)
+      request.controlPayload,
+      bundle: reference.bundle,
+      timeout: request.timeout + Self.foregroundTransportGrace)
     return try Self.decodeCompletedCommand(response)
   }
 
@@ -598,7 +621,9 @@ struct PommeSecurityNormalAgent: Sendable {
     let response: [String: Any]
     do {
       response = try PommeCore.sendForegroundControlObject(
-        request.controlPayload, bundle: reference.bundle)
+        request.controlPayload,
+        bundle: reference.bundle,
+        timeout: request.timeout + Self.foregroundTransportGrace)
     } catch {
       Self.log(
         .init(stage: proofStage, reason: .transport),

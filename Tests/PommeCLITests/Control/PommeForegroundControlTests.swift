@@ -89,6 +89,107 @@ struct PommeForegroundControlTests {
         }
     }
 
+    @Test("A silent foreground peer is bounded by the transport deadline")
+    func silentPeerTimesOut() throws {
+        var sockets: [Int32] = [0, 0]
+        try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
+        defer {
+            _ = Darwin.close(sockets[0])
+            _ = Darwin.close(sockets[1])
+        }
+        let session = PommeControlStreamSession(
+            id: UUID(), fileDescriptor: sockets[0])
+        let partialResponse = Data("{\"type\":\"response\"".utf8)
+        let written = partialResponse.withUnsafeBytes { bytes in
+            Darwin.write(sockets[1], bytes.baseAddress, bytes.count)
+        }
+        #expect(written == partialResponse.count)
+        let started = ProcessInfo.processInfo.systemUptime
+        #expect(throws: RunnerError.self) {
+            try PommeCore.collectForegroundResponse(
+                timeout: 0.05,
+                receive: { remaining in
+                    try session.receiveEventIfAvailable(timeout: remaining)
+                }
+            )
+        }
+        #expect(ProcessInfo.processInfo.systemUptime - started < 1)
+    }
+
+    @Test("A peer that eventually closes cannot hold the bounded collector")
+    func delayedPeerShutdownIsBounded() throws {
+        var sockets: [Int32] = [0, 0]
+        try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
+        defer {
+            _ = Darwin.close(sockets[0])
+            _ = Darwin.close(sockets[1])
+        }
+        let session = PommeControlStreamSession(
+            id: UUID(), fileDescriptor: sockets[0])
+        let partialResponse = Data("{\"type\":\"response\"".utf8)
+        let written = partialResponse.withUnsafeBytes { bytes in
+            Darwin.write(sockets[1], bytes.baseAddress, bytes.count)
+        }
+        #expect(written == partialResponse.count)
+
+        let peer = sockets[1]
+        let peerDone = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            defer { peerDone.signal() }
+            usleep(1_100_000)
+            _ = Darwin.shutdown(peer, SHUT_RDWR)
+        }
+        defer { _ = peerDone.wait(timeout: .now() + .seconds(2)) }
+
+        let started = ProcessInfo.processInfo.systemUptime
+        #expect(throws: RunnerError.self) {
+            try PommeCore.collectForegroundResponse(
+                timeout: 0.05,
+                receive: { remaining in
+                    try session.receiveEventIfAvailable(timeout: remaining)
+                }
+            )
+        }
+        #expect(ProcessInfo.processInfo.systemUptime - started < 0.5)
+    }
+
+    @Test("A terminal frame after the guest deadline still fits the transport grace")
+    func delayedTerminalFrameFitsGrace() throws {
+        var sockets: [Int32] = [0, 0]
+        try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
+        defer {
+            _ = Darwin.close(sockets[0])
+            _ = Darwin.close(sockets[1])
+        }
+        let id = UUID()
+        let session = PommeControlStreamSession(id: id, fileDescriptor: sockets[0])
+        let response = try ControlWireCodec.encodeLine(
+            PommeControlResponse.success(
+                id: id,
+                result: .object(["exited": .bool(true)])
+            )
+        )
+        let writerDone = DispatchSemaphore(value: 0)
+        let peer = sockets[1]
+        let nominalGuestDeadline = 0.05
+        Thread.detachNewThread {
+            defer { writerDone.signal() }
+            usleep(100_000)
+            _ = response.withUnsafeBytes {
+                Darwin.write(peer, $0.baseAddress, $0.count)
+            }
+        }
+        defer { _ = writerDone.wait(timeout: .now() + .seconds(1)) }
+
+        let result = try PommeCore.collectForegroundResponse(
+            timeout: nominalGuestDeadline + 0.2,
+            receive: { remaining in
+                try session.receiveEventIfAvailable(timeout: remaining)
+            }
+        )
+        #expect(result["exited"] as? Bool == true)
+    }
+
     @Test("Malformed binary output is not decoded with replacement bytes")
     func malformedOutputFails() {
         #expect(throws: RunnerError.self) {
