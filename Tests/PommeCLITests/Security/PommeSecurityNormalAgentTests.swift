@@ -193,6 +193,66 @@ struct PommeSecurityNormalAgentTests {
     #expect(!description.contains(secret))
   }
 
+  @Test("Timeout state summary keeps running and output-pending states closed")
+  func timeoutStateSummaryClassifiesKnownBooleans() {
+    let running = response(
+      exitCode: nil,
+      exited: false,
+      outputComplete: false,
+      timedOut: true)
+    #expect(PommeSecurityNormalAgent.timeoutStateSummary(
+      for: running, stage: .aqua
+    ) == "Normal desktop proof timeout state: stage=aqua, exited=false, outputComplete=false, terminationRequested=unknown.")
+
+    var runningResult = running
+    var runningTerminal = runningResult["result"] as! [String: Any]
+    runningTerminal["terminationRequested"] = true
+    runningResult["result"] = runningTerminal
+
+    #expect(PommeSecurityNormalAgent.timeoutStateSummary(
+      for: runningResult, stage: .aqua
+    ) == "Normal desktop proof timeout state: stage=aqua, exited=false, outputComplete=false, terminationRequested=true.")
+
+    var exited = response(
+      exitCode: nil,
+      exited: true,
+      outputComplete: false,
+      timedOut: true)
+    var exitedTerminal = exited["result"] as! [String: Any]
+    exitedTerminal["terminationRequested"] = false
+    exited["result"] = exitedTerminal
+
+    #expect(PommeSecurityNormalAgent.timeoutStateSummary(
+      for: exited, stage: .processList
+    ) == "Normal desktop proof timeout state: stage=ps, exited=true, outputComplete=false, terminationRequested=false.")
+  }
+
+  @Test("Timeout state summary marks malformed fields unknown and excludes raw response data")
+  func timeoutStateSummaryRejectsMalformedFieldsAndSecrets() {
+    let secret = "password=do-not-log /private/secret"
+    var malformed = response(
+      exitCode: nil,
+      exited: false,
+      outputComplete: false,
+      stdout: Data(secret.utf8),
+      stderr: Data(secret.utf8),
+      timedOut: true)
+    var terminal = malformed["result"] as! [String: Any]
+    terminal["exited"] = 1
+    terminal["outputComplete"] = "false"
+    terminal["terminationRequested"] = 0.5
+    terminal["jobID"] = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    terminal["pid"] = Int64(501)
+    malformed["result"] = terminal
+
+    let summary = PommeSecurityNormalAgent.timeoutStateSummary(
+      for: malformed, stage: .console)
+    #expect(summary == "Normal desktop proof timeout state: stage=console, exited=unknown, outputComplete=unknown, terminationRequested=unknown.")
+    #expect(!summary.contains(secret))
+    #expect(!summary.contains("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"))
+    #expect(!summary.contains("501"))
+  }
+
   @Test("Transport diagnostics are closed and never include response material")
   func transportDiagnosticIsRedacted() throws {
     let diagnostic = PommeSecurityNormalAgent.transportDiagnostic(stage: .processList)

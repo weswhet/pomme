@@ -103,8 +103,30 @@ Validation so far:
 
 Result: bounded APFS mitigation and accurate desktop-proof diagnostics are
 validated. The precise historical malformed native output remains unknown.
-Full SIP completion is still blocked by the separate Aqua-probe timeout;
-this is not reported as successful end-to-end SIP disable.
+The initial validation was blocked by a separate intermittent Aqua-probe
+timeout. The follow-up resume below completed SIP disable successfully.
+
+### Desktop-proof prerequisite investigation
+
+On the retained disposable VM, the exact Aqua probe succeeded through public
+`exec` after a cold normal start (0.123 seconds) and after an in-place native
+`/sbin/reboot` with a changed guest boot identity and unchanged helper PID
+(0.092 seconds). A Dock-service-specific probe also succeeded (0.029 seconds).
+All 20 repeated console/Aqua/process-list sequences then passed in 17.969
+seconds using the production exact Dock-path predicate. No probe process was
+left running. These observations do not establish the cause of the in-workflow
+timeouts. The follow-up diagnostic logs only the closed proof stage and strict
+Boolean process-state fields (`exited`, `outputComplete`, and
+`terminationRequested`); missing or malformed values are reported as unknown.
+All 25 normal-agent tests pass, and the signed diagnostic build is
+`51e16c95cb9215deebacfe79f9ee881b3a3dd57d253ece64b5649440c0e93e3d`.
+Its same-action SIP resume passed automatic-login and desktop verification
+without triggering the timeout diagnostic, then advanced to the Recovery SIP
+change. The command then completed with exit 0 and verified
+`configuredDisabled`, `normalBootVerified`, `runtimeConfigurationVerified`,
+`enforcementVerified`, and the requested stopped final state. This successful
+resume does not establish the earlier timeout cause, and the added diagnostic
+does not change probe behavior.
 
 ## Disposable lab cleanup notes
 
