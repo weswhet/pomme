@@ -165,6 +165,34 @@ struct PommeSecurityNormalAgentTests {
     )
   }
 
+  @Test("A timed-out Aqua proof propagates its closed diagnostic without raw output")
+  func timedOutAquaProofPreservesTypedDiagnostic() {
+    let secret = "password=do-not-log /private/secret"
+    let result = PommeSecurityNormalAgent.decodeProofResponse(
+      response(
+        exitCode: nil,
+        exited: false,
+        outputComplete: false,
+        stdout: Data(secret.utf8),
+        stderr: Data(secret.utf8),
+        timedOut: true
+      ),
+      stage: .aqua
+    )
+
+    guard case .failure(let diagnostic) = result else {
+      Issue.record("Expected the timed-out Aqua response to fail with a diagnostic.")
+      return
+    }
+    #expect(diagnostic.stage == .aqua)
+    #expect(diagnostic.reason == .timedOut)
+    #expect(diagnostic.code == "normal-agent-aqua-timedOut")
+    let description = diagnostic.errorDescription ?? ""
+    #expect(description == "Normal agent verification failed (normal-agent-aqua-timedOut).")
+    #expect(!description.contains("pinned"))
+    #expect(!description.contains(secret))
+  }
+
   @Test("Transport diagnostics are closed and never include response material")
   func transportDiagnosticIsRedacted() throws {
     let diagnostic = PommeSecurityNormalAgent.transportDiagnostic(stage: .processList)

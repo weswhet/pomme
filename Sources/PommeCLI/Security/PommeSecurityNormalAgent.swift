@@ -582,9 +582,8 @@ struct PommeSecurityNormalAgent: Sendable {
     return try Self.decodeCompletedCommand(response)
   }
 
-  /// Executes one of the bounded desktop-proof probes while preserving the
-  /// historical thrown error. The closed reason is recorded before the
-  /// generic workflow error crosses the public boundary.
+  /// Executes one of the bounded desktop-proof probes and propagates only a
+  /// closed diagnostic when its response envelope is rejected.
   private func execute(
     _ request: GuestCommandRequest,
     proofStage: PommeSecurityNormalAgentProofStage
@@ -607,14 +606,30 @@ struct PommeSecurityNormalAgent: Sendable {
       throw error
     }
 
+    switch Self.decodeProofResponse(response, stage: proofStage) {
+    case .success(let result):
+      return result
+    case .failure(let diagnostic):
+      Self.log(diagnostic, vmName: reference.displayName)
+      throw diagnostic
+    }
+  }
+
+  /// Decodes a desktop-proof response and preserves the closed diagnostic
+  /// derived from the same rejected envelope. The result keeps this boundary
+  /// independent from the host transport while ensuring callers cannot fall
+  /// back to an unrelated generic workflow error.
+  static func decodeProofResponse(
+    _ response: [String: Any],
+    stage: PommeSecurityNormalAgentProofStage
+  ) -> Result<GuestCommandResult, PommeSecurityNormalAgentDiagnostic> {
     do {
-      return try Self.decodeCompletedCommand(response)
+      return .success(try decodeCompletedCommand(response))
     } catch {
-      Self.log(
-        Self.diagnostic(for: response, stage: proofStage)
-          ?? .init(stage: proofStage, reason: .invalidEnvelope),
-        vmName: reference.displayName)
-      throw error
+      return .failure(
+        diagnostic(for: response, stage: stage)
+          ?? .init(stage: stage, reason: .invalidEnvelope)
+      )
     }
   }
 
