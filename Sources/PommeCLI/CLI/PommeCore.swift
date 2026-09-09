@@ -1237,13 +1237,35 @@ struct PommeCore {
 
     /// Foreground output consists of bounded stream frames followed by one
     /// completion response; a process-start acknowledgement is not completion.
-    static func sendForegroundControlObject(_ payload: [String: Any], bundle: BundleLayout) throws -> [String: Any] {
+    static func sendForegroundControlObject(
+        _ payload: [String: Any],
+        bundle: BundleLayout,
+        timeout: TimeInterval? = nil
+    ) throws -> [String: Any] {
         let request = try makeControlRequest(from: payload)
         let record = try runtimeRecord(for: bundle)
         let identity = PommeRuntimeIdentity(socketPath: record.socketPath, pid: record.pid, startedAt: record.startedAt)
-        let stream = try PommeControlSocketClient(identity: identity).openStream(request)
+        let deadline = try timeout.map { value -> TimeInterval in
+            guard value.isFinite, value > 0 else {
+                throw RunnerError.invalidControlResponse("Pomme control stream timeout is invalid.")
+            }
+            return ProcessInfo.processInfo.systemUptime + value
+        }
+        let stream = try PommeControlSocketClient(identity: identity).openStream(
+            request,
+            timeout: deadline.map { max(0.001, $0 - ProcessInfo.processInfo.systemUptime) }
+        )
         try stream.closeInput()
-        return try collectForegroundResponse(receive: stream.receiveEvent)
+        guard let deadline else {
+            return try collectForegroundResponse(receive: stream.receiveEvent)
+        }
+        return try collectForegroundResponse(
+            maximumOutputBytes: 16 * 1024 * 1024,
+            until: deadline,
+            receive: { remaining in
+                try stream.receiveEventIfAvailable(timeout: remaining)
+            }
+        )
     }
 
     /// A public PTY is a full-duplex terminal bridge, unlike buffered
@@ -1274,10 +1296,60 @@ struct PommeCore {
         maximumOutputBytes: Int = 16 * 1024 * 1024,
         receive: () throws -> PommeControlStreamEvent
     ) throws -> [String: Any] {
+        try collectForegroundResponseLoop(maximumOutputBytes: maximumOutputBytes) {
+            .some(try receive())
+        }
+    }
+
+    /// Collects a foreground response through a monotonic transport deadline.
+    /// The receive closure must perform one bounded poll and return `nil` when
+    /// that poll elapsed without an event. A silent helper therefore cannot
+    /// leave the invoking security workflow suspended indefinitely.
+    static func collectForegroundResponse(
+        maximumOutputBytes: Int = 16 * 1024 * 1024,
+        timeout: TimeInterval,
+        now: @escaping () -> TimeInterval = {
+            ProcessInfo.processInfo.systemUptime
+        },
+        receive: (TimeInterval) throws -> PommeControlStreamEvent?
+    ) throws -> [String: Any] {
+        guard timeout.isFinite, timeout > 0 else {
+            throw RunnerError.invalidControlResponse("Pomme control stream timeout is invalid.")
+        }
+        return try collectForegroundResponse(
+            maximumOutputBytes: maximumOutputBytes,
+            until: now() + timeout,
+            now: now,
+            receive: receive
+        )
+    }
+
+    private static func collectForegroundResponse(
+        maximumOutputBytes: Int,
+        until deadline: TimeInterval,
+        now: @escaping () -> TimeInterval = {
+            ProcessInfo.processInfo.systemUptime
+        },
+        receive: (TimeInterval) throws -> PommeControlStreamEvent?
+    ) throws -> [String: Any] {
+        try collectForegroundResponseLoop(maximumOutputBytes: maximumOutputBytes) {
+            let remaining = deadline - now()
+            guard remaining > 0 else {
+                throw RunnerError.invalidControlResponse("Pomme control stream receive timed out.")
+            }
+            return try receive(remaining)
+        }
+    }
+
+    private static func collectForegroundResponseLoop(
+        maximumOutputBytes: Int,
+        receive: () throws -> PommeControlStreamEvent?
+    ) throws -> [String: Any] {
         var frames: [[String: Any]] = []
         var outputBytes = 0
         while true {
-            switch try receive() {
+            guard let event = try receive() else { continue }
+            switch event {
             case .stream(let frame):
                 switch frame.stream {
                 case .stdout, .stderr:
@@ -2979,8 +3051,13 @@ struct PommeCore {
         timeout: TimeInterval
     ) throws -> [String: Any] {
         let bundle = reference.bundle
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
         if let existing = try? runtimeRecord(for: bundle) {
-            var status = try sendControlObject(["command": "status"], bundle: bundle)
+            var status = try sendControlObject(
+                ["command": "status"],
+                bundle: bundle,
+                timeout: max(0.001, deadline - ProcessInfo.processInfo.systemUptime)
+            )
             let runningMode = stringValue(status["bootMode"])
             guard runningMode == bootMode.rawValue else {
                 throw RunnerError.virtualMachineState(
@@ -3015,9 +3092,17 @@ struct PommeCore {
         process.standardOutput = logHandle
         process.standardError = logHandle
         try process.run()
-        try waitForRuntime(process: process, bundle: bundle, timeout: timeout)
+        try waitForRuntime(
+            process: process,
+            bundle: bundle,
+            timeout: max(0.001, deadline - ProcessInfo.processInfo.systemUptime)
+        )
         try? logHandle.close()
-        let status = try sendControlObject(["command": "status"], bundle: bundle)
+        let status = try sendControlObject(
+            ["command": "status"],
+            bundle: bundle,
+            timeout: max(0.001, deadline - ProcessInfo.processInfo.systemUptime)
+        )
         var payload = status
         payload["operation"] = bootMode == .normal ? "start-normal" : "start-recovery"
         payload["name"] = reference.name as Any
@@ -3027,14 +3112,22 @@ struct PommeCore {
     }
 
     private static func waitForRuntime(process: Process, bundle: BundleLayout, timeout: TimeInterval) throws {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while ProcessInfo.processInfo.systemUptime < deadline {
             guard process.isRunning else {
                 process.waitUntilExit()
                 throw RunnerError.backgroundStartFailed(status: process.terminationStatus, logURL: bundle.helperLogURL)
             }
-            if (try? sendControlObject(["command": "status"], bundle: bundle)) != nil { return }
-            Thread.sleep(forTimeInterval: 0.1)
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            if remaining > 0,
+               (try? sendControlObject(
+                   ["command": "status"], bundle: bundle, timeout: remaining
+               )) != nil {
+                return
+            }
+            let sleepInterval = min(
+                0.1, max(0, deadline - ProcessInfo.processInfo.systemUptime))
+            Thread.sleep(forTimeInterval: sleepInterval)
         }
         throw RunnerError.backgroundStartTimedOut(pid: process.processIdentifier, logURL: bundle.helperLogURL)
     }

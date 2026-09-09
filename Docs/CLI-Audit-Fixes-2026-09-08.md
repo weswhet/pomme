@@ -128,6 +128,42 @@ change. The command then completed with exit 0 and verified
 resume does not establish the earlier timeout cause, and the added diagnostic
 does not change probe behavior.
 
+## 3. AMFI disable wait investigation
+
+The same retained 40GB/4GB VM completed SIP disable before this investigation.
+The signed `51e16c95` baseline AMFI status command verified enforcement enabled,
+no active AMFI disabling boot argument, and custom boot arguments permitted.
+The exact audit disable command completed successfully: it advanced from the
+normal-boot message to verification in 46 seconds and restored the stopped
+final state. Configuration and runtime configuration were verified; live AMFI
+enforcement was not tested. The historical hang did not reproduce.
+
+The investigation found unbounded host control exchanges inside otherwise
+bounded normal-agent and helper-start waits. This is an independently proven
+deadline gap, not an established cause of the historical hang. A real socket
+peer that withholds a complete response reproduced the old collector waiting
+until the peer closed: 1.103 seconds, failing the regression limit of 0.5
+seconds. The candidate passes remaining monotonic budgets into helper startup
+and authentication exchanges, and bounds foreground control collection.
+Guest command deadlines remain unchanged; the host permits 15 additional
+seconds for cleanup/results. An uncertain AMFI mutation remains unverified
+and journaled, without automatic replay.
+
+All 35 focused foreground-control and normal-agent tests pass with the bounded
+path, including partial frames and delayed terminal delivery. All 47 CLI
+contract checks pass. The canonical signed candidate is
+`09771c475e143db2d44017c06f201b196e0974171956ae2ade8ea3a2dd1c0d4c`.
+Candidate AMFI enable completed with exit 0, enabled configuration, verified
+normal boot/runtime configuration, and verified stopped final state. Its
+normal-boot message to verification took 4m42s, including a subsequent Recovery
+policy stage; that stage began 18 seconds after the normal-boot message. Live
+enforcement was not tested. Candidate AMFI disable then completed its mutating
+path with exit 0, disabled configuration, verified normal boot/runtime
+configuration, and verified stopped final state. Its normal-boot message to
+verification took 56 seconds. Both candidate operations returned structured
+results without hanging. The exact historical hang remains unconfirmed; the
+reproduced unbounded control wait is now covered by a passing regression.
+
 ## Disposable lab cleanup notes
 
 The first lab VM was stopped and deleted after the baseline evidence was
