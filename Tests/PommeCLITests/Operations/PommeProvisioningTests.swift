@@ -176,6 +176,133 @@ struct PommeProvisioningTests {
         ).localizedDescription.contains("retained"))
     }
 
+    @Test("resume retries an interrupted Recovery agent installation intent")
+    func resumeRetriesInterruptedRecoveryAgentInstallation() async throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 13, count: 32))
+        let repository = MemoryRepository()
+        let calls = CallLog()
+        let vmPlan = try plan()
+        let retained = try signer.make(
+            generation: 1,
+            plan: vmPlan,
+            events: try eventsThrough(
+                .displayOnlyFirstNormalBoot,
+                leavingIntentFor: .installRecoveryAgent
+            )
+        )
+        try repository.create(retained)
+
+        let orchestrator = PommeProvisioningOrchestrator(
+            signer: signer,
+            repository: repository,
+            effects: effects(calls: calls)
+        )
+        try await orchestrator.resume(expectedPlan: vmPlan)
+
+        let completed = try repository.load()
+        try signer.verify(completed)
+        #expect(await calls.phases == [
+            .installRecoveryAgent,
+            .verifyNormalAgent, .restoreFinalState,
+        ])
+        #expect(completed.events.filter {
+            $0.kind == .intent && $0.phase == .installRecoveryAgent
+        }.map(\.attempt) == [1])
+        #expect(completed.events.filter {
+            $0.kind == .receipt && $0.phase == .installRecoveryAgent
+        }.map(\.attempt) == [1])
+        #expect(completed.events.filter { $0.kind == .receipt }.map(\.phase) == PommeProvisioningPhase.allCases)
+    }
+
+    @Test("resume retries an interrupted final-state restoration intent")
+    func resumeRetriesInterruptedFinalStateRestoration() async throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 15, count: 32))
+        let repository = MemoryRepository()
+        let calls = CallLog()
+        let vmPlan = try plan(finalState: .normalRunning)
+        let retained = try signer.make(
+            generation: 1,
+            plan: vmPlan,
+            events: try eventsThrough(
+                .verifyNormalAgent,
+                leavingIntentFor: .restoreFinalState
+            )
+        )
+        try repository.create(retained)
+
+        let orchestrator = PommeProvisioningOrchestrator(
+            signer: signer,
+            repository: repository,
+            effects: effects(calls: calls)
+        )
+        try await orchestrator.resume(expectedPlan: vmPlan)
+
+        let completed = try repository.load()
+        try signer.verify(completed)
+        #expect(await calls.phases == [.restoreFinalState])
+        #expect(completed.events.filter {
+            $0.kind == .intent && $0.phase == .restoreFinalState
+        }.map(\.attempt) == [1])
+        #expect(completed.events.filter {
+            $0.kind == .receipt && $0.phase == .restoreFinalState
+        }.map(\.attempt) == [1])
+        #expect(completed.events.filter { $0.kind == .receipt }.map(\.phase) == PommeProvisioningPhase.allCases)
+    }
+
+    @Test("resume rejects every other interrupted phase without mutation", arguments: PommeProvisioningPhase.allCases.filter {
+        $0 != .installRecoveryAgent && $0 != .restoreFinalState
+    })
+    func resumeRejectsUnsupportedInterruptedPhase(phase: PommeProvisioningPhase) async throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 14, count: 32))
+        let repository = MemoryRepository()
+        let calls = CallLog()
+        let vmPlan = try plan()
+        let retained = try signer.make(
+            generation: 1,
+            plan: vmPlan,
+            events: try eventsLeavingIntentFor(phase)
+        )
+        try repository.create(retained)
+
+        let orchestrator = PommeProvisioningOrchestrator(
+            signer: signer,
+            repository: repository,
+            effects: effects(calls: calls)
+        )
+        await #expect(throws: PommeProvisioningError.unexpectedEvent) {
+            try await orchestrator.resume(expectedPlan: vmPlan)
+        }
+
+        #expect(await calls.phases.isEmpty)
+        #expect(try repository.load() == retained)
+    }
+
+    @Test("resume validates malformed pending history before effects")
+    func resumeRejectsMalformedPendingHistory() async throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 16, count: 32))
+        let repository = MemoryRepository()
+        let calls = CallLog()
+        let vmPlan = try plan()
+        let malformed = try signer.make(
+            generation: 1,
+            plan: vmPlan,
+            events: [try event(kind: .intent, phase: .installRecoveryAgent)]
+        )
+        try repository.create(malformed)
+
+        let orchestrator = PommeProvisioningOrchestrator(
+            signer: signer,
+            repository: repository,
+            effects: effects(calls: calls)
+        )
+        await #expect(throws: PommeProvisioningError.unexpectedEvent) {
+            try await orchestrator.resume(expectedPlan: vmPlan)
+        }
+
+        #expect(await calls.phases.isEmpty)
+        #expect(try repository.load() == malformed)
+    }
+
     @Test("failed and not-yet-started Recovery agent phases remain repairable")
     func recoveryAgentRepairPhase() throws {
         let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 11, count: 32))
@@ -367,6 +494,18 @@ struct PommeProvisioningTests {
     ) throws -> [PommeProvisioningEvent] {
         var events = try eventsThrough(lastReceipt)
         events.append(try event(kind: .intent, phase: pendingPhase))
+        return events
+    }
+
+    private func eventsLeavingIntentFor(_ phase: PommeProvisioningPhase) throws -> [PommeProvisioningEvent] {
+        guard let index = PommeProvisioningPhase.allCases.firstIndex(of: phase) else {
+            throw PommeProvisioningError.unexpectedEvent
+        }
+        var events: [PommeProvisioningEvent] = []
+        if index > 0 {
+            events = try eventsThrough(PommeProvisioningPhase.allCases[index - 1])
+        }
+        events.append(try event(kind: .intent, phase: phase))
         return events
     }
 
