@@ -45,7 +45,8 @@ struct VirtualizationPrivateHeadlessBackendInputBudgetTests {
 
         try budget.requireFullPlan([plan, plan])
         try budget.requireNextChord(plan, partialInputPossible: false)
-        clock.advance(nanoseconds: 80_000_000)
+        // Leave less than one chord's minimum duration (the key-down dwell).
+        clock.advance(nanoseconds: 100_000_000 - HeadlessInputTiming.keyDownDwellNanoseconds + 1)
 
         do {
             try budget.requireNextChord(plan, partialInputPossible: true)

@@ -281,3 +281,21 @@ order of the list will not change.
   still averaged 208 ms against a 100 ms setting. Typing was unchanged at
   99 s (17:21:27 → 17:23:06). Confirms that navigation is guest-bound and
   that 3.1 (typing) and 3.2 (stop timeout) are the next wins.
+
+## 7. Implementation results (3.1, 3.2, 3.4, 3.5)
+
+Validation create with the same parameters (full unit suite running on the
+host at the same time, so restore/navigation numbers are pessimistic):
+
+| Phase | Before (8:32 run) | After | Change |
+|---|---|---|---|
+| Pre-install (IPSW digest) | 24 s | 16 s | hashed once; a sidecar (`<ipsw>.sha256.json`, identity-keyed) now skips it on later creates |
+| `VZMacOSInstaller` restore | 236 s | 249 s | `.none` sync + all cores: no measurable gain under load; kept (doc-backed, harmless), re-measure on an idle host |
+| Recovery navigation | 87 s | 85 s | guest-bound, as expected |
+| Probe typed + verified | 55 s | 10 s | one 8 ms dwell per chord, ~140-char probe |
+| Launcher typed | 45 s | 9 s | 8-hex tag and workspace |
+| Install → verify → stop | 76 s | 50 s | agent-driven `shutdown -h now` replaces the 30 s graceful-stop timeout |
+| **Total** | **8:32** | **7:01** | |
+
+The next create on the same IPSW should additionally skip the 12 s hash.
+`pomme start` + `exec` and `inspect` health on the resulting VM are unchanged.

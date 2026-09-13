@@ -306,8 +306,17 @@ struct HeadlessInputReadinessToken: Equatable, Sendable {
 }
 
 enum HeadlessInputTiming {
-    static let keyDownDwellNanoseconds: UInt64 = 20_000_000
-    static let transitionGapNanoseconds: UInt64 = 8_000_000
+    /// One bounded dwell per key chord, between key-down and key-up. Modifier
+    /// transitions and key-up carry no delay: events reach the guest in
+    /// order, and every host sleep costs far more than its nominal length
+    /// when timers are coalesced, so typing sleeps once per character.
+    static let keyDownDwellNanoseconds: UInt64 = 8_000_000
+    static let transitionGapNanoseconds: UInt64 = 0
+
+    /// The delay that follows each event of one chord.
+    static func delays(for plan: [HostDisplayInputEvent]) -> [UInt64] {
+        plan.map { $0.kind == .keyDown ? keyDownDwellNanoseconds : transitionGapNanoseconds }
+    }
     static let pointerHoverNanoseconds: UInt64 = 250_000_000
     static let minimumKeyCycleNanoseconds = keyDownDwellNanoseconds + transitionGapNanoseconds
 }
@@ -348,10 +357,7 @@ struct HeadlessInputBudget: Sendable {
     static func minimumDurationNanoseconds(
         for plan: [HostDisplayInputEvent]
     ) -> UInt64 {
-        plan.reduce(into: UInt64.zero) { total, event in
-            let delay = event.kind == .keyDown
-                ? HeadlessInputTiming.keyDownDwellNanoseconds
-                : HeadlessInputTiming.transitionGapNanoseconds
+        HeadlessInputTiming.delays(for: plan).reduce(into: UInt64.zero) { total, delay in
             total = addingSaturating(total, delay)
         }
     }
@@ -1556,13 +1562,7 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
         let eventChords = try plans.map { plan in
             try plan.map(Self.makeKeyEvent)
         }
-        let delayPlans = plans.map { plan in
-            plan.map { event in
-                event.kind == .keyDown
-                    ? HeadlessInputTiming.keyDownDwellNanoseconds
-                    : HeadlessInputTiming.transitionGapNanoseconds
-            }
-        }
+        let delayPlans = plans.map(HeadlessInputTiming.delays(for:))
         _ = try await HeadlessInputEventDispatcher.dispatch(
             delayPlans: delayPlans,
             budget: budget,
