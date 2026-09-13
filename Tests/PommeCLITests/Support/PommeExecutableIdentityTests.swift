@@ -7,8 +7,8 @@ struct PommeExecutableIdentityTests {
     func productionResolutionUsesDyldPath() throws {
         // Given: both production paths are evaluated in this process.
         let identity = try PommeCore.runningExecutableIdentity()
-        let dyldURL = try PommeFirstBootProcessIsolation.currentExecutableURL()
-        let dyldDigest = try PommeFirstBootProcessIsolation.executableDigest(at: dyldURL)
+        let dyldURL = try PommeExecutableIdentity.currentExecutableURL()
+        let dyldDigest = try PommeExecutableIdentity.executableDigest(at: dyldURL)
 
         // Then: the host identity is the process executable, not argv[0].
         #expect(identity.url == dyldURL)
@@ -55,7 +55,7 @@ struct PommeExecutableIdentityTests {
             .appendingPathComponent("pomme-missing-executable-\(UUID().uuidString)")
 
         // When/Then: digesting the missing path fails closed.
-        #expect(throws: PommeFirstBootProcessError.identityRejected) {
+        #expect(throws: PommeExecutableIdentityError.identityRejected) {
             try PommeCore.runningExecutableIdentity(executableURLProvider: { missing })
         }
     }
@@ -68,7 +68,7 @@ struct PommeExecutableIdentityTests {
         let directoryURL = fixture.root
 
         // When/Then: the identity remains fail-closed for non-files.
-        #expect(throws: PommeFirstBootProcessError.identityRejected) {
+        #expect(throws: PommeExecutableIdentityError.identityRejected) {
             try PommeCore.runningExecutableIdentity(
                 executableURLProvider: { directoryURL }
             )

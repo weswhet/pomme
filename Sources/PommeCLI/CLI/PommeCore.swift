@@ -988,15 +988,13 @@ struct PommeCore {
         catch { throw PommeLiveRecoveryIntegration.Error.credentialRejected }
     }
 
-    private static func provisioningEffects(
-        firstBootLease: VMBundleMutationLease
-    ) -> PommeProvisioningEffects {
+    private static func provisioningEffects() -> PommeProvisioningEffects {
         provisioningEffectsLock.lock()
         defer { provisioningEffectsLock.unlock() }
         if let installedProvisioningEffects {
             return installedProvisioningEffects
         }
-        return makeLiveProvisioningEffects(firstBootLease: firstBootLease)
+        return makeLiveProvisioningEffects()
     }
 
     // MARK: Public argument and output helpers
@@ -1806,7 +1804,7 @@ struct PommeCore {
         let orchestrator = PommeProvisioningOrchestrator(
             signer: preparation.signer,
             repository: repository,
-            effects: provisioningEffects(firstBootLease: lease)
+            effects: provisioningEffects()
         )
 
         do {
@@ -1939,18 +1937,10 @@ struct PommeCore {
         }
     }
 
-    private static func makeLiveProvisioningEffects(
-        firstBootLease: VMBundleMutationLease
-    ) -> PommeProvisioningEffects {
+    private static func makeLiveProvisioningEffects() -> PommeProvisioningEffects {
         .init(
             verifyOwnership: { expected in try await verifyProvisioningOwnership(expected) },
             install: { plan in try await installProvisioningVM(plan) },
-            displayOnlyFirstNormalBoot: { plan in
-                guard firstBootLease.validates(name: plan.vm.name) else {
-                    throw PommeProvisioningError.ownershipMismatch
-                }
-                return try await displayOnlyFirstNormalBoot(plan, lease: firstBootLease)
-            },
             installRecoveryAgent: { plan in try await installRecoveryAgent(plan) },
             verifyNormalAgent: { plan in try await verifyNormalAgent(plan) },
             restoreFinalState: { plan in try await restoreProvisioningFinalState(plan) },
@@ -2373,184 +2363,6 @@ struct PommeCore {
             data.append(encoded)
         }
         return PommeProvisioningDigest.sha256(data)
-    }
-
-    private static func displayOnlyFirstNormalBoot(
-        _ plan: PommeProvisioningPlan,
-        lease: VMBundleMutationLease
-    ) async throws -> String {
-        let executable = try runningExecutableIdentity()
-        guard executable.sha256 == plan.normalAgent.executableDigest,
-              executable.sha256 == plan.recoveryAgent.executableDigest
-        else { throw PommeFirstBootProcessError.identityRejected }
-        let bundleIdentity = try PommeFirstBootProcessIsolation.makeBundleIdentity(
-            bundlePath: plan.vm.bundlePath,
-            name: plan.vm.name
-        )
-        let request = try PommeFirstBootProcessRequest(
-            bundlePath: plan.vm.bundlePath,
-            vmName: plan.vm.name,
-            vmUUID: plan.vm.uuid.uuidString.lowercased(),
-            executableSHA256: executable.sha256,
-            bundleIdentity: bundleIdentity,
-            nonce: UUID().uuidString.lowercased(),
-            timeout: Constants.defaultRecoveryAgentTimeout
-        )
-        log("first normal boot milestone: isolatedSupervisorStarting.", vmName: plan.vm.name)
-        let receipt = try await PommeFirstBootProcessIsolation.run(
-            request: request,
-            lease: lease,
-            executableURL: executable.url
-        )
-        log("first normal boot milestone: isolatedProcessGroupReaped.", vmName: plan.vm.name)
-        return try receiptDigest(
-            "display-only-first-normal-boot-\(receipt.stableObservationCount)-\(receipt.reconstructionCount)",
-            plan: plan,
-            bundle: BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
-        )
-    }
-
-    /// Hidden VM-owning worker used only by `PommeFirstBootProcessIsolation`.
-    /// Its intermediate supervisor must prove worker/descendant exit before
-    /// the public CLI can reap that supervisor and proceed to Recovery.
-    static func runFirstBootProcessChild(
-        _ request: PommeFirstBootProcessRequest
-    ) async -> Int32 {
-        await PommeFirstBootProcessIsolation.runChild(request: request) {
-            let bundle = BundleLayout(
-                rootURL: URL(fileURLWithPath: request.bundlePath).standardizedFileURL
-            )
-            let signer = try provisioningSigner(bundleURL: bundle.rootURL)
-            let repository = try provisioningRepository(
-                bundleURL: bundle.rootURL,
-                signer: signer
-            )
-            let journal = try repository.load()
-            guard journal.plan.vm.name == request.vmName,
-                  journal.plan.vm.uuid.uuidString.lowercased() == request.vmUUID,
-                  journal.plan.vm.bundlePath == request.bundlePath,
-                  journal.plan.normalAgent.executableDigest == request.executableSHA256,
-                  journal.plan.recoveryAgent.executableDigest == request.executableSHA256,
-                  journal.events.last?.kind == .intent,
-                  journal.events.last?.phase == .displayOnlyFirstNormalBoot,
-                  try PommeFirstBootProcessIsolation.makeBundleIdentity(
-                    bundlePath: request.bundlePath,
-                    name: request.vmName
-                  ) == request.bundleIdentity,
-                  try await verifyProvisioningOwnership(journal.plan.vm) == journal.plan.vm
-            else { throw PommeFirstBootProcessError.identityRejected }
-            return try await runFirstBootBarrier(journal.plan, timeout: request.timeout)
-        }
-    }
-
-    private static func runFirstBootBarrier(
-        _ plan: PommeProvisioningPlan,
-        timeout: TimeInterval
-    ) async throws -> PommeFirstBootReceipt {
-        let barrier = PommeFirstBootBarrier(dependencies: .init(
-            makeAttempt: { try await makeFirstBootAttempt(plan) }
-        ))
-        let receipt = try await barrier.run(
-            timeout: timeout
-        )
-        guard receipt.setupAssistantSurfaceProven,
-              receipt.stableObservationCount >= PommeFirstBootBarrier.requiredStableObservations,
-              receipt.reconstructionCount <= 1,
-              receipt.stoppedStateProven
-        else { throw PommeProvisioningError.phaseFailed(.displayOnlyFirstNormalBoot) }
-        return receipt
-    }
-
-    /// Constructs one listener-free, display-only first-boot attempt. The
-    /// barrier owns the sole bounded reconstruction policy; this factory does
-    /// not start the VM and retains no attempt after the barrier releases it.
-    private static func makeFirstBootAttempt(
-        _ plan: PommeProvisioningPlan
-    ) async throws -> PommeFirstBootAttempt {
-        let bundle = BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
-        let input = try loadProvisioningInput(for: plan)
-        let hardwareModel = try loadHardwareModel(input.hardwareModelData)
-        guard hardwareModel.isSupported else { throw RunnerError.unsupportedHardwareModel }
-        guard let machineIdentifier = VZMacMachineIdentifier(
-            dataRepresentation: input.machineIdentifierData
-        ) else { throw RunnerError.invalidMachineIdentifier }
-        let auxiliaryStorage = VZMacAuxiliaryStorage(url: bundle.auxiliaryStorageURL)
-        let queue = DispatchQueue(
-            label: "com.github.weswhet.pomme.first-normal-boot.\(UUID().uuidString.lowercased())"
-        )
-        let configuration = try makeRuntimeConfiguration(
-            bundle: bundle,
-            hardwareModel: hardwareModel,
-            machineIdentifier: machineIdentifier,
-            auxiliaryStorage: auxiliaryStorage,
-            memorySizeBytes: input.memorySizeBytes
-        )
-        let vm = VZVirtualMachine(configuration: configuration, queue: queue)
-        let confinedVM = QueueConfined(value: vm)
-        let backend = VirtualizationPrivateHeadlessBackend(
-            virtualMachine: vm,
-            configuration: configuration,
-            queue: queue
-        )
-
-        return .init(
-            startNormal: { completion in
-                // Submit the VZ start before returning to the lifecycle
-                // callback bridge. Its timeout cannot then race ahead,
-                // observe this attempt as stopped, and reconstruct while an
-                // old start remains queued behind cleanup.
-                queue.sync {
-                    let options = VZMacOSVirtualMachineStartOptions()
-                    options.startUpFromMacOSRecovery = false
-                    confinedVM.value.start(options: options, completionHandler: completion)
-                }
-            },
-            stopNormal: { completion in
-                queue.async {
-                    switch confinedVM.value.state {
-                    case .stopped:
-                        completion(nil)
-                    case .running, .paused:
-                        confinedVM.value.stop(completionHandler: completion)
-                    default:
-                        completion(PommeFirstBootBarrierError.cleanupFailed)
-                    }
-                }
-            },
-            observe: {
-                let image: CGImage
-                do {
-                    image = try await backend.captureImage(timeout: 30)
-                } catch {
-                    if VirtualizationPrivateHeadlessBackend.isTransientCaptureFailure(error) {
-                        throw PommeFirstBootObservationError.displayUnavailable
-                    }
-                    throw PommeFirstBootObservationError.recognitionFailed
-                }
-                do {
-                    let lines = try SettingsAIOCRRecognizer().recognizeRecovery(
-                        image: image,
-                        displaySize: VirtualizationPrivateHeadlessBackend.displaySize
-                    )
-                    return PommeFirstBootObservation.fromOCR(
-                        width: image.width,
-                        height: image.height,
-                        lines: lines
-                    )
-                } catch {
-                    throw PommeFirstBootObservationError.recognitionFailed
-                }
-            },
-            cleanupState: {
-                switch await state(of: confinedVM.value, on: queue) {
-                case .stopped: .stopped
-                case .running, .paused: .stoppable
-                case .starting, .pausing, .resuming, .stopping: .transitioning
-                case .error: .stoppable
-                default: .transitioning
-                }
-            }
-        )
     }
 
     /// Recovery installation is an injectable, request-bound boundary:
@@ -3986,7 +3798,7 @@ struct PommeCore {
         let orchestrator = PommeProvisioningOrchestrator(
             signer: signer,
             repository: repository,
-            effects: provisioningEffects(firstBootLease: lease)
+            effects: provisioningEffects()
         )
         try await orchestrator.resume(expectedPlan: journal.plan)
         let payload: [String: Any] = [
@@ -4041,7 +3853,7 @@ struct PommeCore {
         let signer = try provisioningSigner(bundleURL: reference.bundle.rootURL)
         let repository = try provisioningRepository(bundleURL: reference.bundle.rootURL, signer: signer)
         let journal = try repository.load()
-        let effects = provisioningEffects(firstBootLease: lease)
+        let effects = provisioningEffects()
         let ownership = try await effects.verifyOwnership(journal.plan.vm)
         guard ownership == journal.plan.vm else {
             throw PommeProvisioningError.ownershipMismatch
@@ -4559,7 +4371,7 @@ struct PommeCore {
 
     static func runningExecutableIdentity(
         executableURLProvider: @Sendable () throws -> URL = {
-            try PommeFirstBootProcessIsolation.currentExecutableURL()
+            try PommeExecutableIdentity.currentExecutableURL()
         }
     ) throws -> (url: URL, sha256: String) {
         // CommandLine.arguments.first is only the invocation spelling. A PATH
@@ -4567,6 +4379,6 @@ struct PommeCore {
         // current directory, so use dyld's process-owned executable path and
         // canonicalize any test or launcher symlink before hashing.
         let url = try executableURLProvider().resolvingSymlinksInPath()
-        return (url, try PommeFirstBootProcessIsolation.executableDigest(at: url))
+        return (url, try PommeExecutableIdentity.executableDigest(at: url))
     }
 }

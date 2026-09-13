@@ -235,7 +235,6 @@ extension PommeRecoveryProfileContract {
 
 enum PommeProvisioningPhase: String, Codable, CaseIterable, Equatable, Sendable {
     case install
-    case displayOnlyFirstNormalBoot
     case installRecoveryAgent
     case verifyNormalAgent
     case restoreFinalState
@@ -356,19 +355,6 @@ enum PommeProvisioningCoding {
 /// useful category without paths, payloads, credentials, or framework text.
 enum PommeProvisioningFailureDiagnostic {
     static func code(for error: Error) -> String {
-        if let error = error as? PommeFirstBootProcessError {
-            switch error {
-            case .invalidRequest: return "first_boot_process.invalid_request"
-            case .capabilityRejected: return "first_boot_process.capability_rejected"
-            case .identityRejected: return "first_boot_process.identity_rejected"
-            case .spawnFailed: return "first_boot_process.spawn_failed"
-            case .processCancelled: return "first_boot_process.cancelled"
-            case .processTimedOut: return "first_boot_process.timed_out"
-            case .processFailed: return "first_boot_process.worker_failed"
-            case .invalidReceipt: return "first_boot_process.invalid_receipt"
-            case .containmentFailed: return "first_boot_process.containment_failed"
-            }
-        }
         if let error = error as? PommeLiveRecoveryIntegration.Error {
             switch error {
             case .unsupportedOperation: return "live_recovery.unsupported_operation"
@@ -610,7 +596,6 @@ enum PommeProvisioningCoordinator {
 struct PommeProvisioningEffects: Sendable {
     let verifyOwnership: @Sendable (PommeVMOwnership) async throws -> PommeVMOwnership
     let install: @Sendable (PommeProvisioningPlan) async throws -> String
-    let displayOnlyFirstNormalBoot: @Sendable (PommeProvisioningPlan) async throws -> String
     let installRecoveryAgent: @Sendable (PommeProvisioningPlan) async throws -> String
     let verifyNormalAgent: @Sendable (PommeProvisioningPlan) async throws -> String
     let restoreFinalState: @Sendable (PommeProvisioningPlan) async throws -> String
@@ -719,7 +704,6 @@ struct PommeProvisioningOrchestrator: Sendable {
     private func effect(_ phase: PommeProvisioningPhase, plan: PommeProvisioningPlan) async throws -> String {
         switch phase {
         case .install: try await effects.install(plan)
-        case .displayOnlyFirstNormalBoot: try await effects.displayOnlyFirstNormalBoot(plan)
         case .installRecoveryAgent: try await effects.installRecoveryAgent(plan)
         case .verifyNormalAgent: try await effects.verifyNormalAgent(plan)
         case .restoreFinalState: try await effects.restoreFinalState(plan)
