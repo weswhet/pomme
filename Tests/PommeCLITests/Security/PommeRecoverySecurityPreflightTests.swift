@@ -15,6 +15,7 @@ struct PommeRecoverySecurityPreflightTests {
             case .sip(let action): _ = try await integration.sip(action: action, finalState: .stopped)
             case .amfi(let action): _ = try await integration.amfi(action: action, finalState: .stopped)
             case .installAgent: Issue.record("Unexpected install operation")
+            case .terminalSession: Issue.record("Unexpected terminal operation")
             }
             Issue.record("Experimental security operation unexpectedly succeeded")
         } catch {

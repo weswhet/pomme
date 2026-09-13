@@ -233,7 +233,7 @@ protocol PommeMDMTemporaryHelperTransport: Sendable {
 }
 
 extension PommeMDMTemporaryHelperTransport {
-    /// Source compatibility for callers that predate selectable enrollment
+    /// Source support for callers that predate selectable enrollment
     /// modes. Such calls deliberately use the least-privileged unapproved
     /// behavior.
     func enroll(

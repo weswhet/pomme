@@ -1,6 +1,6 @@
 import Testing
 
-@Suite("Pomme create resume contract")
+@Suite("Pomme create resume contract", .serialized)
 struct CreateCommandTests {
     @Test("Direct create rejects non-positive and malformed resource sizes in every execution mode", arguments: [
         "0GB",

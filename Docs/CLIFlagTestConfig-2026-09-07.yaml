@@ -1,0 +1,8 @@
+schemaVersion: 1
+name: pomme-agent-config-0907
+versions: [26.6.0, 15.6.1]
+ipswDevice: Mac14,2
+hardware:
+  diskSize: 40GB
+  memory: 4GB
+boot: none

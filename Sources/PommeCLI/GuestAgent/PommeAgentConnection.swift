@@ -3,7 +3,7 @@ import Foundation
 /// Connection state is deliberately independent of VSOCK so integration can
 /// bind it to a persistent normal daemon or a bounded Recovery session.
 final class PommeAgentConnection: @unchecked Sendable {
-    enum CredentialLifetime: Sendable { case persistent, oneShot }
+    enum CredentialLifetime: Sendable { case persistent, oneShot, bootSession }
 
     private let token: String
     private let lifetime: CredentialLifetime
@@ -15,7 +15,13 @@ final class PommeAgentConnection: @unchecked Sendable {
     private var seenRequests: Set<UUID> = []
     var isAuthenticated: Bool { authenticated }
     var permitsStream: Bool { authenticated && !isExpired }
-    private var isExpired: Bool { expiresAt.map { $0 <= Date() } ?? false }
+    private var isExpired: Bool {
+        // A terminal admission credential is short-lived only until the
+        // first successful authentication. It then remains boot-session
+        // scoped in memory and may authenticate a transient reconnect.
+        guard lifetime != .bootSession || !authenticated else { return false }
+        return expiresAt.map { $0 <= Date() } ?? false
+    }
 
     /// Bind recovery credentials to the VM/session that minted them when that
     /// context is available.  Bindings are compared before the HMAC proof is

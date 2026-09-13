@@ -24,6 +24,11 @@ enum PommeVMControlRouter {
         case "guest-ui":
             guard request.streaming != true else { throw RunnerError.invalidControlCommand(request.command) }
             return .guestUI(try PommeUIControlRequest.parse(from: jsonObject))
+        case "terminal.session":
+            return .terminalSession(
+                try PommeTerminalSessionControlRequest.parse(from: jsonObject),
+                streaming: request.streaming == true
+            )
         default:
             throw RunnerError.invalidControlCommand(request.command)
         }

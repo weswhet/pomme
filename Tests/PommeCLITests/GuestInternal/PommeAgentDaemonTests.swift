@@ -58,6 +58,9 @@ struct PommeAgentDaemonTests {
         #expect(recovery.allowedOperation == "agent.install")
         let security = try PommeAgentDaemon.parse(arguments: ["--pomme-agent", "505053", "--token-file", "/private/token", "--expected-sha256", digest, "--role", "recovery", "--one-shot-expiry", "9999999999", "--vm-id", vmID, "--session-id", sessionID, "--operation", "sip.disable", "--request-file", "/private/request.json"])
         #expect(security.allowedOperation == "sip.disable")
+        let terminal = try PommeAgentDaemon.parse(arguments: ["--pomme-agent", "505053", "--token-file", "/private/token", "--expected-sha256", digest, "--role", "recovery", "--one-shot-expiry", "9999999999", "--vm-id", vmID, "--session-id", sessionID, "--operation", "terminal.session", "--request-file", "/private/request.json"])
+        #expect(terminal.allowedOperation == "terminal.session")
+        #expect(terminal.terminalAuthority)
         #expect(throws: Error.self) { _ = try PommeAgentDaemon.parse(arguments: ["--pomme-agent", "505053", "--token-file", "/private/token", "--expected-sha256", digest, "--role", "recovery", "--one-shot-expiry", "9999999999", "--vm-id", vmID, "--session-id", sessionID, "--operation", "agent.install", "--request-file", "/private/request.json"]) }
         #expect(throws: Error.self) { _ = try PommeAgentDaemon.parse(arguments: ["--pomme-agent", "505052", "--token-file", "/private/token", "--expected-sha256", digest, "--role", "recovery", "--one-shot-expiry", "9999999999", "--vm-id", vmID.uppercased(), "--session-id", sessionID, "--operation", "agent.install", "--request-file", "/private/request.json"]) }
     }

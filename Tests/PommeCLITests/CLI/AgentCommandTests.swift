@@ -2,6 +2,14 @@ import Testing
 
 @Suite("Public Pomme agent command contract")
 struct AgentCommandTests {
+    @Test("Durable terminal commands are public")
+    func durableTerminalCommands() {
+        let help = PommeCLI.helpMessage()
+        #expect(help.contains("sessions"))
+        #expect(SessionsCommand.helpMessage().contains("attach"))
+        #expect(SessionsCommand.helpMessage().contains("logs"))
+    }
+
     @Test("Agent is the only public durable-workflow group")
     func publicCommandVisibility() {
         #expect(PommeCLI.configuration.commandName == "pomme")

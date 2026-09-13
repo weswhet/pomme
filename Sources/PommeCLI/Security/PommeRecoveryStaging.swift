@@ -130,12 +130,29 @@ final class PommeRecoveryStaging: @unchecked Sendable {
     func clearShare(from vm: VZVirtualMachine, on queue: DispatchQueue) throws {
         let cleared = queue.sync { () -> Bool in
             let matches = vm.directorySharingDevices.compactMap { $0 as? VZVirtioFileSystemDevice }
-                .filter { $0.tag == PommeRecoveryStagingBuilder.tag(for: request.requestID) }
+                .filter { $0.tag == PommeRecoveryStagingBuilder.tag(for: request) }
             guard matches.count == 1 else { return false }
             matches[0].share = nil
             return matches[0].share == nil
         }
         guard cleared else { throw PommeRecoveryStagingError.shareNotCleared }
+    }
+
+    /// Replaces the empty ordinary-Recovery bootstrap share with this exact
+    /// request-bound read-only staging share. The device tag is fixed by the
+    /// request operation, so a pre-attached empty device can be populated
+    /// only for terminal admission.
+    func attachShare(to vm: VZVirtualMachine, on queue: DispatchQueue) throws {
+        let attached = queue.sync { () -> Bool in
+            let matches = vm.directorySharingDevices.compactMap { $0 as? VZVirtioFileSystemDevice }
+                .filter { $0.tag == PommeRecoveryStagingBuilder.tag(for: request) }
+            guard matches.count == 1,
+                  let share = deviceConfiguration.share
+            else { return false }
+            matches[0].share = share
+            return matches[0].share != nil
+        }
+        guard attached else { throw PommeRecoveryStagingError.shareNotCleared }
     }
 
     /// Removes only the request's exact root and fixed children. An unknown
@@ -230,6 +247,7 @@ final class PommeRecoveryStaging: @unchecked Sendable {
 struct PommeRecoveryStagingBuilder: Sendable {
     static let maximumExecutableBytes = 128 * 1_024 * 1_024
     static let rootPrefix = "pomme-recovery-"
+    static let terminalBootstrapTag = "pomme-terminal-bootstrap"
 
     struct Input: Sendable {
         let request: PommeRecoverySessionRequest
@@ -336,7 +354,7 @@ struct PommeRecoveryStagingBuilder: Sendable {
                 root: rootURL
             )
 
-            let tag = Self.tag(for: input.request.requestID)
+            let tag = Self.tag(for: input.request)
             try VZVirtioFileSystemDeviceConfiguration.validateTag(tag)
             let shared = VZSharedDirectory(url: rootURL, readOnly: true)
             let device = VZVirtioFileSystemDeviceConfiguration(tag: tag)
@@ -371,6 +389,12 @@ struct PommeRecoveryStagingBuilder: Sendable {
     static func tag(for requestID: UUID) -> String {
         let compact = requestID.uuidString.lowercased().replacingOccurrences(of: "-", with: "")
         return "pomme-\(compact.prefix(24))"
+    }
+
+    static func tag(for request: PommeRecoverySessionRequest) -> String {
+        request.operation == PommeRecoveryOperation.terminalSession.wireName
+            ? terminalBootstrapTag
+            : tag(for: request.requestID)
     }
 
     private func readVerifiedExecutable(at url: URL, expectedSHA256: String) throws -> Data {

@@ -10,8 +10,11 @@ most 256 KiB. Requests contain `protocol`, `version`, `kind`, `requestID`,
 
 Authentication is the first permitted operation. Challenge proofs use
 HMAC-SHA256, constant-time comparison, expiry checks, and replay rejection.
-Persistent credentials are reusable across connections; Recovery credentials
-are one-shot and expire. A connection cannot authenticate twice.
+Persistent credentials are reusable across connections; request-bound Recovery
+security credentials are one-shot and expire. Ordinary Recovery terminal
+admission credentials expire until first authentication, then remain only in
+memory for that boot and can reauthenticate after a transient VSOCK loss. A
+connection cannot authenticate twice.
 
 Version 1 operations are capability-gated and include:
 
@@ -21,6 +24,14 @@ Version 1 operations are capability-gated and include:
   `file.close`;
 - `system.info`, `network.interfaces`, `remoteLogin.set`; and
 - transactional maintenance activation, status, commit, and repair.
+
+The additive terminal-session capability is advertised as
+`terminalSessionVersion: 1`. It is separate from the bounded `process.*` job
+table. The guest service accepts only `terminal.create`, `terminal.status`,
+`terminal.read`, `terminal.ack`, `terminal.input`, `terminal.resize`,
+`terminal.signal`, `terminal.terminate`, `terminal.release`, and paginated
+`terminal.list`. Recovery's terminal authority advertises only
+`agent.describe`, `agent.health`, and this terminal vocabulary.
 
 ### Request and stream exchange
 
@@ -64,10 +75,14 @@ outer buffered CLI collector separately permits at most 16 MiB and 16,384
 output frames; exceeding either bound is a reported failure rather than silent
 truncation.
 
-The agent has low-level PTY support for output, resize, and signals, but the
-public interactive CLI PTY path is not yet wired to the foreground stream
-workflow. This protocol must not be read as claiming that interactive CLI PTY
-execution is complete.
+Interactive PTYs are durable terminal sessions. The host preallocates the
+session UUID, sends a monotonically increasing mutation sequence and canonical
+payload digest for every input, resize, signal, and termination, and treats an
+exact retry as the same acknowledgement. Guest PTY bytes are continuously
+drained into a private spool and replayed by byte offset until the host
+transcript has appended and acknowledged them. Normal transcripts are private
+per-VM records retained until `terminal.delete`; Recovery transcript bytes are
+helper/boot scoped and are never persisted.
 
 Process identity accepts at most one of user name or UID and at most one of
 group name or GID. The agent attempts supplementary-group resolution and drops
@@ -100,5 +115,18 @@ retried after an unknown outcome.
 For buffered foreground execution, the host helper waits through the
 process-start acknowledgement, polls and consumes output until terminal
 completion, and then applies the CLI exit/output bounds above. The public
-interactive PTY CLI path remains unwired even though the lower-level agent can
-operate a PTY.
+interactive PTY path uses the durable terminal-session engine instead. Its
+attachment has no duration or idle deadline. A local TTY disconnect only
+detaches; `~.` at the start of an input line detaches, while `~~` sends a
+literal tilde. Attachments are exclusive unless takeover is requested, and
+logs can replay any validated transcript byte offset.
+
+## Terminal-session control operations
+
+`PommeControlProtocol` version 1 advertises the additive `terminalSessions`
+feature. Its closed `terminal.session` registry contains `terminal.create`,
+`terminal.list`, `terminal.inspect`, `terminal.attach`, `terminal.logs`,
+`terminal.terminate`, and `terminal.delete`. Attach is a full-duplex control
+stream; all setup and frame sizes remain bounded, but an admitted session is
+not subject to a wall-clock or idle timeout. Storage failures report
+`storage-blocked` and stop acknowledgements rather than truncating output.

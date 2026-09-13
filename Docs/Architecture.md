@@ -21,12 +21,15 @@ alter ACLs, migrate Data Protection items, or require Keychain entitlements.
 Builds preserve Pomme's signing identity so authorized login-Keychain access can
 remain valid across rebuilds.
 
-Recovery uses a distinct `PommeRecoverySession`. A session is request-bound,
-temporary, and authenticated with an expiring one-shot credential. Recovery
-listeners use ports `505052` and `505053` only for their documented bounded
-roles. Session teardown removes the share, launcher, credential, listener, and
-sensitive in-memory observations before the VM can transition to its requested
-final state.
+Recovery uses a distinct `PommeRecoverySession`. Security sessions are
+request-bound, temporary, and authenticated with an expiring one-shot
+credential. Ordinary Recovery terminal admission uses the same short-lived
+credential only until the terminal authority authenticates; afterward the
+credential remains in memory for that Recovery boot so transient VSOCK
+reconnects can reauthenticate. Recovery listeners use ports `505052` and
+`505053` only for their documented bounded roles. Session teardown removes the
+share, launcher, credential, listener, and sensitive in-memory observations
+before the VM can transition to its requested final state.
 
 Recovery staging keeps its request-bound `/private/var/tmp` spelling. Lexical
 validation must not use Foundation's filesystem-aware URL standardization,
@@ -43,6 +46,31 @@ without changing the host filesystem.
 Both roles speak `PommeAgentProtocol` version 1. There is one authenticated,
 chunked file path and one operation registry. Normal and Recovery capabilities
 are explicit; callers must never infer authorization from the active boot mode.
+
+## Durable terminal sessions
+
+Normal macOS terminal sessions are owned by the helper's
+`PommeDurableTerminalSessionManager`, scoped to the exact VM runtime and boot
+generation. The manager does not hold the bundle mutation lease while a
+session is attached. The persistent guest `PommeTerminalService` owns the PTY,
+process group, and replayable guest spool; the helper appends raw bytes to a
+private per-VM store and acknowledges guest offsets only after the append is
+durable. Session metadata is atomic and symlink-resistant. A storage error
+transitions the session to `storage-blocked` and preserves unread bytes.
+
+Recovery terminal admission is a distinct terminal-only agent authority. Its
+short-lived admission credential is consumed before the first authenticated
+request, then remains only in memory for the current Recovery boot so a
+transient VSOCK reconnect can reauthenticate. That authority rejects file
+transfer, generic process, maintenance, SIP/AMFI, installation, and unrelated
+terminal operations. Recovery PTY and transcript state is helper-scoped and
+is discarded when the helper, agent, or Recovery boot ends.
+
+Pause/resume leaves live sessions attached to the runtime. Stop, restart,
+guest reboot, mode changes, snapshot restore, helper exit, and agent exit mark
+sessions lost; normal raw transcripts remain available for inspection and
+deletion. Active terminal sessions block Recovery security workflows until
+they are terminated and cleanup is proven.
 
 The local CLI and VM helper speak `PommeControlProtocol` version 1 over a
 bounded JSON-lines Unix socket under `/tmp/pomme-*.sock`. This protocol is

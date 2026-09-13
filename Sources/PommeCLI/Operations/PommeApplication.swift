@@ -602,15 +602,17 @@ enum PommeApplication {
         name: String,
         request: GuestCommandRequest
     ) throws -> PommeOperationResult {
-        try VMBundleMutationLease.withLease(name: name) { _ in
-        let reference = try namedReference(name)
-        var payload = try request.pty
-            ? PommeCore.sendPublicPTYControlObject(
-                request.controlPayload,
-                bundle: reference.bundle,
-                timeout: request.timeout
+        if request.pty {
+            return try terminalSessionCreate(
+                name: name,
+                payload: request.terminalPayload(),
+                title: "Exec",
+                attach: true
             )
-            : PommeCore.sendForegroundControlObject(request.controlPayload, bundle: reference.bundle)
+        }
+        return try VMBundleMutationLease.withLease(name: name) { _ in
+        let reference = try namedReference(name)
+        var payload = try PommeCore.sendForegroundControlObject(request.controlPayload, bundle: reference.bundle)
         payload["operation"] = "process.start"
         payload["name"] = name
         let ok = payload["ok"] as? Bool == true
@@ -618,6 +620,174 @@ enum PommeApplication {
         return result(title: "Exec", reference: reference, payload: payload,
                       text: payload["foreground"] as? Bool == true ? text : (text.isEmpty ? (ok ? "OK" : "ERROR") : text))
         }
+    }
+
+    static func terminalSessionCreate(
+        name: String,
+        payload: [String: Any],
+        title: String,
+        attach: Bool
+    ) throws -> PommeOperationResult {
+        let reference = try namedReference(name)
+        var createPayload = payload
+        let sessionID = UUID().uuidString.lowercased()
+        createPayload["sessionID"] = sessionID
+        createPayload["command"] = "terminal.session"
+        createPayload["operation"] = "terminal.create"
+        let create = { try PommeCore.sendControlObject(createPayload, bundle: reference.bundle) }
+        let status = try? PommeCore.sendControlObject(
+            ["command": "status"],
+            bundle: reference.bundle
+        )
+        var created: [String: Any]
+        if (status?["bootMode"] as? String) == BootMode.recovery.rawValue {
+            // Recovery admission briefly owns the bundle mutation lease while
+            // it stages and authenticates the terminal authority. The lease
+            // is released before the durable session can be attached.
+            created = try VMBundleMutationLease.withLease(name: name) { _ in
+                try create()
+            }
+        } else {
+            created = try create()
+        }
+        created["operation"] = "terminal.create"
+        created["name"] = name
+        guard let createdID = created["sessionID"] as? String else {
+            throw RunnerError.invalidControlResponse("The terminal creation response did not include a session ID.")
+        }
+        if attach {
+            if let session = created["session"] as? [String: Any],
+               session["bootRole"] as? String == PommeDurableTerminalRole.recovery.rawValue {
+                let notice = "Notice: this Recovery terminal runs as unrestricted root and is outside Pomme's transactional SIP/AMFI guarantees.\n"
+                FileHandle.standardError.write(Data(notice.utf8))
+            }
+            let attached = try PommeCore.sendTerminalAttachControlObject(
+                [
+                    "command": "terminal.session",
+                    "operation": "terminal.attach",
+                    "sessionID": createdID
+                ],
+                bundle: reference.bundle
+            )
+            var payload = attached
+            payload["sessionID"] = createdID
+            payload["operation"] = "terminal.attach"
+            payload["terminalAttachment"] = true
+            payload["name"] = name
+            return result(title: title, reference: reference, payload: payload, text: "")
+        }
+        let text = "session " + createdID
+        return result(title: title, reference: reference, payload: created, text: text)
+    }
+
+    static func terminalSessionList(name: String) throws -> PommeOperationResult {
+        try terminalSessionControl(name: name, operation: "terminal.list", payload: [:], title: "Sessions")
+    }
+
+    static func terminalSessionInspect(name: String, sessionID: String) throws -> PommeOperationResult {
+        try terminalSessionControl(
+            name: name,
+            operation: "terminal.inspect",
+            payload: ["sessionID": sessionID],
+            title: "Session"
+        )
+    }
+
+    static func terminalSessionLogs(name: String, sessionID: String, offset: UInt64) throws -> PommeOperationResult {
+        try terminalSessionControl(
+            name: name,
+            operation: "terminal.logs",
+            payload: ["sessionID": sessionID, "offset": Int64(offset)],
+            title: "Logs"
+        )
+    }
+
+    static func terminalSessionTerminate(name: String, sessionID: String, force: Bool) throws -> PommeOperationResult {
+        try terminalSessionControl(
+            name: name,
+            operation: "terminal.terminate",
+            payload: ["sessionID": sessionID, "force": force],
+            title: "Terminate"
+        )
+    }
+
+    static func terminalSessionDelete(name: String, sessionID: String) throws -> PommeOperationResult {
+        try terminalSessionControl(
+            name: name,
+            operation: "terminal.delete",
+            payload: ["sessionID": sessionID],
+            title: "Delete"
+        )
+    }
+
+    static func terminalSessionAttach(
+        name: String,
+        sessionID: String,
+        offset: UInt64?,
+        takeover: Bool
+    ) throws -> PommeOperationResult {
+        let reference = try namedReference(name)
+        let inspection = try PommeCore.sendControlObject(
+            [
+                "command": "terminal.session",
+                "operation": "terminal.inspect",
+                "sessionID": sessionID
+            ],
+            bundle: reference.bundle
+        )
+        if inspection["bootRole"] as? String == PommeDurableTerminalRole.recovery.rawValue {
+            let notice = "Notice: this Recovery terminal runs as unrestricted root and is outside Pomme's transactional SIP/AMFI guarantees.\n"
+            FileHandle.standardError.write(Data(notice.utf8))
+        }
+        var payload: [String: Any] = [
+            "command": "terminal.session",
+            "operation": "terminal.attach",
+            "sessionID": sessionID,
+            "takeover": takeover
+        ]
+        if let offset { payload["offset"] = Int64(offset) }
+        var resultPayload = try PommeCore.sendTerminalAttachControlObject(payload, bundle: reference.bundle)
+        resultPayload["operation"] = "terminal.attach"
+        resultPayload["terminalAttachment"] = true
+        return result(title: "Attach", reference: reference, payload: resultPayload, text: "")
+    }
+
+    private static func terminalSessionControl(
+        name: String,
+        operation: String,
+        payload: [String: Any],
+        title: String
+    ) throws -> PommeOperationResult {
+        let reference = try namedReference(name)
+        var request = payload
+        request["command"] = "terminal.session"
+        request["operation"] = operation
+        var response = try PommeCore.sendControlObject(request, bundle: reference.bundle)
+        response["operation"] = operation
+        response["name"] = name
+        let text: String
+        switch operation {
+        case "terminal.list":
+            let sessions = response["sessions"] as? [[String: Any]] ?? []
+            text = sessions.isEmpty
+                ? "No terminal sessions."
+                : sessions.map { terminalSessionSummary($0) }.joined(separator: "\n")
+        case "terminal.inspect":
+            text = terminalSessionSummary(response)
+        case "terminal.logs":
+            text = response["dataBase64"] as? String ?? ""
+        default:
+            text = response["error"] as? String ?? "OK"
+        }
+        return result(title: title, reference: reference, payload: response, text: text)
+    }
+
+    private static func terminalSessionSummary(_ session: [String: Any]) -> String {
+        let id = stringValue(session["sessionID"])
+        let state = stringValue(session["state"])
+        let executable = stringValue(session["executable"] ?? session["path"])
+        let offset = stringValue(session["transcriptOffset"] ?? session["outputLength"])
+        return [id, state, executable, "offset=" + offset].filter { !$0.isEmpty }.joined(separator: " ")
     }
 
     static func guestRequest(

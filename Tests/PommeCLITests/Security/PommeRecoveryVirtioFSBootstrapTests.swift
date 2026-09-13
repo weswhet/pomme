@@ -397,8 +397,15 @@ struct PommeRecoveryVirtioFSBootstrapTests {
         defer { fixture.remove() }
         let script = try PommeRecoveryVirtioFSTerminalPlan(request: fixture.request).launcherScript
         let unmount = try #require(script.range(of: "/sbin/umount"))
+        let stableCWD = try #require(script.range(of: "\ncd /\n"))
+        let removeWorkspace = try #require(script.range(
+            of: "/bin/rmdir \"$d\"",
+            range: stableCWD.upperBound..<script.endIndex
+        ))
         let launch = try #require(script.range(of: "\"$g/pomme-agent\" --pomme-agent"))
         #expect(unmount.lowerBound < launch.lowerBound)
+        #expect(stableCWD.lowerBound < removeWorkspace.lowerBound)
+        #expect(removeWorkspace.lowerBound < launch.lowerBound)
         #expect(script.contains("/bin/rmdir \"$m\""))
         #expect(script.contains("test ! -e \"$m\" && test ! -L \"$m\""))
         #expect(script.contains("/bin/rmdir \"$d\""))

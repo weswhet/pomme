@@ -61,13 +61,13 @@ struct GuestExecutionOptions: ParsableArguments {
         guard !attachStdin || !detached else {
             throw ValidationError("--stdin conflicts with --detach.")
         }
-        guard !usesPTY || !detached else {
-            throw ValidationError("--pty conflicts with --detach.")
+        guard !usesPTY || !attachStdin else {
+            throw ValidationError("--stdin is implicit for an attached PTY; omit --stdin.")
         }
         guard !usesPTY || guestRedirections.allSatisfy({ $0 == nil }) else {
             throw ValidationError("--pty conflicts with --guest-stdin, --guest-stdout, and --guest-stderr.")
         }
-        if usesPTY {
+        if usesPTY && !detached {
             switch try output.resolvedFormat() {
             case .json, .jsonl:
                 throw ValidationError("--pty conflicts with JSON and JSONL output.")
@@ -149,7 +149,7 @@ struct ExecCommand: ParsableCommand {
     @Argument(help: "VM name. Uses POMME_VM_NAME when omitted before --.")
     var name: String?
 
-    @Flag(name: [.customShort("d"), .customLong("detach")], help: "Start a background job and print its ID.")
+    @Flag(name: [.customShort("d"), .customLong("detach")], help: "Create the PTY session without attaching and print its session ID.")
     var detach = false
 
     @OptionGroup var execution: GuestExecutionOptions
@@ -161,6 +161,9 @@ struct ExecCommand: ParsableCommand {
 
     mutating func validate() throws {
         try execution.validate(detached: detach, output: output)
+        if execution.pty, timeout.isExplicitlySet {
+            throw ValidationError("--timeout is unavailable for interactive PTY sessions.")
+        }
     }
 
     mutating func run() throws {
@@ -171,9 +174,19 @@ struct ExecCommand: ParsableCommand {
             flagName: "exec"
         )
         let request = try execution.apply(to: directRequest)
-        let result = detach
-            ? try PommeEnvironment.live().guest.request(target, .startBackground(request), "Exec")
-            : try PommeEnvironment.live().guest.execute(target, request)
+        let result: PommeOperationResult
+        if request.pty {
+            result = try PommeApplication.terminalSessionCreate(
+                name: target,
+                payload: request.terminalPayload(),
+                title: "Exec",
+                attach: !detach
+            )
+        } else {
+            result = detach
+                ? try PommeEnvironment.live().guest.request(target, .startBackground(request), "Exec")
+                : try PommeEnvironment.live().guest.execute(target, request)
+        }
         try CLIOutputWriter.write(result, options: output)
     }
 }
@@ -185,7 +198,7 @@ struct ShellCommand: ParsableCommand {
     @Argument(help: "[VM name] [quoted shell expression]. Uses POMME_VM_NAME when the VM name is omitted.")
     var arguments: [String] = []
 
-    @Flag(name: [.customShort("d"), .customLong("detach")], help: "Start a background job and print its ID.")
+    @Flag(name: [.customShort("d"), .customLong("detach")], help: "Detach a bare shell as a durable session; expressions remain background jobs.")
     var detach = false
 
     @OptionGroup var execution: GuestExecutionOptions
@@ -194,7 +207,13 @@ struct ShellCommand: ParsableCommand {
 
     mutating func validate() throws {
         let resolution = try resolveTargetAndExpression()
+        if resolution.expression != nil && execution.pty {
+            throw ValidationError("--pty is available for a bare durable shell; shell expressions remain one-shot /bin/sh -c commands.")
+        }
         try execution.validate(detached: detach, output: output, implicitPTY: resolution.expression == nil)
+        if resolution.expression == nil, timeout.isExplicitlySet {
+            throw ValidationError("--timeout is unavailable for interactive PTY sessions.")
+        }
     }
 
     mutating func run() throws {
@@ -204,12 +223,22 @@ struct ShellCommand: ParsableCommand {
         if let expression = resolution.expression {
             directRequest = GuestCommandRequest.shell(expression, timeout: try timeout.value())
         } else {
-            directRequest = GuestCommandRequest(path: "/bin/zsh", arguments: ["-l"], timeout: try timeout.value())
+            directRequest = GuestCommandRequest(path: "/bin/sh", arguments: [], timeout: try timeout.value())
         }
         let request = try execution.apply(to: directRequest, implicitPTY: bareShell)
-        let result = detach
-            ? try PommeEnvironment.live().guest.request(resolution.target, .startBackground(request), "Shell")
-            : try PommeEnvironment.live().guest.execute(resolution.target, request)
+        let result: PommeOperationResult
+        if bareShell {
+            result = try PommeApplication.terminalSessionCreate(
+                name: resolution.target,
+                payload: request.terminalPayload(shell: true),
+                title: "Shell",
+                attach: !detach
+            )
+        } else {
+            result = detach
+                ? try PommeEnvironment.live().guest.request(resolution.target, .startBackground(request), "Shell")
+                : try PommeEnvironment.live().guest.execute(resolution.target, request)
+        }
         try CLIOutputWriter.write(result, options: output)
     }
 

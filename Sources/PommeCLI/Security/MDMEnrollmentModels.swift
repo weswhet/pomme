@@ -96,7 +96,8 @@ struct MDMEnrollmentAgentDescription: Equatable, Sendable {
     /// a caller-supplied role/digest.
     static func fromAuthenticatedDescribe(_ value: JSONValue) throws -> Self {
         guard let object = value.objectValue,
-              Set(object.keys) == ["role", "protocol", "version", "executableSHA256", "capabilities"],
+              Set(object.keys).isSubset(of: ["role", "protocol", "version", "executableSHA256", "capabilities", "terminalSessionVersion"]),
+              Set(["role", "protocol", "version", "executableSHA256", "capabilities"]).isSubset(of: Set(object.keys)),
               let role = object["role"]?.stringValue,
               let protocolName = object["protocol"]?.stringValue,
               case .integer(let version)? = object["version"],
