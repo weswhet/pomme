@@ -336,13 +336,31 @@ struct GuestCommandRequest: Sendable {
         PommeAgentCLIModelSupport.controlPayload(operation: "process.start", payload: agentPayload())
     }
 
+    /// Payload for the durable terminal-session service.  Terminal sessions
+    /// deliberately omit the bounded process timeout and file redirections;
+    /// their PTY and replay spool are owned by the guest terminal service.
+    func terminalPayload(shell: Bool = false) -> [String: Any] {
+        var payload: [String: Any] = [
+            "path": path,
+            "arguments": arguments,
+            "shell": shell
+        ]
+        if let cwd { payload["cwd"] = cwd }
+        if !environment.isEmpty { payload["environment"] = environment }
+        if let user { payload["user"] = user }
+        if let uid { payload["uid"] = uid }
+        if let group { payload["group"] = group }
+        if let gid { payload["gid"] = gid }
+        return payload
+    }
+
     func validatedControlPayload(detached: Bool = false) throws -> [String: Any] {
         try validate(detached: detached)
         return PommeAgentCLIModelSupport.controlPayload(operation: "process.start", payload: agentPayload(detached: detached))
     }
 
     static func shell(_ command: String, timeout: TimeInterval) -> Self {
-        Self(path: "/bin/sh", arguments: ["-lc", command], timeout: timeout)
+        Self(path: "/bin/sh", arguments: ["-c", command], timeout: timeout)
     }
 
     static func direct(_ arguments: [String], timeout: TimeInterval, flagName: String = "--exec") throws -> Self {
@@ -725,7 +743,8 @@ enum ScreenSharingAgentCapabilityGate {
 
     static func verifyAuthenticatedDescribe(_ value: JSONValue) throws {
         guard let object = value.objectValue,
-              Set(object.keys) == Set(["role", "protocol", "version", "executableSHA256", "capabilities"]),
+              Set(object.keys).isSubset(of: Set(["role", "protocol", "version", "executableSHA256", "capabilities", "terminalSessionVersion"])),
+              Set(["role", "protocol", "version", "executableSHA256", "capabilities"]).isSubset(of: Set(object.keys)),
               object["role"]?.stringValue == "persistent",
               object["protocol"]?.stringValue == PommeAgentProtocol.name,
               object["version"] == .integer(Int64(PommeAgentProtocol.version)),

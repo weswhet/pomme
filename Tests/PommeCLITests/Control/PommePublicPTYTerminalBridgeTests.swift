@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import Testing
 
-@Suite("Public PTY terminal and control polling")
+@Suite("Public PTY terminal and control polling", .serialized)
 struct PommePublicPTYTerminalBridgeTests {
     @Test("Terminal output is byte-exact and original terminal state returns after child exit")
     func preservesBytesAndRestoresTerminal() throws {

@@ -117,6 +117,9 @@ private final class PommeRetainedRuntime: @unchecked Sendable {
         }
         coordinator?.teardown()
         await runtime.teardown()
+        guard runtime.terminalCleanupIsVerified() else {
+            throw RunnerError.virtualMachineState("Recovery terminal cleanup could not be proven complete.")
+        }
     }
 }
 
@@ -158,7 +161,7 @@ private final class PommeLiveRecoveryRuntimeResources: @unchecked Sendable {
         queue.sync {
             let matches = vm.directorySharingDevices
                 .compactMap { $0 as? VZVirtioFileSystemDevice }
-                .filter { $0.tag == PommeRecoveryStagingBuilder.tag(for: request.requestID) }
+                .filter { $0.tag == PommeRecoveryStagingBuilder.tag(for: request) }
             return matches.count == 1 && matches[0].share != nil
         }
     }
@@ -1292,6 +1295,24 @@ struct PommeCore {
         return try bridge.run(timeout: timeout)
     }
 
+    /// Opens a durable terminal attachment.  The setup exchange is bounded;
+    /// the attachment itself has no wall-clock deadline and returns only when
+    /// the local client detaches or the guest session exits.
+    static func sendTerminalAttachControlObject(
+        _ payload: [String: Any],
+        bundle: BundleLayout,
+        setupTimeout: TimeInterval = Constants.agentRoundTripTimeout
+    ) throws -> [String: Any] {
+        let request = try makeControlRequest(from: payload)
+        guard request.command == "terminal.session",
+              payload["operation"] as? String == "terminal.attach"
+        else { throw RunnerError.invalidControlCommand("terminal.attach") }
+        let record = try runtimeRecord(for: bundle)
+        let identity = PommeRuntimeIdentity(socketPath: record.socketPath, pid: record.pid, startedAt: record.startedAt)
+        let stream = try PommeControlSocketClient(identity: identity).openStream(request, timeout: setupTimeout)
+        return try PommeDurableTerminalBridge(stream: stream).run()
+    }
+
     static func collectForegroundResponse(
         maximumOutputBytes: Int = 16 * 1024 * 1024,
         receive: () throws -> PommeControlStreamEvent
@@ -1389,6 +1410,12 @@ struct PommeCore {
             else { throw RunnerError.invalidControlCommand(command) }
             body["operation"] = operation
         }
+        if command == "terminal.session" {
+            guard let operation = payload["operation"] as? String,
+                  operation != command
+            else { throw RunnerError.invalidControlCommand(command) }
+            body["operation"] = operation
+        }
         if command == "guest-ui", let path = body["hostOutputPath"] as? String {
             guard !path.isEmpty, !path.contains("\0") else {
                 throw RunnerError.invalidUICommand("A screenshot requires a valid host output path.")
@@ -1414,7 +1441,7 @@ struct PommeCore {
 
     private static func controlCommand(from payload: [String: Any]) throws -> String {
         let candidate = (payload["command"] as? String) ?? (payload["operation"] as? String)
-        guard let candidate, ["pause", "resume", "stop", "force-stop", "status", "inspect", "snapshot-save", "agent.perform", "guest-ui"].contains(candidate) else {
+        guard let candidate, ["pause", "resume", "stop", "force-stop", "status", "inspect", "snapshot-save", "agent.perform", "guest-ui", "terminal.session"].contains(candidate) else {
             throw RunnerError.invalidControlCommand(candidate ?? "")
         }
         return candidate
@@ -2520,7 +2547,7 @@ struct PommeCore {
                 case .running, .paused: .stoppable
                 case .starting, .pausing, .resuming, .stopping: .transitioning
                 case .error: .stoppable
-                @unknown default: .transitioning
+                default: .transitioning
                 }
             }
         )
@@ -2600,9 +2627,9 @@ struct PommeCore {
                 inspect: false
             ))
         case .recoveryRunning:
-            // An ordinary final-state Recovery boot is display/lifecycle only.
-            // The durable normal token and every Pomme listener are forbidden
-            // outside a request-bound PommeRecoverySession.
+            // An ordinary final-state Recovery boot exposes only the empty
+            // terminal bootstrap listener. Its terminal credential and agent
+            // are admitted lazily by the first terminal session.
             let retained = try await startProvisioningRuntime(plan: plan, mode: .recovery, attachAgent: false)
             retainRuntime(retained, for: plan.vm.bundlePath)
             observed = try liveRecoveryRunState(from: await retained.runtime.statusPayload(
@@ -2665,33 +2692,108 @@ struct PommeCore {
         }
         let auxiliaryStorage = VZMacAuxiliaryStorage(url: bundle.auxiliaryStorageURL)
         let queue = DispatchQueue(label: "com.github.weswhet.pomme.runtime")
-        let configuration = try makeRuntimeConfiguration(
-            bundle: bundle,
-            hardwareModel: hardwareModel,
-            machineIdentifier: machineIdentifier,
-            auxiliaryStorage: auxiliaryStorage,
-            memorySizeBytes: input.memorySizeBytes
-        )
+        let terminalBootstrapShare: PommeRecoveryTerminalBootstrapShare?
+        if mode == .recovery, !attachAgent {
+            terminalBootstrapShare = try PommeRecoveryTerminalBootstrapShare(
+                parentURL: try applicationSupportRoot(create: true)
+                    .appendingPathComponent("RecoveryTerminalBootstrap", isDirectory: true),
+                vmUUID: plan.vm.uuid
+            )
+        } else {
+            terminalBootstrapShare = nil
+        }
+
+        let configuration: VZVirtualMachineConfiguration
+        do {
+            configuration = try makeRuntimeConfiguration(
+                bundle: bundle,
+                hardwareModel: hardwareModel,
+                machineIdentifier: machineIdentifier,
+                auxiliaryStorage: auxiliaryStorage,
+                memorySizeBytes: input.memorySizeBytes,
+                ordinaryRecoveryBootstrapShare: terminalBootstrapShare
+            )
+        } catch {
+            try? terminalBootstrapShare?.removeHostRoot()
+            throw error
+        }
         let vm = VZVirtualMachine(configuration: configuration, queue: queue)
+        let terminalAdmissionState = terminalBootstrapShare.map { _ in
+            PommeRecoveryTerminalAdmissionState()
+        }
         let coordinator: PommeAgentVSOCKCoordinator?
-        if attachAgent {
-            guard let socketDevice = queue.sync(execute: { vm.socketDevices.first as? VZVirtioSocketDevice }) else {
-                throw RunnerError.hostCommandFailed("Pomme could not attach the VM agent socket.")
+        do {
+            if attachAgent || terminalBootstrapShare != nil {
+                guard let socketDevice = queue.sync(execute: { vm.socketDevices.first as? VZVirtioSocketDevice }) else {
+                    throw RunnerError.hostCommandFailed("Pomme could not attach the VM agent socket.")
+                }
+                let provider = PommeAgentVSOCKCoordinator(
+                    socketDevice: socketDevice,
+                    queue: queue,
+                    secretProvider: { role in
+                        if let terminalAdmissionState {
+                            return try terminalAdmissionState.secret(for: role)
+                        }
+                        return try existingProvisioningAgentCredential(for: plan)
+                    },
+                    bindingProvider: { role in
+                        if let terminalAdmissionState {
+                            return try terminalAdmissionState.sessionBinding(for: role)
+                        }
+                        return nil
+                    }
+                )
+                switch mode {
+                case .normal: try provider.attachNormal()
+                case .recovery: try provider.attachRecoveryRuntime()
+                }
+                coordinator = provider
+            } else {
+                coordinator = nil
             }
-            let provider = PommeAgentVSOCKCoordinator(
-                socketDevice: socketDevice,
-                queue: queue,
-                secretProvider: { _ in
-                    try existingProvisioningAgentCredential(for: plan)
+        } catch {
+            try? terminalBootstrapShare?.removeHostRoot()
+            throw error
+        }
+
+        let terminalAdmission: PommeRecoveryTerminalAdmission?
+        if let terminalBootstrapShare,
+           let terminalAdmissionState,
+           let coordinator {
+            let virtualization = PommeRecoveryTerminalVirtualizationContext(
+                vm: vm,
+                configuration: configuration,
+                queue: queue
+            )
+            terminalAdmission = PommeRecoveryTerminalAdmission(
+                plan: plan,
+                profileResolver: { try PommeCore.recoveryProfileEvidence(for: plan) },
+                virtualization: virtualization,
+                coordinator: coordinator,
+                state: terminalAdmissionState,
+                bootstrapShare: terminalBootstrapShare,
+                executableResolver: {
+                    try PommeAgentArtifactStore(
+                        rootURL: try applicationSupportRoot(create: false)
+                    ).resolve(sha256: plan.recoveryAgent.executableDigest)
                 }
             )
-            switch mode {
-            case .normal: try provider.attachNormal()
-            case .recovery: try provider.attachRecoveryRuntime()
-            }
-            coordinator = provider
         } else {
-            coordinator = nil
+            terminalAdmission = nil
+        }
+
+        let terminalAdmissionEffect: (@Sendable (UUID) async throws -> Void)?
+        let terminalAdmissionCleanup: (@Sendable () async -> Bool)?
+        if let terminalAdmission {
+            terminalAdmissionEffect = { sessionID in
+                try await terminalAdmission.ensure(sessionID: sessionID)
+            }
+            terminalAdmissionCleanup = {
+                await terminalAdmission.cleanup()
+            }
+        } else {
+            terminalAdmissionEffect = nil
+            terminalAdmissionCleanup = nil
         }
         let runtime = PommeVMRuntime(
             vm: vm,
@@ -2701,7 +2803,9 @@ struct PommeCore {
             snapshotsURL: bundle.snapshotsURL,
             requiredSnapshotRestoreURL: bundle.requiredSnapshotRestoreURL,
             agentProvider: coordinator,
-            bootMode: mode
+            bootMode: mode,
+            terminalAdmission: terminalAdmissionEffect,
+            terminalAdmissionCleanup: terminalAdmissionCleanup
         )
         do {
             try await runtime.start()
@@ -2776,7 +2880,8 @@ struct PommeCore {
         machineIdentifier: VZMacMachineIdentifier,
         auxiliaryStorage: VZMacAuxiliaryStorage,
         memorySizeBytes: UInt64,
-        recoveryConfiguration: PommeRecoveryRuntimeConfiguration? = nil
+        recoveryConfiguration: PommeRecoveryRuntimeConfiguration? = nil,
+        ordinaryRecoveryBootstrapShare: PommeRecoveryTerminalBootstrapShare? = nil
     ) throws -> VZVirtualMachineConfiguration {
         let platform = VZMacPlatformConfiguration()
         platform.hardwareModel = hardwareModel
@@ -2812,6 +2917,12 @@ struct PommeCore {
         configuration.keyboards = [VZMacKeyboardConfiguration(), VZUSBKeyboardConfiguration()]
         configuration.pointingDevices = [VZMacTrackpadConfiguration(), VZUSBScreenCoordinatePointingDeviceConfiguration()]
         configuration.graphicsDevices = [graphics]
+        if let ordinaryRecoveryBootstrapShare {
+            guard recoveryConfiguration == nil else {
+                throw RunnerError.hostCommandFailed("Recovery bootstrap shares cannot be combined.")
+            }
+            configuration.directorySharingDevices = [ordinaryRecoveryBootstrapShare.deviceConfiguration]
+        }
         if let recoveryConfiguration {
             try recoveryConfiguration.apply(to: configuration)
             try recoveryConfiguration.requireApplied()
@@ -2825,6 +2936,11 @@ struct PommeCore {
     ) async throws -> PommeRecoveryRunState {
         let payload: [String: Any]
         if let retained = retainedRuntime(for: reference.standardizedPath) {
+            if await retained.runtime.hasLiveTerminalSessions() {
+                throw RunnerError.virtualMachineState(
+                    "Recovery security workflows are unavailable while a terminal session is active. Terminate it first."
+                )
+            }
             payload = await retained.runtime.statusPayload(
                 bundle: reference.bundle,
                 inspect: false
@@ -3142,9 +3258,9 @@ struct PommeCore {
         guard plan.vm.bundlePath == bundle.rootURL.standardizedFileURL.path,
               plan.vm.name == (reference.name ?? plan.vm.name)
         else { throw PommeProvisioningError.ownershipMismatch }
-        // Recovery boots are lifecycle/UI sessions only. Recovery listeners
-        // are installed by the request-bound integration, never by an
-        // ordinary final-state runtime and never with the durable token.
+        // Ordinary Recovery boots carry only the empty terminal bootstrap
+        // share. No credential or launcher is staged until the first
+        // terminal session requests admission.
         let retained = try await startProvisioningRuntime(
             plan: plan,
             mode: bootMode,
@@ -3173,8 +3289,11 @@ struct PommeCore {
         // are merely queued in an unstructured task. Otherwise the next
         // security boot can find a dead helper's retained record.
         server.stop()
-        retained.coordinator?.teardown()
         await retained.runtime.teardown()
+        retained.coordinator?.teardown()
+        guard retained.runtime.terminalCleanupIsVerified() else {
+            throw RunnerError.virtualMachineState("Recovery terminal cleanup could not be proven complete.")
+        }
         let record = try JSONDecoder().decode(
             PommeRuntimeRecord.self, from: Data(contentsOf: recordURL))
         guard record.pid == Darwin.getpid(),
@@ -3238,6 +3357,11 @@ struct PommeCore {
             case .guestUI(let request):
                 let payload = try await runtime.performUI(request)
                 return try jsonLine(payload.mapValues(\.publicValue))
+            case .terminalSession(let request, let streaming):
+                guard !streaming, request.operation != "terminal.attach" else {
+                    throw RunnerError.invalidControlCommand("terminal.session")
+                }
+                return try await terminalSessionControlResponse(request, runtime: runtime)
             case .agentPerform(let request, _):
                 if isSecurityNormalAMFI(request) {
                     return await securityNormalAMFIControlResponse(request, runtime: runtime)
@@ -3254,13 +3378,107 @@ struct PommeCore {
         }
     }
 
+    private static func terminalSessionControlResponse(
+        _ request: PommeTerminalSessionControlRequest,
+        runtime: PommeVMRuntime
+    ) async throws -> String {
+        let payload: [String: Any]
+        switch request.operation {
+        case "terminal.create":
+            payload = try await runtime.terminalSessionCreate(payload: request.payload)
+        case "terminal.list":
+            let pageToken: String?
+            if let value = request.payload["pageToken"] {
+                guard let token = value.stringValue else { throw RunnerError.invalidControlCommand("terminal.session") }
+                pageToken = token
+            } else {
+                pageToken = nil
+            }
+            let pageSize: Int
+            if let value = request.payload["pageSize"] {
+                guard case .integer(let raw) = value, raw > 0, let parsed = Int(exactly: raw) else {
+                    throw RunnerError.invalidControlCommand("terminal.session")
+                }
+                pageSize = parsed
+            } else {
+                pageSize = 128
+            }
+            payload = try await runtime.terminalSessionList(pageToken: pageToken, pageSize: pageSize)
+        case "terminal.inspect":
+            payload = try await runtime.terminalSessionInspect(id: terminalSessionID(from: request.payload))
+        case "terminal.logs":
+            let id = try terminalSessionID(from: request.payload)
+            let offset = try optionalOffset(request.payload["offset"]) ?? 0
+            payload = try await runtime.terminalSessionLogs(id: id, offset: offset)
+        case "terminal.terminate":
+            let id = try terminalSessionID(from: request.payload)
+            let force = try strictBoolean(request.payload["force"], default: false)
+            payload = try await runtime.terminalSessionTerminate(id: id, force: force)
+        case "terminal.delete":
+            payload = try await runtime.terminalSessionDelete(id: terminalSessionID(from: request.payload))
+        case "terminal.attach":
+            throw RunnerError.invalidControlCommand("terminal.attach")
+        default:
+            throw RunnerError.invalidControlCommand(request.operation)
+        }
+        return try jsonLine(payload)
+    }
+
+    private static func terminalSessionID(from payload: [String: JSONValue]) throws -> UUID {
+        guard let raw = payload["sessionID"]?.stringValue,
+              let id = UUID(uuidString: raw),
+              id.uuidString.lowercased() == raw.lowercased()
+        else { throw RunnerError.invalidControlCommand("terminal.session") }
+        return id
+    }
+
+    private static func optionalOffset(_ value: JSONValue?) throws -> UInt64? {
+        guard let value else { return nil }
+        guard case .integer(let raw) = value, raw >= 0,
+              let offset = UInt64(exactly: raw)
+        else { throw RunnerError.invalidControlCommand("terminal.session") }
+        return offset
+    }
+
+    private static func strictBoolean(_ value: JSONValue?, default defaultValue: Bool) throws -> Bool {
+        guard let value else { return defaultValue }
+        guard case .bool(let result) = value else {
+            throw RunnerError.invalidControlCommand("terminal.session")
+        }
+        return result
+    }
+
     private static func runtimeStreamResponse(
         _ request: PommeVMControlRequest,
         stream: PommeControlStreamSession,
         runtime: PommeVMRuntime
     ) async -> String {
+        if case .terminalSession(let operation, let streaming) = request {
+            guard streaming, operation.operation == "terminal.attach" else {
+                return "ERROR Pomme terminal streaming requires terminal.attach."
+            }
+            do {
+                let sessionID = try Self.terminalSessionID(from: operation.payload)
+                let takeover = try Self.strictBoolean(operation.payload["takeover"], default: false)
+                let offset = try Self.optionalOffset(operation.payload["offset"])
+                let result = try await runtime.terminalSessionAttach(
+                    id: sessionID,
+                    offset: offset,
+                    takeover: takeover,
+                    stream: stream
+                )
+                return try jsonLine(result)
+            } catch {
+                // The stream's terminal response is the control-plane error
+                // channel.  Returning an `ok: false` JSON payload here would
+                // make ControlServer wrap it in a successful response, so a
+                // takeover/reconnect failure would look like a clean detach
+                // to the CLI bridge.
+                return "ERROR \(error.localizedDescription)"
+            }
+        }
         guard case .agentPerform(let operation, _) = request else {
-            return "ERROR Pomme control streaming is limited to agent.perform."
+            return "ERROR Pomme control streaming is limited to agent.perform or terminal.attach."
         }
         do {
             if isSecurityNormalAMFI(operation) {

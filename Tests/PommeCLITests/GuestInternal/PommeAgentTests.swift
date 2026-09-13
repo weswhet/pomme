@@ -5,6 +5,24 @@ import Testing
 
 @Suite("Pomme persistent agent")
 struct PommeAgentTests {
+    @Test("Recovery terminal authority exposes only health and terminal capabilities")
+    func recoveryTerminalAuthority() async throws {
+        let agent = try PommeAgent(
+            role: .recovery,
+            executableSHA256: String(repeating: "a", count: 64),
+            authority: .recoveryTerminal
+        )
+        let describe = try await agent.perform(.request(operation: "agent.describe"))
+        #expect(describe.objectValue?["terminalSessionVersion"] == .integer(Int64(PommeTerminalService.protocolVersion)))
+        #expect(describe.objectValue?["capabilities"]?.arrayValue?.compactMap(\.stringValue) == PommeAgent.recoveryTerminalCapabilities)
+        await #expect(throws: PommeAgentOperationError.self) {
+            _ = try await agent.perform(.request(operation: "file.read"))
+        }
+        await #expect(throws: PommeAgentOperationError.self) {
+            _ = try await agent.performAsynchronously(.request(operation: "sip.status"))
+        }
+    }
+
     @Test("Capabilities and ordinary-operation update gate are closed")
     func capabilitiesAndUpdateGate() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -18,7 +36,7 @@ struct PommeAgentTests {
         let agent = try PommeAgent(role: .persistent, executableSHA256: oldDigest, journalPath: directory.appendingPathComponent("journal").path, executablePath: executable.path)
         let describe = try await agent.perform(.request(operation: "agent.describe"))
         #expect(describe.objectValue?["role"]?.stringValue == "persistent")
-        #expect(describe.objectValue.map { Set($0.keys) } == Set(["role", "protocol", "version", "executableSHA256", "capabilities"]))
+        #expect(describe.objectValue.map { Set($0.keys) } == Set(["role", "protocol", "version", "executableSHA256", "capabilities", "terminalSessionVersion"]))
         #expect(describe.objectValue?["publicPTYEchoVersion"] == nil)
         #expect(describe.objectValue?["privatePTYInputVersion"] == nil)
         let mdmDescription = try MDMEnrollmentAgentDescription.fromAuthenticatedDescribe(describe)
@@ -27,14 +45,14 @@ struct PommeAgentTests {
             operation: "agent.describe",
             payload: .object(["includePrivatePTYCapabilities": .bool(true)])
         ))
-        #expect(privatePTYDescribe.objectValue.map { Set($0.keys) } == Set(["role", "protocol", "version", "executableSHA256", "capabilities", "privatePTYInputVersion"]))
+        #expect(privatePTYDescribe.objectValue.map { Set($0.keys) } == Set(["role", "protocol", "version", "executableSHA256", "capabilities", "privatePTYInputVersion", "terminalSessionVersion"]))
         #expect(privatePTYDescribe.objectValue?["privatePTYInputVersion"] == .integer(Int64(PommeAgent.privatePTYInputVersion)))
         let publicPTYDescribe = try await agent.perform(.request(
             operation: "agent.describe",
             payload: .object(["includePublicPTYCapabilities": .bool(true)])
         ))
         #expect(publicPTYDescribe.objectValue.map { Set($0.keys) } == Set([
-            "role", "protocol", "version", "executableSHA256", "capabilities", "publicPTYEchoVersion"
+            "role", "protocol", "version", "executableSHA256", "capabilities", "publicPTYEchoVersion", "terminalSessionVersion"
         ]))
         #expect(publicPTYDescribe.objectValue?["publicPTYEchoVersion"] == .integer(Int64(PommeAgent.publicPTYEchoVersion)))
         let normalAMFIDescribe = try await agent.perform(.request(
@@ -42,7 +60,7 @@ struct PommeAgentTests {
             payload: .object(["includeNormalAMFICapabilities": .bool(true)])
         ))
         #expect(normalAMFIDescribe.objectValue.map { Set($0.keys) } == Set([
-            "role", "protocol", "version", "executableSHA256", "capabilities",
+            "role", "protocol", "version", "executableSHA256", "capabilities", "terminalSessionVersion",
             "normalAMFIWorkflowVersion"
         ]))
         #expect(normalAMFIDescribe.objectValue?["normalAMFIWorkflowVersion"] == .integer(Int64(PommeAgent.normalAMFIWorkflowVersion)))

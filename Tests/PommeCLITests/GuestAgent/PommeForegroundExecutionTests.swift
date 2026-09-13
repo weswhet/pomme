@@ -238,7 +238,11 @@ struct PommeForegroundExecutionTests {
             "arguments": .array([])
         ]),
         transport: ForegroundTransport,
-        timeout: TimeInterval = 1,
+        // This is only the fixture's operation budget. The implementation's
+        // bounded deadline behavior is covered by the explicit short-timeout
+        // tests below; the larger default avoids starvation under the full
+        // parallel suite.
+        timeout: TimeInterval = 5,
         onFrames: PommeForegroundExecution.FrameHandler? = nil
     ) async throws -> PommeAgentCorrelatedResult {
         try await PommeForegroundExecution.run(

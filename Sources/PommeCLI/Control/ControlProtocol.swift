@@ -15,6 +15,7 @@ enum PommeControlFeature: String, Codable, CaseIterable, Sendable {
     case status
     case streaming
     case ui
+    case terminalSessions
 }
 
 struct PommeControlHello: Codable, Equatable, Sendable {
@@ -22,7 +23,7 @@ struct PommeControlHello: Codable, Equatable, Sendable {
     let protocolVersion: Int
     let features: [PommeControlFeature]
 
-    init(features: [PommeControlFeature] = PommeControlFeature.allCases) {
+    init(features: [PommeControlFeature] = [.lifecycle, .status, .streaming, .ui]) {
         type = "hello"
         protocolVersion = PommeControlProtocol.version
         self.features = features
@@ -509,6 +510,7 @@ enum PommeVMControlRequest: Sendable {
     case inspect
     case agentPerform(PommeAgentPerformRequest, streaming: Bool)
     case guestUI(PommeUIControlRequest)
+    case terminalSession(PommeTerminalSessionControlRequest, streaming: Bool)
 
     var requiredFeature: PommeControlFeature {
         switch self {
@@ -516,6 +518,10 @@ enum PommeVMControlRequest: Sendable {
         case .status, .inspect: .status
         case .agentPerform(_, let streaming): streaming ? .streaming : .status
         case .guestUI: .ui
+        // A streamed terminal attach needs both the streaming transport and
+        // the terminal-session capability. The socket client checks the
+        // transport feature separately.
+        case .terminalSession: .terminalSessions
         }
     }
 }

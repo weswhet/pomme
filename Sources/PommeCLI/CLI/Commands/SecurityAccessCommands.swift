@@ -138,7 +138,8 @@ struct MDMCommand: AsyncParsableCommand {
     @OptionGroup var output: GlobalOptions
 
     func validate() throws {
-        guard timeout.timeout.isFinite, (1...300).contains(timeout.timeout) else {
+        let value = try timeout.value()
+        guard value.isFinite, (1...300).contains(value) else {
             throw ValidationError("--timeout must be between 1 and 300 seconds.")
         }
     }

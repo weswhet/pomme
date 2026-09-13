@@ -41,7 +41,7 @@ never chooses a machine merely because it is the only running one.
 
 ```text
 create, list|ls, start, stop, restart, pause, resume, delete|rm,
-status, inspect, exec, shell, jobs, cp, cat, agent, sip, amfi,
+status, inspect, exec, shell, sessions, jobs, cp, cat, agent, sip, amfi,
 mdm, remote-login, screen-sharing, snapshot, config, ipsw, ui, tui
 ```
 
@@ -99,7 +99,15 @@ Guest process and file examples:
 
 ```sh
 pomme exec dev -- /usr/bin/sw_vers
+pomme shell dev
+pomme shell dev --detach
 pomme exec dev --pty --user alice -- /bin/zsh
+pomme exec dev --pty --detach -- /usr/bin/top
+pomme sessions list dev
+pomme sessions attach dev SESSION_ID --takeover
+pomme sessions logs dev SESSION_ID --follow
+pomme sessions terminate dev SESSION_ID
+pomme sessions delete dev SESSION_ID
 pomme exec dev --detach -- /usr/bin/sleep 30
 pomme jobs list dev
 pomme cp ./input dev:/tmp/input
@@ -107,7 +115,10 @@ pomme cat dev:/tmp/input
 ```
 
 Process streams, terminal resize, signals, jobs, and file handles are correlated
-and bounded. File transfer is authenticated and chunked, stages adjacent to its
+and bounded. Bare `shell` and `exec --pty` create durable reconnectable
+sessions; `shell [expression]` remains the one-shot `/bin/sh -c` workflow.
+Interactive attachments require local TTYs, reject JSON output, and detach on
+socket loss without signalling the guest. File transfer is authenticated and chunked, stages adjacent to its
 destination, refuses symbolic-link traversal, and commits atomically.
 
 ## Direct guest display input

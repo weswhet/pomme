@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 
 enum PommeAgentRole: String, Sendable { case persistent, recovery }
+enum PommeAgentAuthority: Sendable { case standard, recoveryTerminal }
 
 /// A single long-lived normal-boot agent or a bounded Recovery session.
 /// VSOCK integration owns framing I/O and delegates each authenticated request
@@ -30,12 +31,22 @@ actor PommeAgent {
     /// Version of the public PTY echo contract. Hosts must preflight this
     /// additive describe receipt before requesting normal terminal echo.
     static let publicPTYEchoVersion = 1
+    /// Version of the durable terminal-session contract. It is advertised
+    /// independently so older pinned agents fail before a PTY is created.
+    static let terminalSessionVersion = PommeTerminalService.protocolVersion
+    static let terminalCapabilities = [
+        "terminal.create", "terminal.status", "terminal.read", "terminal.ack",
+        "terminal.input", "terminal.resize", "terminal.signal", "terminal.terminate",
+        "terminal.release", "terminal.list"
+    ]
+    static let recoveryTerminalCapabilities = ["agent.describe", "agent.health"] + terminalCapabilities
     static let recoveryCapabilities = [
         "agent.install",
+        "agent.describe", "agent.health",
         "sip.status", "sip.disable", "sip.enable",
         "amfi.status", "amfi.disable", "amfi.enable"
     ]
-    static let persistentCapabilities = ["agent.describe", "agent.health", "process.start", "process.status", "process.signal", "process.list", "process.output", "process.wait", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize"] + normalAMFIOperations
+    static let persistentCapabilities = ["agent.describe", "agent.health", "process.start", "process.status", "process.signal", "process.list", "process.output", "process.wait", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize"] + terminalCapabilities + normalAMFIOperations
     /// Detached-job logs retain their trailing bytes so an already streamed
     /// status response never makes `process.output` destructive. The agent
     /// keeps this bounded per channel and tells callers when earlier bytes
@@ -80,6 +91,7 @@ actor PommeAgent {
     }
 
     let role: PommeAgentRole
+    let authority: PommeAgentAuthority
     let executableSHA256: String
     private var files: [UUID: OpenFile] = [:]
     private struct FileCleanup {
@@ -98,6 +110,7 @@ actor PommeAgent {
     private let writeChunk: @Sendable (Int32, Data, Int) -> Int
     private let recoveryInstaller: PommeAgentRecoveryInstaller?
     private let recoverySecurity: PommeGuestRecoverySecurityOperations
+    private let terminalService: PommeTerminalService
 
     init(role: PommeAgentRole, executableSHA256: String, journalPath: String = PommeAgentInstall.journal,
          executablePath: String = PommeAgentInstall.executable,
@@ -105,13 +118,21 @@ actor PommeAgent {
          writeChunk: @escaping @Sendable (Int32, Data, Int) -> Int = PommeAgent.writeChunk,
          recoveryInstaller: PommeAgentRecoveryInstaller? = nil,
          recoverySecurity: PommeGuestRecoverySecurityOperations = .init(),
-         recoveredJournal: PommeAgentUpdateJournal? = nil) throws {
+         recoveredJournal: PommeAgentUpdateJournal? = nil,
+         authority: PommeAgentAuthority = .standard) throws {
         guard executableSHA256.count == 64, executableSHA256.allSatisfy(\.isHexDigit) else {
             throw PommeAgentProtocol.Error.invalidRequest
         }
-        self.role = role; self.executableSHA256 = executableSHA256.lowercased(); self.journalPath = journalPath; self.executablePath = executablePath; self.remoteLoginTransaction = remoteLoginTransaction; self.writeChunk = writeChunk
+        self.role = role; self.authority = authority; self.executableSHA256 = executableSHA256.lowercased(); self.journalPath = journalPath; self.executablePath = executablePath; self.remoteLoginTransaction = remoteLoginTransaction; self.writeChunk = writeChunk
         self.recoveryInstaller = role == .recovery ? (recoveryInstaller ?? PommeAgentRecoveryInstaller()) : nil
         self.recoverySecurity = recoverySecurity
+        let terminalSpoolRoot = URL(fileURLWithPath: journalPath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("terminal-spool", isDirectory: true)
+        self.terminalService = try PommeTerminalService(
+            role: role,
+            spoolRoot: role == .persistent ? terminalSpoolRoot : nil
+        )
         if let recovered = recoveredJournal {
             if recovered.phase != .hostValidated && recovered.phase != .rolledBack { self.update = recovered; self.activationPending = true }
         } else if FileManager.default.fileExists(atPath: journalPath) {
@@ -126,19 +147,40 @@ actor PommeAgent {
     }
 
     func perform(_ request: PommeAgentProtocol.Envelope) throws -> JSONValue {
+        if authority == .recoveryTerminal {
+            guard role == .recovery else { throw PommeAgentOperationError.invalid }
+            switch request.operation {
+            case "agent.describe":
+                return .object([
+                    "role": .string(role.rawValue), "protocol": .string(PommeAgentProtocol.name),
+                    "version": .integer(Int64(PommeAgentProtocol.version)), "executableSHA256": .string(executableSHA256),
+                    "capabilities": .array(Self.recoveryTerminalCapabilities.map(JSONValue.string)),
+                    "terminalSessionVersion": .integer(Int64(Self.terminalSessionVersion))
+                ])
+            case "agent.health":
+                return .object(["ok": .bool(true), "activationPending": .bool(false)])
+            default:
+                throw PommeAgentOperationError.unsupported
+            }
+        }
         if role == .recovery {
             switch request.operation {
             case "agent.describe":
                 return .object([
                     "role": .string(role.rawValue), "protocol": .string(PommeAgentProtocol.name),
                     "version": .integer(Int64(PommeAgentProtocol.version)), "executableSHA256": .string(executableSHA256),
-                    "capabilities": .array(Self.recoveryCapabilities.map(JSONValue.string))
+                    "capabilities": .array(Self.recoveryCapabilities.map(JSONValue.string)),
+                    "terminalSessionVersion": .integer(Int64(Self.terminalSessionVersion))
                 ])
             case "agent.health":
                 return .object(["ok": .bool(true), "activationPending": .bool(false)])
             case "agent.install":
                 guard let recoveryInstaller else { throw PommeAgentOperationError.invalid }
                 return try recoveryInstaller.install(payload: request.payload, requestID: request.requestID)
+            case "terminal.create", "terminal.status", "terminal.read", "terminal.ack",
+                 "terminal.input", "terminal.resize", "terminal.signal", "terminal.terminate",
+                 "terminal.release", "terminal.list":
+                throw PommeAgentOperationError.unsupported
             case "sip.status", "sip.disable", "sip.enable",
                  "amfi.status", "amfi.disable", "amfi.enable":
                 return try recoverySecurity.execute(
@@ -166,6 +208,7 @@ actor PommeAgent {
             if request.payload.objectValue?["includePublicPTYCapabilities"] == .bool(true) {
                 description["publicPTYEchoVersion"] = .integer(Int64(Self.publicPTYEchoVersion))
             }
+            description["terminalSessionVersion"] = .integer(Int64(Self.terminalSessionVersion))
             if request.payload.objectValue?["includeNormalAMFICapabilities"] == .bool(true) {
                 description["normalAMFIWorkflowVersion"] = .integer(Int64(Self.normalAMFIWorkflowVersion))
             }
@@ -211,6 +254,20 @@ actor PommeAgent {
     /// uses this entry point so ordinary synchronous in-process operation
     /// seams remain usable for file and process tests.
     func performAsynchronously(_ request: PommeAgentProtocol.Envelope) async throws -> JSONValue {
+        if authority == .recoveryTerminal {
+            guard request.operation == "agent.describe"
+                    || request.operation == "agent.health"
+                    || Self.terminalCapabilities.contains(request.operation)
+            else { throw PommeAgentOperationError.unsupported }
+            if request.operation == "agent.describe" || request.operation == "agent.health" {
+                return try perform(request)
+            }
+            return try await terminalService.perform(operation: request.operation, payload: request.payload)
+        }
+        if Self.terminalCapabilities.contains(request.operation) {
+            guard role == .persistent || role == .recovery else { throw PommeAgentOperationError.unsupported }
+            return try await terminalService.perform(operation: request.operation, payload: request.payload)
+        }
         if role == .persistent, request.operation == "process.wait" {
             guard !activationPending else { throw PommeAgentOperationError.activationPending }
             return try await wait(request.payload)
@@ -741,9 +798,15 @@ actor PommeAgent {
                   [Int32(SIGHUP), Int32(SIGINT), Int32(SIGTERM), Int32(SIGKILL)].contains(raw)
             else { throw PommeAgentOperationError.invalid }
             guard let job = jobs[jobID] else { throw PommeAgentOperationError.notFound }
+            // Bytes written before a signal may already be readable from the
+            // PTY master. Drain them before killing the process group so a
+            // signal arriving immediately after launch cannot discard a
+            // completed prompt or marker from the correlated exchange.
+            let pending = try drainPTY(jobID: jobID, requestID: frame.requestID)
             let groupSignalled = kill(-job.pid, raw) == 0
             let processSignalled = kill(job.pid, raw) == 0
             guard groupSignalled || processSignalled else { throw PommeAgentOperationError.invalid }
+            return pending + (try streamEvents(jobID: jobID, requestID: frame.requestID))
         case .eof:
             guard var job = jobs[jobID] else { throw PommeAgentOperationError.notFound }
             if job.ptyMaster != nil { try writePTY(jobID: jobID, data: Data([0x04])) }

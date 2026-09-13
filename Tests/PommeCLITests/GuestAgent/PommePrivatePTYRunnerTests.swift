@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import Testing
 
-@Suite("Pomme private PTY runner")
+@Suite("Pomme private PTY runner", .serialized)
 struct PommePrivatePTYRunnerTests: Sendable {
     private let jobID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
     private let startRequestID = UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!

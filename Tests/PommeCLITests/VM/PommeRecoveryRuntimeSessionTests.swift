@@ -167,7 +167,9 @@ struct PommeRecoveryRuntimeSessionTests {
             configuration: fixture.configuration,
             coordinator: coordinator,
             effects: calls.effects,
-            authenticationTimeout: 1
+            // Keep the production timeout semantics under test while leaving
+            // enough scheduler headroom for the complete parallel suite.
+            authenticationTimeout: 5
         )
 
         let evidence = try await root.prepare(request: fixture.request)

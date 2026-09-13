@@ -32,6 +32,29 @@ pause/resume, digest-verified self-update, Recovery repair, SIP/AMFI, MDM, UI,
 and TUI checks. Package inspection must prove only Pomme paths and the expected
 Virtualization entitlement.
 
+The terminal-session qualification must additionally cover normal and Recovery
+sessions beyond 15 minutes, detached output pumping, byte-exact replay beyond
+64 KiB, reattachment after abrupt client loss, takeover, multiple concurrent
+sessions, resize, Ctrl-C, Ctrl-D, `~.`, exit status, HUP/KILL termination,
+pause/resume, transient VSOCK reconnect, storage-blocked retry, and exact
+Recovery share/credential/workspace cleanup. No Recovery transcript or
+credential may remain after the helper or boot exits.
+
+For the Recovery transcript-exit and working-directory regressions, explicitly
+start an authorized disposable `pomme-agent-*` VM in Recovery, then run:
+
+```sh
+rtk proxy python3 Tests/PommeRecoveryTerminalReplayLiveTests.py \
+  --runner /absolute/path/to/signed/pomme \
+  --vm pomme-agent-EXPERIMENT --iterations 10
+```
+
+This opt-in check does not boot or restart the VM. It creates finite detached
+terminals without a cwd override, verifies the stable `/` cwd and exact binary
+output across multiple chunks, and checks repeated and offset replay. It deletes
+only its successfully verified sessions; failures retain their session IDs for
+inspection. This targeted smoke check does not replace the full matrix above.
+
 GitHub publication and Homebrew updates remain manual actions protected by the
 `pomme-release` environment. The workflow requires the reviewed qualification
 digest and an explicit publish choice; tag pushes do not publish.

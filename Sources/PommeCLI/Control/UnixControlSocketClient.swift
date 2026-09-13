@@ -48,7 +48,10 @@ struct PommeControlSocketClient: Sendable {
             guard timeout.isFinite, timeout > 0 else { throw POSIXError(.ETIMEDOUT) }
             deadline = ProcessInfo.processInfo.systemUptime + timeout
         } else { deadline = nil }
-        guard try negotiatedHello(deadline: deadline).features.contains(.streaming) else { throw RunnerError.controlCapabilityUnavailable(PommeControlFeature.streaming.rawValue) }
+        let hello = try negotiatedHello(deadline: deadline)
+        guard hello.features.contains(.streaming) else { throw RunnerError.controlCapabilityUnavailable(PommeControlFeature.streaming.rawValue) }
+        let routed = try PommeVMControlRouter.route(request)
+        guard hello.features.contains(routed.requiredFeature) else { throw RunnerError.controlCapabilityUnavailable(routed.requiredFeature.rawValue) }
         let fd = try connect(deadline: deadline)
         let streaming = PommeControlRequest(id: request.id, command: request.command, payload: request.payload, streaming: true)
         do {

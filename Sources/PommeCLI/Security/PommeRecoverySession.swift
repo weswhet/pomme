@@ -12,6 +12,7 @@ enum PommeRecoveryListenerPort: UInt32, Codable, CaseIterable, Sendable {
 
 enum PommeRecoveryOperation: Equatable, Sendable {
     case installAgent
+    case terminalSession
     case sip(SIPAction)
     case amfi(AMFIAction)
 
@@ -19,6 +20,8 @@ enum PommeRecoveryOperation: Equatable, Sendable {
         switch self {
         case .installAgent:
             "agent.install"
+        case .terminalSession:
+            "terminal.session"
         case .sip(let action):
             "sip.\(action.rawValue)"
         case .amfi(let action):
@@ -30,6 +33,8 @@ enum PommeRecoveryOperation: Equatable, Sendable {
         switch wireName {
         case "agent.install":
             self = .installAgent
+        case "terminal.session":
+            self = .terminalSession
         case "sip.status":
             self = .sip(.status)
         case "sip.disable":
@@ -51,7 +56,7 @@ enum PommeRecoveryOperation: Equatable, Sendable {
         switch self {
         case .installAgent:
             .bootstrap
-        case .sip, .amfi:
+        case .terminalSession, .sip, .amfi:
             .operation
         }
     }

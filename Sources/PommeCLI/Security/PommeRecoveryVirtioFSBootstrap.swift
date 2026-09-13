@@ -99,7 +99,7 @@ struct PommeRecoveryVirtioFSTerminalPlan: Equatable, Sendable {
         let mountWorkspace = "/private/var/run/.pomme-vfs-\(shortID)"
         let guestWorkspace = "/private/var/tmp/pomme-recovery-\(request.requestID.uuidString.lowercased())"
         let runScript = "\(mountWorkspace)/run"
-        let tag = PommeRecoveryVirtioFSBootstrapBuilder.tag(for: request.requestID)
+        let tag = PommeRecoveryStagingBuilder.tag(for: request)
         guard Self.validTag(tag), tag.utf8.count <= Self.maximumTagLength else {
             throw PommeRecoveryVirtioFSBootstrapError.invalidInput
         }
@@ -115,7 +115,7 @@ struct PommeRecoveryVirtioFSTerminalPlan: Equatable, Sendable {
         // the redaction-safe Pomme marker.
         // Fixed absolute prefixes save HID events without consulting PATH or
         // weakening the short-circuit checks before the known-vector probe.
-        let probe = "p=/sbin;u=/usr/bin;test -x $p/mount_virtiofs&&test -x $p/umount&&test -x $u/codesign&&test -x $p/sha256&&test \"$($u/printf abc|$p/sha256 -q)\" = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad&&printf 'POMME \(Self.ocrSafeMarkerSuffix(requestID: request.requestID)) OK\\n'"
+        let probe = "p=/sbin;u=/usr/bin;[ -x /bin/sh ]&&test -x $p/mount_virtiofs&&test -x $p/umount&&test -x $u/codesign&&test -x $p/sha256&&test \"$($u/printf abc|$p/sha256 -q)\" = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad&&printf 'POMME \(Self.ocrSafeMarkerSuffix(requestID: request.requestID)) OK\\n'"
         // The mount point is intentionally nested below a new directory. A
         // pre-existing directory or symlink makes this command fail closed.
         // Enter only the newly created private workspace before shortening
@@ -293,6 +293,10 @@ test "$(/sbin/sha256 -q "$g/request.json")" = \#(requestSHA256)
 /bin/rmdir "$m"
 test ! -e "$m" && test ! -L "$m"
 /bin/rm -f "$d/run"
+# The Recovery terminal command entered the mounted workspace before running
+# this script. Move to a live directory before removing that workspace so the
+# daemon, and every later PTY child, never inherits a deleted cwd.
+cd /
 /bin/rmdir "$d"
 test ! -e "$d" && test ! -L "$d"
 "$g/pomme-agent" --pomme-agent \#(request.listenerPort) --token-file "$g/session.credential" --expected-sha256 \#(digest) --role recovery --one-shot-expiry \#(expiry) --vm-id \#(vmID) --session-id \#(sessionID) --operation \#(request.operation) --request-file "$g/request.json" </dev/null >/dev/null 2>&1

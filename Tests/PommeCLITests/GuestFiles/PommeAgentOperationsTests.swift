@@ -3,7 +3,7 @@ import CryptoKit
 import Foundation
 import Testing
 
-@Suite("Pomme agent files, jobs, and privilege validation")
+@Suite("Pomme agent files, jobs, and privilege validation", .serialized)
 struct PommeAgentOperationsTests {
     @Test("File chunks are bounded and handle operations are correlated")
     func files() async throws {
@@ -158,7 +158,12 @@ struct PommeAgentOperationsTests {
         let started = try await agent.perform(.request(operation: "process.start", payload: .object(["path": .string("/bin/sh"), "arguments": .array([.string("-c"), .string("printf pty; sleep 5")]), "pty": .bool(true)])))
         let id = try #require(started.objectValue?["jobID"]?.stringValue); let jobID = try #require(UUID(uuidString: id)); let requestID = UUID()
         try await agent.resizePTY(jobID: jobID, columns: 120, rows: 40)
-        var events = try await agent.acceptStream(.init(requestID: requestID, stream: .signal, signal: SIGTERM), jobID: jobID)
+        var events = try await agent.streamEvents(jobID: jobID, requestID: requestID)
+        for _ in 0..<20 where !events.contains(where: { $0.stream == .stdout }) {
+            try await Task.sleep(for: .milliseconds(10))
+            events += try await agent.streamEvents(jobID: jobID, requestID: requestID)
+        }
+        events += try await agent.acceptStream(.init(requestID: requestID, stream: .signal, signal: SIGTERM), jobID: jobID)
         for _ in 0..<200 where !events.contains(where: { $0.stream == .exit }) {
             try await Task.sleep(for: .milliseconds(25))
             events += try await agent.streamEvents(jobID: jobID, requestID: requestID)

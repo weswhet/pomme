@@ -26,6 +26,10 @@ enum PommeAgentDaemon {
         /// carries one immutable allowlisted operation, so a launcher for one
         /// request cannot be reused for another command.
         let allowedOperation: String?
+        /// Terminal Recovery is a distinct authority. Its admission expires
+        /// before first authentication, then the credential is retained only
+        /// in memory for this boot and can authenticate reconnects.
+        let terminalAuthority: Bool
     }
 
     enum Exit: Int32 { case success = 0, invalidArguments = 64, integrity = 65, credential = 66, transport = 69 }
@@ -81,22 +85,39 @@ enum PommeAgentDaemon {
                     expectedDigest: options.expectedSHA256
                 )
             }
-            let agent = try PommeAgent(role: options.role, executableSHA256: options.expectedSHA256)
+            var terminalAdmissionAuthenticated = false
+            let agent = try PommeAgent(
+                role: options.role,
+                executableSHA256: options.expectedSHA256,
+                authority: options.terminalAuthority ? .recoveryTerminal : .standard
+            )
             while true {
                 let descriptor = try connectToHost(port: options.port)
-                let connection = try PommeAgentConnection(token: token, lifetime: options.role == .recovery ? .oneShot : .persistent,
-                                                          expiresAt: options.oneShotExpiry, vmBinding: options.vmBinding, sessionBinding: options.sessionBinding)
+                let lifetime: PommeAgentConnection.CredentialLifetime = options.terminalAuthority
+                    ? .bootSession
+                    : (options.role == .recovery ? .oneShot : .persistent)
+                let connection = try PommeAgentConnection(token: token, lifetime: lifetime,
+                                                          expiresAt: terminalAdmissionAuthenticated ? nil : options.oneShotExpiry,
+                                                          vmBinding: options.vmBinding, sessionBinding: options.sessionBinding)
                 blocking {
                     await serve(
                         descriptor: descriptor,
                         connection: connection,
                         agent: agent,
                         allowedOperation: options.allowedOperation,
+                        terminalAuthority: options.terminalAuthority,
                         oneShotCleanup: oneShotCleanup
                     )
                 }
+                if options.terminalAuthority && connection.isAuthenticated {
+                    // The short-lived credential gates only first admission.
+                    // Once this daemon has authenticated, reconnects during
+                    // the same Recovery boot use the in-memory boot-session
+                    // authority even if the original deadline has elapsed.
+                    terminalAdmissionAuthenticated = true
+                }
                 _ = Darwin.close(descriptor)
-                if options.role == .recovery {
+                if options.role == .recovery && !options.terminalAuthority {
                     try oneShotCleanup()
                     return Exit.success.rawValue
                 }
@@ -125,10 +146,12 @@ enum PommeAgentDaemon {
         let vmBinding = try values["--vm-id"].map(Self.canonicalUUID)
         let sessionBinding = try values["--session-id"].map(Self.canonicalUUID)
         let allowedOperation: String?
+        let terminalAuthority: Bool
         switch (role, port) {
         case (.persistent, Constants.pommeAgentPort):
             guard expiry == nil, vmBinding == nil, sessionBinding == nil, values["--operation"] == nil, values["--request-file"] == nil else { throw PommeAgentDaemonError(.invalidArguments) }
             allowedOperation = nil
+            terminalAuthority = false
         case (.recovery, Constants.pommeRecoverySessionPort):
             // The bootstrap listener can only install the persistent agent.
             guard expiry != nil, vmBinding != nil, sessionBinding != nil,
@@ -136,18 +159,22 @@ enum PommeAgentDaemon {
                   values["--request-file"].map({ $0.hasPrefix("/") }) == true
             else { throw PommeAgentDaemonError(.invalidArguments) }
             allowedOperation = PommeRecoveryOperation.installAgent.wireName
+            terminalAuthority = false
         case (.recovery, Constants.pommeRecoveryRuntimePort):
-            // Security operations are request-bound and closed; do not allow
-            // a generic Recovery process on the runtime listener.
             guard expiry != nil, vmBinding != nil, sessionBinding != nil,
-                  let operation = values["--operation"], Self.recoverySecurityOperations.contains(operation),
+                  let operation = values["--operation"],
                   values["--request-file"].map({ $0.hasPrefix("/") }) == true
             else { throw PommeAgentDaemonError(.invalidArguments) }
             allowedOperation = operation
+            let isTerminal = operation == PommeRecoveryOperation.terminalSession.wireName
+            guard isTerminal || Self.recoverySecurityOperations.contains(operation) else {
+                throw PommeAgentDaemonError(.invalidArguments)
+            }
+            terminalAuthority = isTerminal
         default:
             throw PommeAgentDaemonError(.invalidArguments)
         }
-        do { return try .init(port: port, tokenFile: token, expectedSHA256: PommeAgentAuthentication.normalized(digest), role: role, oneShotExpiry: expiry, vmBinding: vmBinding, sessionBinding: sessionBinding, requestFile: values["--request-file"], allowedOperation: allowedOperation) }
+        do { return try .init(port: port, tokenFile: token, expectedSHA256: PommeAgentAuthentication.normalized(digest), role: role, oneShotExpiry: expiry, vmBinding: vmBinding, sessionBinding: sessionBinding, requestFile: values["--request-file"], allowedOperation: allowedOperation, terminalAuthority: terminalAuthority) }
         catch { throw PommeAgentDaemonError(.invalidArguments) }
     }
 
@@ -270,6 +297,7 @@ enum PommeAgentDaemon {
         connection: PommeAgentConnection,
         agent: PommeAgent,
         allowedOperation: String? = nil,
+        terminalAuthority: Bool = false,
         oneShotCleanup: @escaping @Sendable () throws -> Void = {}
     ) async {
         defer { connection.resetForReconnect() }
@@ -293,7 +321,7 @@ enum PommeAgentDaemon {
                 let line = Data(buffer[..<newline]); buffer.removeSubrange(...newline)
                 guard !line.isEmpty, line.count < PommeAgentProtocol.maximumFrameBytes else { return }
                 if let envelope = try? PommeAgentProtocol.decode(line), envelope.kind == .stream {
-                    guard connection.permitsStream,
+                    guard !terminalAuthority, connection.permitsStream,
                           let jobID = streamJobID(envelope),
                           let frames = try? await routeStream(envelope, agent: agent)
                     else { return }
@@ -322,8 +350,12 @@ enum PommeAgentDaemon {
                     // A wrong operation is a policy violation, not an
                     // invitation to probe the Recovery agent. Return only a
                     // redacted protocol error, then close the descriptor.
-                    guard allowedOperation == nil || request.operation == allowedOperation,
-                          !operationConsumed
+                    let permitted = terminalAuthority
+                        ? request.operation == "agent.describe"
+                            || request.operation == "agent.health"
+                            || request.operation.hasPrefix("terminal.")
+                        : allowedOperation == nil || request.operation == allowedOperation
+                    guard permitted, !operationConsumed
                     else {
                         let response = await connection.receive(line) { _ in throw PommeAgentOperationError.unsupported }
                         guard !response.isEmpty, writeAll(descriptor: descriptor, data: response) else { return }
@@ -333,10 +365,10 @@ enum PommeAgentDaemon {
                 let response = await connection.receive(line) { request in
                     do {
                         let result = try await agent.performAsynchronously(request)
-                        if allowedOperation != nil { try oneShotCleanup() }
+                        if allowedOperation != nil && !terminalAuthority { try oneShotCleanup() }
                         return result
                     } catch {
-                        if allowedOperation != nil { try? oneShotCleanup() }
+                        if allowedOperation != nil && !terminalAuthority { try? oneShotCleanup() }
                         throw error
                     }
                 }
@@ -346,7 +378,7 @@ enum PommeAgentDaemon {
                 // In particular, do not call streamEvents for an
                 // unauthenticated or failed request: neither is permitted to
                 // observe a job's output.
-                if allowedOperation == nil,
+                if allowedOperation == nil || terminalAuthority,
                    let request,
                    let responseEnvelope = try? decodeResponse(response),
                    responseEnvelope.ok == true,
@@ -367,7 +399,7 @@ enum PommeAgentDaemon {
                 if let request,
                    request.kind == .request,
                    request.operation != "authenticate",
-                   allowedOperation != nil {
+                   allowedOperation != nil && !terminalAuthority {
                     // Count failed operations too. An operation may have
                     // partially mutated guest state before producing its
                     // correlated error, so retrying is never safe.

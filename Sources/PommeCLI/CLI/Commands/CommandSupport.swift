@@ -34,14 +34,17 @@ struct GlobalOptions: ParsableArguments {
 /// Common time limit used by guest operations.
 struct TimeoutOptions: ParsableArguments {
     @Option(name: .customLong("timeout"), help: "Time limit in seconds.")
-    var timeout: Double = Constants.defaultGuestCommandTimeout
+    var timeout: Double?
+
+    var isExplicitlySet: Bool { timeout != nil }
 
     /// Validates and returns the configured timeout.
     func value() throws -> TimeInterval {
-        guard timeout > 0 else {
+        let value = timeout ?? Constants.defaultGuestCommandTimeout
+        guard value.isFinite, value > 0 else {
             throw ValidationError("--timeout must be greater than zero.")
         }
-        return timeout
+        return value
     }
 }
 
@@ -132,6 +135,10 @@ enum CLIOutputWriter {
                     if let error = result.payload["error"] as? String {
                         try writeBytes(Data((error + "\n").utf8), to: STDERR_FILENO)
                     }
+                } else if result.payload["operation"] as? String == "terminal.logs" {
+                    try writeBytes(terminalOutput(result.payload), to: STDOUT_FILENO)
+                } else if result.payload["terminalAttachment"] as? Bool == true {
+                    break
                 } else {
                     print(result.text)
                 }
@@ -152,6 +159,17 @@ enum CLIOutputWriter {
               let data = Data(base64Encoded: encoded),
               data.count <= PommeAgentProtocol.maximumFileChunkBytes else {
             throw RunnerError.invalidControlResponse("Invalid file output.")
+        }
+        return data
+    }
+
+    /// Durable terminal logs use the stream-sized control-channel limit rather
+    /// than the smaller file-transfer chunk limit.
+    static func terminalOutput(_ payload: [String: Any]) throws -> Data {
+        guard let encoded = payload["dataBase64"] as? String,
+              let data = Data(base64Encoded: encoded),
+              data.count <= PommeControlProtocol.maximumStreamChunkBytes else {
+            throw RunnerError.invalidControlResponse("Invalid terminal output.")
         }
         return data
     }

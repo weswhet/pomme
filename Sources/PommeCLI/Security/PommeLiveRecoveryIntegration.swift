@@ -431,6 +431,8 @@ enum PommeLiveRecoveryIntegration {
                 try PommeRecoverySecurityQualification.require(profile: profile)
             case .installAgent:
                 break
+            case .terminalSession:
+                throw Error.unsupportedOperation
             }
             let installMode: InstallMode?
             if case .installAgent = operation {
