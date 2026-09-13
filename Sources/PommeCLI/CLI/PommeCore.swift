@@ -1635,7 +1635,66 @@ struct PommeCore {
         guard timeout > 0 else {
             throw RunnerError.virtualMachineState("Pomme lifecycle timeout must be greater than zero.")
         }
-        return try startRuntimeInBackground(reference: reference, bootMode: bootMode, timeout: timeout)
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        let payload = try startRuntimeInBackground(reference: reference, bootMode: bootMode, timeout: timeout)
+        // A plain Recovery boot exposes only the terminal bootstrap listener;
+        // its agent is admitted lazily by the first terminal session, so only
+        // normal boots have an agent to wait for.
+        guard bootMode == .normal else { return payload }
+        return try waitForGuestAgentConnection(
+            reference: reference,
+            payload: payload,
+            deadline: deadline,
+            timeout: timeout
+        )
+    }
+
+    /// Polls the helper until the guest agent reports connected, so `start`
+    /// returns a VM that can already accept guest commands. The VM is left
+    /// running on timeout; the error names the status to inspect.
+    private static func waitForGuestAgentConnection(
+        reference: VMReference,
+        payload initial: [String: Any],
+        deadline: TimeInterval,
+        timeout: TimeInterval
+    ) throws -> [String: Any] {
+        var payload = initial
+        while true {
+            let agent = payload["guestAgent"] as? [String: Any]
+            let connection = GuestAgentStatusV1.ConnectionState(rawValue: stringValue(agent?["connection"]))
+            switch connection {
+            case .connected:
+                return payload
+            case .failed:
+                throw RunnerError.virtualMachineState(
+                    "\(reference.displayName) started but its guest agent failed to connect; run `pomme status` to inspect it."
+                )
+            default:
+                break
+            }
+            let timedOut = RunnerError.virtualMachineState(
+                "\(reference.displayName) started but its guest agent did not connect within \(Int(timeout)) seconds; the VM is still running. Run `pomme status` to inspect it."
+            )
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { throw timedOut }
+            Thread.sleep(forTimeInterval: min(0.5, remaining))
+            let status: [String: Any]
+            do {
+                status = try sendControlObject(
+                    ["command": "status"],
+                    bundle: reference.bundle,
+                    timeout: max(0.001, deadline - ProcessInfo.processInfo.systemUptime)
+                )
+            } catch {
+                // A status poll that fails only because the deadline elapsed
+                // should report the agent wait, not the transport.
+                guard ProcessInfo.processInfo.systemUptime < deadline else { throw timedOut }
+                throw error
+            }
+            for key in ["guestAgent", "vmState", "bootMode", "helperRunning"] where status[key] != nil {
+                payload[key] = status[key]
+            }
+        }
     }
 
     static func startRequiredSnapshotRestorePayload(reference: VMReference) throws -> [String: Any] {
