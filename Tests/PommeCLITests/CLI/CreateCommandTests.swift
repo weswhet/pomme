@@ -50,6 +50,30 @@ struct CreateCommandTests {
         #expect(ByteSizeParser.parse(command.memory) == 4 * 1024 * 1024 * 1024)
     }
 
+    @Test("--latest is shorthand for --version latest")
+    func latestFlag() throws {
+        var command = try CreateCommand.parse(["research-agent", "--latest", "--dry-run"])
+        try command.validate()
+        #expect(command.version == "latest")
+
+        var explicit = try CreateCommand.parse(["research-agent", "--latest", "--version", "latest"])
+        try explicit.validate()
+        #expect(explicit.version == "latest")
+    }
+
+    @Test("--latest rejects a conflicting --version or --restore-image", arguments: [
+        ["research-agent", "--latest", "--version", "26.6.0"],
+        ["research-agent", "--latest", "--restore-image", "/tmp/Restore.ipsw"],
+        ["research-agent", "--resume", "--latest"],
+        ["--config", "create.yaml", "--latest"]
+    ])
+    func latestExclusivity(arguments: [String]) {
+        #expect(throws: Error.self) {
+            var command = try CreateCommand.parse(arguments)
+            try command.validate()
+        }
+    }
+
     @Test("Resume accepts only a target and presentation options")
     func resumeGrammar() throws {
         var command = try CreateCommand.parse(["research-agent", "--resume", "--debug", "--json"])
