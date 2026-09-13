@@ -2799,6 +2799,14 @@ struct PommeCore {
         _ = try? sendControlObject(payload, bundle: reference.bundle, timeout: 10)
     }
 
+    /// True only when the status payload reports the persistent guest agent
+    /// connected, so an agent-driven shutdown request can actually be
+    /// delivered before falling back to the framework's graceful stop.
+    private static func normalGuestAgentConnected(_ payload: [String: Any]) -> Bool {
+        let agent = payload["guestAgent"] as? [String: Any]
+        return GuestAgentStatusV1.ConnectionState(rawValue: stringValue(agent?["connection"])) == .connected
+    }
+
     private static func restoreProvisioningFinalState(_ plan: PommeProvisioningPlan) async throws -> String {
         try await restoreProvisioningState(plan, finalState: plan.finalState)
     }
@@ -3190,6 +3198,19 @@ struct PommeCore {
 
     private static func stopForLiveRecovery(reference: VMReference) async throws {
         try await stopRetainedRuntime(for: reference.standardizedPath)
+        // A normal-booted guest with a connected agent can shut itself down in
+        // a few seconds. VZ's requestStop behaves like a power button, which a
+        // freshly booted macOS guest may take the full graceful window to
+        // honor, so ask the agent to `shutdown -h now` first and let the
+        // following helper stop observe an already-powering-down guest. This is
+        // the same agent-driven shutdown provisioning uses. recoveryOS has no
+        // such agent, and an agentless or non-normal guest simply falls through
+        // to the ordinary graceful stop below.
+        if let payload = try? vmStatusPayload(reference: reference),
+           (try? liveRecoveryRunState(from: payload)) == .running(.normal),
+           normalGuestAgentConnected(payload) {
+            requestGuestShutdownThroughHelper(reference: reference)
+        }
         do {
             _ = try sendControlObject(
                 ["command": PommeLifecycleCommand.stop.rawValue],
