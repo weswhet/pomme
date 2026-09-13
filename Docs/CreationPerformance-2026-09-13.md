@@ -248,3 +248,27 @@ frame is 2 s (`lastClassificationAt … >= 2`). Per transition that can add up t
 Killing the orphaned VM service and re-measuring should be the first step; the
 typing and polling numbers above will shrink on their own, and the remaining
 order of the list will not change.
+
+## 6. Follow-up results (2026-09-13, later the same day)
+
+- **4.1 implemented.** `HeadlessFramebufferCaptureState` now retains the most
+  recently published full-frame IOSurface and renders it on demand; the
+  observer is no longer detached/re-attached per capture once a surface is
+  held. `pomme ui screenshot` on a static screen went from `frame_timeout` to
+  0.13 s per call, and captures reflect live changes.
+- **4.2 implemented.** The classification cool-down inside one checkpoint is
+  0.5 s (`PommeRecoveryObservationReadiness.classificationCooldown`) instead
+  of 2 s.
+- **4.3 NVRAM shortcuts tested and rejected.** From a normal boot as root in
+  the guest, `nvram recovery-boot-mode=unused` fails with
+  `(iokit/common) not permitted` (SIP-protected variable). `nvram
+  prev-lang:kbd=en-US:0` is accepted, but the next Recovery boot still shows
+  the startup-options picker and then the Language chooser, so it saves
+  nothing. Neither is usable under Virtualization; the trace stays as is.
+- **Validation create after 4.1 + 4.2** (same VM parameters, orphan VM service
+  killed, `devme` deleted): total 8:32 (was 8:50). Navigation 87 s (was 92 s):
+  331 captures in 14.5 s = **44 ms per capture (was 207 ms)**, but the loop
+  simply ran more iterations while waiting on the guest — 323 poll sleeps
+  still averaged 208 ms against a 100 ms setting. Typing was unchanged at
+  99 s (17:21:27 → 17:23:06). Confirms that navigation is guest-bound and
+  that 3.1 (typing) and 3.2 (stop timeout) are the next wins.
