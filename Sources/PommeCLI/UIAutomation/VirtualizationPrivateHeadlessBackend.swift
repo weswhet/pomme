@@ -605,6 +605,45 @@ private final class HeadlessFramebufferCaptureState: @unchecked Sendable {
     private var pendingRequestID: UInt64?
     private var renderingRequestID: UInt64?
     private var completedFrame: CompletedFrame?
+    /// The most recently published full-frame IOSurface. It is the guest's
+    /// live framebuffer, so rendering it later yields the current screen
+    /// without waiting for another publish; damage-only updates never replace
+    /// it because they carry no surface.
+    private var latestSurface: Unmanaged<IOSurface>?
+
+    var hasLatestSurface: Bool {
+        lock.withLock { latestSurface != nil }
+    }
+
+    /// Renders the retained live surface immediately. Returns nil until the
+    /// observer has published its first full update.
+    func renderLatestSurface() throws -> CGImage? {
+        let retained: Unmanaged<IOSurface>? = lock.withLock {
+            latestSurface.map { $0.retain() }
+        }
+        guard let retained else { return nil }
+        defer { retained.release() }
+        let surface = retained.takeUnretainedValue()
+        let width = IOSurfaceGetWidth(surface)
+        let height = IOSurfaceGetHeight(surface)
+        guard width > 0, height > 0 else {
+            throw VirtualizationPrivateHeadlessError(
+                .frameInvalid,
+                detail: "The private framebuffer IOSurface has invalid dimensions."
+            )
+        }
+        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        let rendered = renderQueue.sync {
+            context.createCGImage(CIImage(ioSurface: surface), from: bounds)
+        }
+        guard let rendered else {
+            throw VirtualizationPrivateHeadlessError(
+                .frameInvalid,
+                detail: "The private framebuffer IOSurface could not be rendered."
+            )
+        }
+        return rendered
+    }
 
     func beginRequest() throws -> UInt64 {
         try lock.withLock {
@@ -628,11 +667,15 @@ private final class HeadlessFramebufferCaptureState: @unchecked Sendable {
         guard let surfacePointer = HeadlessFramebufferFrameLayout.surfacePointer(
             sharedFrameUpdatePointer: sharedFrameUpdatePointer
         ) else { return }
-        let requestID = lock.withLock { () -> UInt64? in
-            guard let pendingRequestID, renderingRequestID == nil else { return nil }
+        let incomingSurface = Unmanaged<IOSurface>.fromOpaque(surfacePointer).retain()
+        let (requestID, replacedSurface) = lock.withLock { () -> (UInt64?, Unmanaged<IOSurface>?) in
+            let replaced = latestSurface
+            latestSurface = incomingSurface
+            guard let pendingRequestID, renderingRequestID == nil else { return (nil, replaced) }
             renderingRequestID = pendingRequestID
-            return pendingRequestID
+            return (pendingRequestID, replaced)
         }
+        replacedSurface?.release()
         guard let requestID else { return }
 
         let retainedSurface = QueueConfined(
@@ -1239,9 +1282,20 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
     private func captureFrame(timeout: TimeInterval) async throws -> CGImage {
         try VirtualizationPrivateABIPreflight.validateRuntime()
         let resources = try captureResources()
+        try ensureFramebufferObserver(display: resources.display)
+        // The retained surface is the live framebuffer: render it now rather
+        // than waiting for the guest to publish another update. A static
+        // screen therefore captures immediately instead of timing out.
+        if let image = try framebufferCaptureState.renderLatestSurface() {
+            try Self.validateFrame(
+                image,
+                expectedWidth: resources.width,
+                expectedHeight: resources.height
+            )
+            return image
+        }
         let requestID = try framebufferCaptureState.beginRequest()
         do {
-            try ensureFramebufferObserver(display: resources.display)
             let deadline = Date().addingTimeInterval(max(0.1, timeout))
             while Date() < deadline {
                 try Task.checkCancellation()
@@ -1271,9 +1325,11 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
             try requireRunning()
             let displayIdentity = ObjectIdentifier(display)
             if let framebufferObserver, observedDisplayIdentity == displayIdentity {
-                // Registration publishes the framebuffer's last full update.
-                // Re-arm it for each request so a static Recovery screen is
-                // capturable even when no damage event follows the request.
+                // Once a full update has been published its surface is
+                // retained, so the observer stays attached. Re-arm only while
+                // no surface has arrived yet: registration publishes the
+                // framebuffer's last full update.
+                guard !framebufferCaptureState.hasLatestSurface else { return }
                 try HeadlessFramebufferObserverRuntime.setDisplay(
                     nil,
                     on: framebufferObserver.value

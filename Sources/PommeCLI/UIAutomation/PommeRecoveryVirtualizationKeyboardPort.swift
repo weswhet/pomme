@@ -58,6 +58,10 @@ actor PommeRecoveryObservationReadiness {
   private let sleep: Sleep
   private let clock: Clock
   private let pollNanoseconds: UInt64
+  /// Minimum spacing between OCR classifications of a still-changing screen
+  /// within one checkpoint. Region OCR is cached, so a short cool-down keeps
+  /// a new screen from waiting up to two seconds before it is recognised.
+  static let classificationCooldown: TimeInterval = 0.5
   private var classifications: [CacheKey: PommeRecoveryFrame] = [:]
   private var priorDigest: String?
   private var stableCaptureCount = 0
@@ -188,7 +192,7 @@ actor PommeRecoveryObservationReadiness {
           lastObservedFrame = cached
           if acceptedFrames.contains(cached) { return [cached, cached] }
         } else if stableCaptureCount >= 2,
-          lastClassificationAt.map({ clock().timeIntervalSince($0) >= 2 }) ?? true
+          lastClassificationAt.map({ clock().timeIntervalSince($0) >= Self.classificationCooldown }) ?? true
         {
           let classified = try classify(captured, context)
           lastObservedFrame = classified

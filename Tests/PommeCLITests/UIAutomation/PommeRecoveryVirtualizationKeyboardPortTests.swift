@@ -174,14 +174,16 @@ struct PommeRecoveryVirtualizationKeyboardPortTests {
                 clock.advance(nanoseconds: nanoseconds)
             },
             clock: { clock.now },
-            pollNanoseconds: 500_000_000
+            pollNanoseconds: 200_000_000
         )
 
+        // Stable pairs complete at 0.2 s, 0.6 s, and 1.0 s; the 0.5 s
+        // classification cool-down skips the middle one.
         await #expect(throws: PommeRecoveryVirtualizationPortError.observationTimedOut(.startupOptions)) {
             try await readiness.waitForExpectedStablePair(
                 .startupOptions,
                 context: .unproven,
-                timeout: 3
+                timeout: 1.2
             )
         }
         #expect(classifications.value == 2)
