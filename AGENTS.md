@@ -51,8 +51,7 @@ append-only `~/Library/Application Support/pomme/AgentArtifacts/sha256` store.
 Recovery installation can therefore resume using the exact agent digest pinned
 by an existing VM's journal while the host CLI receives fixes. The resolver
 rechecks ownership, signature, inode, and digest; never rewrite a journal or
-substitute the current build's digest. Earlier first-boot worker phases still
-require the original invoking executable.
+substitute the current build's digest.
 
 To retain a previously preserved signed Pomme build explicitly, use
 `rtk proxy bash Scripts/archive-agent.sh --source /absolute/path/to/pomme

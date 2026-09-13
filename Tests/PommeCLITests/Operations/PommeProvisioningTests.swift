@@ -140,17 +140,17 @@ struct PommeProvisioningTests {
         let journal = try signer.make(
             generation: 1,
             plan: plan(),
-            events: try eventsThrough(.install)
+            events: try eventsThrough(.installRecoveryAgent)
         )
 
         #expect(throws: PommeProvisioningError.repairUnavailable(
-            phase: .displayOnlyFirstNormalBoot,
+            phase: .verifyNormalAgent,
             vmName: "pomme-test"
         )) {
             try PommeProvisioningCoordinator.repairPhase(in: journal)
         }
         #expect(PommeProvisioningError.repairUnavailable(
-            phase: .displayOnlyFirstNormalBoot,
+            phase: .verifyNormalAgent,
             vmName: "pomme-test"
         ).localizedDescription.contains("--resume"))
     }
@@ -161,17 +161,17 @@ struct PommeProvisioningTests {
         let journal = try signer.make(
             generation: 1,
             plan: plan(),
-            events: try eventsThrough(.install, leavingIntentFor: .displayOnlyFirstNormalBoot)
+            events: try eventsLeavingIntentFor(.install)
         )
 
         #expect(throws: PommeProvisioningError.repairInterrupted(
-            phase: .displayOnlyFirstNormalBoot,
+            phase: .install,
             vmName: "pomme-test"
         )) {
             try PommeProvisioningCoordinator.repairPhase(in: journal)
         }
         #expect(PommeProvisioningError.repairInterrupted(
-            phase: .displayOnlyFirstNormalBoot,
+            phase: .install,
             vmName: "pomme-test"
         ).localizedDescription.contains("retained"))
     }
@@ -186,7 +186,7 @@ struct PommeProvisioningTests {
             generation: 1,
             plan: vmPlan,
             events: try eventsThrough(
-                .displayOnlyFirstNormalBoot,
+                .install,
                 leavingIntentFor: .installRecoveryAgent
             )
         )
@@ -309,7 +309,7 @@ struct PommeProvisioningTests {
         let notStarted = try signer.make(
             generation: 1,
             plan: plan(),
-            events: try eventsThrough(.displayOnlyFirstNormalBoot)
+            events: try eventsThrough(.install)
         )
         let first = try PommeProvisioningCoordinator.repairPhase(in: notStarted)
         #expect(first.phase == .installRecoveryAgent)
@@ -318,7 +318,7 @@ struct PommeProvisioningTests {
         let failed = try signer.make(
             generation: 1,
             plan: plan(),
-            events: try eventsThrough(.displayOnlyFirstNormalBoot)
+            events: try eventsThrough(.install)
                 + [
                     try event(kind: .intent, phase: .installRecoveryAgent),
                     try event(kind: .failure, phase: .installRecoveryAgent),
@@ -361,8 +361,8 @@ struct PommeProvisioningTests {
             }
         }
         let journal = try repository.load()
-        #expect(journal.events.map(\.kind) == [.intent, .receipt, .intent, .receipt, .intent, .failure])
-        #expect(await calls.phases == [.install, .displayOnlyFirstNormalBoot, .installRecoveryAgent])
+        #expect(journal.events.map(\.kind) == [.intent, .receipt, .intent, .failure])
+        #expect(await calls.phases == [.install, .installRecoveryAgent])
         #expect(logs.values == [
             "pomme-test provisioning phase installRecoveryAgent failed [code=internal.unknown]."
         ])
@@ -401,7 +401,7 @@ struct PommeProvisioningTests {
         #expect(completed.events.filter { $0.kind == .receipt }.map(\.phase) == PommeProvisioningPhase.allCases)
         #expect(completed.events.filter { $0.kind == .intent && $0.phase == .installRecoveryAgent }.map(\.attempt) == [1, 2])
         #expect(await calls.phases == [
-            .install, .displayOnlyFirstNormalBoot, .installRecoveryAgent,
+            .install, .installRecoveryAgent,
             .installRecoveryAgent, .verifyNormalAgent, .restoreFinalState,
         ])
         let count = await calls.phases.count
@@ -413,7 +413,7 @@ struct PommeProvisioningTests {
             repository: repository,
             effects: .init(
                 verifyOwnership: { expected in try PommeVMOwnership(name: expected.name, uuid: UUID(), bundlePath: expected.bundlePath) },
-                install: { _ in self.digest }, displayOnlyFirstNormalBoot: { _ in self.digest },
+                install: { _ in self.digest },
                 installRecoveryAgent: { _ in self.digest }, verifyNormalAgent: { _ in self.digest },
                 restoreFinalState: { _ in self.digest }, recoveryRepair: { _, _ in self.digest }
             )
@@ -454,7 +454,6 @@ struct PommeProvisioningTests {
         .init(
             verifyOwnership: { $0 },
             install: { _ in try await calls.record(.install, digest: self.digest, fail: fail) },
-            displayOnlyFirstNormalBoot: { _ in try await calls.record(.displayOnlyFirstNormalBoot, digest: self.digest, fail: fail) },
             installRecoveryAgent: { _ in try await calls.record(.installRecoveryAgent, digest: self.digest, fail: fail) },
             verifyNormalAgent: { _ in try await calls.record(.verifyNormalAgent, digest: self.digest, fail: fail) },
             restoreFinalState: { _ in try await calls.record(.restoreFinalState, digest: self.digest, fail: fail) },

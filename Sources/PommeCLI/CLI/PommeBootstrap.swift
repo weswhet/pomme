@@ -6,28 +6,6 @@ import Foundation
 /// enter the host command tree.
 enum PommeBootstrap {
     static func main(arguments: [String] = Array(CommandLine.arguments.dropFirst())) async {
-        if arguments.first == PommeFirstBootProcessRequest.supervisorFlag {
-            do {
-                guard let request = try PommeFirstBootProcessRequest.parseChildArguments(arguments) else {
-                    Foundation.exit(64)
-                }
-                Foundation.exit(PommeFirstBootProcessIsolation.runSupervisor(request: request))
-            } catch {
-                Foundation.exit(64)
-            }
-        }
-
-        if arguments.first == PommeFirstBootProcessRequest.workerFlag {
-            do {
-                guard let request = try PommeFirstBootProcessRequest.parseChildArguments(arguments) else {
-                    Foundation.exit(64)
-                }
-                Foundation.exit(await PommeCore.runFirstBootProcessChild(request))
-            } catch {
-                Foundation.exit(64)
-            }
-        }
-
         if arguments.first == "--pomme-agent" {
             let exitCode = PommeAgentDaemon.run(arguments: arguments)
             Foundation.exit(exitCode)

@@ -103,17 +103,18 @@ journals intent before each phase:
 
 1. install macOS and bind the VM, restore image, build, locale, display, and
    agent identities;
-2. perform the required display-only first normal boot in a capability-gated
-   supervisor/worker process group, prove descendant-liveness EOF, and exactly
-   reap both owned children before constructing any Recovery `VZVirtualMachine`
-   objects;
-3. enter Recovery and install the signed persistent agent through the
-   request-bound read-only VirtioFS bootstrap;
-4. boot normal, authenticate, verify the executable digest and required
+2. enter Recovery directly from the freshly installed image and install the
+   signed persistent agent through the request-bound read-only VirtioFS
+   bootstrap;
+3. boot normal, authenticate, verify the executable digest and required
    capabilities; and
-5. restore the requested `none`, `normal`, or `recovery` final state.
+4. restore the requested `none`, `normal`, or `recovery` final state.
 
-The development build wires steps 3–5 through the production request-bound
+No normal boot precedes Recovery: a restored image boots into Recovery
+directly, and the agent verification boot in step 3 is the guest's first
+normal boot.
+
+The development build wires steps 2–4 through the production request-bound
 Recovery adapter. It remains pre-release until the live creation and Recovery
 qualification matrices are complete; every unresolved phase still fails closed
 and retains the VM and journal.
