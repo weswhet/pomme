@@ -299,3 +299,21 @@ host at the same time, so restore/navigation numbers are pessimistic):
 
 The next create on the same IPSW should additionally skip the 12 s hash.
 `pomme start` + `exec` and `inspect` health on the resulting VM are unchanged.
+
+## 8. Template identity test (3.6)
+
+`testvm`'s `Disk.img`, `AuxiliaryStorage`, and `HardwareModel` were cloned
+with `cp -c` (APFS clonefile: 0.01 s for 21 GB) and booted by a small
+entitled Virtualization program under a **freshly generated**
+`VZMacMachineIdentifier`, with a listener on the agent's VSOCK port 505051.
+The guest booted and its installed agent LaunchDaemon connected to the host
+after 14.6 s. So a provisioned image is not bound to the machine identifier:
+clones can carry distinct identities (and therefore may run concurrently,
+which Apple requires for distinct identifiers). Guest-visible identity fields
+(serial, platform UUID) were not compared in this test.
+
+Consequences for a template design:
+- an installed *or* provisioned template can be cloned per VM in well under a
+  second, each clone getting a new identifier, MAC (derived from it), and UUID;
+- a provisioned template's clone boots with the template's agent credential,
+  so the host must rotate it on first boot before treating the clone as owned.
