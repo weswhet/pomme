@@ -2752,16 +2752,21 @@ struct PommeCore {
         return try await adapter(plan, .stopped)
     }
 
+    /// Boots the verified guest through the background VM helper, the same
+    /// runtime `pomme start` uses, so the boot that proves the agent is also
+    /// the boot a `normal` final state keeps: no second start is needed and
+    /// the VM outlives this process.
     private static func verifyNormalAgent(_ plan: PommeProvisioningPlan) async throws -> String {
         try await stopRetainedRuntime(for: plan.vm.bundlePath)
-        let retained = try await startProvisioningRuntime(plan: plan, mode: .normal, attachAgent: true)
-        retainRuntime(retained, for: plan.vm.bundlePath)
-        guard let coordinator = retained.coordinator else {
-            throw PommeProvisioningError.unavailableIntegration("persistent PommeAgent connection")
-        }
+        let reference = provisioningReference(for: plan)
         let deadline = Date().addingTimeInterval(Constants.defaultRecoveryAgentTimeout)
+        _ = try startRuntimeInBackground(
+            reference: reference,
+            bootMode: .normal,
+            timeout: Constants.defaultRecoveryAgentTimeout
+        )
         while true {
-            let status = await coordinator.status()
+            let status = try await provisioningAgentStatus(name: plan.vm.name)
             if status.connection == .connected,
                status.role == .normal,
                status.protocolVersion == plan.normalAgent.protocolVersion,
@@ -2773,9 +2778,25 @@ struct PommeCore {
                 throw PommeProvisioningError.phaseFailed(.verifyNormalAgent)
             }
             try Task.checkCancellation()
-            try await Task.sleep(nanoseconds: 100_000_000)
+            try await Task.sleep(nanoseconds: 250_000_000)
         }
-        return try receiptDigest("verify-normal-agent", plan: plan, bundle: BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath)))
+        return try receiptDigest("verify-normal-agent", plan: plan, bundle: reference.bundle)
+    }
+
+    private static func provisioningReference(for plan: PommeProvisioningPlan) -> VMReference {
+        VMReference(
+            name: plan.vm.name,
+            bundle: BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
+        )
+    }
+
+    /// Asks the running guest to shut itself down through the helper. A
+    /// guest at Setup Assistant ignores the framework's stop request, so
+    /// without this the helper stop waits out its graceful timeout.
+    private static func requestGuestShutdownThroughHelper(reference: VMReference) {
+        let request = GuestCommandRequest(path: "/sbin/shutdown", arguments: ["-h", "now"], timeout: 10)
+        guard let payload = try? request.validatedControlPayload(detached: true) else { return }
+        _ = try? sendControlObject(payload, bundle: reference.bundle, timeout: 10)
     }
 
     private static func restoreProvisioningFinalState(_ plan: PommeProvisioningPlan) async throws -> String {
@@ -2787,32 +2808,27 @@ struct PommeCore {
         finalState: PommeProvisioningFinalState
     ) async throws -> String {
         try await stopRetainedRuntime(for: plan.vm.bundlePath)
-        let reference = VMReference(
-            name: plan.vm.name,
-            bundle: BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
-        )
-        let observed: PommeRecoveryRunState
+        let reference = provisioningReference(for: plan)
+        // The verified normal boot already runs in the background helper.
+        // A `normal` final state keeps it; `stopped` shuts the guest down
+        // through the agent and then stops the helper; `recovery` stops the
+        // helper and starts it again in Recovery, whose terminal credential
+        // and agent are admitted lazily by the first terminal session.
         switch finalState {
-        case .stopped:
-            observed = try liveRecoveryRunState(from: vmStatusPayload(reference: reference))
         case .normalRunning:
-            let retained = try await startProvisioningRuntime(plan: plan, mode: .normal, attachAgent: true)
-            retainRuntime(retained, for: plan.vm.bundlePath)
-            observed = try liveRecoveryRunState(from: await retained.runtime.statusPayload(
-                bundle: reference.bundle,
-                inspect: false
-            ))
+            try await restoreStableVMRunState(.running(.normal), reference: reference)
+        case .stopped:
+            if try stableVMRunState(reference: reference) == .running(.normal) {
+                requestGuestShutdownThroughHelper(reference: reference)
+            }
+            try await restoreStableVMRunState(.stopped, reference: reference)
         case .recoveryRunning:
-            // An ordinary final-state Recovery boot exposes only the empty
-            // terminal bootstrap listener. Its terminal credential and agent
-            // are admitted lazily by the first terminal session.
-            let retained = try await startProvisioningRuntime(plan: plan, mode: .recovery, attachAgent: false)
-            retainRuntime(retained, for: plan.vm.bundlePath)
-            observed = try liveRecoveryRunState(from: await retained.runtime.statusPayload(
-                bundle: reference.bundle,
-                inspect: false
-            ))
+            if try stableVMRunState(reference: reference) == .running(.normal) {
+                requestGuestShutdownThroughHelper(reference: reference)
+            }
+            try await restoreStableVMRunState(.running(.recovery), reference: reference)
         }
+        let observed = try liveRecoveryRunState(from: vmStatusPayload(reference: reference))
         switch (finalState, observed) {
         case (.stopped, .stopped),
              (.normalRunning, .running(.normal)),
@@ -2821,7 +2837,7 @@ struct PommeCore {
         default:
             throw PommeRecoverySessionError.finalStateUnverified
         }
-        return try receiptDigest("restore-final-state", plan: plan, bundle: BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath)))
+        return try receiptDigest("restore-final-state", plan: plan, bundle: reference.bundle)
     }
 
     private static func repairProvisioningAgent(

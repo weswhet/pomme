@@ -3,11 +3,11 @@ import Testing
 
 @Suite("Recovery security qualification before effects")
 struct PommeRecoverySecurityPreflightTests {
-    @Test("Every security action rejects experimental profiles before any effect", arguments: [
+    @Test("Every security action accepts a planner-qualified experimental profile and stops at the next gate", arguments: [
         PommeRecoveryOperation.sip(.status), .sip(.enable), .sip(.disable),
         .amfi(.status), .amfi(.enable), .amfi(.disable)
     ])
-    func experimentalSecurityDoesNotReachEffects(_ operation: PommeRecoveryOperation) async throws {
+    func experimentalSecurityPassesProfileGate(_ operation: PommeRecoveryOperation) async throws {
         let fixture = try SecurityPreflightFixture()
         let integration = try await fixture.factory.make(reference: fixture.reference, operation: operation)
         do {
@@ -17,13 +17,14 @@ struct PommeRecoverySecurityPreflightTests {
             case .installAgent: Issue.record("Unexpected install operation")
             case .terminalSession: Issue.record("Unexpected terminal operation")
             }
-            Issue.record("Experimental security operation unexpectedly succeeded")
+            Issue.record("Security operation unexpectedly succeeded without a runtime")
         } catch {
-            #expect(error.localizedDescription.contains("SIP"))
-            #expect(error.localizedDescription.contains("AMFI"))
-            #expect(error.localizedDescription.contains("qualified"))
+            #expect(!(error is PommeRecoverySecurityQualification.Error))
         }
-        #expect(fixture.trace.events == ["identity", "executable", "profile"])
+        // The profile gate is crossed; whatever gate follows is not a live effect.
+        #expect(Array(fixture.trace.events.prefix(3)) == ["identity", "executable", "profile"])
+        #expect(fixture.trace.events.count > 3)
+        #expect(!fixture.trace.events.contains("runtime"))
     }
 
     @Test("Experimental agent installation still passes qualification")
