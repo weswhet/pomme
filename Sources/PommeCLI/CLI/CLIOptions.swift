@@ -35,6 +35,7 @@ struct CLIOptions {
     var ipswLimit: Int?
     var ipswDownloadSelection: String?
     var restoreImageVersionSelection: String?
+    var templateName: String?
     var resumeDownload = false
     var sizeOptions = VMSizeOptions.default
     var hasCustomSizeOptions = false

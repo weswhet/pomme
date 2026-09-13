@@ -32,6 +32,11 @@ struct PommeProvisioningInput: Codable, Sendable {
     /// is optional during initial planning and is persisted only in the
     /// companion input/metadata records, never in the signed journal or plan.
     let startupVolumeGroupUUID: UUID?
+    /// When set, the install phase clones this template bundle's disk,
+    /// auxiliary storage, and hardware model instead of restoring
+    /// `restoreImagePath` (which then records the image the template came
+    /// from). Absent in inputs written before templates existed.
+    let templateBundlePath: String?
 
     init(
         restoreImagePath: String,
@@ -40,7 +45,8 @@ struct PommeProvisioningInput: Codable, Sendable {
         hardwareModelData: Data,
         machineIdentifierData: Data,
         agentCredentialAccount: String = PommeProvisioningCredentialReference.agentAccount,
-        startupVolumeGroupUUID: UUID? = nil
+        startupVolumeGroupUUID: UUID? = nil,
+        templateBundlePath: String? = nil
     ) {
         schema = Self.schema
         self.restoreImagePath = restoreImagePath
@@ -50,9 +56,15 @@ struct PommeProvisioningInput: Codable, Sendable {
         self.machineIdentifierData = machineIdentifierData
         self.agentCredentialAccount = agentCredentialAccount
         self.startupVolumeGroupUUID = startupVolumeGroupUUID
+        self.templateBundlePath = templateBundlePath
     }
 
     func validate(for plan: PommeProvisioningPlan) throws {
+        if let templateBundlePath {
+            guard !templateBundlePath.isEmpty,
+                  URL(fileURLWithPath: templateBundlePath).standardizedFileURL.path == templateBundlePath
+            else { throw PommeProvisioningError.invalidPlan }
+        }
         guard schema == Self.schema,
               URL(fileURLWithPath: restoreImagePath).standardizedFileURL.path == restoreImagePath,
               !restoreImagePath.isEmpty,
@@ -1913,32 +1925,102 @@ struct PommeCore {
         return payload
     }
 
+    /// Everything that distinguishes a fresh restore from a template clone.
+    /// The plan built from it is identical in shape: a template-sourced VM
+    /// records the template's restore image digest and runs the same
+    /// Recovery bootstrap and verification phases.
+    private struct ProvisioningSource {
+        let version: String
+        let build: String
+        let restoreImageDigest: String
+        let restoreImage: URL
+        let profileDescriptor: PommeCreateRecoveryProfileDescriptor
+        let hardwareModelData: Data
+        let requirements: VZMacOSConfigurationRequirements?
+        let diskSizeBytes: UInt64
+        let templateBundlePath: String?
+    }
+
+    private static func restoreImageSource(
+        arguments: CLIOptions,
+        vmName: String
+    ) async throws -> ProvisioningSource {
+        let restoreImageURL = try await resolveCreateRestoreImageURL(arguments)
+        let restoreQualification = try await qualifyRestoreImage(at: restoreImageURL)
+        let canonicalRestoreImage = URL(fileURLWithPath: restoreQualification.identity.canonicalPath)
+        let requirements = restoreQualification.requirements
+        let disk = arguments.sizeOptions.diskSizeBytes
+        guard disk > 0 else {
+            throw RunnerError.invalidSize(flag: "--disk-size", value: String(disk))
+        }
+        return .init(
+            version: restoreQualification.identity.version,
+            build: restoreQualification.identity.build,
+            restoreImageDigest: try restoreImageDigest(at: canonicalRestoreImage),
+            restoreImage: canonicalRestoreImage,
+            profileDescriptor: restoreQualification.identity.recoveryProfile,
+            hardwareModelData: requirements.hardwareModel.dataRepresentation,
+            requirements: requirements,
+            diskSizeBytes: disk,
+            templateBundlePath: nil
+        )
+    }
+
+    private static func templateSource(
+        templateName: String,
+        arguments: CLIOptions
+    ) throws -> ProvisioningSource {
+        let manifest = try PommeTemplateStore.manifest(for: templateName)
+        let bundle = try PommeTemplateStore.bundle(for: templateName)
+        let requested = arguments.sizeOptions.diskSizeBytes
+        guard requested == manifest.diskSizeBytes else {
+            throw PommeTemplateError.diskSizeMismatch(template: manifest.diskSizeBytes, requested: requested)
+        }
+        let hardwareModelData = try Data(contentsOf: bundle.hardwareModelURL)
+        guard let hardwareModel = VZMacHardwareModel(dataRepresentation: hardwareModelData),
+              hardwareModel.isSupported
+        else { throw RunnerError.invalidHardwareModel }
+        return .init(
+            version: manifest.version,
+            build: manifest.build,
+            restoreImageDigest: manifest.restoreImageDigest,
+            restoreImage: URL(fileURLWithPath: manifest.restoreImagePath).standardizedFileURL,
+            profileDescriptor: try PommeRecoveryProfileSelector.descriptor(
+                version: manifest.version,
+                build: manifest.build
+            ),
+            hardwareModelData: hardwareModelData,
+            requirements: nil,
+            diskSizeBytes: manifest.diskSizeBytes,
+            templateBundlePath: bundle.rootURL.standardizedFileURL.path
+        )
+    }
+
     private static func prepareProvisioning(
         config: VMCreationConfigV1?,
         arguments: CLIOptions,
         reference: VMReference
     ) async throws -> ProvisioningPreparation {
-        let restoreImageURL = try await resolveCreateRestoreImageURL(arguments)
-        let restoreQualification = try await qualifyRestoreImage(at: restoreImageURL)
-        let canonicalRestoreImage = URL(fileURLWithPath: restoreQualification.identity.canonicalPath)
-        let version = restoreQualification.identity.version
-        let build = restoreQualification.identity.build
-        let profileDescriptor = restoreQualification.identity.recoveryProfile
+        let vmName = reference.name ?? reference.bundle.rootURL.deletingPathExtension().lastPathComponent
+        let source: ProvisioningSource
+        if let templateName = arguments.templateName {
+            source = try templateSource(templateName: templateName, arguments: arguments)
+        } else {
+            source = try await restoreImageSource(arguments: arguments, vmName: vmName)
+        }
+        let version = source.version
+        let build = source.build
+        let profileDescriptor = source.profileDescriptor
         if profileDescriptor.qualification == .experimental {
             log(
                 "Warning: Recovery support for macOS \(version) (\(build)) is experimental. Creation will attempt the observed-screen navigation and stop if it does not match.",
-                vmName: reference.name ?? reference.bundle.rootURL.deletingPathExtension().lastPathComponent
+                vmName: vmName
             )
         }
-        let requirements = restoreQualification.requirements
 
         let memory = arguments.sizeOptions.memorySizeBytes
-        try validateMemorySize(memory, requirements: requirements)
-        let disk = arguments.sizeOptions.diskSizeBytes
-        guard disk > 0 else {
-            throw RunnerError.invalidSize(flag: "--disk-size", value: String(disk))
-        }
-        let imageDigest = try restoreImageDigest(at: canonicalRestoreImage)
+        try validateMemorySize(memory, requirements: source.requirements)
+        let disk = source.diskSizeBytes
         let vmUUID = UUID()
         let ownership = try PommeVMOwnership(
             name: try validateVMName(reference.name ?? ""),
@@ -1967,7 +2049,7 @@ struct PommeCore {
         }
         let plan = try PommeProvisioningPlan(
             vm: ownership,
-            restore: .init(version: version, build: build, restoreImageDigest: imageDigest),
+            restore: .init(version: version, build: build, restoreImageDigest: source.restoreImageDigest),
             display: .required,
             profile: profile,
             normalAgent: normalAgent,
@@ -1976,16 +2058,17 @@ struct PommeCore {
         )
         let machineIdentifierData = VZMacMachineIdentifier().dataRepresentation
         let input = PommeProvisioningInput(
-            restoreImagePath: canonicalRestoreImage.path,
+            restoreImagePath: source.restoreImage.path,
             memorySizeBytes: memory,
             diskSizeBytes: disk,
-            hardwareModelData: requirements.hardwareModel.dataRepresentation,
+            hardwareModelData: source.hardwareModelData,
             machineIdentifierData: machineIdentifierData,
-            agentCredentialAccount: PommeProvisioningCredentialReference.agentAccount
+            agentCredentialAccount: PommeProvisioningCredentialReference.agentAccount,
+            templateBundlePath: source.templateBundlePath
         )
         try input.validate(for: plan)
         let signer = try provisioningSigner(bundleURL: reference.bundle.rootURL)
-        return .init(plan: plan, input: input, signer: signer, restoreImage: canonicalRestoreImage)
+        return .init(plan: plan, input: input, signer: signer, restoreImage: source.restoreImage)
     }
 
     private static func provisioningFinalState(_ mode: VMCreationConfigV1.BootMode) -> PommeProvisioningFinalState {
@@ -2387,6 +2470,14 @@ struct PommeCore {
     private static func installProvisioningVM(_ plan: PommeProvisioningPlan) async throws -> String {
         let bundle = BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
         let input = try loadProvisioningInput(for: plan)
+        if let templateBundlePath = input.templateBundlePath {
+            return try installProvisioningVMFromTemplate(
+                plan,
+                input: input,
+                bundle: bundle,
+                templateBundlePath: templateBundlePath
+            )
+        }
         let imageURL = URL(fileURLWithPath: input.restoreImagePath)
         let image = try await loadRestoreImage(from: imageURL)
         let version = "\(image.operatingSystemVersion.majorVersion).\(image.operatingSystemVersion.minorVersion).\(image.operatingSystemVersion.patchVersion)"
@@ -2418,22 +2509,7 @@ struct PommeCore {
             try bundle.createDiskImage(size: input.diskSizeBytes)
         }
 
-        var metadata = (try? metadataPayload(bundle: bundle)) ?? [:]
-        metadata[Constants.vmUUIDMetadataKey] = plan.vm.uuid.uuidString.lowercased()
-        metadata["memorySize"] = input.memorySizeBytes
-        metadata["diskSize"] = input.diskSizeBytes
-        metadata["buildVersion"] = plan.restore.build
-        metadata["osVersion"] = plan.restore.version
-        metadata["locale"] = plan.display.locale
-        metadata["displayWidth"] = plan.display.width
-        metadata["displayHeight"] = plan.display.height
-        metadata["provisioningPlanDigest"] = plan.digest
-        metadata["guestAgent"] = [
-            "identifier": plan.normalAgent.identifier,
-            "protocolVersion": plan.normalAgent.protocolVersion,
-            "executableDigest": plan.normalAgent.executableDigest
-        ]
-        try writeMetadataPayload(metadata, bundle: bundle)
+        try writeProvisioningMetadata(plan: plan, input: input, bundle: bundle)
 
         let auxiliaryStorage: VZMacAuxiliaryStorage
         if FileManager.default.fileExists(atPath: bundle.auxiliaryStorageURL.path) {
@@ -2464,6 +2540,162 @@ struct PommeCore {
         defer { observation.invalidate() }
         try await install(installer, on: queue)
         return try receiptDigest("install", plan: plan, bundle: bundle)
+    }
+
+    private static func writeProvisioningMetadata(
+        plan: PommeProvisioningPlan,
+        input: PommeProvisioningInput,
+        bundle: BundleLayout
+    ) throws {
+        var metadata = (try? metadataPayload(bundle: bundle)) ?? [:]
+        metadata[Constants.vmUUIDMetadataKey] = plan.vm.uuid.uuidString.lowercased()
+        metadata["memorySize"] = input.memorySizeBytes
+        metadata["diskSize"] = input.diskSizeBytes
+        metadata["buildVersion"] = plan.restore.build
+        metadata["osVersion"] = plan.restore.version
+        metadata["locale"] = plan.display.locale
+        metadata["displayWidth"] = plan.display.width
+        metadata["displayHeight"] = plan.display.height
+        metadata["provisioningPlanDigest"] = plan.digest
+        metadata["guestAgent"] = [
+            "identifier": plan.normalAgent.identifier,
+            "protocolVersion": plan.normalAgent.protocolVersion,
+            "executableDigest": plan.normalAgent.executableDigest
+        ]
+        if let templateBundlePath = input.templateBundlePath {
+            metadata["template"] = URL(fileURLWithPath: templateBundlePath).deletingPathExtension().lastPathComponent
+        }
+        try writeMetadataPayload(metadata, bundle: bundle)
+    }
+
+    /// The install phase for a template-sourced VM: clone the template's
+    /// disk image and auxiliary storage (copy-on-write on APFS) under this
+    /// VM's own machine identifier. The template manifest must still match
+    /// the immutable plan, so a replaced template cannot satisfy an older
+    /// journal. Existing files are kept for `--resume`.
+    private static func installProvisioningVMFromTemplate(
+        _ plan: PommeProvisioningPlan,
+        input: PommeProvisioningInput,
+        bundle: BundleLayout,
+        templateBundlePath: String
+    ) throws -> String {
+        let template = BundleLayout(rootURL: URL(fileURLWithPath: templateBundlePath))
+        let manifest = try PommeTemplateStore.manifest(in: template)
+        guard manifest.version == plan.restore.version,
+              manifest.build == plan.restore.build,
+              manifest.restoreImageDigest == plan.restore.restoreImageDigest,
+              manifest.diskSizeBytes == input.diskSizeBytes,
+              try Data(contentsOf: template.hardwareModelURL) == input.hardwareModelData
+        else { throw PommeProvisioningError.invalidPlan }
+        guard let hardwareModel = VZMacHardwareModel(dataRepresentation: input.hardwareModelData),
+              hardwareModel.isSupported
+        else { throw RunnerError.invalidHardwareModel }
+        guard VZMacMachineIdentifier(dataRepresentation: input.machineIdentifierData) != nil else {
+            throw RunnerError.invalidMachineIdentifier
+        }
+
+        try persistExactData(input.hardwareModelData, at: bundle.hardwareModelURL)
+        try persistExactData(input.machineIdentifierData, at: bundle.machineIdentifierURL)
+        if let existingSize = fileSize(bundle.diskImageURL) {
+            guard existingSize == Int64(input.diskSizeBytes) else {
+                throw PommeProvisioningError.ownershipMismatch
+            }
+        } else {
+            try PommeTemplateStore.clone(template.diskImageURL, to: bundle.diskImageURL)
+            guard fileSize(bundle.diskImageURL) == Int64(input.diskSizeBytes) else {
+                throw PommeProvisioningError.invalidPlan
+            }
+        }
+        if !FileManager.default.fileExists(atPath: bundle.auxiliaryStorageURL.path) {
+            try PommeTemplateStore.clone(template.auxiliaryStorageURL, to: bundle.auxiliaryStorageURL)
+        }
+        try writeProvisioningMetadata(plan: plan, input: input, bundle: bundle)
+        log("cloned template \(manifest.name) (macOS \(manifest.version) \(manifest.build)).", vmName: plan.vm.name)
+        return try receiptDigest("install", plan: plan, bundle: bundle)
+    }
+
+    /// Creates an installed-but-unprovisioned template: a restored disk image
+    /// with its auxiliary storage and hardware model, and a manifest. No
+    /// agent, credential, or journal is involved; a failed restore removes
+    /// the partial bundle.
+    static func createTemplatePayload(name: String, arguments: CLIOptions) async throws -> [String: Any] {
+        let validName = try validateVMName(name)
+        let bundle = try PommeTemplateStore.bundle(for: validName)
+        guard !FileManager.default.fileExists(atPath: bundle.rootURL.path) else {
+            throw PommeTemplateError.alreadyExists(validName)
+        }
+        let source = try await restoreImageSource(arguments: arguments, vmName: validName)
+        guard let requirements = source.requirements else { throw RunnerError.noSupportedConfiguration }
+        let memory = arguments.sizeOptions.memorySizeBytes
+        try validateMemorySize(memory, requirements: requirements)
+        if source.profileDescriptor.qualification == .experimental {
+            log(
+                "Warning: Recovery support for macOS \(source.version) (\(source.build)) is experimental; VMs created from this template will attempt observed-screen navigation.",
+                vmName: validName
+            )
+        }
+        try FileManager.default.createDirectory(
+            at: bundle.rootURL,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        do {
+            let hardwareModel = requirements.hardwareModel
+            let machineIdentifier = VZMacMachineIdentifier()
+            try writePrivate(hardwareModel.dataRepresentation, to: bundle.hardwareModelURL)
+            try writePrivate(machineIdentifier.dataRepresentation, to: bundle.machineIdentifierURL)
+            try bundle.createDiskImage(size: source.diskSizeBytes)
+            let auxiliaryStorage = try VZMacAuxiliaryStorage(
+                creatingStorageAt: bundle.auxiliaryStorageURL,
+                hardwareModel: hardwareModel,
+                options: []
+            )
+            let queue = DispatchQueue(label: "com.github.weswhet.pomme.template-install")
+            let configuration = try makeRuntimeConfiguration(
+                bundle: bundle,
+                hardwareModel: hardwareModel,
+                machineIdentifier: machineIdentifier,
+                auxiliaryStorage: auxiliaryStorage,
+                memorySizeBytes: memory,
+                installer: true
+            )
+            let installer = queue.sync {
+                let vm = VZVirtualMachine(configuration: configuration, queue: queue)
+                return VZMacOSInstaller(virtualMachine: vm, restoringFromImageAt: source.restoreImage)
+            }
+            let observation = installer.progress.observe(\.fractionCompleted, options: [.initial, .new]) { progress, _ in
+                logInstallProgress(fractionCompleted: progress.fractionCompleted, vmName: validName)
+            }
+            defer { observation.invalidate() }
+            try await install(installer, on: queue)
+            // The installer's identifier is never reused: every VM cloned
+            // from the template generates its own.
+            try? FileManager.default.removeItem(at: bundle.machineIdentifierURL)
+            let manifest = PommeTemplateManifest(
+                name: validName,
+                version: source.version,
+                build: source.build,
+                restoreImageDigest: source.restoreImageDigest,
+                restoreImagePath: source.restoreImage.path,
+                diskSizeBytes: source.diskSizeBytes
+            )
+            try PommeTemplateStore.write(manifest, to: bundle)
+        } catch {
+            try? FileManager.default.removeItem(at: bundle.rootURL)
+            throw error
+        }
+        return [
+            "ok": true,
+            "operation": "template-create",
+            "hostExitCode": 0,
+            "name": validName,
+            "bundlePath": bundle.rootURL.path,
+            "version": source.version,
+            "build": source.build,
+            "diskSize": source.diskSizeBytes,
+            "restoreImage": source.restoreImage.path,
+            "restoreImageDigest": source.restoreImageDigest
+        ]
     }
 
     private static func persistExactData(_ data: Data, at url: URL) throws {

@@ -114,6 +114,20 @@ No normal boot precedes Recovery: a restored image boots into Recovery
 directly, and the agent verification boot in step 3 is the guest's first
 normal boot.
 
+### Templates
+
+`pomme template create NAME --latest` performs step 1 once into
+`Templates/NAME.bundle` (disk image, auxiliary storage, hardware model, and a
+manifest recording the restore image digest and disk size); no agent,
+credential, or journal is involved. `pomme create VM --from-template NAME`
+runs the same journaled phases, but its install phase clones the template's
+disk image and auxiliary storage with APFS `clonefile` under a fresh machine
+identifier and UUID, then continues with steps 2–4 unchanged. The plan pins
+the template's restore digest, and the install phase re-verifies the
+manifest against it, so a replaced template cannot satisfy an older journal.
+A cloned installation boots under a new machine identifier (verified live),
+so template-sourced VMs have distinct identities and may run concurrently.
+
 The development build wires steps 2–4 through the production request-bound
 Recovery adapter. It remains pre-release until the live creation and Recovery
 qualification matrices are complete; every unresolved phase still fails closed

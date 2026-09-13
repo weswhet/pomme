@@ -259,7 +259,11 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     static let inferredFocusSettleNanoseconds: UInt64 = 100_000_000
     static let terminalCommandSettleNanoseconds: UInt64 = 250_000_000
     static let markerRetryNanoseconds: UInt64 = 500_000_000
-    static let markerAttempts = 3
+    /// The first command in a cold Recovery shell can take a few seconds to
+    /// exec (dyld cache and binaries are read from the freshly restored or
+    /// cloned image). Each attempt is one capture plus OCR, so a ten-second
+    /// window costs nothing when the marker appears immediately.
+    static let markerAttempts = 20
   }
 
   private let backend: VirtualizationPrivateHeadlessBackend

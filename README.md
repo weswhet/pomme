@@ -42,25 +42,39 @@ never chooses a machine merely because it is the only running one.
 ```text
 create, list|ls, start, stop, restart, pause, resume, delete|rm,
 status, inspect, exec, shell, sessions, jobs, cp, cat, agent, sip, amfi,
-mdm, remote-login, screen-sharing, snapshot, config, ipsw, ui, tui
+mdm, remote-login, screen-sharing, snapshot, template, config, ipsw, ui, tui
 ```
 
 Create is a durable provisioning workflow, not only an installation command:
 
 ```sh
 pomme create dev --version 26.6.0 --boot none
-pomme create dev --version latest --boot normal
+pomme create dev --latest --boot normal
 pomme create dev --resume
 ```
 
 Before creating anything, Pomme resolves and verifies the restore-image build,
 English locale, `1280×800` display geometry, closed Recovery profile, and
-immutable agent identity. It installs macOS, performs the required display-only
-normal boot behind an isolated supervisor/worker boundary, proves that both
-processes and their descendants stopped and were reaped, installs the signed
-persistent agent in Recovery, verifies the normal agent, and restores `none`,
-`normal`, or `recovery` as requested. SIP and AMFI
-are never changed by creation.
+immutable agent identity. It installs macOS, boots straight into Recovery to
+install the signed persistent agent, verifies the normal agent, and restores
+`none`, `normal`, or `recovery` as requested. SIP and AMFI are never changed
+by creation.
+
+The restore is the slow part (about four minutes for a 20 GB image). Do it
+once into a template, then clone:
+
+```sh
+pomme template create base --latest --disk-size 40GB
+pomme create dev --from-template base --memory 4GB
+pomme template list
+```
+
+A template holds only the restored disk image, auxiliary storage, and
+hardware model. `--from-template` clones them copy-on-write (APFS) under a
+fresh machine identifier and UUID and then runs the same journaled Recovery
+bootstrap and verification, so a VM is ready in roughly two and a half
+minutes instead of seven. Every VM cloned from a template inherits its disk
+size.
 
 The `0.1.0` development build includes the request-bound production Recovery
 bootstrap adapter. The workflow above remains pre-release: publication stays

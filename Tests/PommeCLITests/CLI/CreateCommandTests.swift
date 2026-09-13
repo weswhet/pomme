@@ -61,6 +61,29 @@ struct CreateCommandTests {
         #expect(explicit.version == "latest")
     }
 
+    @Test("--from-template excludes restore-image sources, config, and resume", arguments: [
+        ["research-agent", "--from-template", "base", "--version", "26.6.0"],
+        ["research-agent", "--from-template", "base", "--latest"],
+        ["research-agent", "--from-template", "base", "--restore-image", "/tmp/Restore.ipsw"],
+        ["research-agent", "--from-template", "base", "--ipsw-device", "Mac14,2"],
+        ["--config", "create.yaml", "--from-template", "base"],
+        ["research-agent", "--resume", "--from-template", "base"]
+    ])
+    func templateExclusivity(arguments: [String]) {
+        #expect(throws: Error.self) {
+            var command = try CreateCommand.parse(arguments)
+            try command.validate()
+        }
+    }
+
+    @Test("--from-template validates without a restore source")
+    func templateAlone() throws {
+        var command = try CreateCommand.parse(["research-agent", "--from-template", "base", "--memory", "4GB"])
+        try command.validate()
+        #expect(command.fromTemplate == "base")
+        #expect(command.version == nil)
+    }
+
     @Test("--latest rejects a conflicting --version or --restore-image", arguments: [
         ["research-agent", "--latest", "--version", "26.6.0"],
         ["research-agent", "--latest", "--restore-image", "/tmp/Restore.ipsw"],
