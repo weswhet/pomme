@@ -46,6 +46,9 @@ struct CreateCommand: AsyncParsableCommand {
     @Option(name: .customLong("version"), help: "macOS version, build, or 'latest'.")
     var version: String?
 
+    @Flag(name: .customLong("latest"), help: "Use the latest signed macOS version. Same as --version latest.")
+    var latest = false
+
     @Option(name: .customLong("restore-image"), help: "Local IPSW path. Available only in direct mode.")
     var restoreImage: String?
 
@@ -79,6 +82,12 @@ struct CreateCommand: AsyncParsableCommand {
     @OptionGroup var output: GlobalOptions
 
     mutating func validate() throws {
+        if latest {
+            if let version, version != "latest" {
+                throw ValidationError("Choose either --latest or --version.")
+            }
+            version = "latest"
+        }
         if resume {
             guard let name, !name.isEmpty else {
                 throw ValidationError("--resume requires a VM name.")
