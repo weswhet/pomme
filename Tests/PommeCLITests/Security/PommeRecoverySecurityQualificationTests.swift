@@ -7,12 +7,26 @@ struct PommeRecoverySecurityQualificationTests {
         try PommeRecoverySecurityQualification.require(profile: tahoe)
     }
 
-    @Test("Experimental and pending profiles cannot perform Recovery security mutations")
-    func rejectsExperimentalAndPendingProfiles() {
-        for profile in [experimental, pending] {
-            #expect(throws: PommeRecoverySecurityQualification.Error.unqualifiedRestoreProfile) {
-                try PommeRecoverySecurityQualification.require(profile: profile)
-            }
+    @Test("A planner-qualified experimental profile permits Recovery security operations")
+    func acceptsQualifiedExperimental() throws {
+        try PommeRecoverySecurityQualification.require(profile: experimental)
+    }
+
+    @Test("Pending-review builds and experimental evidence with a wrong manifest are rejected")
+    func rejectsPendingAndMismatchedProfiles() {
+        #expect(throws: PommeRecoverySecurityQualification.Error.unqualifiedRestoreProfile) {
+            try PommeRecoverySecurityQualification.require(profile: pending)
+        }
+        let mismatched = PommeRecoveryProfileEvidence(
+            build: .experimental(version: "26.6.2", build: "25G83"),
+            locale: .english,
+            geometry: .pixels1280x800,
+            privateHostABI: .qualifiedRecoveryInputV1,
+            manifestHash: .experimentalProfile("profile-digest"),
+            ownership: .verified
+        )
+        #expect(throws: PommeRecoveryInputQualificationError.manifestHashMismatch) {
+            try PommeRecoverySecurityQualification.require(profile: mismatched)
         }
     }
 
@@ -48,7 +62,9 @@ struct PommeRecoverySecurityQualificationTests {
             locale: .english,
             geometry: .pixels1280x800,
             privateHostABI: .qualifiedRecoveryInputV1,
-            manifestHash: .experimentalProfile("profile-digest"),
+            manifestHash: .experimentalProfile(
+                (try? PommeRecoveryProfileSelector.descriptor(version: "26.6.2", build: "25G83").digest) ?? ""
+            ),
             ownership: .verified
         )
     }
