@@ -35,14 +35,6 @@ struct PommeSecurityRecoveryAdapter: Sendable {
     return try PommeSecurityWorkflowState.decode(value, sip: operation.isSIP)
   }
 
-  func requireSIPDisabled() async throws {
-    let value = try await execute(.sip(.status), payload: .object([:]))
-    let state = try PommeSecurityWorkflowState.decode(value, sip: true)
-    guard state.disabled else {
-      throw PommeSecurityWorkflowError.amfiRequiresSIPDisabled
-    }
-  }
-
   func mutate(
     _ operation: PommeSecurityWorkflowOperation, credentials: PommeGuestSecurityCredentials
   ) async throws -> JSONValue {

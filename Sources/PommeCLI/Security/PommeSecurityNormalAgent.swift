@@ -332,7 +332,10 @@ struct PommeSecurityNormalAgent: Sendable {
   /// others naturally end the helper. The adapter accepts either a running
   /// normal VM with a changed boot identity or a verified stopped VM followed
   /// by a guarded normal start. No failure path calls a stop operation.
-  func rebootAndAuthenticate(timeout: TimeInterval = 180) async throws {
+  /// Returns the verified new boot identity so a caller can later recognize
+  /// this exact boot without rebooting it again.
+  @discardableResult
+  func rebootAndAuthenticate(timeout: TimeInterval = 180) async throws -> String {
     guard timeout.isFinite, timeout > 0, timeout <= Self.maximumRebootTimeout else {
       throw PommeSecurityNormalAgentError.invalidRebootTimeout
     }
@@ -417,7 +420,7 @@ struct PommeSecurityNormalAgent: Sendable {
           let current = try Self.validatedBootIdentity(
             hooks.captureBootIdentity(try remaining(Self.bootIdentityRequestTimeout)))
           sawAuthenticatedBoot = true
-          if current != originalBootIdentity { return }
+          if current != originalBootIdentity { return current }
         } catch is CancellationError {
           throw CancellationError()
         } catch {
@@ -466,7 +469,7 @@ struct PommeSecurityNormalAgent: Sendable {
         let current = try Self.validatedBootIdentity(
           hooks.captureBootIdentity(try remaining(Self.bootIdentityRequestTimeout)))
         sawAuthenticatedAfterStart = true
-        if current != originalBootIdentity { return }
+        if current != originalBootIdentity { return current }
       } catch is CancellationError {
         throw CancellationError()
       } catch {
@@ -1017,15 +1020,42 @@ struct PommeSecurityNormalAgent: Sendable {
     )
     let result = try execute(request)
     guard result.hostExitCode == 0 else { throw PommeSecurityWorkflowError.normalBootUnverified }
-    let output = String(decoding: result.stdout, as: UTF8.self).trimmingCharacters(
-      in: .whitespacesAndNewlines)
+    let output = String(decoding: result.stdout, as: UTF8.self)
     if sip {
-      let expected = "System Integrity Protection status: \(disabled ? "disabled" : "enabled")."
-      guard output == expected else { throw PommeSecurityWorkflowError.normalBootUnverified }
-    } else {
-      guard PommeBootArguments.containsOverride(output) == disabled else {
+      guard Self.parseSIPDisabled(output) == disabled else {
         throw PommeSecurityWorkflowError.normalBootUnverified
       }
+    } else {
+      guard PommeBootArguments.containsOverride(
+        output.trimmingCharacters(in: .whitespacesAndNewlines)) == disabled
+      else {
+        throw PommeSecurityWorkflowError.normalBootUnverified
+      }
+    }
+  }
+
+  /// Reads the effective SIP state of the current normal boot. `csrutil
+  /// status` reports the configuration the running kernel booted with, which
+  /// is the state that governs normal-boot NVRAM writes and the same read that
+  /// proves every SIP workflow after its final normal boot. It needs neither
+  /// owner credentials nor a Recovery session.
+  func observeSIPDisabled() throws -> Bool {
+    let request = GuestCommandRequest(
+      path: "/usr/bin/csrutil", arguments: ["status"], timeout: 30)
+    let result = try execute(request)
+    guard result.hostExitCode == 0,
+      let disabled = Self.parseSIPDisabled(String(decoding: result.stdout, as: UTF8.self))
+    else { throw PommeSecurityWorkflowError.statusUnverified }
+    return disabled
+  }
+
+  /// Accepts only the two exact native `csrutil status` reports. A custom
+  /// configuration report or any other text is not a verified state.
+  static func parseSIPDisabled(_ output: String) -> Bool? {
+    switch output.trimmingCharacters(in: .whitespacesAndNewlines) {
+    case "System Integrity Protection status: enabled.": false
+    case "System Integrity Protection status: disabled.": true
+    default: nil
     }
   }
 }

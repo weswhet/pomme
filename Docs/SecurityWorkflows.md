@@ -63,9 +63,17 @@ silently change it.
 ## State-first execution
 
 The workflow observes the requested security state before owner preparation can
-run. If the observed state already matches and there is no unresolved
-reconciliation, it records a `noMutationVerified` receipt and restores the
-final state without asking for an owner or touching Recovery mutation inputs.
+run. A SIP workflow reads the effective state of the current normal boot
+through the authenticated persistent agent (`csrutil status`), booting normal
+macOS first if needed. This is the same read that proves every SIP workflow
+after its final normal boot, and it needs neither owner credentials nor a
+Recovery session. AMFI state is inspected through Recovery, where the retained
+transaction record is read, while the AMFI SIP prerequisite uses the same
+normal-boot read. The public `status` commands still observe through Recovery.
+If the observed state already matches and there is no unresolved
+reconciliation, the workflow records a `noMutationVerified` receipt and
+restores the final state without asking for an owner or touching Recovery
+mutation inputs.
 
 AMFI enable has an additional rule: a retained AMFI baseline makes the state
 ineligible for the no-op path, even when the current disabled value appears to
@@ -234,7 +242,11 @@ After each normal NVRAM receipt, the host requests a native reboot through the
 existing authenticated agent and verifies a changed boot identity with the same
 creation-pinned executable. This commits firmware state before any subsequent
 Recovery transition. A host stop/start, which can fall back to a forced stop,
-is not a substitute for that proof.
+is not a substitute for that proof. That rebooted session is the fresh boot on
+which a disable is verified; an enable is verified on the fresh normal boot
+that follows its Recovery policy stage. Verification reboots again only when
+it finds a running boot it did not itself start or prove, such as a retry in a
+new process.
 
 A retained AMFI disable can resume an owned normal-NVRAM checkpoint or reapply
 its configured target after owner reverification when that target was lost
