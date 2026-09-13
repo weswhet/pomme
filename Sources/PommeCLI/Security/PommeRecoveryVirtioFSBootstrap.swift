@@ -95,8 +95,10 @@ struct PommeRecoveryVirtioFSTerminalPlan: Equatable, Sendable {
         let compactRequestID = request.requestID.uuidString
             .lowercased()
             .replacingOccurrences(of: "-", with: "")
-        let shortID = String(compactRequestID.prefix(24))
-        let mountWorkspace = "/private/var/run/.pomme-vfs-\(shortID)"
+        // Every character of the mount workspace is typed into Recovery
+        // Terminal; eight hex digits keep it request-unique and short.
+        let shortID = String(compactRequestID.prefix(8))
+        let mountWorkspace = "/private/var/run/.p\(shortID)"
         let guestWorkspace = "/private/var/tmp/pomme-recovery-\(request.requestID.uuidString.lowercased())"
         let runScript = "\(mountWorkspace)/run"
         let tag = PommeRecoveryStagingBuilder.tag(for: request)
@@ -113,9 +115,13 @@ struct PommeRecoveryVirtioFSTerminalPlan: Equatable, Sendable {
         // guest workspace can be created.  The command substitution keeps
         // the digest out of the terminal output; the only proof emitted is
         // the redaction-safe Pomme marker.
-        // Fixed absolute prefixes save HID events without consulting PATH or
-        // weakening the short-circuit checks before the known-vector probe.
-        let probe = "p=/sbin;u=/usr/bin;[ -x /bin/sh ]&&test -x $p/mount_virtiofs&&test -x $p/umount&&test -x $u/codesign&&test -x $p/sha256&&test \"$($u/printf abc|$p/sha256 -q)\" = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad&&printf 'POMME \(Self.ocrSafeMarkerSuffix(requestID: request.requestID)) OK\\n'"
+        // Fixed absolute prefixes save HID events without consulting PATH.
+        // The probe proves only what the launcher cannot check for itself
+        // before mutating anything: the VirtioFS mount tool exists and the
+        // sha256 command produces the known vector (a 16-hex prefix is ample
+        // to detect a wrong or missing tool). umount and codesign are
+        // verified by the launcher script, which fails closed on its own.
+        let probe = "p=/sbin;u=/usr/bin;test -x $p/mount_virtiofs&&case $($u/printf abc|$p/sha256 -q) in ba7816bf8f01cfea*)printf 'POMME \(Self.ocrSafeMarkerSuffix(requestID: request.requestID)) OK\\n';;esac"
         // The mount point is intentionally nested below a new directory. A
         // pre-existing directory or symlink makes this command fail closed.
         // Enter only the newly created private workspace before shortening

@@ -12,8 +12,8 @@ struct PommeRecoveryVirtioFSBootstrapTests {
         defer { fixture.remove() }
         let plan = try PommeRecoveryVirtioFSTerminalPlan(request: fixture.request)
 
-        #expect(plan.tag == "pomme-0123456789abcdef01234567")
-        #expect(plan.mountWorkspacePath == "/private/var/run/.pomme-vfs-0123456789abcdef01234567")
+        #expect(plan.tag == "pomme-01234567")
+        #expect(plan.mountWorkspacePath == "/private/var/run/.p01234567")
         #expect(plan.guestWorkspacePath == "/private/var/tmp/pomme-recovery-01234567-89ab-cdef-0123-456789abcdef")
         #expect(plan.runScriptPath == "\(plan.mountWorkspacePath)/run")
         #expect(plan.capabilityProbes.count == 1)
@@ -116,9 +116,10 @@ struct PommeRecoveryVirtioFSBootstrapTests {
         #expect(knownVector == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
         #expect(knownVector.utf8.count == 64)
         #expect(probe.command.hasPrefix("p=/sbin;u=/usr/bin;"))
-        #expect(probe.command.contains("test -x $p/mount_virtiofs&&test -x $p/umount&&test -x $u/codesign&&test -x $p/sha256&&test"))
+        #expect(probe.command.contains("test -x $p/mount_virtiofs&&case"))
         #expect(probe.command.contains("$u/printf abc|$p/sha256 -q"))
-        #expect(probe.command.contains(knownVector))
+        #expect(probe.command.contains("in \(knownVector.prefix(16))*)"))
+        #expect(probe.command.utf8.count < 160)
         #expect(probe.command.contains("printf '\(probe.marker)\\n'"))
         #expect(!probe.command.contains("/usr/bin/shasum"))
         #expect(!probe.command.contains("/usr/bin/openssl"))

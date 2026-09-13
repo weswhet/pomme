@@ -1938,7 +1938,7 @@ struct PommeCore {
         guard disk > 0 else {
             throw RunnerError.invalidSize(flag: "--disk-size", value: String(disk))
         }
-        let imageDigest = try sha256File(canonicalRestoreImage)
+        let imageDigest = try restoreImageDigest(at: canonicalRestoreImage)
         let vmUUID = UUID()
         let ownership = try PommeVMOwnership(
             name: try validateVMName(reference.name ?? ""),
@@ -2088,16 +2088,88 @@ struct PommeCore {
         guard descriptor >= 0 else { try throwPOSIX("open") }
         defer { Darwin.close(descriptor) }
         var hasher = SHA256()
-        var buffer = [UInt8](repeating: 0, count: 1024 * 1024)
+        var buffer = [UInt8](repeating: 0, count: 8 * 1024 * 1024)
         while true {
             let count = buffer.withUnsafeMutableBytes { bytes in
                 Darwin.read(descriptor, bytes.baseAddress, bytes.count)
             }
             if count < 0 { try throwPOSIX("read") }
             if count == 0 { break }
-            hasher.update(data: Data(buffer.prefix(count)))
+            buffer.withUnsafeBytes { bytes in
+                hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: bytes.prefix(count)))
+            }
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// File identity that changes whenever the restore image is replaced or
+    /// rewritten. `ctime` cannot be reset by `touch`, so a same-size,
+    /// same-mtime substitution still invalidates a cached digest.
+    private struct RestoreImageIdentity: Codable, Equatable {
+        let device: Int64
+        let inode: UInt64
+        let size: Int64
+        let modifiedSeconds: Int64
+        let modifiedNanoseconds: Int64
+        let changedSeconds: Int64
+        let changedNanoseconds: Int64
+
+        init(path: String) throws {
+            var info = stat()
+            guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
+                throw PommeProvisioningError.invalidPlan
+            }
+            device = Int64(info.st_dev)
+            inode = UInt64(info.st_ino)
+            size = Int64(info.st_size)
+            modifiedSeconds = Int64(info.st_mtimespec.tv_sec)
+            modifiedNanoseconds = Int64(info.st_mtimespec.tv_nsec)
+            changedSeconds = Int64(info.st_ctimespec.tv_sec)
+            changedNanoseconds = Int64(info.st_ctimespec.tv_nsec)
+        }
+    }
+
+    private struct RestoreImageDigestRecord: Codable, Equatable {
+        let identity: RestoreImageIdentity
+        let sha256: String
+    }
+
+    private static let restoreImageDigestLock = NSLock()
+    nonisolated(unsafe) private static var restoreImageDigestCache: [String: RestoreImageDigestRecord] = [:]
+
+    private static func restoreImageDigestSidecarURL(for url: URL) -> URL {
+        url.appendingPathExtension("sha256.json")
+    }
+
+    /// The SHA-256 of a restore image, hashed at most once per file identity.
+    /// A 20 GB IPSW takes ~12 s to hash; creation previously did it twice
+    /// (plan, then install verification) and again on every later create.
+    /// The digest is remembered in-process and in a sidecar next to the image,
+    /// and either is trusted only while the file's identity is unchanged.
+    static func restoreImageDigest(at url: URL) throws -> String {
+        let canonical = url.resolvingSymlinksInPath().standardizedFileURL
+        let identity = try RestoreImageIdentity(path: canonical.path)
+        let cached = restoreImageDigestLock.withLock { restoreImageDigestCache[canonical.path] }
+        if let cached, cached.identity == identity { return cached.sha256 }
+        let sidecar = restoreImageDigestSidecarURL(for: canonical)
+        if let data = try? Data(contentsOf: sidecar),
+           let record = try? JSONDecoder().decode(RestoreImageDigestRecord.self, from: data),
+           record.identity == identity,
+           PommeProvisioningDigest.isSHA256(record.sha256) {
+            restoreImageDigestLock.withLock { restoreImageDigestCache[canonical.path] = record }
+            return record.sha256
+        }
+        let digest = try sha256File(canonical)
+        // Re-read the identity: a file rewritten while hashing must not bind
+        // its new identity to the old bytes' digest.
+        let identityAfter = try RestoreImageIdentity(path: canonical.path)
+        guard identityAfter == identity else { return digest }
+        let record = RestoreImageDigestRecord(identity: identity, sha256: digest)
+        restoreImageDigestLock.withLock { restoreImageDigestCache[canonical.path] = record }
+        if let encoded = try? JSONEncoder().encode(record) {
+            try? encoded.write(to: sidecar, options: .atomic)
+        }
+        return digest
     }
 
     /// Binds an installer input to the immutable restore-image digest recorded
@@ -2105,7 +2177,7 @@ struct PommeCore {
     /// bytes changed after planning.
     static func verifyRestoreImageDigest(at url: URL, expected: String) throws {
         guard PommeProvisioningDigest.isSHA256(expected),
-              try sha256File(url) == expected
+              try restoreImageDigest(at: url) == expected
         else { throw PommeProvisioningError.invalidPlan }
     }
 
@@ -2379,7 +2451,8 @@ struct PommeCore {
             hardwareModel: hardwareModel,
             machineIdentifier: machineIdentifier,
             auxiliaryStorage: auxiliaryStorage,
-            memorySizeBytes: input.memorySizeBytes
+            memorySizeBytes: input.memorySizeBytes,
+            installer: true
         )
         let installer = queue.sync {
             let vm = VZVirtualMachine(configuration: configuration, queue: queue)
@@ -2741,8 +2814,29 @@ struct PommeCore {
     }
 
     private static func stopRetainedRuntime(for bundlePath: String) async throws {
-        guard let runtime = removeRetainedRuntime(for: bundlePath) else { return }
-        try await runtime.stop()
+        guard let retained = removeRetainedRuntime(for: bundlePath) else { return }
+        await requestGuestShutdown(retained)
+        try await retained.stop()
+    }
+
+    /// A freshly provisioned guest sitting in Setup Assistant ignores the
+    /// framework's stop request, so `runtime.stop()` would wait out the full
+    /// graceful timeout before forcing. When the normal agent is connected,
+    /// ask the guest to shut itself down first; the following stop then
+    /// observes a stopped VM within seconds. Failures fall through to the
+    /// ordinary stop path.
+    private static func requestGuestShutdown(_ retained: PommeRetainedRuntime) async {
+        guard retained.mode == .normal, let coordinator = retained.coordinator else { return }
+        do {
+            let session = try coordinator.captureAuthenticatedSession(as: .normal)
+            let request = GuestCommandRequest(path: "/sbin/shutdown", arguments: ["-h", "now"], timeout: 10)
+            _ = try await session.request(
+                operation: "process.start",
+                payload: try JSONValue(any: request.agentPayload(detached: true))
+            )
+        } catch {
+            return
+        }
     }
 
     private static func makeRuntimeConfiguration(
@@ -2752,14 +2846,27 @@ struct PommeCore {
         auxiliaryStorage: VZMacAuxiliaryStorage,
         memorySizeBytes: UInt64,
         recoveryConfiguration: PommeRecoveryRuntimeConfiguration? = nil,
-        ordinaryRecoveryBootstrapShare: PommeRecoveryTerminalBootstrapShare? = nil
+        ordinaryRecoveryBootstrapShare: PommeRecoveryTerminalBootstrapShare? = nil,
+        installer: Bool = false
     ) throws -> VZVirtualMachineConfiguration {
         let platform = VZMacPlatformConfiguration()
         platform.hardwareModel = hardwareModel
         platform.machineIdentifier = machineIdentifier
         platform.auxiliaryStorage = auxiliaryStorage
 
-        let disk = try VZDiskImageStorageDeviceAttachment(url: bundle.diskImageURL, readOnly: false)
+        // The installer VM exists only to restore the image once; a failed
+        // restore is retried from scratch. That is the case Apple documents
+        // for `.none`: no synchronization with permanent storage, so guest
+        // flushes during the ~20 GB restore do not become host F_FULLFSYNCs.
+        // Every later boot keeps the durable default.
+        let disk = installer
+            ? try VZDiskImageStorageDeviceAttachment(
+                url: bundle.diskImageURL,
+                readOnly: false,
+                cachingMode: .automatic,
+                synchronizationMode: .none
+            )
+            : try VZDiskImageStorageDeviceAttachment(url: bundle.diskImageURL, readOnly: false)
         let block = VZVirtioBlockDeviceConfiguration(attachment: disk)
         let network = VZVirtioNetworkDeviceConfiguration()
         network.attachment = VZNATNetworkDeviceAttachment()
@@ -2776,8 +2883,12 @@ struct PommeCore {
         let configuration = VZVirtualMachineConfiguration()
         configuration.platform = platform
         configuration.bootLoader = VZMacOSBootLoader()
+        // The restore is partly CPU-bound in the guest and the CPU count is
+        // not persisted by the installed OS, so the installer VM gets every
+        // host core; ordinary boots keep four.
+        let preferredCPUCount = installer ? ProcessInfo.processInfo.activeProcessorCount : 4
         configuration.cpuCount = min(
-            max(4, VZVirtualMachineConfiguration.minimumAllowedCPUCount),
+            max(preferredCPUCount, VZVirtualMachineConfiguration.minimumAllowedCPUCount),
             VZVirtualMachineConfiguration.maximumAllowedCPUCount
         )
         configuration.memorySize = memorySizeBytes

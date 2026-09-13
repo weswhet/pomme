@@ -387,8 +387,10 @@ struct PommeRecoveryStagingBuilder: Sendable {
     }
 
     static func tag(for requestID: UUID) -> String {
+        // The tag is typed into Recovery Terminal character by character;
+        // eight hex digits are enough to keep concurrent requests distinct.
         let compact = requestID.uuidString.lowercased().replacingOccurrences(of: "-", with: "")
-        return "pomme-\(compact.prefix(24))"
+        return "pomme-\(compact.prefix(8))"
     }
 
     static func tag(for request: PommeRecoverySessionRequest) -> String {
