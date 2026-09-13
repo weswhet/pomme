@@ -317,3 +317,19 @@ Consequences for a template design:
   second, each clone getting a new identifier, MAC (derived from it), and UUID;
 - a provisioned template's clone boots with the template's agent credential,
   so the host must rotate it on first boot before treating the clone as owned.
+
+## 9. Installed templates (3.6, installed variant) — implemented
+
+- `pomme template create|list|delete`; `pomme create VM --from-template NAME`.
+- `template create base` (one-time restore, 40 GB / 4 GB): 260 s.
+- `create tvm2 --from-template base`: **2:36** end to end (clone 0.01 s,
+  Recovery navigation 86 s, probe + launcher 18 s, agent install / verify /
+  stop ~50 s), versus 7:01 from the IPSW.
+- The first template-sourced attempt failed with
+  `recovery_session.terminal_proof_failed`: the marker proof allowed only
+  three attempts 0.5 s apart, and the first `sha256` exec in a cold Recovery
+  shell can exceed that. A manual repro showed the typed probe was byte-exact
+  and the marker printed. The window is now 20 attempts (10 s).
+- A retained VM cannot be resumed after the `pomme` binary is rebuilt: the
+  plan pins the running executable's digest and `--resume` fails closed with
+  `live_recovery.ownership_mismatch` (a misleading code for that case).

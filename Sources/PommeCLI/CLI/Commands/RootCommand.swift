@@ -28,6 +28,7 @@ struct PommeCLI: AsyncParsableCommand {
             RemoteLoginCommand.self,
             ScreenSharingCommand.self,
             SnapshotCommand.self,
+            TemplateCommand.self,
             AgentCommand.self,
             ConfigCommand.self,
             IPSWCommand.self,

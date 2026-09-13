@@ -52,6 +52,9 @@ struct CreateCommand: AsyncParsableCommand {
     @Option(name: .customLong("restore-image"), help: "Local IPSW path. Available only in direct mode.")
     var restoreImage: String?
 
+    @Option(name: .customLong("from-template"), help: "Clone an installed template (see `pomme template`) instead of restoring an IPSW.")
+    var fromTemplate: String?
+
     @Option(name: .customLong("ipsw-device"), help: "Apple silicon Mac identifier used to resolve --version.")
     var ipswDevice: String?
 
@@ -94,7 +97,7 @@ struct CreateCommand: AsyncParsableCommand {
             }
             _ = try validateVMName(name)
             let creationArgumentsSupplied = configPath != nil || version != nil || restoreImage != nil
-                || ipswDevice != nil || diskSize != "60GB" || memory != "8GB" || boot != .none
+                || fromTemplate != nil || ipswDevice != nil || diskSize != "60GB" || memory != "8GB" || boot != .none
                 || dryRun || parallel || parallelLimit != nil
             guard !creationArgumentsSupplied else {
                 throw ValidationError("--resume accepts only a VM name and output or debug options.")
@@ -103,6 +106,7 @@ struct CreateCommand: AsyncParsableCommand {
         }
         if let configPath {
             let directSettingsWereSupplied = name != nil || version != nil || restoreImage != nil || ipswDevice != nil
+                || fromTemplate != nil
                 || diskSize != "60GB" || memory != "8GB" || boot != .none
             if directSettingsWereSupplied {
                 throw ValidationError("--config cannot be combined with a VM name or direct creation options.")
@@ -115,6 +119,9 @@ struct CreateCommand: AsyncParsableCommand {
                 throw ValidationError("Direct creation requires a VM name.")
             }
             _ = try validateVMName(name)
+            if fromTemplate != nil, version != nil || restoreImage != nil || ipswDevice != nil {
+                throw ValidationError("--from-template cannot be combined with --version, --latest, --restore-image, or --ipsw-device.")
+            }
             if version != nil, restoreImage != nil {
                 throw ValidationError("Choose either --version or --restore-image.")
             }
@@ -156,6 +163,10 @@ struct CreateCommand: AsyncParsableCommand {
         }
 
         let vmName = try validateVMName(name!)
+        if let fromTemplate {
+            try await runFromTemplate(fromTemplate, vmName: vmName)
+            return
+        }
         let restoreArguments: [String]
         var selectedProfile: PommeCreateRecoveryProfileDescriptor?
         var resolvedLocalRestoreImage: PommeLocalRestoreImageIdentity?
@@ -233,6 +244,55 @@ struct CreateCommand: AsyncParsableCommand {
             name: vmName,
             restoreArgs: restoreArguments,
             diskSize: diskSize,
+            memory: memory,
+            startMode: boot.startMode
+        )
+        try CLIOutputWriter.write(result, options: output)
+    }
+
+    /// Template creates inherit the template's disk size. An explicit
+    /// `--disk-size` is accepted only when it matches, because the cloned
+    /// image already carries its APFS container geometry.
+    private func runFromTemplate(_ templateName: String, vmName: String) async throws {
+        let manifest = try PommeTemplateStore.manifest(for: templateName)
+        let templateDiskSize = "\(manifest.diskSizeBytes / (1 << 20))MB"
+        if diskSize != "60GB", ByteSizeParser.parse(diskSize) != manifest.diskSizeBytes {
+            throw PommeTemplateError.diskSizeMismatch(
+                template: manifest.diskSizeBytes,
+                requested: ByteSizeParser.parse(diskSize) ?? 0
+            )
+        }
+        let descriptor = try PommeRecoveryProfileSelector.descriptor(version: manifest.version, build: manifest.build)
+        if dryRun {
+            let payload: [String: Any] = [
+                "ok": true,
+                "dryRun": true,
+                "name": vmName,
+                "template": manifest.name,
+                "version": manifest.version,
+                "build": manifest.build,
+                "diskSize": manifest.diskSizeBytes,
+                "memory": memory,
+                "boot": boot.rawValue,
+                "recoveryProfile": [
+                    "id": descriptor.id,
+                    "version": descriptor.version,
+                    "build": descriptor.build,
+                    "qualification": descriptor.qualification.rawValue,
+                    "digest": descriptor.digest
+                ]
+            ]
+            try CLIOutputWriter.write(
+                payload: payload,
+                text: "Would create \(vmName) from template \(manifest.name) (macOS \(manifest.version) \(manifest.build), disk \(manifest.diskSizeBytes / (1 << 30))GB, memory \(memory), boot \(boot.rawValue)).",
+                options: output
+            )
+            return
+        }
+        let result = try await PommeApplication.create(
+            name: vmName,
+            restoreArgs: ["--from-template", manifest.name],
+            diskSize: templateDiskSize,
             memory: memory,
             startMode: boot.startMode
         )

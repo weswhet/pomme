@@ -2775,6 +2775,12 @@ enum PommeApplication {
                 }
                 options.restoreImagePath = restoreArgs[index + 1]
                 index += 2
+            case "--from-template":
+                guard index + 1 < restoreArgs.count else {
+                    throw RunnerError.usage
+                }
+                options.templateName = restoreArgs[index + 1]
+                index += 2
             default:
                 throw RunnerError.usage
             }
