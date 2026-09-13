@@ -274,6 +274,15 @@ order of the list will not change.
     still shows the startup-options picker and then the Language chooser, so
     it saves nothing under Virtualization.
   The navigation trace stays as is.
+- **Follow-up (later the same day): the SIP-off variant was tested and also
+  fails.** On `tvm2` (26.6.2, template-sourced) the write succeeds from the
+  Recovery Terminal, and — after `pomme sip disable` (the first SIP workflow
+  on an experimental-profile build, gate lifted in `03e9a10`) — it also
+  succeeds from normal mode as root. In both cases the next plain start
+  *consumes* `recovery-boot-mode` (it is gone from NVRAM afterwards) yet the
+  guest boots normally: Virtualization's `VZMacOSBootLoader` honours only
+  `startUpFromMacOSRecovery`. Closed: no NVRAM path skips the startup-options
+  picker or the Language chooser in a VZ guest.
 - **Validation create after 4.1 + 4.2** (same VM parameters, orphan VM service
   killed, `devme` deleted): total 8:32 (was 8:50). Navigation 87 s (was 92 s):
   331 captures in 14.5 s = **44 ms per capture (was 207 ms)**, but the loop
