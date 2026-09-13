@@ -56,6 +56,23 @@ struct PommeSecurityNormalAgentTests {
     #expect(!PommeSecurityNormalAgent.normalAMFIOperations.contains("process.start"))
   }
 
+  @Test("Normal-boot SIP read accepts only the two exact native status reports")
+  func parsesExactSIPStatus() {
+    #expect(PommeSecurityNormalAgent.parseSIPDisabled(
+      "System Integrity Protection status: enabled.\n") == false)
+    #expect(PommeSecurityNormalAgent.parseSIPDisabled(
+      "System Integrity Protection status: disabled.\n") == true)
+    #expect(PommeSecurityNormalAgent.parseSIPDisabled(
+      "System Integrity Protection status: disabled.") == true)
+    #expect(PommeSecurityNormalAgent.parseSIPDisabled("") == nil)
+    #expect(PommeSecurityNormalAgent.parseSIPDisabled(
+      "System Integrity Protection status: enabled (Custom Configuration).\n") == nil)
+    #expect(PommeSecurityNormalAgent.parseSIPDisabled(
+      "System Integrity Protection status: unknown (Custom Configuration).\n\nConfiguration:\n") == nil)
+    #expect(PommeSecurityNormalAgent.parseSIPDisabled(
+      "System Integrity Protection status: disabled.\nextra\n") == nil)
+  }
+
   @Test("Decodes an Int64 exit code and stream frames")
   func decodesIntegerExitAndFrames() throws {
     let response = response(

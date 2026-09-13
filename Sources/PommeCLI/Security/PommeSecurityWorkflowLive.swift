@@ -1,5 +1,14 @@
 import Foundation
 
+/// The boot identity this process proved after its most recent native reboot
+/// following an AMFI NVRAM write. Normal-boot verification may run on that
+/// boot instead of rebooting it a second time.
+actor PommeSecurityProvenBootRecord {
+  private var identity: String?
+  var provenIdentity: String? { identity }
+  func record(_ identity: String) { self.identity = identity }
+}
+
 extension PommeSecurityWorkflow {
   /// A fresh owner credential is returned to the Recovery mutation only after
   /// the current normal boot proves that the owner still has an Aqua desktop.
@@ -14,6 +23,21 @@ extension PommeSecurityWorkflow {
     default:
       return false
     }
+  }
+
+  /// AMFI verification must observe a boot that started after the last NVRAM
+  /// write. A VM that this verification itself started from a non-running
+  /// state is such a boot, and so is the boot this process already proved
+  /// after its NVRAM reboot. Any other running boot is rebooted first, so a
+  /// retry in a new process still verifies a fresh boot.
+  static func amfiVerificationRequiresReboot(
+    startedFreshBoot: Bool,
+    currentBootIdentity: String?,
+    provenBootIdentity: String?
+  ) -> Bool {
+    if startedFreshBoot { return false }
+    guard let currentBootIdentity, let provenBootIdentity else { return true }
+    return currentBootIdentity != provenBootIdentity
   }
 
   static func runLive(
@@ -73,6 +97,22 @@ extension PommeSecurityWorkflow {
         to: error, journal: retained)
     }
     let progress = PommeSecurityWorkflowProgress(journal, store: store, lease: lease)
+    let normal = PommeSecurityNormalAgent(
+      reference: reference, expectedExecutableDigest: plan.normalAgent.executableDigest)
+    // SIP is read from the effective state of the current normal boot. This is
+    // the same `csrutil status` read that proves every SIP workflow after its
+    // final normal boot and the state that governs AMFI's normal-boot NVRAM
+    // writes. It needs no owner credentials and no Recovery session; the
+    // normal boot it may perform is the one owner preparation needs anyway.
+    let observeNormalSIPDisabled: @Sendable () async throws -> Bool = {
+      PommeCore.log(
+        "Reading the effective SIP state through the persistent normal agent.",
+        vmName: reference.displayName)
+      try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
+      try await normal.authenticate()
+      return try normal.observeSIPDisabled()
+    }
+    let provenBoot = PommeSecurityProvenBootRecord()
     let initialAMFIObservation: PommeSecurityAMFIPreflightObservation?
     if operation.isSIP {
       initialAMFIObservation = nil
@@ -87,7 +127,11 @@ extension PommeSecurityWorkflow {
         initialAMFIObservation = try await PommeSecurityAMFIPreflight.inspectRetained(
           journal: progress.journal,
           observeAMFI: { try await recovery.observe(operation) },
-          requireSIPDisabled: { try await recovery.requireSIPDisabled() })
+          requireSIPDisabled: {
+            guard try await observeNormalSIPDisabled() else {
+              throw PommeSecurityWorkflowError.amfiRequiresSIPDisabled
+            }
+          })
         if progress.journal.phase == .preflightIntent {
           try progress.advance(.credentialPending)
         }
@@ -111,8 +155,6 @@ extension PommeSecurityWorkflow {
         throw resumeGuided(primary)
       }
     }
-    let normal = PommeSecurityNormalAgent(
-      reference: reference, expectedExecutableDigest: plan.normalAgent.executableDigest)
     let owner = PommeSecurityLiveOwnerPreparation(
       reference: reference, normal: normal, force: force)
     let changeNormalBootArguments: @Sendable () async throws -> JSONValue = {
@@ -128,7 +170,8 @@ extension PommeSecurityWorkflow {
         volumeGroupUUID: group)
       // Native reboot commits the guest's firmware state before another host
       // lifecycle transition, including enable's subsequent Recovery stage.
-      try await normal.rebootAndAuthenticate()
+      // The rebooted session is remembered so verification can run on it.
+      await provenBoot.record(try await normal.rebootAndAuthenticate())
       return result
     }
     let dependencies = PommeSecurityWorkflowDependencies(
@@ -139,7 +182,11 @@ extension PommeSecurityWorkflow {
           // This outcome has no observed phase to synthesize. Only the
           // separately guarded retained-checkpoint entry point may use it.
           throw PommeSecurityWorkflowError.incompleteTransaction
-        case nil: return try await recovery.observe(operation)
+        case nil:
+          guard operation.isSIP else { return try await recovery.observe(operation) }
+          return .init(
+            disabled: try await observeNormalSIPDisabled(),
+            baselinePresent: false, reconciliationRequired: false, baselinePhase: nil)
         }
       },
       prepareOwner: { try await owner.prepare(progress: $0) },
@@ -164,8 +211,24 @@ extension PommeSecurityWorkflow {
           try await normal.authenticate()
           try normal.verifyNormalSecurity(sip: true, disabled: operation.requestsDisabled)
         } else {
+          let observed = try PommeCore.stableVMRunState(reference: reference)
           try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
-          try await normal.rebootAndAuthenticate()
+          try await normal.authenticate()
+          let current = try normal.currentBootIdentity()
+          if PommeSecurityWorkflow.amfiVerificationRequiresReboot(
+            startedFreshBoot: observed != .running(.normal),
+            currentBootIdentity: current,
+            provenBootIdentity: await provenBoot.provenIdentity)
+          {
+            PommeCore.log(
+              "Rebooting normal macOS to verify the AMFI configuration on a fresh boot.",
+              vmName: reference.displayName)
+            try await normal.rebootAndAuthenticate()
+          } else {
+            PommeCore.log(
+              "Verifying the AMFI configuration on the fresh normal boot.",
+              vmName: reference.displayName)
+          }
           _ = try normal.performAMFI(
             operation: operation.requestsDisabled
               ? "amfi.normal.verifyDisabled" : "amfi.normal.verifyEnabled",

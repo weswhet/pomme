@@ -88,6 +88,27 @@ struct PommeSecurityWorkflowTests {
         #expect(!PommeSecurityWorkflow.freshOwnerDesktopProofRequired(for: .securityMutationVerified))
     }
 
+    @Test("AMFI verification reboots only a running boot this process did not prove")
+    func amfiVerificationRebootDecision() {
+        let proven = "01234567-89ab-cdef-0123-456789abcdef"
+        let other = "fedcba98-7654-3210-fedc-ba9876543210"
+        // A VM the verification itself started from stopped is a fresh boot.
+        #expect(!PommeSecurityWorkflow.amfiVerificationRequiresReboot(
+            startedFreshBoot: true, currentBootIdentity: other, provenBootIdentity: nil))
+        #expect(!PommeSecurityWorkflow.amfiVerificationRequiresReboot(
+            startedFreshBoot: true, currentBootIdentity: nil, provenBootIdentity: nil))
+        // The boot proven after this process's NVRAM reboot is verified as is.
+        #expect(!PommeSecurityWorkflow.amfiVerificationRequiresReboot(
+            startedFreshBoot: false, currentBootIdentity: proven, provenBootIdentity: proven))
+        // A retry in a new process, or a boot that changed since the proof, reboots.
+        #expect(PommeSecurityWorkflow.amfiVerificationRequiresReboot(
+            startedFreshBoot: false, currentBootIdentity: other, provenBootIdentity: nil))
+        #expect(PommeSecurityWorkflow.amfiVerificationRequiresReboot(
+            startedFreshBoot: false, currentBootIdentity: other, provenBootIdentity: proven))
+        #expect(PommeSecurityWorkflow.amfiVerificationRequiresReboot(
+            startedFreshBoot: false, currentBootIdentity: nil, provenBootIdentity: proven))
+    }
+
     @Test("Fresh-owner preference completion retries once after bounded initialization failure")
     func freshOwnerPreferenceRetryAfterInitializationFailure() async throws {
         let trace = FreshOwnerPreferenceRecoveryTrace()
