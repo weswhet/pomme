@@ -259,12 +259,21 @@ order of the list will not change.
 - **4.2 implemented.** The classification cool-down inside one checkpoint is
   0.5 s (`PommeRecoveryObservationReadiness.classificationCooldown`) instead
   of 2 s.
-- **4.3 NVRAM shortcuts tested and rejected.** From a normal boot as root in
-  the guest, `nvram recovery-boot-mode=unused` fails with
-  `(iokit/common) not permitted` (SIP-protected variable). `nvram
-  prev-lang:kbd=en-US:0` is accepted, but the next Recovery boot still shows
-  the startup-options picker and then the Language chooser, so it saves
-  nothing. Neither is usable under Virtualization; the trace stays as is.
+- **4.3 NVRAM shortcuts tested and rejected (for now).**
+  - `nvram recovery-boot-mode=unused`, run as root through the agent in a
+    normal boot, fails with `(iokit/common) not permitted`. `recovery-boot-mode`
+    is one of the NVRAM variables that System Integrity Protection's NVRAM
+    protection blocks from userspace on Apple silicon; it can only be written
+    where SIP does not apply — from the Recovery Terminal, or in a guest whose
+    SIP has been disabled (`pomme sip disable`). **Revisit later:** for a VM
+    that is already SIP-disabled, or at the end of a Recovery session
+    (setting it there would arm the *next* boot to enter Recovery directly,
+    skipping the startup-options picker), this may still be usable. It was
+    not tested in either configuration.
+  - `nvram prev-lang:kbd=en-US:0` is accepted, but the next Recovery boot
+    still shows the startup-options picker and then the Language chooser, so
+    it saves nothing under Virtualization.
+  The navigation trace stays as is.
 - **Validation create after 4.1 + 4.2** (same VM parameters, orphan VM service
   killed, `devme` deleted): total 8:32 (was 8:50). Navigation 87 s (was 92 s):
   331 captures in 14.5 s = **44 ms per capture (was 207 ms)**, but the loop
