@@ -1,20 +1,22 @@
 import Foundation
 
-/// Security operations require the one reviewed Recovery input contract. VM
-/// creation may retain an experimental restore plan, but that plan cannot
-/// issue credentials or authorize Recovery input for SIP or AMFI.
+/// Security operations accept any Recovery input contract the profile
+/// planner qualifies: the reviewed Tahoe record or a planner-qualified
+/// experimental identity. Builds whose review is pending, and evidence that
+/// fails the locale, geometry, host ABI, manifest, or ownership checks, are
+/// still rejected.
 enum PommeRecoverySecurityQualification {
     enum Error: Swift.Error, LocalizedError, Equatable, Sendable {
         case unqualifiedRestoreProfile
 
         var errorDescription: String? {
-            "SIP and AMFI Recovery operations require Pomme's reviewed macOS Tahoe 26.6.0 (25G72) restore profile. This profile is not qualified for security operations; experimental creation does not qualify it."
+            "SIP and AMFI Recovery operations require a restore profile the Recovery planner qualifies; this VM's profile is pending review or unsupported."
         }
     }
 
     static func require(profile: PommeRecoveryProfileEvidence) throws {
         do {
-            _ = try PommeRecoveryProfileSelector.reviewedTahoeInput(for: profile)
+            _ = try PommeRecoveryProfileSelector.inputForAttempt(for: profile)
         } catch let error as PommeRecoveryInputQualificationError {
             switch error {
             case .unsupportedBuild, .externallyPendingReview:
