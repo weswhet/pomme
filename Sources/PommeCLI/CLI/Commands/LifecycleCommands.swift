@@ -64,8 +64,14 @@ struct CreateCommand: AsyncParsableCommand {
     @Option(name: .customLong("memory"), help: "Guest memory size.")
     var memory = "8GB"
 
-    @Option(name: .customLong("boot"), help: "State after creation: none, normal, or recovery.")
-    var boot: CLIBootMode = .none
+    @Option(name: .customLong("boot"), help: "State after creation: normal (default), recovery, or none.")
+    var boot: CLIBootMode = .normal
+
+    @Flag(name: .customLong("recovery"), help: "Leave the VM booted in Recovery after creation. Same as --boot recovery.")
+    var recovery = false
+
+    @Flag(name: .customLong("shutdown"), help: "Shut the VM down after the agent is installed and verified. Same as --boot none.")
+    var shutdown = false
 
     @Flag(name: .customLong("dry-run"), help: "Resolve and print the creation plan without creating VMs.")
     var dryRun = false
@@ -85,6 +91,23 @@ struct CreateCommand: AsyncParsableCommand {
     @OptionGroup var output: GlobalOptions
 
     mutating func validate() throws {
+        // validate() runs during parse and may run again; keep the flag
+        // mapping idempotent, like --latest.
+        if recovery, shutdown {
+            throw ValidationError("Choose either --recovery or --shutdown.")
+        }
+        if recovery {
+            guard boot == .normal || boot == .recovery else {
+                throw ValidationError("--recovery cannot be combined with --boot \(boot.rawValue).")
+            }
+            boot = .recovery
+        }
+        if shutdown {
+            guard boot == .normal || boot == .none else {
+                throw ValidationError("--shutdown cannot be combined with --boot \(boot.rawValue).")
+            }
+            boot = .none
+        }
         if latest {
             if let version, version != "latest" {
                 throw ValidationError("Choose either --latest or --version.")
@@ -97,7 +120,7 @@ struct CreateCommand: AsyncParsableCommand {
             }
             _ = try validateVMName(name)
             let creationArgumentsSupplied = configPath != nil || version != nil || restoreImage != nil
-                || fromTemplate != nil || ipswDevice != nil || diskSize != "60GB" || memory != "8GB" || boot != .none
+                || fromTemplate != nil || ipswDevice != nil || diskSize != "60GB" || memory != "8GB" || boot != .normal
                 || dryRun || parallel || parallelLimit != nil
             guard !creationArgumentsSupplied else {
                 throw ValidationError("--resume accepts only a VM name and output or debug options.")
@@ -107,7 +130,7 @@ struct CreateCommand: AsyncParsableCommand {
         if let configPath {
             let directSettingsWereSupplied = name != nil || version != nil || restoreImage != nil || ipswDevice != nil
                 || fromTemplate != nil
-                || diskSize != "60GB" || memory != "8GB" || boot != .none
+                || diskSize != "60GB" || memory != "8GB" || boot != .normal
             if directSettingsWereSupplied {
                 throw ValidationError("--config cannot be combined with a VM name or direct creation options.")
             }

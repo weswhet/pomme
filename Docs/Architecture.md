@@ -106,9 +106,11 @@ journals intent before each phase:
 2. enter Recovery directly from the freshly installed image and install the
    signed persistent agent through the request-bound read-only VirtioFS
    bootstrap;
-3. boot normal, authenticate, verify the executable digest and required
-   capabilities; and
-4. restore the requested `none`, `normal`, or `recovery` final state.
+3. boot normal through the background VM helper, authenticate, verify the
+   executable digest and required capabilities; and
+4. restore the requested final state: `normal` (the default) keeps the
+   verified boot running, `none` shuts the guest down through the agent and
+   stops the helper, `recovery` restarts the helper in Recovery.
 
 No normal boot precedes Recovery: a restored image boots into Recovery
 directly, and the agent verification boot in step 3 is the guest's first

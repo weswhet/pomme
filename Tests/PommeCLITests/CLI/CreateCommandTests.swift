@@ -76,6 +76,34 @@ struct CreateCommandTests {
         }
     }
 
+    @Test("Creation boots normally by default; --recovery and --shutdown select the alternatives")
+    func bootDefaultsAndFlags() throws {
+        var normal = try CreateCommand.parse(["research-agent", "--latest"])
+        try normal.validate()
+        #expect(normal.boot == .normal)
+        #expect(normal.boot.startMode == .normal)
+
+        var recovery = try CreateCommand.parse(["research-agent", "--latest", "--recovery"])
+        try recovery.validate()
+        #expect(recovery.boot == .recovery)
+
+        var shutdown = try CreateCommand.parse(["research-agent", "--latest", "--shutdown"])
+        try shutdown.validate()
+        #expect(shutdown.boot == .none)
+        #expect(shutdown.boot.startMode == .none)
+
+        for arguments in [
+            ["research-agent", "--latest", "--recovery", "--shutdown"],
+            ["research-agent", "--latest", "--recovery", "--boot", "none"],
+            ["research-agent", "--latest", "--shutdown", "--boot", "recovery"]
+        ] {
+            #expect(throws: Error.self) {
+                var command = try CreateCommand.parse(arguments)
+                try command.validate()
+            }
+        }
+    }
+
     @Test("--from-template validates without a restore source")
     func templateAlone() throws {
         var command = try CreateCommand.parse(["research-agent", "--from-template", "base", "--memory", "4GB"])
@@ -112,7 +140,10 @@ struct CreateCommandTests {
         ["research-agent", "--resume", "--restore-image", "/tmp/Restore.ipsw"],
         ["research-agent", "--resume", "--config", "create.yaml"],
         ["research-agent", "--resume", "--dry-run"],
-        ["research-agent", "--resume", "--parallel"]
+        ["research-agent", "--resume", "--parallel"],
+        ["research-agent", "--resume", "--recovery"],
+        ["research-agent", "--resume", "--shutdown"],
+        ["research-agent", "--resume", "--boot", "none"]
     ])
     func resumeExclusivity(arguments: [String]) {
         #expect(throws: Error.self) {

@@ -936,7 +936,9 @@ enum PommeApplication {
         options.restoreImageVersionSelection = plan.firmware.buildid
         options.ipswDeviceIdentifier = plan.config.ipswDevice
         options.resumeDownload = true
-        if let boot = plan.config.boot, boot != .none {
+        // Config members boot normally unless the config says `none` or `recovery`.
+        let boot = plan.config.boot ?? .normal
+        if boot != .none {
             options.start = true
             options.bootMode = boot == .normal ? .normal : .recovery
         }

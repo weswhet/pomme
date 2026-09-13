@@ -48,8 +48,9 @@ mdm, remote-login, screen-sharing, snapshot, template, config, ipsw, ui, tui
 Create is a durable provisioning workflow, not only an installation command:
 
 ```sh
-pomme create dev --version 26.6.0 --boot none
-pomme create dev --latest --boot normal
+pomme create dev --latest                 # installs, verifies the agent, leaves it running
+pomme create dev --version 26.6.0 --shutdown
+pomme create dev --latest --recovery
 pomme create dev --resume
 ```
 
@@ -75,6 +76,10 @@ fresh machine identifier and UUID and then runs the same journaled Recovery
 bootstrap and verification, so a VM is ready in roughly two and a half
 minutes instead of seven. Every VM cloned from a template inherits its disk
 size.
+
+Creation ends with the VM booted normally and its agent verified — the same
+boot that proved the agent — unless `--shutdown` or `--recovery` (or
+`--boot none|recovery`, or `boot:` in a config) asks for another state.
 
 The `0.1.0` development build includes the request-bound production Recovery
 bootstrap adapter. The workflow above remains pre-release: publication stays
