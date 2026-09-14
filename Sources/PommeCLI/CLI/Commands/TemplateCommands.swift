@@ -38,7 +38,10 @@ struct TemplateCreateCommand: AsyncParsableCommand {
     @Option(name: .customLong("memory"), help: "Guest memory used only while restoring the image.")
     var memory = "4GB"
 
-    @Flag(name: .customLong("provisioned"), help: "Also prepare the owner account, so a VM cloned from this template can run MDM enrollment as its first command. Takes several extra minutes once, and saves them on every VM.")
+    @Option(name: .customLong("from-template"), help: "Build on an existing installed template instead of restoring an image again. Only with --provisioned.")
+    var fromTemplate: String?
+
+    @Flag(name: .customLong("provisioned"), help: "Also prepare the owner account and leave SIP disabled with the AMFI override on, so a VM cloned from this template can run MDM enrollment as its first command with no security mutation. Every VM cloned from it inherits that posture.")
     var provisioned = false
 
     @OptionGroup var output: GlobalOptions
@@ -57,8 +60,18 @@ struct TemplateCreateCommand: AsyncParsableCommand {
         if restoreImage != nil, ipswDevice != nil {
             throw ValidationError("--ipsw-device is available only with --version.")
         }
-        guard version != nil || restoreImage != nil else {
-            throw ValidationError("Template creation requires --version, --latest, or --restore-image.")
+        if let fromTemplate {
+            guard provisioned else {
+                throw ValidationError("--from-template is available only with --provisioned.")
+            }
+            guard version == nil, restoreImage == nil else {
+                throw ValidationError("Choose either --from-template or a restore image source.")
+            }
+            _ = try validateVMName(fromTemplate)
+        } else {
+            guard version != nil || restoreImage != nil else {
+                throw ValidationError("Template creation requires --version, --latest, --restore-image, or --from-template with --provisioned.")
+            }
         }
         for (flag, value) in [("--disk-size", diskSize), ("--memory", memory)] {
             guard let bytes = ByteSizeParser.parse(value), bytes > 0 else {
@@ -70,6 +83,7 @@ struct TemplateCreateCommand: AsyncParsableCommand {
     mutating func run() async throws {
         if provisioned {
             var restoreArgs: [String] = []
+            if let fromTemplate { restoreArgs += ["--from-template", fromTemplate] }
             if let version { restoreArgs += ["--version", version] }
             if let restoreImage { restoreArgs += ["--restore-image", restoreImage] }
             if let ipswDevice { restoreArgs += ["--ipsw-device", ipswDevice] }
@@ -116,15 +130,18 @@ struct TemplateListCommand: ParsableCommand {
                     "diskSize": manifest.diskSizeBytes,
                     "restoreImageDigest": manifest.restoreImageDigest,
                     "provisioned": manifest.isProvisioned,
+                    "securityDisabled": manifest.isSecurityDisabled,
                     "ownerAccount": manifest.provisionedOwnerAccount as Any,
                     "createdAt": ISO8601DateFormatter().string(from: manifest.createdAt)
                 ]
             }
         ]
         let lines = templates.map {
-            "\($0.name)\t\($0.version)\t\($0.build)\t\($0.diskSizeBytes / (1 << 30))GB\t\($0.provisionedOwnerAccount ?? "-")"
+            "\($0.name)\t\($0.version)\t\($0.build)\t\($0.diskSizeBytes / (1 << 30))GB"
+                + "\t\($0.provisionedOwnerAccount ?? "-")"
+                + "\t\($0.isSecurityDisabled ? "sip-off,amfi-off" : "default")"
         }
-        let text = (["NAME\tVERSION\tBUILD\tDISK\tOWNER"] + lines).joined(separator: "\n")
+        let text = (["NAME\tVERSION\tBUILD\tDISK\tOWNER\tSECURITY"] + lines).joined(separator: "\n")
         try CLIOutputWriter.write(payload: payload, text: text, options: output)
     }
 }
