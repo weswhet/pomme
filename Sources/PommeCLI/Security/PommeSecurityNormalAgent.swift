@@ -1049,6 +1049,95 @@ struct PommeSecurityNormalAgent: Sendable {
     return disabled
   }
 
+  /// Observes AMFI configuration and any retained transaction through the
+  /// persistent agent, so a caller does not spend a Recovery session to learn
+  /// a state a normal boot can report. Returns nil when this VM's pinned agent
+  /// predates the contract, or when the read cannot be completed here, so the
+  /// caller falls back to the authoritative Recovery observation rather than
+  /// guessing. Reading the boot policy needs `bputil`, which is not always
+  /// available to a normal boot, and that case defers to Recovery rather
+  /// than failing.
+  func observeAMFIState(
+    volumeGroupUUID: UUID,
+    timeout: TimeInterval = Constants.defaultGuestCommandTimeout
+  ) -> PommeSecurityWorkflowState? {
+    // Declining is ordinary, not a failure, but it costs the caller a whole
+    // Recovery session, so say which check declined it. The reasons are a
+    // closed vocabulary and carry no guest text.
+    func decline(_ reason: String) -> PommeSecurityWorkflowState? {
+      PommeCore.log(
+        "Normal-agent AMFI status unavailable (\(reason)); observing through Recovery.",
+        vmName: reference.displayName)
+      return nil
+    }
+    guard PommeProvisioningDigest.isSHA256(expectedExecutableDigest) else {
+      return decline("pinned-digest-invalid")
+    }
+    guard (try? PommeCore.stableVMRunState(reference: reference)) == .running(.normal) else {
+      return decline("not-a-normal-boot")
+    }
+    guard supportsNormalAMFIStatus(timeout: timeout) else {
+      return decline("agent-contract-unavailable")
+    }
+    guard let response = try? PommeCore.sendControlObject([
+      "command": "agent.perform",
+      "operation": PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation,
+      "payload": [
+        "volumeGroupUUID": volumeGroupUUID.uuidString.lowercased(),
+        "includeWorkflowState": true,
+      ],
+    ], bundle: reference.bundle, timeout: timeout) else {
+      return decline("transport")
+    }
+    guard response["ok"] as? Bool == true,
+      let rawResult = response["result"],
+      let result = try? JSONValue(any: rawResult),
+      result.objectValue?["operation"]
+        == .string(PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation)
+    else { return decline("rejected") }
+    // The decoder enforces the same internal consistency it does for a
+    // Recovery observation; an inconsistent report is not downgraded to a
+    // guess, it simply is not used.
+    guard let state = try? PommeSecurityWorkflowState.decode(result, sip: false) else {
+      return decline("report-not-verifiable")
+    }
+    return state
+  }
+
+  /// True when this VM's pinned agent advertises the normal-boot AMFI status
+  /// contract. An agent pinned before it keeps working for the four staging
+  /// operations and is never replaced.
+  private func supportsNormalAMFIStatus(timeout: TimeInterval) -> Bool {
+    guard let response = try? PommeCore.sendControlObject([
+      "command": "agent.perform",
+      "operation": "agent.describe",
+      "payload": ["includeNormalAMFICapabilities": true],
+    ], bundle: reference.bundle, timeout: timeout),
+      response["ok"] as? Bool == true,
+      let rawResult = response["result"],
+      let result = try? JSONValue(any: rawResult),
+      let description = result.objectValue
+    else { return false }
+    return Self.supportsNormalAMFIStatus(
+      description.mapValues(\.publicValue), expectedExecutableDigest: expectedExecutableDigest)
+  }
+
+  /// Pure receipt check, closed against host-side numeric coercions.
+  static func supportsNormalAMFIStatus(
+    _ description: [String: Any], expectedExecutableDigest: String
+  ) -> Bool {
+    guard description["role"] as? String == "persistent",
+      description["protocol"] as? String == PommeAgentProtocol.name,
+      integerValue(description["version"]) == Int64(PommeAgentProtocol.version),
+      description["executableSHA256"] as? String == expectedExecutableDigest,
+      integerValue(description["normalAMFIStatusVersion"])
+        == Int64(PommeGuestRecoverySecurityOperations.normalAMFIStatusVersion),
+      let rawCapabilities = description["capabilities"] as? [Any]
+    else { return false }
+    return Set(rawCapabilities.compactMap { $0 as? String })
+      .contains(PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation)
+  }
+
   /// Recovers the owner account's automatic-login password from the guest,
   /// for a VM whose host Keychain item is absent because it was cloned from a
   /// provisioned template. The credential is returned only over the

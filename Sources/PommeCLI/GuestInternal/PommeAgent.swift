@@ -52,7 +52,7 @@ actor PommeAgent {
         "sip.status", "sip.disable", "sip.enable",
         "amfi.status", "amfi.disable", "amfi.enable"
     ]
-    static let persistentCapabilities = ["agent.describe", "agent.health", "process.start", "process.status", "process.signal", "process.list", "process.output", "process.wait", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize", PommeGuestOwnerCredentialReader.operation] + terminalCapabilities + normalAMFIOperations
+    static let persistentCapabilities = ["agent.describe", "agent.health", "process.start", "process.status", "process.signal", "process.list", "process.output", "process.wait", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize", PommeGuestOwnerCredentialReader.operation, PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation] + terminalCapabilities + normalAMFIOperations
     /// Detached-job logs retain their trailing bytes so an already streamed
     /// status response never makes `process.output` destructive. The agent
     /// keeps this bounded per channel and tells callers when earlier bytes
@@ -220,12 +220,16 @@ actor PommeAgent {
             description["terminalSessionVersion"] = .integer(Int64(Self.terminalSessionVersion))
             if request.payload.objectValue?["includeNormalAMFICapabilities"] == .bool(true) {
                 description["normalAMFIWorkflowVersion"] = .integer(Int64(Self.normalAMFIWorkflowVersion))
+                description["normalAMFIStatusVersion"] =
+                    .integer(Int64(PommeGuestRecoverySecurityOperations.normalAMFIStatusVersion))
             }
             if request.payload.objectValue?["includeOwnerCredentialCapabilities"] == .bool(true) {
                 description["ownerCredentialVersion"] = .integer(Int64(Self.ownerCredentialVersion))
             }
             return .object(description)
         case "agent.health": return .object(["ok": .bool(true), "activationPending": .bool(activationPending)])
+        case PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation:
+            return try recoverySecurity.executeNormalAMFIStatus(role: role, payload: request.payload)
         case let operation where Self.normalAMFIOperations.contains(operation):
             return try recoverySecurity.executeNormalAMFI(
                 role: role,

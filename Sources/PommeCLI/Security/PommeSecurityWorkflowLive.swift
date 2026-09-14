@@ -112,6 +112,23 @@ extension PommeSecurityWorkflow {
       try await normal.authenticate()
       return try normal.observeSIPDisabled()
     }
+    // AMFI state is fully observable from a normal boot: the policy, the
+    // NVRAM projection, and the retained transaction all live where the
+    // persistent agent can read them. Prefer that over spending a Recovery
+    // session, and fall back to Recovery whenever the pinned agent predates
+    // the contract or the read cannot be completed there.
+    let observeAMFI: @Sendable () async throws -> PommeSecurityWorkflowState = {
+        if try PommeCore.stableVMRunState(reference: reference) == .running(.normal),
+          (try? await normal.authenticate()) != nil,
+          let state = normal.observeAMFIState(volumeGroupUUID: group)
+        {
+            PommeCore.log(
+                "Read the AMFI configuration through the persistent normal agent.",
+                vmName: reference.displayName)
+            return state
+        }
+        return try await recovery.observe(operation)
+    }
     let provenBoot = PommeSecurityProvenBootRecord()
     let initialAMFIObservation: PommeSecurityAMFIPreflightObservation?
     if operation.isSIP {
@@ -126,7 +143,7 @@ extension PommeSecurityWorkflow {
         }
         initialAMFIObservation = try await PommeSecurityAMFIPreflight.inspectRetained(
           journal: progress.journal,
-          observeAMFI: { try await recovery.observe(operation) },
+          observeAMFI: { try await observeAMFI() },
           requireSIPDisabled: {
             guard try await observeNormalSIPDisabled() else {
               throw PommeSecurityWorkflowError.amfiRequiresSIPDisabled
@@ -183,7 +200,7 @@ extension PommeSecurityWorkflow {
           // separately guarded retained-checkpoint entry point may use it.
           throw PommeSecurityWorkflowError.incompleteTransaction
         case nil:
-          guard operation.isSIP else { return try await recovery.observe(operation) }
+          guard operation.isSIP else { return try await observeAMFI() }
           return .init(
             disabled: try await observeNormalSIPDisabled(),
             baselinePresent: false, reconciliationRequired: false, baselinePhase: nil)

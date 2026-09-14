@@ -202,3 +202,99 @@ struct PommeGuestOwnerCredentialTests {
             PommeGuestOwnerCredentialReader.operation))
     }
 }
+
+@Suite("Normal-boot AMFI status contract")
+struct PommeNormalAMFIStatusTests {
+    private let digest = String(repeating: "a", count: 64)
+
+    private func describe(
+        version: Int64? = Int64(PommeGuestRecoverySecurityOperations.normalAMFIStatusVersion),
+        capabilities: [Any] = [
+            PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation, "process.start",
+        ],
+        role: String = "persistent",
+        executable: String? = nil
+    ) -> [String: Any] {
+        var value: [String: Any] = [
+            "role": role,
+            "protocol": PommeAgentProtocol.name,
+            "version": Int64(PommeAgentProtocol.version),
+            "executableSHA256": executable ?? digest,
+            "capabilities": capabilities,
+        ]
+        if let version { value["normalAMFIStatusVersion"] = version }
+        return value
+    }
+
+    @Test("The status receipt requires the advertised version, capability, role, and digest")
+    func receiptIsClosed() {
+        #expect(PommeSecurityNormalAgent.supportsNormalAMFIStatus(
+            describe(), expectedExecutableDigest: digest))
+
+        // An agent pinned before this contract existed.
+        #expect(!PommeSecurityNormalAgent.supportsNormalAMFIStatus(
+            describe(version: nil), expectedExecutableDigest: digest))
+        #expect(!PommeSecurityNormalAgent.supportsNormalAMFIStatus(
+            describe(capabilities: ["process.start"]), expectedExecutableDigest: digest))
+        #expect(!PommeSecurityNormalAgent.supportsNormalAMFIStatus(
+            describe(role: "recovery"), expectedExecutableDigest: digest))
+        #expect(!PommeSecurityNormalAgent.supportsNormalAMFIStatus(
+            describe(executable: String(repeating: "b", count: 64)),
+            expectedExecutableDigest: digest))
+    }
+
+    @Test("A coerced or mismatched version is not accepted")
+    func rejectsCoercedVersion() {
+        var coerced = describe()
+        coerced["normalAMFIStatusVersion"] = "1"
+        #expect(!PommeSecurityNormalAgent.supportsNormalAMFIStatus(
+            coerced, expectedExecutableDigest: digest))
+
+        #expect(!PommeSecurityNormalAgent.supportsNormalAMFIStatus(
+            describe(version: 99), expectedExecutableDigest: digest))
+    }
+
+    /// The status operation must stay out of the staging vocabulary, or an
+    /// agent pinned before it would fail the superset check that gates AMFI
+    /// disable and enable and would stop working entirely.
+    @Test("Status is advertised separately from the four staging operations")
+    func statusIsNotAStagingOperation() {
+        let status = PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation
+        #expect(status == "amfi.normal.status")
+        #expect(!PommeAgent.normalAMFIOperations.contains(status))
+        #expect(!PommeSecurityNormalAgent.normalAMFIOperations.contains(status))
+        #expect(PommeAgent.persistentCapabilities.contains(status))
+        #expect(!PommeAgent.recoveryCapabilities.contains(status))
+        #expect(PommeSecurityNormalAgent.normalAMFIOperations.count == 4)
+    }
+}
+
+@Suite("Helper forwarding boundary")
+struct PommeAgentPerformAllowlistTests {
+    private func parses(_ operation: String) -> Bool {
+        (try? PommeAgentPerformRequest.parse(from: [
+            "operation": .string(operation), "payload": .object([:]),
+        ])) != nil
+    }
+
+    /// The helper's allowlist is closed, so an operation the guest agent
+    /// supports is still unreachable until it is named here. Both of these
+    /// were added with their guest operations and must not drift apart.
+    @Test("The new guest operations are reachable through the helper")
+    func newOperationsAreForwarded() {
+        #expect(parses(PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation))
+        #expect(parses(PommeGuestOwnerCredentialReader.operation))
+        for staging in PommeSecurityNormalAgent.normalAMFIOperations { #expect(parses(staging)) }
+        #expect(parses("agent.describe"))
+    }
+
+    @Test("The allowlist still refuses operations it does not name")
+    func unrelatedOperationsAreRefused() {
+        for refused in [
+            "owner.credential.write", "owner.", "amfi.normal", "amfi.disable",
+            "sip.disable", "agent.install", "terminal.create", "shell",
+        ] {
+            #expect(!parses(refused), "\(refused) must not be forwarded")
+        }
+    }
+}
