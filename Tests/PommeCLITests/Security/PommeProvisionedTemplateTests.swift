@@ -11,7 +11,8 @@ struct PommeProvisionedTemplateTests {
             restoreImageDigest: String(repeating: "a", count: 64),
             restoreImagePath: "/images/UniversalMac.ipsw",
             diskSizeBytes: 40 * 1024 * 1024 * 1024,
-            provisionedOwnerAccount: owner
+            provisionedOwnerAccount: owner,
+            provisionedSecurityDisabled: owner == nil ? nil : true
         )
     }
 
@@ -21,10 +22,12 @@ struct PommeProvisionedTemplateTests {
         try provisioned.validate()
         #expect(provisioned.isProvisioned)
         #expect(provisioned.provisionedOwnerAccount == "pomme")
+        #expect(provisioned.isSecurityDisabled)
 
         let installedOnly = manifest(owner: nil)
         try installedOnly.validate()
         #expect(!installedOnly.isProvisioned)
+        #expect(!installedOnly.isSecurityDisabled)
     }
 
     @Test("An owner account that is not a safe local account name is rejected")
@@ -58,6 +61,8 @@ struct PommeProvisionedTemplateTests {
         try decoded.validate()
         #expect(decoded.provisionedOwnerAccount == nil)
         #expect(!decoded.isProvisioned)
+        // A legacy template never claims the disabled-security posture.
+        #expect(!decoded.isSecurityDisabled)
     }
 
     @Test("A provisioned manifest round-trips through the store encoding")
@@ -70,6 +75,7 @@ struct PommeProvisionedTemplateTests {
             PommeTemplateManifest.self, from: try encoder.encode(manifest(owner: "pomme")))
         #expect(decoded.provisionedOwnerAccount == "pomme")
         #expect(decoded.isProvisioned)
+        #expect(decoded.isSecurityDisabled)
     }
 
     @Test("The provisioning VM name is derived from the template and is a valid VM name")

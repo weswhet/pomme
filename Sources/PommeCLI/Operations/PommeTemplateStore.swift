@@ -24,6 +24,11 @@ struct PommeTemplateManifest: Codable, Equatable, Sendable {
     /// password is deliberately absent: a clone recovers it from its own
     /// automatic-login configuration. Absent on installed-only templates.
     let provisionedOwnerAccount: String?
+    /// True when the capture was taken with System Integrity Protection
+    /// disabled and the AMFI override active, so a clone can run an
+    /// owner-authenticated workflow without any security mutation. Every VM
+    /// cloned from such a template inherits that posture.
+    let provisionedSecurityDisabled: Bool?
 
     init(
         name: String,
@@ -33,7 +38,8 @@ struct PommeTemplateManifest: Codable, Equatable, Sendable {
         restoreImagePath: String,
         diskSizeBytes: UInt64,
         createdAt: Date = Date(),
-        provisionedOwnerAccount: String? = nil
+        provisionedOwnerAccount: String? = nil,
+        provisionedSecurityDisabled: Bool? = nil
     ) {
         schema = Self.schemaVersion
         self.name = name
@@ -44,9 +50,13 @@ struct PommeTemplateManifest: Codable, Equatable, Sendable {
         self.diskSizeBytes = diskSizeBytes
         self.createdAt = createdAt
         self.provisionedOwnerAccount = provisionedOwnerAccount
+        self.provisionedSecurityDisabled = provisionedSecurityDisabled
     }
 
     var isProvisioned: Bool { provisionedOwnerAccount != nil }
+    /// True only for a capture taken with SIP disabled and the AMFI override
+    /// active. Absent in manifests written before that was recorded.
+    var isSecurityDisabled: Bool { provisionedSecurityDisabled == true }
 
     func validate() throws {
         guard schema == Self.schemaVersion,

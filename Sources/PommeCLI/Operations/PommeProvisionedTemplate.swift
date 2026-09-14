@@ -18,10 +18,16 @@ enum PommeProvisionedTemplate {
     /// created, provisioned, captured, and destroyed inside one command.
     static let provisioningSuffix = "-provisioning"
 
-    /// The security posture the capture is taken at. The owner is created by
-    /// disabling SIP, which is then restored so that every clone starts from
-    /// the same posture a freshly installed macOS has. MDM enrollment disables
-    /// and restores SIP and AMFI itself, so it does not need them pre-changed.
+    /// The capture is taken with System Integrity Protection disabled and the
+    /// AMFI override active, which is the state an owner-authenticated
+    /// workflow would otherwise have to reach for itself. MDM enrollment
+    /// compares the VM against that baseline, finds both already in the state
+    /// it needs, and skips the SIP and AMFI child workflows entirely, so a
+    /// clone enrolls without a single security mutation.
+    ///
+    /// Every VM cloned from such a template therefore starts with SIP off. It
+    /// is the point of the template, but it is a real posture change and is
+    /// recorded in the manifest so `template list` shows it.
     static func create(
         name: String,
         restoreArgs: [String],
@@ -50,14 +56,15 @@ enum PommeProvisionedTemplate {
 
         do {
             // Owner preparation only runs as part of a security mutation, so
-            // the owner is created by disabling SIP and the posture is then
-            // restored. Both end stopped, which is also what the capture needs.
-            log("Preparing the owner account on \(vmName).")
+            // disabling SIP both creates the owner and leaves the posture an
+            // enrollment needs. AMFI then follows, which requires SIP already
+            // disabled. Both end stopped, which is what the capture needs.
+            log("Preparing the owner account and disabling System Integrity Protection on \(vmName).")
             _ = try await PommeApplication.sipWorkflow(
                 name: vmName, action: .disable, finalState: .stopped, force: true)
-            log("Restoring System Integrity Protection before capture.")
-            _ = try await PommeApplication.sipWorkflow(
-                name: vmName, action: .enable, finalState: .stopped)
+            log("Configuring the AMFI override on \(vmName).")
+            _ = try await PommeApplication.amfiWorkflow(
+                name: vmName, action: .disable, finalState: .stopped)
 
             let manifest = try capture(
                 from: vmReference, into: bundle, templateName: validName, log: log)
@@ -118,7 +125,8 @@ enum PommeProvisionedTemplate {
             restoreImageDigest: plan.restore.restoreImageDigest,
             restoreImagePath: input.restoreImagePath,
             diskSizeBytes: diskSize,
-            provisionedOwnerAccount: PommeSecurityOwnerIdentity.pomme.username
+            provisionedOwnerAccount: PommeSecurityOwnerIdentity.pomme.username,
+            provisionedSecurityDisabled: true
         )
         try PommeTemplateStore.write(manifest, to: bundle)
         return manifest
@@ -136,6 +144,7 @@ enum PommeProvisionedTemplate {
             "build": manifest.build,
             "diskSize": manifest.diskSizeBytes,
             "provisioned": true,
+            "securityDisabled": manifest.isSecurityDisabled,
             "ownerAccount": manifest.provisionedOwnerAccount as Any,
             "bundlePath": bundle.rootURL.path,
         ]
