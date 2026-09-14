@@ -28,6 +28,12 @@ actor PommeAgent {
     /// credential-bearing process so older pinned daemons cannot run it.
     static let privatePTYInputVersion = 1
 
+    /// Version of the owner-credential recovery contract. A host preflights
+    /// this additive describe field before asking the root agent to recover
+    /// the automatic-login owner password, so an older pinned agent fails
+    /// explicitly instead of looking like a guest with no owner.
+    static let ownerCredentialVersion = PommeGuestOwnerCredentialReader.version
+
     /// Version of the public PTY echo contract. Hosts must preflight this
     /// additive describe receipt before requesting normal terminal echo.
     static let publicPTYEchoVersion = 1
@@ -46,7 +52,7 @@ actor PommeAgent {
         "sip.status", "sip.disable", "sip.enable",
         "amfi.status", "amfi.disable", "amfi.enable"
     ]
-    static let persistentCapabilities = ["agent.describe", "agent.health", "process.start", "process.status", "process.signal", "process.list", "process.output", "process.wait", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize"] + terminalCapabilities + normalAMFIOperations
+    static let persistentCapabilities = ["agent.describe", "agent.health", "process.start", "process.status", "process.signal", "process.list", "process.output", "process.wait", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize", PommeGuestOwnerCredentialReader.operation] + terminalCapabilities + normalAMFIOperations
     /// Detached-job logs retain their trailing bytes so an already streamed
     /// status response never makes `process.output` destructive. The agent
     /// keeps this bounded per channel and tells callers when earlier bytes
@@ -110,6 +116,7 @@ actor PommeAgent {
     private let writeChunk: @Sendable (Int32, Data, Int) -> Int
     private let recoveryInstaller: PommeAgentRecoveryInstaller?
     private let recoverySecurity: PommeGuestRecoverySecurityOperations
+    private let ownerCredential: PommeGuestOwnerCredentialReader
     private let terminalService: PommeTerminalService
 
     init(role: PommeAgentRole, executableSHA256: String, journalPath: String = PommeAgentInstall.journal,
@@ -118,6 +125,7 @@ actor PommeAgent {
          writeChunk: @escaping @Sendable (Int32, Data, Int) -> Int = PommeAgent.writeChunk,
          recoveryInstaller: PommeAgentRecoveryInstaller? = nil,
          recoverySecurity: PommeGuestRecoverySecurityOperations = .init(),
+         ownerCredential: PommeGuestOwnerCredentialReader = .init(),
          recoveredJournal: PommeAgentUpdateJournal? = nil,
          authority: PommeAgentAuthority = .standard) throws {
         guard executableSHA256.count == 64, executableSHA256.allSatisfy(\.isHexDigit) else {
@@ -126,6 +134,7 @@ actor PommeAgent {
         self.role = role; self.authority = authority; self.executableSHA256 = executableSHA256.lowercased(); self.journalPath = journalPath; self.executablePath = executablePath; self.remoteLoginTransaction = remoteLoginTransaction; self.writeChunk = writeChunk
         self.recoveryInstaller = role == .recovery ? (recoveryInstaller ?? PommeAgentRecoveryInstaller()) : nil
         self.recoverySecurity = recoverySecurity
+        self.ownerCredential = ownerCredential
         let terminalSpoolRoot = URL(fileURLWithPath: journalPath)
             .deletingLastPathComponent()
             .appendingPathComponent("terminal-spool", isDirectory: true)
@@ -212,6 +221,9 @@ actor PommeAgent {
             if request.payload.objectValue?["includeNormalAMFICapabilities"] == .bool(true) {
                 description["normalAMFIWorkflowVersion"] = .integer(Int64(Self.normalAMFIWorkflowVersion))
             }
+            if request.payload.objectValue?["includeOwnerCredentialCapabilities"] == .bool(true) {
+                description["ownerCredentialVersion"] = .integer(Int64(Self.ownerCredentialVersion))
+            }
             return .object(description)
         case "agent.health": return .object(["ok": .bool(true), "activationPending": .bool(activationPending)])
         case let operation where Self.normalAMFIOperations.contains(operation):
@@ -223,6 +235,12 @@ actor PommeAgent {
         case "system.info": return .object(["name": .string("macOS"), "hostName": .string(ProcessInfo.processInfo.hostName)])
         case "network.interfaces": return .array([])
         case "remoteLogin.set": return try remoteLogin(request.payload)
+        // The response carries the owner password, so it is produced only for
+        // the root persistent agent on this authenticated session and is
+        // never written to a log, journal, or process argument.
+        case PommeGuestOwnerCredentialReader.operation:
+            guard role == .persistent else { throw PommeAgentOperationError.invalid }
+            return try ownerCredential.read(payload: request.payload)
         case "process.start": return try start(request.payload)
         case "process.status": return try status(request.payload)
         case "process.signal": return try signal(request.payload)

@@ -2430,7 +2430,7 @@ struct PommeCore {
         try writePrivate(try encoder.encode(preparation.input), to: provisioningInputURL(bundle: bundle))
     }
 
-    private static func loadProvisioningInput(for plan: PommeProvisioningPlan) throws -> PommeProvisioningInput {
+    static func loadProvisioningInput(for plan: PommeProvisioningPlan) throws -> PommeProvisioningInput {
         let bundle = BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
         let data = try Data(contentsOf: provisioningInputURL(bundle: bundle), options: .mappedIfSafe)
         let input = try JSONDecoder().decode(PommeProvisioningInput.self, from: data)
@@ -2568,7 +2568,16 @@ struct PommeCore {
             "executableDigest": plan.normalAgent.executableDigest
         ]
         if let templateBundlePath = input.templateBundlePath {
+            let template = BundleLayout(rootURL: URL(fileURLWithPath: templateBundlePath))
             metadata["template"] = URL(fileURLWithPath: templateBundlePath).deletingPathExtension().lastPathComponent
+            // A provisioned template's clone already carries the owner
+            // account, so record which one it is. The password is not
+            // recorded: the host Keychain item belongs to the VM the template
+            // was captured from, and a clone recovers its own from the guest's
+            // automatic-login configuration instead.
+            if let owner = (try? PommeTemplateStore.manifest(in: template))?.provisionedOwnerAccount {
+                metadata[Constants.guestKCPasswordUserMetadataKey] = owner
+            }
         }
         try writeMetadataPayload(metadata, bundle: bundle)
     }

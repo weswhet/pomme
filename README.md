@@ -77,6 +77,28 @@ bootstrap and verification, so a VM is ready in roughly two and a half
 minutes instead of seven. Every VM cloned from a template inherits its disk
 size.
 
+Creating the owner account an authenticated workflow needs is the other slow
+step, and it can be captured into the template too:
+
+```sh
+pomme template create mdm-ready --latest --disk-size 40GB --provisioned
+pomme create lab --from-template mdm-ready
+pomme mdm lab --profile enroll.mobileconfig
+```
+
+`--provisioned` builds a disposable VM, prepares the `pomme` owner with
+persistent automatic login, restores System Integrity Protection, and captures
+that state. A VM cloned from it can run MDM enrollment as its first command
+instead of creating an owner first. `pomme template list` shows which
+templates carry an owner.
+
+The owner's password is never printed and is not stored in the template. Each
+clone gets its own VM UUID, so the host Keychain item from the VM the template
+was captured from cannot follow it; instead the root agent recovers the
+password from that guest's own `/etc/kcpassword` and the host adopts it for the
+clone after proving the account's administrator membership, Secure Token, and
+APFS ownership. Nothing has to know the password, including you.
+
 Creation ends with the VM booted normally and its agent verified — the same
 boot that proved the agent — unless `--shutdown` or `--recovery` (or
 `--boot none|recovery`, or `boot:` in a config) asks for another state.
