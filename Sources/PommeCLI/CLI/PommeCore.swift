@@ -662,7 +662,12 @@ struct PommeCore {
         try await PommeSecurityRunStateRestoration.restore(
             desired: desired,
             observe: { try stableVMRunState(reference: reference) },
-            stop: { try await stopForLiveRecovery(reference: reference) },
+            // A mode change stops only to boot the other mode next; a Recovery
+            // target must not be preceded by an agent-driven shutdown.
+            stop: {
+                try await stopForLiveRecovery(
+                    reference: reference, allowAgentShutdown: desired == .stopped)
+            },
             start: { _ in
                 try await requestLiveRecoveryFinalState(
                     finalState,
@@ -3187,7 +3192,9 @@ struct PommeCore {
             payload = try vmStatusPayload(reference: reference)
         }
         let state = try liveRecoveryRunState(from: payload)
-        try await stopForLiveRecovery(reference: reference)
+        // This stop exists only to free the VM for the Recovery boot that
+        // immediately follows it, so it keeps the framework stop.
+        try await stopForLiveRecovery(reference: reference, allowAgentShutdown: false)
         guard try liveRecoveryRunState(
             from: vmStatusPayload(reference: reference)
         ) == .stopped else {
@@ -3196,7 +3203,17 @@ struct PommeCore {
         return state
     }
 
-    private static func stopForLiveRecovery(reference: VMReference) async throws {
+    /// `allowAgentShutdown` must be false whenever this stop precedes a
+    /// Recovery boot. An agent-driven `shutdown -h now` is far faster than VZ's
+    /// power-button request, but a Recovery boot that follows one was observed
+    /// to reach Recovery Utilities without presenting the language chooser the
+    /// reviewed navigation route expects, which desynchronizes navigation. The
+    /// fast path is therefore limited to stops whose target is a stopped VM;
+    /// every Recovery transition keeps the framework stop.
+    private static func stopForLiveRecovery(
+        reference: VMReference,
+        allowAgentShutdown: Bool
+    ) async throws {
         try await stopRetainedRuntime(for: reference.standardizedPath)
         // A normal-booted guest with a connected agent can shut itself down in
         // a few seconds. VZ's requestStop behaves like a power button, which a
@@ -3206,7 +3223,8 @@ struct PommeCore {
         // the same agent-driven shutdown provisioning uses. recoveryOS has no
         // such agent, and an agentless or non-normal guest simply falls through
         // to the ordinary graceful stop below.
-        if let payload = try? vmStatusPayload(reference: reference),
+        if allowAgentShutdown,
+           let payload = try? vmStatusPayload(reference: reference),
            (try? liveRecoveryRunState(from: payload)) == .running(.normal),
            normalGuestAgentConnected(payload) {
             requestGuestShutdownThroughHelper(reference: reference)
@@ -3297,7 +3315,8 @@ struct PommeCore {
     ) async throws {
         switch state {
         case .stopped:
-            try await stopForLiveRecovery(reference: reference)
+            // A requested stopped final state boots nothing afterwards.
+            try await stopForLiveRecovery(reference: reference, allowAgentShutdown: true)
         case .normal:
             _ = try startRuntimeInBackground(
                 reference: reference,
