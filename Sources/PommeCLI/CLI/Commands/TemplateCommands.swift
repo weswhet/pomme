@@ -38,6 +38,9 @@ struct TemplateCreateCommand: AsyncParsableCommand {
     @Option(name: .customLong("memory"), help: "Guest memory used only while restoring the image.")
     var memory = "4GB"
 
+    @Flag(name: .customLong("provisioned"), help: "Also prepare the owner account, so a VM cloned from this template can run MDM enrollment as its first command. Takes several extra minutes once, and saves them on every VM.")
+    var provisioned = false
+
     @OptionGroup var output: GlobalOptions
 
     mutating func validate() throws {
@@ -65,6 +68,21 @@ struct TemplateCreateCommand: AsyncParsableCommand {
     }
 
     mutating func run() async throws {
+        if provisioned {
+            var restoreArgs: [String] = []
+            if let version { restoreArgs += ["--version", version] }
+            if let restoreImage { restoreArgs += ["--restore-image", restoreImage] }
+            if let ipswDevice { restoreArgs += ["--ipsw-device", ipswDevice] }
+            let payload = try await PommeProvisionedTemplate.create(
+                name: name, restoreArgs: restoreArgs, diskSize: diskSize, memory: memory
+            )
+            let owner = PommeCore.stringValue(payload["ownerAccount"])
+            let text = "OK created provisioned template \(name) macOS "
+                + "\(PommeCore.stringValue(payload["version"])) "
+                + "(\(PommeCore.stringValue(payload["build"]))) owner=\(owner)"
+            try CLIOutputWriter.write(payload: payload, text: text, options: output)
+            return
+        }
         var options = CLIOptions()
         options.restoreImageVersionSelection = version
         options.restoreImagePath = restoreImage
@@ -97,14 +115,16 @@ struct TemplateListCommand: ParsableCommand {
                     "build": manifest.build,
                     "diskSize": manifest.diskSizeBytes,
                     "restoreImageDigest": manifest.restoreImageDigest,
+                    "provisioned": manifest.isProvisioned,
+                    "ownerAccount": manifest.provisionedOwnerAccount as Any,
                     "createdAt": ISO8601DateFormatter().string(from: manifest.createdAt)
                 ]
             }
         ]
         let lines = templates.map {
-            "\($0.name)\t\($0.version)\t\($0.build)\t\($0.diskSizeBytes / (1 << 30))GB"
+            "\($0.name)\t\($0.version)\t\($0.build)\t\($0.diskSizeBytes / (1 << 30))GB\t\($0.provisionedOwnerAccount ?? "-")"
         }
-        let text = (["NAME\tVERSION\tBUILD\tDISK"] + lines).joined(separator: "\n")
+        let text = (["NAME\tVERSION\tBUILD\tDISK\tOWNER"] + lines).joined(separator: "\n")
         try CLIOutputWriter.write(payload: payload, text: text, options: output)
     }
 }

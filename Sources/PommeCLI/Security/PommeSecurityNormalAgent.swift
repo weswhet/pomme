@@ -1049,6 +1049,99 @@ struct PommeSecurityNormalAgent: Sendable {
     return disabled
   }
 
+  /// Recovers the owner account's automatic-login password from the guest,
+  /// for a VM whose host Keychain item is absent because it was cloned from a
+  /// provisioned template. The credential is returned only over the
+  /// authenticated agent session; it is never logged, journaled, or placed in
+  /// a process argument, and the caller must still prove the account through
+  /// the ordinary owner verification before trusting it.
+  ///
+  /// `account` binds the request when the host already knows which account to
+  /// expect; passing nil asks the guest which account it logs in
+  /// automatically, which is what a freshly cloned VM needs.
+  func recoverOwnerCredential(
+    account: String? = nil,
+    timeout: TimeInterval = Constants.defaultGuestCommandTimeout
+  ) throws -> PommeGuestSecurityCredentials {
+    guard PommeProvisioningDigest.isSHA256(expectedExecutableDigest),
+      expectedExecutableDigest == expectedExecutableDigest.lowercased(),
+      try PommeCore.stableVMRunState(reference: reference) == .running(.normal)
+    else { throw PommeSecurityWorkflowError.agentUnverified }
+
+    var payload: [String: Any] = [:]
+    if let account {
+      guard PommeGuestOwnerCredentialReader.isSafeAccount(account) else {
+        throw PommeSecurityWorkflowError.ownerUnavailable
+      }
+      payload["account"] = account
+    }
+    let response: [String: Any]
+    do {
+      response = try PommeCore.sendControlObject([
+        "command": "agent.perform",
+        "operation": PommeGuestOwnerCredentialReader.operation,
+        "payload": payload,
+      ], bundle: reference.bundle, timeout: timeout)
+    } catch {
+      throw PommeSecurityWorkflowError.ownerUnavailable
+    }
+    guard response["ok"] as? Bool == true,
+      let rawResult = response["result"],
+      let result = try? JSONValue(any: rawResult),
+      let object = result.objectValue,
+      object["verified"] == .bool(true),
+      object["operation"] == .string(PommeGuestOwnerCredentialReader.operation),
+      let recovered = object["account"]?.stringValue,
+      let password = object["password"]?.stringValue,
+      PommeGuestOwnerCredentialReader.isSafeAccount(recovered),
+      account == nil || account == recovered
+    else { throw PommeSecurityWorkflowError.ownerUnavailable }
+    do {
+      return try .init(username: recovered, password: password)
+    } catch {
+      throw PommeSecurityWorkflowError.ownerUnavailable
+    }
+  }
+
+  /// Checks the opt-in owner-credential receipt without accepting host-side
+  /// numeric coercions, so an older pinned agent is rejected before the host
+  /// mistakes a missing capability for a guest with no owner.
+  static func supportsOwnerCredentialRecovery(
+    _ description: [String: Any], expectedExecutableDigest: String
+  ) -> Bool {
+    guard description["role"] as? String == "persistent",
+      description["protocol"] as? String == PommeAgentProtocol.name,
+      integerValue(description["version"]) == Int64(PommeAgentProtocol.version),
+      description["executableSHA256"] as? String == expectedExecutableDigest,
+      integerValue(description["ownerCredentialVersion"])
+        == Int64(PommeGuestOwnerCredentialReader.version),
+      let rawCapabilities = description["capabilities"] as? [Any]
+    else { return false }
+    return Set(rawCapabilities.compactMap { $0 as? String })
+      .contains(PommeGuestOwnerCredentialReader.operation)
+  }
+
+  /// True when this VM's pinned agent advertises the recovery contract. A
+  /// pinned agent that predates it is not replaced; the caller falls back to
+  /// its ordinary credential resolution.
+  func supportsOwnerCredentialRecovery(
+    timeout: TimeInterval = Constants.defaultGuestCommandTimeout
+  ) -> Bool {
+    guard let response = try? PommeCore.sendControlObject([
+      "command": "agent.perform",
+      "operation": "agent.describe",
+      "payload": ["includeOwnerCredentialCapabilities": true],
+    ], bundle: reference.bundle, timeout: timeout),
+      response["ok"] as? Bool == true,
+      let rawResult = response["result"],
+      let result = try? JSONValue(any: rawResult),
+      let description = result.objectValue
+    else { return false }
+    return Self.supportsOwnerCredentialRecovery(
+      description.mapValues(\.publicValue),
+      expectedExecutableDigest: expectedExecutableDigest)
+  }
+
   /// Accepts only the two exact native `csrutil status` reports. A custom
   /// configuration report or any other text is not a verified state.
   static func parseSIPDisabled(_ output: String) -> Bool? {

@@ -18,6 +18,12 @@ struct PommeTemplateManifest: Codable, Equatable, Sendable {
     let restoreImagePath: String
     let diskSizeBytes: UInt64
     let createdAt: Date
+    /// Present when the template was captured with an owner account already
+    /// prepared, so VMs cloned from it can reach an owner-authenticated
+    /// workflow such as MDM enrollment without creating one first. The
+    /// password is deliberately absent: a clone recovers it from its own
+    /// automatic-login configuration. Absent on installed-only templates.
+    let provisionedOwnerAccount: String?
 
     init(
         name: String,
@@ -26,7 +32,8 @@ struct PommeTemplateManifest: Codable, Equatable, Sendable {
         restoreImageDigest: String,
         restoreImagePath: String,
         diskSizeBytes: UInt64,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        provisionedOwnerAccount: String? = nil
     ) {
         schema = Self.schemaVersion
         self.name = name
@@ -36,13 +43,18 @@ struct PommeTemplateManifest: Codable, Equatable, Sendable {
         self.restoreImagePath = restoreImagePath
         self.diskSizeBytes = diskSizeBytes
         self.createdAt = createdAt
+        self.provisionedOwnerAccount = provisionedOwnerAccount
     }
+
+    var isProvisioned: Bool { provisionedOwnerAccount != nil }
 
     func validate() throws {
         guard schema == Self.schemaVersion,
               !name.isEmpty, !version.isEmpty, !build.isEmpty,
               PommeProvisioningDigest.isSHA256(restoreImageDigest),
-              diskSizeBytes > 0
+              diskSizeBytes > 0,
+              provisionedOwnerAccount.map(
+                PommeGuestOwnerCredentialReader.isSafeAccount) ?? true
         else { throw PommeTemplateError.invalidManifest }
     }
 }

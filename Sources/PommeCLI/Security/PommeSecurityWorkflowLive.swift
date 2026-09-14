@@ -354,6 +354,7 @@ private struct PommeSecurityLiveOwnerPreparation: Sendable {
 
     let authorization: PommeGuestSecurityCredentials
     var offerSave = false
+    var adoptRecovered = false
     if let environment = try PommeSecurityOwnerInteraction.environmentOwner(
       ProcessInfo.processInfo.environment)
     {
@@ -366,6 +367,11 @@ private struct PommeSecurityLiveOwnerPreparation: Sendable {
         identity: progress.journal.identity, account: username)
     {
       authorization = try .init(username: username, password: password)
+    } else if let recovered = recoverOwnerCredentialFromGuest(
+      expecting: initial.owner?.accountUsername ?? legacyAccount)
+    {
+      authorization = recovered
+      adoptRecovered = true
     } else {
       authorization = try interaction.existingOwner(vmName: reference.displayName)
       offerSave = true
@@ -382,7 +388,11 @@ private struct PommeSecurityLiveOwnerPreparation: Sendable {
       username: authorization.username, progress: progress, priorProvisioningAbsent: false)
     let verified = try await existing.verifyOwner(password: authorization.password)
     try recordVerification(verified, progress: progress)
-    if offerSave, interaction.shouldSaveOwner(vmName: reference.displayName) {
+    // A recovered credential is Pomme's own generated secret, already proven
+    // by the verification above, so it is adopted for this VM's identity
+    // without a prompt. A credential typed by the user is still only stored
+    // when they say so.
+    if adoptRecovered || (offerSave && interaction.shouldSaveOwner(vmName: reference.displayName)) {
       // Reference intent is durable before the Keychain write. A failed
       // save does not change the existing user's password or login.
       let pointer = try PommeOwnerCredentialReference(
@@ -506,6 +516,29 @@ private struct PommeSecurityLiveOwnerPreparation: Sendable {
       try await normal.verifyConsoleLogin(username: verified.username, uniqueID: verified.uniqueID)
     }
     return try .init(username: credential.reference.account, password: credential.password)
+  }
+
+  /// A VM cloned from a provisioned template carries the owner account but no
+  /// host Keychain item, because that item is scoped to the UUID of the VM the
+  /// template was captured from. Ask the root agent for the automatic-login
+  /// credential Pomme itself configured instead of prompting for a password
+  /// nobody was ever told. The result is only a candidate: the ordinary owner
+  /// verification below still has to prove the account, its administrator
+  /// membership, Secure Token, and APFS ownership before it is recorded.
+  ///
+  /// An older pinned agent that does not advertise the contract, or a guest
+  /// with no automatic-login artifact, simply yields nil and the caller falls
+  /// back to its existing resolution.
+  private func recoverOwnerCredentialFromGuest(
+    expecting account: String?
+  ) -> PommeGuestSecurityCredentials? {
+    guard normal.supportsOwnerCredentialRecovery(),
+      let recovered = try? normal.recoverOwnerCredential(account: account)
+    else { return nil }
+    PommeCore.log(
+      "Recovered owner \(recovered.username)'s credential from the guest's automatic-login configuration.",
+      vmName: reference.displayName)
+    return recovered
   }
 
   private func recordVerification(
