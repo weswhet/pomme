@@ -190,3 +190,35 @@ consumed credential, a finalized lifecycle, every cleanup flag true, and
 `finalStateVerified: true` with the VM back at stopped. No security policy was
 changed. The timing log is in the session scratchpad and was not added to the
 repository.
+
+## 6. Implementation results (3.2, 3.3, 3.4, 3.5, 3.6)
+
+All five host-side recommendations and the pinned-agent one are implemented.
+
+`amfi.normal.status` (3.5) is advertised separately from the four staging
+operations, so an agent pinned before it keeps working for AMFI disable and
+enable and only the status read observes through Recovery. The host preflights
+the additive describe receipt and, when it declines, logs a closed reason
+rather than silently spending a Recovery session.
+
+Adding a guest operation is not enough on its own: the helper's
+`agent.perform` forwarding allowlist is closed, so both new operations had to
+be named in it. Until they were, the host saw a transport failure and observed
+through Recovery, which is the safe outcome but hid the cause. That is what
+the decline diagnostic now reports.
+
+Measured live on a VM cloned from a provisioned template, enrolling with a
+deliberately nonexistent MDM server so only the security path is under test:
+
+| | Before 3.5 | After 3.5 |
+| --- | ---: | ---: |
+| AMFI baseline read | 170 s (Recovery session) | 5.5 s (normal agent) |
+| Recovery sessions in an enrollment | 1 | 0 |
+| Security child workflows | 0 | 0 |
+| Reached the enrollment helper at | 251 s | 54 s |
+| Complete command | 317 s | 121 s |
+
+Both runs reported the same baseline, `sipDisabled=true, amfiDisabled=true,
+baselinePresent=true, phase=disabledVerified, reconciliationRequired=false`,
+verified the enrollment helper's signature and entitlements, failed only at the
+unreachable server, and restored security and run state.

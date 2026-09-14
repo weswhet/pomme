@@ -496,7 +496,14 @@ struct PommeAgentPerformRequest: Sendable {
         let exact: Set<String> = [
             "agent.describe", "agent.health", "system.info", "network.interfaces",
             "amfi.normal.disable", "amfi.normal.enable",
-            "amfi.normal.verifyDisabled", "amfi.normal.verifyEnabled"
+            "amfi.normal.verifyDisabled", "amfi.normal.verifyEnabled",
+            // Read-only AMFI inspection from a normal boot, so a caller does
+            // not spend a Recovery session to learn a state this reports.
+            "amfi.normal.status",
+            // Recovers the automatic-login owner credential Pomme configured,
+            // for a VM cloned from a provisioned template. Root-only and
+            // bounded inside the agent; it is named exactly, never by prefix.
+            "owner.credential.read"
         ]
         let prefixes = ["process.", "file.", "job.", "maintenance.", "remoteLogin.", "mdm.", "ui."]
         return exact.contains(operation) || prefixes.contains(where: operation.hasPrefix)

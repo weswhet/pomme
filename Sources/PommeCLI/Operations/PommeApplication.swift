@@ -1325,12 +1325,25 @@ enum PommeApplication {
             let recovery = PommeSecurityRecoveryAdapter(
                 reference: reference, volumeGroupUUID: group, factory: try currentRecoveryIntegrationFactory()
             )
+            // The baseline read is the only Recovery session an enrollment
+            // needs when SIP and AMFI already match what it requires. A normal
+            // boot can report the same AMFI state, so prefer the agent and
+            // defer to Recovery for agents pinned before that.
+            let normalAgent = PommeSecurityNormalAgent(
+                reference: reference, expectedExecutableDigest: plan.normalAgent.executableDigest)
+            let observeAMFIBaseline: @Sendable () async throws -> PommeSecurityWorkflowState = {
+                if let state = normalAgent.observeAMFIState(volumeGroupUUID: group) {
+                    PommeCore.log("MDM baseline: read the AMFI configuration through the persistent normal agent.")
+                    return state
+                }
+                return try await recovery.observe(.amfiDisable)
+            }
             let dependencies = PommeMDMWorkflowDependencies(
                 ensureNormal: ensureNormal,
                 observe: observe,
                 captureSecurity: {
                     let normal = try await observeMDMNormalSecurity(reference: reference, timeout: timeout)
-                    let amfi = try await recovery.observe(.amfiDisable)
+                    let amfi = try await observeAMFIBaseline()
                     PommeCore.log("MDM baseline: sipDisabled=\(normal.sipDisabled), amfiDisabled=\(amfi.disabled), baselinePresent=\(amfi.baselinePresent), phase=\(amfi.baselinePhase ?? "none"), reconciliationRequired=\(amfi.reconciliationRequired).")
                     try PommeMDMWorkflowSecurityBaseline.validateOriginalAMFI(sipDisabled: normal.sipDisabled,
                         activeBootArguments: normal.arguments, state: amfi)

@@ -1072,6 +1072,35 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
     /// transaction.  Only the exact volume-group UUID is accepted; all
     /// ownership and target state comes from the durable split record written
     /// by the authenticated Recovery stage.
+    /// Reads the AMFI configuration, and any retained transaction, from a
+    /// normal boot. A host would otherwise spend a whole Recovery session just
+    /// to learn a state that is fully observable here: the policy through
+    /// `bputil`, the NVRAM projection, and the retained record on the same
+    /// Data volume Recovery would have mounted.
+    ///
+    /// Unlike the staging operations this requires no retained record. A VM
+    /// that has never had an AMFI transaction simply reports no baseline,
+    /// which is exactly what a first inspection needs to hear.
+    func executeNormalAMFIStatus(role: PommeAgentRole, payload: JSONValue) throws -> JSONValue {
+        guard role == .persistent else {
+            throw PommeGuestRecoverySecurityError.invalidOperation
+        }
+        guard effectiveUserID() == 0 else {
+            throw PommeGuestRecoverySecurityError.rootRequired
+        }
+        do {
+            return try amfiStatusResult(
+                payload: payload,
+                operation: PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation,
+                resolveStore: { try normalSnapshotStore(for: $0) }
+            )
+        } catch let error as PommeGuestRecoverySecurityError {
+            throw error
+        } catch {
+            throw PommeGuestRecoverySecurityError.commandFailed
+        }
+    }
+
     func executeNormalAMFI(
         role: PommeAgentRole,
         operation: String,
@@ -1127,6 +1156,12 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
             }
         }
     }
+
+    /// Advertised separately from the four staging operations so that an
+    /// agent pinned before this existed keeps working for them and only the
+    /// status read falls back to Recovery.
+    static let normalAMFIStatusOperation = "amfi.normal.status"
+    static let normalAMFIStatusVersion = 1
 
     private enum NormalAMFIOperation: String {
         case disable = "amfi.normal.disable"
@@ -1281,6 +1316,23 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
     }
 
     private func amfiStatusResult(payload: JSONValue) throws -> JSONValue {
+        try amfiStatusResult(
+            payload: payload,
+            operation: Operation.amfiStatus.rawValue,
+            resolveStore: { try snapshotStore(for: $0) }
+        )
+    }
+
+    /// Shared body for both status environments. Recovery resolves the guest's
+    /// Data volume through diskutil; a normal boot already has it mounted and
+    /// uses the exact `/System/Volumes/Data` store instead. Everything the
+    /// host reads - the policy, the NVRAM projection, and the retained
+    /// transaction phase - is identical, because it is the same volume.
+    private func amfiStatusResult(
+        payload: JSONValue,
+        operation: String,
+        resolveStore: (UUID) throws -> PommeGuestAMFISnapshotStore
+    ) throws -> JSONValue {
         let request = try amfiStatusRequest(from: payload)
         let state = try captureAMFIState(
             expectedVolumeGroupUUID: request.volumeGroupUUID,
@@ -1288,7 +1340,7 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
         )
         let active = PommeBootArguments.containsOverride(state.snapshot.nvram.value(for: "boot-args"))
         var result: [String: JSONValue] = [
-            "operation": .string(Operation.amfiStatus.rawValue),
+            "operation": .string(operation),
             "amfiBootArgActive": .bool(active),
             "amfiDisabled": .bool(active && state.policy.allowsCustomBootArguments),
             "bootPolicyAllowsCustomBootArgs": .bool(state.policy.allowsCustomBootArguments),
@@ -1296,7 +1348,7 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
             "verified": .bool(true)
         ]
         if request.includeWorkflowState, let volumeGroupUUID = request.volumeGroupUUID {
-            let store = try snapshotStore(for: volumeGroupUUID)
+            let store = try resolveStore(volumeGroupUUID)
             let record = try store.loadRecordIfPresent()
             let tombstone: Bool
             if let record, record.phase == .enabledVerified {

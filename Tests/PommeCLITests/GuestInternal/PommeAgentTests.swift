@@ -61,7 +61,7 @@ struct PommeAgentTests {
         ))
         #expect(normalAMFIDescribe.objectValue.map { Set($0.keys) } == Set([
             "role", "protocol", "version", "executableSHA256", "capabilities", "terminalSessionVersion",
-            "normalAMFIWorkflowVersion"
+            "normalAMFIWorkflowVersion", "normalAMFIStatusVersion"
         ]))
         #expect(normalAMFIDescribe.objectValue?["normalAMFIWorkflowVersion"] == .integer(Int64(PommeAgent.normalAMFIWorkflowVersion)))
         #expect(normalAMFIDescribe.objectValue?["capabilities"]?.arrayValue?.compactMap(\.stringValue).contains("amfi.normal.disable") == true)
