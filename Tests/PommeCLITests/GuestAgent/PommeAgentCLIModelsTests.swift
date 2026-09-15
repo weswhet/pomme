@@ -77,12 +77,46 @@ struct PommeAgentCLIModelsTests {
             try #require(CopyRequest.parse(source: source, destination: destination).destination.payload["path"] as? String)
         }
         let standardized = directory.standardizedFileURL.path
+        let hostFile = directory.appendingPathComponent("h.txt")
+        try Data("h".utf8).write(to: hostFile)
 
-        #expect(try destinationPath("/tmp/h.txt", "guest:/tmp/") == "/tmp/h.txt")
-        #expect(try destinationPath("/tmp/h.txt", "guest:/tmp") == "/tmp")
+        #expect(try destinationPath(hostFile.path, "guest:/tmp/") == "/tmp/h.txt")
+        #expect(try destinationPath(hostFile.path, "guest:/tmp") == "/tmp")
         #expect(try destinationPath("guest:/etc/hosts", directory.path + "/") == standardized + "/hosts")
         #expect(try destinationPath("guest:/etc/hosts", directory.path) == standardized + "/hosts")
         #expect(try destinationPath("guest:/etc/hosts", directory.path + "/new.txt") == standardized + "/new.txt")
+    }
+
+    @Test("Unusable host paths are named before any agent traffic")
+    func hostPathProblemsAreNamed() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pomme-cp-host-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            _ = chmod(directory.appendingPathComponent("unreadable.txt").path, 0o600)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let root = directory.standardizedFileURL.path
+        let file = directory.appendingPathComponent("file.txt")
+        try Data("file".utf8).write(to: file)
+        let link = directory.appendingPathComponent("link.txt")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: file)
+        let unreadable = directory.appendingPathComponent("unreadable.txt")
+        try Data("secret".utf8).write(to: unreadable)
+        #expect(chmod(unreadable.path, 0o000) == 0)
+
+        func message(_ source: String, _ destination: String) -> String? {
+            let error = #expect(throws: RunnerError.self) { try CopyRequest.parse(source: source, destination: destination) }
+            return error?.localizedDescription
+        }
+
+        #expect(message(root + "/missing.txt", "guest:/tmp/x") == "Host file \(root)/missing.txt does not exist.")
+        #expect(message(root, "guest:/tmp/x") == "Host path \(root) is a directory, not a file.")
+        #expect(message(root + "/link.txt", "guest:/tmp/x") == "Host path \(root)/link.txt is a symbolic link; give the file it points to.")
+        if getuid() != 0 {
+            #expect(message(root + "/unreadable.txt", "guest:/tmp/x") == "Host file \(root)/unreadable.txt is not readable.")
+        }
+        #expect(message("guest:/etc/hosts", root + "/nodir/x") == "Host directory \(root)/nodir does not exist.")
     }
 
     @Test("File requests reject unsafe endpoints and enforce the 32 KiB read limit")
@@ -93,7 +127,10 @@ struct PommeAgentCLIModelsTests {
             try CatRequest.parse(path: "guest:/tmp/file", offset: 0, count: PommeAgentCLIModelLimits.maximumFileChunkBytes + 1)
         }
 
-        let copy = try CopyRequest.parse(source: "/tmp/source", destination: "guest:/tmp/destination")
+        let source = FileManager.default.temporaryDirectory.appendingPathComponent("pomme-cp-source-\(UUID().uuidString)")
+        try Data("source".utf8).write(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let copy = try CopyRequest.parse(source: source.path, destination: "guest:/tmp/destination")
         #expect(copy.controlPayload["operation"] as? String == "file.transfer")
         let copyPayload = try #require(copy.controlPayload["payload"] as? [String: Any])
         #expect((copyPayload["source"] as? [String: Any])?["kind"] as? String == "host")

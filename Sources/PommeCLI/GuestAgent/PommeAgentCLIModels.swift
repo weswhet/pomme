@@ -595,7 +595,41 @@ struct CopyRequest: Sendable {
             destination: try .parse(directoryDestinationExpanded(destination, source: parsedSource))
         )
         try request.validate()
+        try request.checkHostPaths()
         return request
+    }
+
+    /// Names a host path the transfer could not use before any agent
+    /// traffic. The transfer's own opens stay the authoritative checks.
+    func checkHostPaths() throws {
+        if case .host(let url) = source, let problem = Self.sourceProblem(url) {
+            throw RunnerError.hostFileUnavailable(path: url.path, reason: problem)
+        }
+        if case .host(let url) = destination, let problem = Self.destinationProblem(url) {
+            throw RunnerError.hostFileUnavailable(path: url.deletingLastPathComponent().path, reason: problem)
+        }
+    }
+
+    /// A host source must be a readable regular file reached without a final
+    /// symbolic link, matching the transfer's O_NOFOLLOW open.
+    static func sourceProblem(_ url: URL) -> HostFileProblem? {
+        var value = stat()
+        guard lstat(url.path, &value) == 0 else {
+            return errno == ENOENT || errno == ENOTDIR ? .missing : .unreadable
+        }
+        switch value.st_mode & S_IFMT {
+        case S_IFLNK: return .symbolicLink
+        case S_IFDIR: return .directory
+        case S_IFREG: return access(url.path, R_OK) == 0 ? nil : .unreadable
+        default: return .notRegular
+        }
+    }
+
+    static func destinationProblem(_ url: URL) -> HostFileProblem? {
+        var isDirectory: ObjCBool = false
+        let parent = url.deletingLastPathComponent().path
+        return FileManager.default.fileExists(atPath: parent, isDirectory: &isDirectory) && isDirectory.boolValue
+            ? nil : .missingDirectory
     }
 
     /// Follows cp(1) for a destination that names a directory: the file keeps
