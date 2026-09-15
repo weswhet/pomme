@@ -40,7 +40,11 @@ enum UIPositionalTargetResolver {
         case 2:
             return (try validateVMName(arguments[0]), arguments[1])
         default:
-            let value = action == "ai settings" ? "goal" : "key"
+            let value = switch action {
+            case "ai settings": "goal"
+            case "type": "text"
+            default: "key"
+            }
             throw ValidationError("Usage: pomme ui \(action) [<vm>] <\(value)> (or set POMME_VM_NAME).")
         }
     }
@@ -93,22 +97,52 @@ enum UIPositionalTargetResolver {
 
 struct UITypeCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "type", abstract: "Type text into the guest display.")
-    @Argument var name: String?
+    @Argument(help: "[VM name] text. Uses POMME_VM_NAME when the VM name is omitted.") var arguments: [String] = []
     @Option(name: .customLong("text"), help: "Text to type.") var text: String?
     @Option(name: .customLong("text-env"), help: "Environment variable containing text to type.") var textEnvironment: String?
     @Flag(name: .customLong("replace"), help: "Press Command-A before typing so the text replaces the focused field's contents. Off by default.") var replace = false
     @OptionGroup var timeout: TimeoutOptions
     @OptionGroup var output: GlobalOptions
 
+    /// Checks the text forms and positional count only; the VM target,
+    /// which may come from POMME_VM_NAME, is resolved when the command runs.
     mutating func validate() throws {
-        guard (text != nil) != (textEnvironment != nil) else {
-            throw ValidationError("Choose exactly one of --text or --text-env.")
+        let conflict = ValidationError("Choose exactly one of positional text, --text, or --text-env.")
+        switch (text != nil, textEnvironment != nil) {
+        case (true, true):
+            throw conflict
+        case (true, false), (false, true):
+            guard arguments.count <= 1 else { throw conflict }
+        case (false, false):
+            guard !arguments.isEmpty else { throw conflict }
+            guard arguments.count <= 2 else {
+                throw ValidationError("Usage: pomme ui type [<vm>] <text> (or set POMME_VM_NAME).")
+            }
         }
     }
 
+    /// The VM and, for the positional form, the text. With --text or
+    /// --text-env the positional list may hold only the VM name.
+    func target(
+        environmentTarget: String? = ProcessInfo.processInfo.environment["POMME_VM_NAME"]
+    ) throws -> (name: String?, positionalText: String?) {
+        guard text == nil, textEnvironment == nil else {
+            return (arguments.first, nil)
+        }
+        let resolved = try UIPositionalTargetResolver.singleAction(
+            arguments: arguments,
+            environmentTarget: environmentTarget,
+            action: "type"
+        )
+        return (resolved.target, resolved.action)
+    }
+
     mutating func run() throws {
+        let target = try target()
         let resolved: String
-        if let text {
+        if let positionalText = target.positionalText {
+            resolved = positionalText
+        } else if let text {
             resolved = text
         } else if let name = textEnvironment, let value = ProcessInfo.processInfo.environment[name] {
             resolved = value
@@ -116,7 +150,7 @@ struct UITypeCommand: ParsableCommand {
             throw ValidationError("Environment variable \(textEnvironment ?? "") is not set.")
         }
         try runUIRequest(
-            name: name,
+            name: target.name,
             request: GuestUIRequest(
                 operation: .type,
                 agentPayload: ["operation": "type", "text": resolved, "replace": replace],
