@@ -47,7 +47,17 @@ struct PommeGuestFileTransfer {
     }
 
     private func upload(source: URL, destination: String) throws -> Receipt {
-        let descriptor = try PommeAgentFileTransaction.openRegular(source, flags: O_RDONLY)
+        let descriptor: Int32
+        do {
+            descriptor = try PommeAgentFileTransaction.openRegular(source, flags: O_RDONLY)
+        } catch {
+            // The source changed after the request was parsed; name it rather
+            // than reporting a protocol failure.
+            if let problem = CopyRequest.sourceProblem(source) {
+                throw RunnerError.hostFileUnavailable(path: source.path, reason: problem)
+            }
+            throw error
+        }
         defer { _ = Darwin.close(descriptor) }
         var before = stat()
         guard fstat(descriptor, &before) == 0, before.st_size >= 0 else { throw invalid("Invalid source file size.") }
@@ -99,7 +109,15 @@ struct PommeGuestFileTransfer {
     }
 
     private func download(source: String, destination: URL) throws -> Receipt {
-        let stage = try PommeAgentFileTransaction.createAdjacentStage(for: destination)
+        let stage: (url: URL, descriptor: Int32)
+        do {
+            stage = try PommeAgentFileTransaction.createAdjacentStage(for: destination)
+        } catch {
+            if let problem = CopyRequest.destinationProblem(destination) {
+                throw RunnerError.hostFileUnavailable(path: destination.deletingLastPathComponent().path, reason: problem)
+            }
+            throw error
+        }
         var descriptorOpen = true
         var remoteID: String?
         var transferred: UInt64 = 0

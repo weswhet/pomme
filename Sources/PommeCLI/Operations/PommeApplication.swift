@@ -1868,11 +1868,16 @@ enum PommeApplication {
         guard response["ok"] as? Bool == true,
               PommeCore.hostExitCode(from: response) == 0,
               let result = response["result"] else {
-            throw RunnerError.hostCommandFailed(
-                "The authenticated PommeAgent operation did not complete."
-            )
+            throw authenticatedOperationFailure(response: response)
         }
         return try JSONValue(any: result)
+    }
+
+    /// The helper's own message, such as `Pomme agent request failed
+    /// (not-found): …`, when the reply carries one.
+    static func authenticatedOperationFailure(response: [String: Any]) -> RunnerError {
+        let message = (response["error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return .hostCommandFailed(message ?? "The authenticated PommeAgent operation did not complete.")
     }
 
     private static func authenticatedMDMAgentDescription(

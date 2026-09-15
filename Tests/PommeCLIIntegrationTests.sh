@@ -372,6 +372,13 @@ else
 fi
 rm -f "$work/goodbogus.yaml"
 
+expect_failure "cp names a missing host source" "$runner" cp /nonexistent.txt missing:/tmp/x
+if grep -q 'Host file /nonexistent.txt does not exist.' "$work/stderr"; then
+  pass "cp missing host source is reported on the host"
+else
+  fail "cp missing host source is reported on the host"
+fi
+
 if [[ $failures -ne 0 ]]; then
   printf '%d of %d contract checks failed\n' "$failures" "$checks" >&2
   exit 1

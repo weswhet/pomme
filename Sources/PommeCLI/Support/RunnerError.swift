@@ -55,6 +55,7 @@ enum RunnerError: LocalizedError {
     case unsupportedCopy(String)
     case hostCommandFailed(String)
     case configDecoding(path: String, message: String)
+    case hostFileUnavailable(path: String, reason: HostFileProblem)
     case runningVMBlocksRecovery(VMReference)
     case missingSIPPassword
     case invalidSIPBootstrapConfiguration(String)
@@ -163,6 +164,8 @@ enum RunnerError: LocalizedError {
             }
         case .guestJobNotFound(let jobID):
             "No detached guest job exists with id \(jobID)."
+        case .hostFileUnavailable(let path, let reason):
+            reason.message(path: path)
         case .configDecoding(let path, let message):
             "\(path): \(message)"
         case .snapshotNotFound(let vm, let name):
@@ -177,6 +180,27 @@ enum RunnerError: LocalizedError {
             message
         case .keychainError(let message):
             "Host Keychain error: \(message)"
+        }
+    }
+}
+
+/// Why a host path given to cp cannot be used.
+enum HostFileProblem: Equatable, Sendable {
+    case missing
+    case directory
+    case symbolicLink
+    case notRegular
+    case unreadable
+    case missingDirectory
+
+    func message(path: String) -> String {
+        switch self {
+        case .missing: "Host file \(path) does not exist."
+        case .directory: "Host path \(path) is a directory, not a file."
+        case .symbolicLink: "Host path \(path) is a symbolic link; give the file it points to."
+        case .notRegular: "Host path \(path) is not a regular file."
+        case .unreadable: "Host file \(path) is not readable."
+        case .missingDirectory: "Host directory \(path) does not exist."
         }
     }
 }

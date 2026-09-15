@@ -46,4 +46,15 @@ struct PommeApplicationGuestTextTests {
         #expect(try PommeApplication.guestRequestText(for: .jobStatus(jobID), payload: ["ok": false, "error": "not-found"]) == "not-found")
         #expect(try PommeApplication.guestRequestText(for: .jobList, payload: ["ok": true, "result": ["jobs": []]]) == "No background jobs.")
     }
+
+    @Test("A failed authenticated operation carries the helper's message")
+    func authenticatedOperationFailureCarriesMessage() {
+        let specific = PommeApplication.authenticatedOperationFailure(response: [
+            "ok": false, "error": "Pomme agent request failed (not-found): No such file or directory: /nonexistent"
+        ])
+        let generic = PommeApplication.authenticatedOperationFailure(response: ["ok": false])
+
+        #expect(specific.localizedDescription == "Pomme agent request failed (not-found): No such file or directory: /nonexistent")
+        #expect(generic.localizedDescription == "The authenticated PommeAgent operation did not complete.")
+    }
 }
