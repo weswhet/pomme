@@ -68,6 +68,93 @@ struct VMCreationConfigV1: Codable, Sendable {
 
 typealias ConfigBootMode = VMCreationConfigV1.BootMode
 
+// Each config level rejects keys it does not define before decoding, so a
+// misspelled key fails loudly instead of being ignored. Encoding stays
+// synthesized.
+extension VMCreationConfigV1 {
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case schemaVersion, name, versions, ipswDevice, hardware, credentials, workflow, mdm, boot
+    }
+
+    init(from decoder: any Decoder) throws {
+        try rejectUnknownKeys(in: decoder, allowed: CodingKeys.self)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        name = try container.decode(String.self, forKey: .name)
+        versions = try container.decode([String].self, forKey: .versions)
+        ipswDevice = try container.decodeIfPresent(String.self, forKey: .ipswDevice)
+        hardware = try container.decodeIfPresent(Hardware.self, forKey: .hardware)
+        credentials = try container.decodeIfPresent(Credentials.self, forKey: .credentials)
+        workflow = try container.decodeIfPresent(Workflow.self, forKey: .workflow)
+        mdm = try container.decodeIfPresent(MDM.self, forKey: .mdm)
+        boot = try container.decodeIfPresent(BootMode.self, forKey: .boot)
+    }
+}
+
+extension VMCreationConfigV1.Hardware {
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case diskSize, memory
+    }
+
+    init(from decoder: any Decoder) throws {
+        try rejectUnknownKeys(in: decoder, allowed: CodingKeys.self)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        diskSize = try container.decodeIfPresent(String.self, forKey: .diskSize)
+        memory = try container.decodeIfPresent(String.self, forKey: .memory)
+    }
+}
+
+extension VMCreationConfigV1.Credentials {
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case sipUser, sipBootstrapAccount, sipBootstrapUser, sipPasswordEnv, sipKeychain
+    }
+
+    init(from decoder: any Decoder) throws {
+        try rejectUnknownKeys(in: decoder, allowed: CodingKeys.self)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sipUser = try container.decodeIfPresent(String.self, forKey: .sipUser)
+        sipBootstrapAccount = try container.decodeIfPresent(Bool.self, forKey: .sipBootstrapAccount)
+        sipBootstrapUser = try container.decodeIfPresent(String.self, forKey: .sipBootstrapUser)
+        sipPasswordEnv = try container.decodeIfPresent(String.self, forKey: .sipPasswordEnv)
+        sipKeychain = try container.decodeIfPresent(String.self, forKey: .sipKeychain)
+    }
+}
+
+extension VMCreationConfigV1.Workflow {
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case bootRecoveryAfterCreate, disableSIP, disableAMFI, bootNormalBeforeMDM
+        case reenableAMFI, reenableSIP, finalBoot, enableRemoteLogin
+    }
+
+    init(from decoder: any Decoder) throws {
+        try rejectUnknownKeys(in: decoder, allowed: CodingKeys.self)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        bootRecoveryAfterCreate = try container.decodeIfPresent(Bool.self, forKey: .bootRecoveryAfterCreate)
+        disableSIP = try container.decodeIfPresent(Bool.self, forKey: .disableSIP)
+        disableAMFI = try container.decodeIfPresent(Bool.self, forKey: .disableAMFI)
+        bootNormalBeforeMDM = try container.decodeIfPresent(Bool.self, forKey: .bootNormalBeforeMDM)
+        reenableAMFI = try container.decodeIfPresent(Bool.self, forKey: .reenableAMFI)
+        reenableSIP = try container.decodeIfPresent(Bool.self, forKey: .reenableSIP)
+        finalBoot = try container.decodeIfPresent(VMCreationConfigV1.BootMode.self, forKey: .finalBoot)
+        enableRemoteLogin = try container.decodeIfPresent(Bool.self, forKey: .enableRemoteLogin)
+    }
+}
+
+extension VMCreationConfigV1.MDM {
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case enabled, method, profile, guestPath
+    }
+
+    init(from decoder: any Decoder) throws {
+        try rejectUnknownKeys(in: decoder, allowed: CodingKeys.self)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
+        method = try container.decodeIfPresent(MDMEnrollmentMethod.self, forKey: .method)
+        profile = try container.decodeIfPresent(String.self, forKey: .profile)
+        guestPath = try container.decodeIfPresent(String.self, forKey: .guestPath)
+    }
+}
+
 /// One fully resolved VM in a batch creation plan.
 struct VMCreationPlan: Sendable {
     let name: String
