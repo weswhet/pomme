@@ -765,21 +765,35 @@ enum PommeApplication {
         var response = try PommeCore.sendControlObject(request, bundle: reference.bundle)
         response["operation"] = operation
         response["name"] = name
-        let text: String
+        return result(title: title, reference: reference, payload: response,
+                      text: terminalSessionText(operation: operation, response: response))
+    }
+
+    /// Table text for a terminal session control reply. A failure envelope
+    /// carries the helper's message and nothing else, so it is rendered
+    /// before any per-operation summary that would read empty fields.
+    static func terminalSessionText(operation: String, response: [String: Any]) -> String {
+        if response["ok"] as? Bool == false {
+            if operation == "terminal.logs",
+               let offset = TerminalSessionCommandSupport.uint64(response["fromOffset"]),
+               let end = TerminalSessionCommandSupport.uint64(response["transcriptOffset"]) {
+                return "--from-offset \(offset) is beyond the transcript end (\(end) bytes)."
+            }
+            return response["error"] as? String ?? "The terminal session operation failed."
+        }
         switch operation {
         case "terminal.list":
             let sessions = response["sessions"] as? [[String: Any]] ?? []
-            text = sessions.isEmpty
+            return sessions.isEmpty
                 ? "No terminal sessions."
                 : sessions.map { terminalSessionSummary($0) }.joined(separator: "\n")
         case "terminal.inspect":
-            text = terminalSessionSummary(response)
+            return terminalSessionSummary(response)
         case "terminal.logs":
-            text = response["dataBase64"] as? String ?? ""
+            return response["dataBase64"] as? String ?? ""
         default:
-            text = response["error"] as? String ?? "OK"
+            return response["error"] as? String ?? "OK"
         }
-        return result(title: title, reference: reference, payload: response, text: text)
     }
 
     private static func terminalSessionSummary(_ session: [String: Any]) -> String {

@@ -81,6 +81,7 @@ enum PommeDurableTerminalError: Error, Equatable, LocalizedError, Sendable {
     case attachmentBusy
     case attachmentReplaced
     case invalidOffset
+    case offsetBeyondEnd(offset: UInt64, length: UInt64)
     case invalidState
     case transcriptChanged
     case storageBlocked
@@ -93,6 +94,8 @@ enum PommeDurableTerminalError: Error, Equatable, LocalizedError, Sendable {
         case .attachmentBusy: "The terminal session is already attached; use --takeover."
         case .attachmentReplaced: "The terminal attachment was replaced by another client."
         case .invalidOffset: "The terminal transcript offset is invalid."
+        case .offsetBeyondEnd(let offset, let length):
+            "The transcript offset \(offset) is beyond the transcript end (\(length) bytes)."
         case .invalidState: "The terminal session is not in a state that permits this operation."
         case .transcriptChanged: "The terminal transcript changed unexpectedly."
         case .storageBlocked: "The terminal transcript storage is unavailable."
@@ -505,7 +508,7 @@ actor PommeDurableTerminalSessionManager {
     }
 
     private func validatedCursor(_ offset: UInt64, length: UInt64) throws -> UInt64 {
-        guard offset <= length else { throw PommeDurableTerminalError.invalidOffset }
+        guard offset <= length else { throw PommeDurableTerminalError.offsetBeyondEnd(offset: offset, length: length) }
         return offset
     }
 
