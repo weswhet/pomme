@@ -170,6 +170,47 @@ struct UITypeCommandTests {
     }
 }
 
+@Suite("UI screenshot output path")
+struct UIScreenshotOutputPathTests {
+    @Test("A file path in an existing directory is accepted")
+    func existingParentAccepted() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try UIScreenshotCommand.validateOutputPath(directory.appendingPathComponent("s.png").path)
+    }
+
+    @Test("A missing parent directory is named")
+    func missingParentRejected() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let missing = directory.appendingPathComponent("nonexistentdir").standardizedFileURL.path
+
+        let error = #expect(throws: ValidationError.self) {
+            try UIScreenshotCommand.validateOutputPath(missing + "/s.png")
+        }
+        #expect(error?.message == "No such directory: \(missing)")
+    }
+
+    @Test("A directory leaf is rejected")
+    func directoryLeafRejected() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.standardizedFileURL.path
+
+        let error = #expect(throws: ValidationError.self) {
+            try UIScreenshotCommand.validateOutputPath(path)
+        }
+        #expect(error?.message == "\(path) is a directory; give a file path.")
+    }
+
+    private func temporaryDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("pomme-screenshot-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        return url
+    }
+}
+
 @Suite("UI command help")
 struct UICommandHelpTests {
     @Test("ui ai settings lists its modes and describes every option")
