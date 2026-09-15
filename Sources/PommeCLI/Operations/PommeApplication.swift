@@ -305,10 +305,9 @@ enum PommeApplication {
                 text: "VM is already stopped."
             )
         }
-        let payload = try PommeCore.controlCommandPayload(force ? .forceStop : .stop, reference: reference)
-        var resultPayload = payload
-        resultPayload["forceRequested"] = force
-        return result(title: "Stop", reference: reference, payload: resultPayload, text: stringValue(payload["response"]))
+        var payload = try PommeCore.controlCommandPayload(force ? .forceStop : .stop, reference: reference)
+        payload["forceRequested"] = force
+        return lifecycleResult(title: "Stop", command: force ? .forceStop : .stop, reference: reference, payload: payload)
         }
     }
 
@@ -316,7 +315,7 @@ enum PommeApplication {
         try VMBundleMutationLease.withLease(name: name, inherited: lease) { _ in
         let reference = try namedReference(name)
         let payload = try PommeCore.controlCommandPayload(.pause, reference: reference)
-        return result(title: "Pause", reference: reference, payload: payload, text: stringValue(payload["response"]))
+        return lifecycleResult(title: "Pause", command: .pause, reference: reference, payload: payload)
         }
     }
 
@@ -324,7 +323,38 @@ enum PommeApplication {
         try VMBundleMutationLease.withLease(name: name, inherited: lease) { _ in
         let reference = try namedReference(name)
         let payload = try PommeCore.controlCommandPayload(.resume, reference: reference)
-        return result(title: "Resume", reference: reference, payload: payload, text: stringValue(payload["response"]))
+        return lifecycleResult(title: "Resume", command: .resume, reference: reference, payload: payload)
+        }
+    }
+
+    private static func lifecycleResult(
+        title: String,
+        command: PommeLifecycleCommand,
+        reference: VMReference,
+        payload: [String: Any]
+    ) -> PommeOperationResult {
+        guard payload["ok"] as? Bool != false else {
+            return result(title: title, reference: reference, payload: payload,
+                          text: payload["error"] as? String ?? "The \(command.rawValue) request failed.")
+        }
+        // A helper from before the changed field always performed the call.
+        let text = lifecycleText(command, changed: payload["changed"] as? Bool ?? true)
+        var payload = payload
+        payload["response"] = text
+        return result(title: title, reference: reference, payload: payload, text: text)
+    }
+
+    /// The confirmation line for pause, resume, and stop, or the no-op
+    /// sentence when the VM was already in that state.
+    static func lifecycleText(_ command: PommeLifecycleCommand, changed: Bool) -> String {
+        switch (command, changed) {
+        case (.pause, true): "OK paused"
+        case (.pause, false): "VM is already paused."
+        case (.resume, true): "OK resumed"
+        case (.resume, false): "VM is already running."
+        case (.stop, true): "OK stopped"
+        case (.forceStop, true): "OK stopped (forced)"
+        case (.stop, false), (.forceStop, false): "VM is already stopped."
         }
     }
 
