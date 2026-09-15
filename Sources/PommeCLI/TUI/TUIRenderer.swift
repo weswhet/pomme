@@ -149,16 +149,18 @@ struct TUIRenderer {
         }
 
         if let errorMessage, !errorMessage.isEmpty {
-            let prefix = "ERROR: "
-            let wrapped = wrapText(errorMessage, width: max(8, contentWidth - prefix.count))
-            for (index, line) in wrapped.enumerated() {
-                let linePrefix = index == 0 ? prefix : String(repeating: " ", count: prefix.count)
-                lines.append(warning(linePrefix + line))
-            }
+            lines.append(contentsOf: errorLines(errorMessage, width: contentWidth))
         } else if let result {
-            let body = result.text.isEmpty ? (result.ok ? "OK" : "ERROR") : result.text
-            for line in body.split(separator: "\n", omittingEmptySubsequences: false) {
-                lines.append(truncateMiddle(String(line), width: contentWidth))
+            if result.ok {
+                let body = result.text.isEmpty ? "OK" : result.text
+                for line in body.split(separator: "\n", omittingEmptySubsequences: false) {
+                    lines.append(truncateMiddle(String(line), width: contentWidth))
+                }
+            } else {
+                // Result text no longer carries its own ERROR marker; the
+                // renderer supplies it, the same as for a thrown error.
+                let message = result.text.isEmpty ? "The operation failed." : result.text
+                lines.append(contentsOf: errorLines(message, width: contentWidth))
             }
             let detailLines = renderPayloadDetails(result.payload, width: contentWidth)
             if !detailLines.isEmpty {
@@ -355,6 +357,15 @@ struct TUIRenderer {
         let leftCount = (width - 3) / 2
         let rightCount = width - 3 - leftCount
         return String(value.prefix(leftCount)) + "..." + String(value.suffix(rightCount))
+    }
+
+    private func errorLines(_ message: String, width: Int) -> [String] {
+        let prefix = "ERROR: "
+        let wrapped = wrapText(message, width: max(8, width - prefix.count))
+        return wrapped.enumerated().map { index, line in
+            let linePrefix = index == 0 ? prefix : String(repeating: " ", count: prefix.count)
+            return warning(linePrefix + line)
+        }
     }
 
     private func wrapText(_ value: String, width: Int) -> [String] {

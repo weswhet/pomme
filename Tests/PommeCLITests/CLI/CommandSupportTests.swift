@@ -28,6 +28,56 @@ struct CommandSupportTests {
         }
     }
 
+    @Test("Failed text results render on stderr with the Error prefix")
+    func failedTextResultsRenderOnStderr() {
+        let failed = operationResult(ok: false, text: "The terminal session was not found.")
+
+        #expect(CLIOutputWriter.tableRendering(for: failed)
+                == .text(descriptor: STDERR_FILENO, text: "Error: The terminal session was not found."))
+        #expect(CLIOutputWriter.tableRendering(for: failed, label: "t1")
+                == .text(descriptor: STDERR_FILENO, text: "Error: t1: The terminal session was not found."))
+        #expect(CLIOutputWriter.tableRendering(for: operationResult(ok: false, text: ""))
+                == .text(descriptor: STDERR_FILENO, text: "Error: The operation failed."))
+    }
+
+    @Test("Successful text results stay on stdout without a prefix")
+    func successfulTextResultsStayOnStdout() {
+        let stopped = operationResult(ok: true, text: "VM is already stopped.")
+
+        #expect(CLIOutputWriter.tableRendering(for: stopped)
+                == .text(descriptor: STDOUT_FILENO, text: "VM is already stopped."))
+        #expect(CLIOutputWriter.tableRendering(for: stopped, label: "t1")
+                == .text(descriptor: STDOUT_FILENO, text: "VM is already stopped."))
+    }
+
+    @Test("Byte-carrying results keep their frame routes whether or not they failed")
+    func byteResultsKeepFrameRoutes() {
+        let foreground = operationResult(ok: false, text: "", payload: ["foreground": true, "streamFrames": []])
+        let job = operationResult(ok: false, text: "", payload: ["operation": "process.wait", "streamFrames": [[String: Any]]()])
+        let logs = operationResult(ok: true, text: "", payload: ["operation": "terminal.logs", "dataBase64": ""])
+        let failedLogs = operationResult(ok: false, text: "The transcript offset is invalid.", payload: ["operation": "terminal.logs"])
+        let failedRead = operationResult(ok: false, text: "The file is missing.", payload: ["operation": "file.read"])
+
+        #expect(CLIOutputWriter.tableRendering(for: foreground) == .foregroundFrames)
+        #expect(CLIOutputWriter.tableRendering(for: job) == .jobFrames)
+        #expect(CLIOutputWriter.tableRendering(for: logs) == .terminalBytes)
+        #expect(CLIOutputWriter.tableRendering(for: failedLogs)
+                == .text(descriptor: STDERR_FILENO, text: "Error: The transcript offset is invalid."))
+        #expect(CLIOutputWriter.tableRendering(for: failedRead)
+                == .text(descriptor: STDERR_FILENO, text: "Error: The file is missing."))
+    }
+
+    private func operationResult(ok: Bool, text: String, payload: [String: Any] = [:]) -> PommeOperationResult {
+        PommeOperationResult(
+            title: "Test",
+            vmName: "t1",
+            ok: ok,
+            hostExitCode: ok ? 0 : 1,
+            text: text,
+            payload: payload
+        )
+    }
+
     @Test("File output retains its strict 32 KiB limit")
     func fileOutputRetainsFileLimit() throws {
         let maximum = Data(repeating: 0x5A, count: PommeAgentProtocol.maximumFileChunkBytes)

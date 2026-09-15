@@ -400,7 +400,7 @@ struct VMCreationExecutor: Sendable {
                 vmName: plan.name,
                 ok: false,
                 hostExitCode: 1,
-                text: "ERROR: \(error.localizedDescription)",
+                text: error.localizedDescription,
                 payload: [
                     "ok": false,
                     "name": plan.name,

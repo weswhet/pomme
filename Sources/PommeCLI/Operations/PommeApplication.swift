@@ -618,7 +618,7 @@ enum PommeApplication {
         let ok = payload["ok"] as? Bool == true
         let text = agentResponseText(payload)
         return result(title: "Exec", reference: reference, payload: payload,
-                      text: payload["foreground"] as? Bool == true ? text : (text.isEmpty ? (ok ? "OK" : "ERROR") : text))
+                      text: payload["foreground"] as? Bool == true ? text : (text.isEmpty ? (ok ? "OK" : "The guest command failed.") : text))
         }
     }
 
@@ -964,7 +964,7 @@ enum PommeApplication {
             payload: payload,
             text: payload["ok"] as? Bool == true
                 ? "OK created name=\(plan.name) version=\(plan.firmware.version)"
-                : "ERROR: \(stringValue(payload["error"]))"
+                : stringValue(payload["error"])
         )
         }
     }
@@ -2744,7 +2744,7 @@ enum PommeApplication {
             title: title,
             reference: reference,
             payload: payload,
-            text: ok ? "OK " + operation : "ERROR: " + (error ?? "PommeAgent operation failed.")
+            text: ok ? "OK " + operation : (error ?? "PommeAgent operation failed.")
         )
     }
 
@@ -2952,7 +2952,7 @@ enum PommeApplication {
 
     private static func formatCapabilities(_ payload: [String: Any]) -> String {
         guard let agent = payload["guestAgent"] as? [String: Any] else {
-            return payload["ok"] as? Bool == false ? "ERROR: \(stringValue(payload["error"]))" : "Guest agent is unavailable."
+            return payload["ok"] as? Bool == false ? stringValue(payload["error"]) : "Guest agent is unavailable."
         }
         let capabilities = agent["capabilities"] as? [String] ?? []
         return [
@@ -2968,7 +2968,7 @@ enum PommeApplication {
 
     private static func formatBoot(_ payload: [String: Any]) -> String {
         if payload["ok"] as? Bool != true {
-            return "ERROR boot mode=\(stringValue(payload["bootMode"])): \(stringValue(payload["error"]))"
+            return "boot mode=\(stringValue(payload["bootMode"])): \(stringValue(payload["error"]))"
         }
         if payload["bootMode"] as? String == BootMode.recovery.rawValue,
            let agent = payload["guestAgent"] as? [String: Any],
@@ -2987,7 +2987,7 @@ enum PommeApplication {
         if payload["ok"] as? Bool == true {
             return "OK created name=\(stringValue(payload["name"])) bundle=\(stringValue(payload["bundlePath"]))"
         }
-        return "ERROR create failed: \(stringValue(payload["error"]))"
+        return "create failed: \(stringValue(payload["error"]))"
     }
 
     private static func formatSecurityPayload(_ payload: [String: Any]) -> String {
@@ -2999,7 +2999,7 @@ enum PommeApplication {
             lines.append("cleanup: " + (complete ? "verified" : "incomplete"))
         }
         if lines.isEmpty {
-            lines.append(payload["ok"] as? Bool == true ? "OK" : "ERROR: " + stringValue(payload["error"]))
+            lines.append(payload["ok"] as? Bool == true ? "OK" : stringValue(payload["error"]))
         }
         return lines.joined(separator: "\n")
     }
