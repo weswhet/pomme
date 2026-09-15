@@ -295,7 +295,7 @@ struct PommePublicPTYTerminalBridge {
             }
             payload["ok"] = false
             payload["hostExitCode"] = 124
-            payload["error"] = "Foreground command timed out; inspect the returned job ID before taking further action."
+            payload["error"] = "Foreground command timed out; the guest job is still running. Run `pomme jobs list <vm>` to find its ID, then `pomme jobs wait` or `pomme jobs kill`."
         }
         payload["foreground"] = true
         payload["streamFrames"] = [[String: Any]]()
