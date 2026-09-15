@@ -109,14 +109,21 @@ enum CLIOutputWriter {
             }
         case .table, .raw:
             for (index, result) in results.enumerated() {
-                if results.count > 1 {
-                    let name = result.vmName ?? "unknown"
-                    print("\(name):")
+                let label = results.count > 1 ? (result.vmName ?? "unknown") : nil
+                let rendering = tableRendering(for: result, label: label)
+                if let label, !rendering.isFailureText {
+                    print("\(label):")
                 }
-                if result.ok, result.payload["operation"] as? String == "file.read" {
+                switch rendering {
+                case .text(let descriptor, let text):
+                    if descriptor == STDOUT_FILENO {
+                        print(text)
+                    } else {
+                        try writeBytes(Data((text + "\n").utf8), to: descriptor)
+                    }
+                case .fileBytes:
                     try writeBytes(fileOutput(result.payload), to: STDOUT_FILENO)
-                } else if ["process.output", "process.wait"].contains(result.payload["operation"] as? String ?? ""),
-                          result.payload["streamFrames"] is [[String: Any]] {
+                case .jobFrames:
                     for output in try backgroundJobOutput(result.payload) {
                         try writeBytes(output.data, to: output.descriptor)
                     }
@@ -125,22 +132,16 @@ enum CLIOutputWriter {
                             try writeBytes(Data("Earlier \(channel) output was discarded; showing the last 64 KiB.\n".utf8), to: STDERR_FILENO)
                         }
                     }
-                    if let error = result.payload["error"] as? String {
-                        try writeBytes(Data((error + "\n").utf8), to: STDERR_FILENO)
-                    }
-                } else if result.payload["foreground"] as? Bool == true {
+                    try writeFailure(result.payload)
+                case .foregroundFrames:
                     for output in try foregroundOutput(result.payload) {
                         try writeBytes(output.data, to: output.descriptor)
                     }
-                    if let error = result.payload["error"] as? String {
-                        try writeBytes(Data((error + "\n").utf8), to: STDERR_FILENO)
-                    }
-                } else if result.payload["operation"] as? String == "terminal.logs" {
+                    try writeFailure(result.payload)
+                case .terminalBytes:
                     try writeBytes(terminalOutput(result.payload), to: STDOUT_FILENO)
-                } else if result.payload["terminalAttachment"] as? Bool == true {
+                case .attachment:
                     break
-                } else {
-                    print(result.text)
                 }
                 if results.count > 1, index != results.indices.last {
                     print("")
@@ -150,6 +151,57 @@ enum CLIOutputWriter {
 
         if let failed = results.first(where: { !$0.ok || $0.hostExitCode != 0 }) {
             throw ExitCode(failed.hostExitCode)
+        }
+    }
+
+    /// How the table form presents one result: exact bytes for command
+    /// output, or presentation text on the descriptor that matches its
+    /// outcome.
+    enum TableRendering: Equatable {
+        case text(descriptor: Int32, text: String)
+        case fileBytes
+        case jobFrames
+        case foregroundFrames
+        case terminalBytes
+        case attachment
+
+        var isFailureText: Bool {
+            if case .text(let descriptor, _) = self { return descriptor == STDERR_FILENO }
+            return false
+        }
+    }
+
+    /// Byte-carrying results keep their existing routes. Everything else is
+    /// text, and a failed result reaches stderr with the same `Error:` prefix
+    /// ArgumentParser gives a thrown error, so a failure reads the same whether
+    /// the CLI threw it or the helper returned it.
+    static func tableRendering(for result: PommeOperationResult, label: String? = nil) -> TableRendering {
+        let operation = result.payload["operation"] as? String ?? ""
+        if result.ok, operation == "file.read" {
+            return .fileBytes
+        }
+        if ["process.output", "process.wait"].contains(operation), result.payload["streamFrames"] is [[String: Any]] {
+            return .jobFrames
+        }
+        if result.payload["foreground"] as? Bool == true {
+            return .foregroundFrames
+        }
+        if result.ok, operation == "terminal.logs" {
+            return .terminalBytes
+        }
+        if result.payload["terminalAttachment"] as? Bool == true {
+            return .attachment
+        }
+        if result.ok {
+            return .text(descriptor: STDOUT_FILENO, text: result.text)
+        }
+        let message = result.text.isEmpty ? "The operation failed." : result.text
+        return .text(descriptor: STDERR_FILENO, text: "Error: " + (label.map { "\($0): " } ?? "") + message)
+    }
+
+    private static func writeFailure(_ payload: [String: Any]) throws {
+        if let error = payload["error"] as? String {
+            try writeBytes(Data(("Error: " + error + "\n").utf8), to: STDERR_FILENO)
         }
     }
 
@@ -226,7 +278,11 @@ enum CLIOutputWriter {
         case .json, .jsonl:
             print(try jsonLine(payload), terminator: "")
         case .table, .raw:
-            print(text)
+            if payload["ok"] as? Bool == false {
+                try writeBytes(Data(("Error: " + text + "\n").utf8), to: STDERR_FILENO)
+            } else {
+                print(text)
+            }
         }
         if payload["ok"] as? Bool == false {
             throw ExitCode(PommeCore.hostExitCode(from: payload, default: 1))
