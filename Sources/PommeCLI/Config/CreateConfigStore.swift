@@ -132,25 +132,36 @@ enum CreateConfigStore {
         }
 
         let config: VMCreationConfigV1
-        switch url.pathExtension.lowercased() {
-        case "json":
-            let data = try Data(contentsOf: url)
-            try rejectUnsupportedShape(String(decoding: data, as: UTF8.self))
-            config = try JSONDecoder().decode(VMCreationConfigV1.self, from: data)
-        case "yaml", "yml":
-            let text = try String(contentsOf: url, encoding: .utf8)
-            try rejectUnsupportedShape(text)
-            config = try YAMLDecoder().decode(VMCreationConfigV1.self, from: text)
-        case "toml":
-            let text = try String(contentsOf: url, encoding: .utf8)
-            try rejectUnsupportedShape(text)
-            config = try TOMLDecoder().decode(VMCreationConfigV1.self, from: text)
-        case "pkl":
-            let data = try pklEvaluator(url)
-            try rejectUnsupportedShape(String(decoding: data, as: UTF8.self))
-            config = try JSONDecoder().decode(VMCreationConfigV1.self, from: data)
-        default:
-            throw RunnerError.hostCommandFailed("Unsupported config format .\(url.pathExtension). Use .json, .yaml, .yml, .toml, or .pkl.")
+        do {
+            switch url.pathExtension.lowercased() {
+            case "json":
+                let data = try Data(contentsOf: url)
+                try rejectUnsupportedShape(String(decoding: data, as: UTF8.self))
+                config = try JSONDecoder().decode(VMCreationConfigV1.self, from: data)
+            case "yaml", "yml":
+                let text = try String(contentsOf: url, encoding: .utf8)
+                try rejectUnsupportedShape(text)
+                config = try YAMLDecoder().decode(VMCreationConfigV1.self, from: text)
+            case "toml":
+                let text = try String(contentsOf: url, encoding: .utf8)
+                try rejectUnsupportedShape(text)
+                config = try TOMLDecoder().decode(VMCreationConfigV1.self, from: text)
+            case "pkl":
+                let data = try pklEvaluator(url)
+                try rejectUnsupportedShape(String(decoding: data, as: UTF8.self))
+                config = try JSONDecoder().decode(VMCreationConfigV1.self, from: data)
+            default:
+                throw RunnerError.hostCommandFailed("Unsupported config format .\(url.pathExtension). Use .json, .yaml, .yml, .toml, or .pkl.")
+            }
+        } catch let error as DecodingError {
+            // Yams wraps an error thrown by the config's own decoding in
+            // dataCorrupted; that error already names the problem.
+            if case .dataCorrupted(let context) = error, let runnerError = context.underlyingError as? RunnerError {
+                throw runnerError
+            }
+            throw RunnerError.configDecoding(path: url.path, message: ConfigDecodingMessage.describe(error))
+        } catch let error as TOMLDecodingError {
+            throw RunnerError.configDecoding(path: url.path, message: ConfigDecodingMessage.describe(error))
         }
 
         try validate(config)
@@ -474,5 +485,66 @@ struct VMCreationExecutor: Sendable {
             text: "Would create \(plan.name) from macOS \(plan.firmware.version) (\(plan.firmware.buildid)).",
             payload: payload
         )
+    }
+}
+
+/// Plain-language descriptions of config decoding failures, naming the
+/// dotted key path instead of printing Swift's coding-key debug text.
+enum ConfigDecodingMessage {
+    static func describe(_ error: DecodingError) -> String {
+        switch error {
+        case .keyNotFound(let key, let context):
+            return "Config is missing required key '\(dottedPath(context.codingPath + [key]))'."
+        case .typeMismatch(let type, let context), .valueNotFound(let type, let context):
+            return "Config key '\(dottedPath(context.codingPath))' must be \(typeName(type))."
+        case .dataCorrupted(let context):
+            if let yaml = context.underlyingError as? YamlError {
+                return describe(yaml)
+            }
+            if context.codingPath.isEmpty {
+                let detail = (context.underlyingError as NSError?)?.userInfo[NSDebugDescriptionErrorKey] as? String
+                return "Config is not valid JSON: \(detail ?? context.debugDescription)"
+            }
+            return "Config key '\(dottedPath(context.codingPath))' is invalid: \(context.debugDescription)"
+        @unknown default:
+            return "Config could not be decoded: \(error.localizedDescription)"
+        }
+    }
+
+    static func describe(_ error: TOMLDecodingError) -> String {
+        switch error {
+        case .invalidSyntax(let line, let column, let message):
+            return "Config is not valid TOML at line \(line), column \(column): \(message)"
+        default:
+            return "Config is not valid TOML: \(error.description)"
+        }
+    }
+
+    static func describe(_ error: YamlError) -> String {
+        switch error {
+        case .scanner(_, let problem, let mark, _),
+             .parser(_, let problem, let mark, _),
+             .composer(_, let problem, let mark, _):
+            return "Config is not valid YAML at line \(mark.line), column \(mark.column): \(problem)"
+        default:
+            return "Config is not valid YAML: \(error)"
+        }
+    }
+
+    private static func dottedPath(_ path: [any CodingKey]) -> String {
+        path.map { $0.intValue.map { "[\($0)]" } ?? $0.stringValue }
+            .joined(separator: ".")
+            .replacingOccurrences(of: ".[", with: "[")
+    }
+
+    private static func typeName(_ type: Any.Type) -> String {
+        switch type {
+        case is String.Type: return "a string"
+        case is Bool.Type: return "true or false"
+        case is Int.Type, is Int64.Type, is UInt64.Type, is UInt.Type, is Int32.Type: return "an integer"
+        case is Double.Type, is Float.Type: return "a number"
+        default:
+            return String(describing: type).hasPrefix("Array") ? "a list" : "a mapping"
+        }
     }
 }

@@ -346,6 +346,18 @@ else
   fail "ipsw list names the device identifier shape"
 fi
 
+cat >"$work/cfgbad.yaml" <<'YAML'
+name: cfgbad
+versions: [26.6.2]
+YAML
+expect_failure "config validate rejects a config without schemaVersion" "$runner" config validate "$work/cfgbad.yaml"
+if grep -q "missing required key 'schemaVersion'" "$work/stderr" && ! grep -q 'CodingKeys' "$work/stderr"; then
+  pass "config decode failure names the missing key in plain words"
+else
+  fail "config decode failure names the missing key in plain words"
+fi
+rm -f "$work/cfgbad.yaml"
+
 if [[ $failures -ne 0 ]]; then
   printf '%d of %d contract checks failed\n' "$failures" "$checks" >&2
   exit 1
