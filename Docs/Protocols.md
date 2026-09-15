@@ -53,6 +53,11 @@ result identifies the job and process and may report `exited: false`. A
 foreground caller sends input in chunks no larger than 64 KiB, sends EOF, then
 polls status while consuming output until the terminal exchange is complete.
 
+A started process inherits the agent's environment with `HOME`, `USER`,
+`LOGNAME`, and `SHELL` set from the passwd record of the account it runs as
+(root unless a user or uid is requested). Values in the request's
+`environment` take precedence. `PATH` is left as the agent's.
+
 On each status/stream drain pass, the agent performs at most one nonblocking
 read of up to 64 KiB from each stdout and stderr descriptor. EOF is established
 by an observed read EOF (not merely by `POLLHUP`). The exit frame is emitted

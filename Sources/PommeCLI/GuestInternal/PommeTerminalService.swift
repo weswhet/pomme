@@ -558,12 +558,10 @@ actor PommeTerminalService {
     }
 
     private func passwdRecord(uid: uid_t) throws -> (home: String, shell: String) {
-        guard let record = getpwuid(uid),
-              let home = String(validatingCString: record.pointee.pw_dir),
-              let shell = String(validatingCString: record.pointee.pw_shell),
-              !home.isEmpty
-        else { throw PommeAgentOperationError.invalid }
-        return (home, shell)
+        guard let record = PommeGuestIdentityEnvironment.passwdRecord(uid: uid), !record.home.isEmpty else {
+            throw PommeAgentOperationError.invalid
+        }
+        return (record.home, record.shell)
     }
 
     private static func executableAbsolutePath(_ path: String) -> Bool {

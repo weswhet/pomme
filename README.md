@@ -162,6 +162,8 @@ pomme cat dev:/tmp/input
 Process streams, terminal resize, signals, jobs, and file handles are correlated
 and bounded. Bare `shell` and `exec --pty` create durable reconnectable
 sessions; `shell [expression]` remains the one-shot `/bin/sh -c` workflow.
+Guest processes get `HOME`, `USER`, `LOGNAME`, and `SHELL` for the account they
+run as (root by default, or `--user`); `--env` overrides them.
 Interactive attachments require local TTYs, reject JSON output, and detach on
 socket loss without signalling the guest. File transfer is authenticated and chunked, stages adjacent to its
 destination, refuses symbolic-link traversal, and commits atomically.
