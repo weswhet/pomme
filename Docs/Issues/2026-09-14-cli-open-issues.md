@@ -1,7 +1,8 @@
 # Open CLI issues after the 2026-09-14 exploration
 
-- **Status:** The twelve High and Medium issues (#1–#10, #12, #20) are resolved
-  as of 2026-09-15; see `../CLI-Fixes-2026-09-15.md`. The Low issues remain open.
+- **Status:** All issues are resolved as of 2026-09-15. The twelve High and
+  Medium issues (#1–#10, #12, #20) are recorded in `../CLI-Fixes-2026-09-15.md`,
+  and the seventeen Low issues in `../CLI-Fixes-2026-09-15-low.md`.
 - **Binary under test:** `~/.local/bin/pomme` at commit `8f18fc3`, SHA-256
   `2ecacdebbf25bc96435c25e464f8c5473198ec37c1f6c8e441cc053b4f0e818f`,
   signed Release, Developer ID Application: Wesley Whetstone (2D8XQ77EBQ).
@@ -404,6 +405,7 @@ reusing `validateVMName`, whose message is hard-coded to say "VM name".
 ## 11. Deleting a missing snapshot reports an unsafe directory (#33)
 
 - **Severity:** Low
+- **Status:** Resolved (2026-09-15; 5257596)
 - **Area:** `snapshot`
 - **Source:** `Sources/PommeCLI/VM/VMSnapshotStore.swift:299`
 
@@ -468,6 +470,7 @@ key-sequence --help` does not enumerate them either.
 ## 13. A bad screenshot output directory is not validated before capture (#30)
 
 - **Severity:** Low
+- **Status:** Resolved (2026-09-15; 0ee2066)
 - **Area:** `ui`
 
 ### Reproduction
@@ -507,6 +510,7 @@ when the framebuffer capture was fixed.
 ## 14. `ui ai settings` options have no help text (#31)
 
 - **Severity:** Low
+- **Status:** Resolved (2026-09-15; 5c55852)
 - **Area:** `ui ai`
 
 ### Reproduction
@@ -539,6 +543,7 @@ undocumented if it becomes available.
 ## 15. `$HOME` is empty in `shell` (#17)
 
 - **Severity:** Low
+- **Status:** Resolved (2026-09-15; 5fb246d)
 - **Area:** `shell`
 
 ### Reproduction
@@ -564,6 +569,7 @@ resolving `~`, silently operate on the wrong path instead of failing.
 ## 16. Guest execution failures share one generic message (#16)
 
 - **Severity:** Low
+- **Status:** Resolved (2026-09-15; dfb4f86)
 - **Area:** `exec`
 
 ### Reproduction and observed output
@@ -596,6 +602,7 @@ Diagnosing a failing `exec` requires bisecting the arguments by hand.
 ## 17. Guest and host path errors in `cp`/`cat` are generic (#26, #27)
 
 - **Severity:** Low
+- **Status:** Resolved (2026-09-15; a66ffd2, dfb4f86)
 - **Area:** `cp`, `cat`
 - **Source:** `Sources/PommeCLI/GuestAgent/PommeAgentProtocol.swift:160`
 
@@ -633,6 +640,7 @@ typo in a host path.
 ## 18. Config decode failures expose raw Swift error text (#12)
 
 - **Severity:** Low
+- **Status:** Resolved (2026-09-15; 9974081)
 - **Area:** `config`
 
 ### Reproduction
@@ -668,6 +676,7 @@ also duplicated: the key name appears three times.
 ## 19. Unknown config keys are silently accepted (#13)
 
 - **Severity:** Low
+- **Status:** Resolved (2026-09-15; 2153aee)
 - **Area:** `config`
 
 ### Reproduction
@@ -747,6 +756,7 @@ recorded here only because it appears in the same output.
 ## 21. `pause`, `resume`, and `stop` print nothing (#9)
 
 - **Severity:** Low
+- **Status:** Resolved (2026-09-15; 282fb77)
 - **Area:** lifecycle
 
 ### Reproduction and observed output
@@ -779,6 +789,7 @@ Silence is indistinguishable from a command that did nothing, and repeating
 ## 22. `delete` reports an empty bundle path (#10)
 
 - **Severity:** Low
+- **Status:** Resolved (2026-09-15; 01c72dc)
 - **Area:** `delete`
 - **Source:** `Sources/PommeCLI/Operations/PommeApplication.swift:565`
 
@@ -810,6 +821,7 @@ built after the bundle record is cleared.
 ## 23. `inspect` output repeats itself (#40)
 
 - **Severity:** Low
+- **Status:** Resolved (2026-09-15; 3c9b512)
 - **Area:** `inspect`
 
 ### Reproduction
@@ -853,6 +865,7 @@ hard to read and hard to parse with `grep`.
 ## 24. Usage lines lose the subcommand (#38)
 
 - **Severity:** Low
+- **Status:** Resolved (2026-09-15; 92986b8)
 - **Area:** argument parsing
 - **Source:** `Sources/PommeCLI/CLI/Commands/SnapshotCommands.swift:200`,
   `Sources/PommeCLI/CLI/Commands/TemplateCommands.swift:163`
@@ -902,6 +915,7 @@ the root usage.
 ## 25. No `--version` flag (#42)
 
 - **Severity:** Low
+- **Status:** Resolved (2026-09-15; 80413b1)
 - **Area:** top level
 
 ### Reproduction
@@ -933,6 +947,7 @@ The only identifier available today is a SHA-256 of the executable.
 ## 26. `--format raw` is identical to `table` (#39)
 
 - **Severity:** Low
+- **Status:** Resolved (2026-09-15; 1c8bf13)
 - **Area:** output formatting
 
 ### Reproduction
@@ -966,6 +981,7 @@ The 2026-09-12 run reported `jsonl` printing a single object for `list`,
 ## 27. Unknown `--device` reports a download failure (#41)
 
 - **Severity:** Low
+- **Status:** Resolved (2026-09-15; 3b9a99c)
 - **Area:** `ipsw`
 
 ### Reproduction
@@ -999,6 +1015,7 @@ Reporting a listing operation as a "download" failure compounds it.
 ## 28. `config render --format toml` is rejected (new)
 
 - **Severity:** Low
+- **Status:** Resolved (2026-09-15; 5c55852); no code change: `config render --format` has not taken `toml` since 0.1.0 (only `config init --format` names config formats), and the 2026-09-12 record described config input formats
 - **Area:** `config`
 
 ### Reproduction
@@ -1030,6 +1047,7 @@ exploration and should be reconciled with the documentation.
 ## 29. `ui type` requires `--text` rather than a positional argument (new)
 
 - **Severity:** Low
+- **Status:** Resolved (2026-09-15; 0f6f341)
 - **Area:** `ui`
 - **Source:** `Sources/PommeCLI/CLI/Commands/UIUtilityCommands.swift:104`
 
