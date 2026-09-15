@@ -154,6 +154,36 @@ struct VMSnapshotStoreTests {
         #expect(try VMSnapshotStore.drift(bundle: fixture.bundle, manifest: manifest) == ["vmUUID"])
     }
 
+    @Test("Deleting or restoring an absent snapshot reports it as not found")
+    func absentSnapshotIsNotFound() throws {
+        let fixture = try SnapshotFixture()
+        defer { fixture.remove() }
+        try fixture.publish("present", state: "state")
+
+        let deleteError = #expect(throws: RunnerError.self) {
+            try VMSnapshotStore.delete(bundle: fixture.bundle, name: "nosnap")
+        }
+        let restoreError = #expect(throws: RunnerError.self) {
+            try VMSnapshotStore.manifest(bundle: fixture.bundle, name: "nosnap")
+        }
+        #expect(deleteError?.localizedDescription == "No snapshot named nosnap exists for fixture.")
+        #expect(restoreError?.localizedDescription == "No snapshot named nosnap exists for fixture.")
+    }
+
+    @Test("A snapshot path that exists but is not a directory stays unsafe")
+    func nonDirectorySnapshotIsUnsafe() throws {
+        let fixture = try SnapshotFixture()
+        defer { fixture.remove() }
+        try fixture.publish("present", state: "state")
+        let linked = try VMSnapshotStore.snapshotURL(bundle: fixture.bundle, name: "linked")
+        try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: fixture.root)
+
+        let error = #expect(throws: RunnerError.self) {
+            try VMSnapshotStore.delete(bundle: fixture.bundle, name: "linked")
+        }
+        #expect(error?.localizedDescription.hasPrefix("Unsafe snapshot directory") == true)
+    }
+
     @Test("Unsafe snapshot links fail closed and delete leaves no visible or tombstone artifact")
     func rejectsUnsafeLinksAndDeletesThroughTombstone() throws {
         let fixture = try SnapshotFixture()

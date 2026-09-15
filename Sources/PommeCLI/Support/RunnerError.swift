@@ -46,6 +46,7 @@ enum RunnerError: LocalizedError {
     case unsafeHelperTermination(String)
     case guestFileTransferFailed(primary: String, transferredBytes: UInt64, cleanupErrors: [String])
     case guestJobNotFound(String)
+    case snapshotNotFound(vm: String, name: String)
     case invalidDockerCommand(String)
     case invalidUICommand(String)
     case invalidCopyEndpoint(String)
@@ -155,6 +156,8 @@ enum RunnerError: LocalizedError {
             }
         case .guestJobNotFound(let jobID):
             "No detached guest job exists with id \(jobID)."
+        case .snapshotNotFound(let vm, let name):
+            "No snapshot named \(name) exists for \(vm)."
         case .invalidCopyEndpoint(let endpoint):
             "Invalid copy endpoint: \(endpoint)"
         case .runningVMBlocksRecovery(let reference):
