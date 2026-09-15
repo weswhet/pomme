@@ -208,6 +208,44 @@ for action in key key-sequence; do
     fail "$action reaches target validation"
   fi
 done
+expect_failure "dry-run rejects memory below the provisional floor" "$runner" create example \
+  --restore-image "$work/missing.ipsw" --memory 512MB --dry-run
+if grep -q 'provisional guest minimum' "$work/stderr"; then
+  pass "dry-run names the provisional memory floor"
+else
+  fail "dry-run names the provisional memory floor"
+fi
+cat >"$work/parallel.yaml" <<'YAML'
+schemaVersion: 1
+name: cfgtest
+versions: [26.6.2]
+boot: none
+YAML
+expect_failure "parallel takes no value" "$runner" create --config "$work/parallel.yaml" --dry-run --parallel 2
+if grep -q -- '--parallel takes no value' "$work/stderr"; then
+  pass "parallel explains that it takes no value"
+else
+  fail "parallel explains that it takes no value"
+fi
+expect_failure "click rejects a negative coordinate" "$runner" ui click missing --x -1 --y 1
+if grep -q -- '--x must be' "$work/stderr"; then
+  pass "click names the coordinate range"
+else
+  fail "click names the coordinate range"
+fi
+expect_failure "snapshot names are validated as snapshot names" "$runner" snapshot create missing "bad/snap"
+if grep -q 'Invalid snapshot name bad/snap' "$work/stderr"; then
+  pass "snapshot rejection names the snapshot"
+else
+  fail "snapshot rejection names the snapshot"
+fi
+expect_failure "exec takes the VM name from the environment" env POMME_VM_NAME=invalid/name \
+  "$runner" exec -- /bin/echo hi
+if grep -q 'Invalid VM name invalid/name' "$work/stderr"; then
+  pass "exec name comes from the environment, not the command"
+else
+  fail "exec name comes from the environment, not the command"
+fi
 expect_success "ui keys lists the key vocabulary" "$runner" ui keys
 if grep -q '^return' "$work/stdout" && grep -q '^cmd-' "$work/stdout"; then
   pass "ui keys names keys and modifier prefixes"

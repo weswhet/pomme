@@ -351,8 +351,30 @@ struct VMCreationPlanner: Sendable {
 
 struct VMCreationExecutionDependencies: Sendable {
     let install: @Sendable (VMCreationPlan) async throws -> PommeOperationResult
+    /// Checks a plan without installing it and returns payload fields for the
+    /// dry-run result. It throws for a plan the real create would refuse.
+    let dryRunPreflight: @Sendable (VMCreationPlan) async throws -> [String: Any]
 
-    static let live = VMCreationExecutionDependencies(install: PommeApplication.configuredCreate)
+    init(
+        install: @escaping @Sendable (VMCreationPlan) async throws -> PommeOperationResult,
+        dryRunPreflight: @escaping @Sendable (VMCreationPlan) async throws -> [String: Any] = { _ in [:] }
+    ) {
+        self.install = install
+        self.dryRunPreflight = dryRunPreflight
+    }
+
+    static let live = VMCreationExecutionDependencies(
+        install: PommeApplication.configuredCreate,
+        dryRunPreflight: { plan in
+            let memory = plan.config.hardware?.memory ?? "8GB"
+            let check = try await PommeCore.dryRunMemoryCheck(
+                memoryBytes: ByteSizeParser.parse(memory) ?? 0,
+                source: .firmware(plan.firmware),
+                vmName: plan.name
+            )
+            return ["memoryMinimum": check.payload]
+        }
+    )
 }
 
 struct VMCreationExecutor: Sendable {
@@ -370,7 +392,11 @@ struct VMCreationExecutor: Sendable {
         guard (1...Self.maximumParallelism).contains(parallelism) else {
             throw RunnerError.hostCommandFailed("Parallel creation runs at most \(Self.maximumParallelism) VMs at once.")
         }
-        if dryRun { return plans.map(dryRunResult) }
+        if dryRun {
+            var results: [PommeOperationResult] = []
+            for plan in plans { results.append(await dryRunResult(plan)) }
+            return results
+        }
         if parallelism == 1 {
             var results: [PommeOperationResult] = []
             for plan in plans { results.append(await install(plan)) }
@@ -417,10 +443,25 @@ struct VMCreationExecutor: Sendable {
         }
     }
 
-    private func dryRunResult(_ plan: VMCreationPlan) -> PommeOperationResult {
+    private func dryRunResult(_ plan: VMCreationPlan) async -> PommeOperationResult {
         var payload = plan.payload
-        payload["ok"] = true
         payload["dryRun"] = true
+        do {
+            payload.merge(try await dependencies.dryRunPreflight(plan)) { _, new in new }
+        } catch {
+            payload["ok"] = false
+            payload["hostExitCode"] = 1
+            payload["error"] = error.localizedDescription
+            return PommeOperationResult(
+                title: "Create plan",
+                vmName: plan.name,
+                ok: false,
+                hostExitCode: 1,
+                text: error.localizedDescription,
+                payload: payload
+            )
+        }
+        payload["ok"] = true
         payload["hostExitCode"] = 0
         return PommeOperationResult(
             title: "Create plan",

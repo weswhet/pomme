@@ -185,18 +185,24 @@ struct CreateCommand: AsyncParsableCommand {
         }
 
         let vmName = try validateVMName(name!)
+        // Fail a too-small request before catalog or image resolution, so the
+        // check is the same whether or not the image is at hand.
+        let memoryBytes = ByteSizeParser.parse(memory) ?? 0
+        try PommeCore.validateProvisionalMemoryFloor(memoryBytes)
         if let fromTemplate {
-            try await runFromTemplate(fromTemplate, vmName: vmName)
+            try await runFromTemplate(fromTemplate, vmName: vmName, memoryBytes: memoryBytes)
             return
         }
         let restoreArguments: [String]
         var selectedProfile: PommeCreateRecoveryProfileDescriptor?
         var resolvedLocalRestoreImage: PommeLocalRestoreImageIdentity?
+        var resolvedFirmware: IPSWMEFirmware?
         if let version {
             let firmware = try await PommeCore.resolveIPSWFirmware(
                 selection: version,
                 deviceIdentifier: ipswDevice
             )
+            resolvedFirmware = firmware
             let profile = try PommeRecoveryProfileSelector.select(for: firmware)
             selectedProfile = profile
             if profile.qualification == .experimental {
@@ -229,13 +235,23 @@ struct CreateCommand: AsyncParsableCommand {
             }
             let dryRunVersion: Any
             let dryRunRestoreImage: Any
+            let memorySource: PommeCore.DryRunRestoreSource
             if let resolvedLocalRestoreImage {
                 dryRunVersion = resolvedLocalRestoreImage.version
                 dryRunRestoreImage = resolvedLocalRestoreImage.canonicalPath
-            } else {
+                memorySource = .localImage(path: resolvedLocalRestoreImage.canonicalPath)
+            } else if let resolvedFirmware {
                 dryRunVersion = version as Any
                 dryRunRestoreImage = restoreImage as Any
+                memorySource = .firmware(resolvedFirmware)
+            } else {
+                throw RunnerError.hostCommandFailed("Pomme could not resolve a restore image source for the dry run.")
             }
+            let memoryCheck = try await PommeCore.dryRunMemoryCheck(
+                memoryBytes: memoryBytes,
+                source: memorySource,
+                vmName: vmName
+            )
             let payload: [String: Any] = [
                 "ok": true,
                 "dryRun": true,
@@ -245,6 +261,7 @@ struct CreateCommand: AsyncParsableCommand {
                 "ipswDevice": ipswDevice as Any,
                 "diskSize": diskSize,
                 "memory": memory,
+                "memoryMinimum": memoryCheck.payload,
                 "boot": boot.rawValue,
                 "recoveryProfile": [
                     "id": selectedProfile.id,
@@ -275,7 +292,7 @@ struct CreateCommand: AsyncParsableCommand {
     /// Template creates inherit the template's disk size. An explicit
     /// `--disk-size` is accepted only when it matches, because the cloned
     /// image already carries its APFS container geometry.
-    private func runFromTemplate(_ templateName: String, vmName: String) async throws {
+    private func runFromTemplate(_ templateName: String, vmName: String, memoryBytes: UInt64) async throws {
         let manifest = try PommeTemplateStore.manifest(for: templateName)
         let templateDiskSize = "\(manifest.diskSizeBytes / (1 << 20))MB"
         if diskSize != "60GB", ByteSizeParser.parse(diskSize) != manifest.diskSizeBytes {
@@ -286,6 +303,11 @@ struct CreateCommand: AsyncParsableCommand {
         }
         let descriptor = try PommeRecoveryProfileSelector.descriptor(version: manifest.version, build: manifest.build)
         if dryRun {
+            let memoryCheck = try await PommeCore.dryRunMemoryCheck(
+                memoryBytes: memoryBytes,
+                source: .template(manifest),
+                vmName: vmName
+            )
             let payload: [String: Any] = [
                 "ok": true,
                 "dryRun": true,
@@ -295,6 +317,7 @@ struct CreateCommand: AsyncParsableCommand {
                 "build": manifest.build,
                 "diskSize": manifest.diskSizeBytes,
                 "memory": memory,
+                "memoryMinimum": memoryCheck.payload,
                 "boot": boot.rawValue,
                 "recoveryProfile": [
                     "id": descriptor.id,
