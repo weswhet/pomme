@@ -1,6 +1,7 @@
 # Open CLI issues after the 2026-09-14 exploration
 
-- **Status:** Open; nothing in this document has been fixed.
+- **Status:** The twelve High and Medium issues (#1–#10, #12, #20) are resolved
+  as of 2026-09-15; see `../CLI-Fixes-2026-09-15.md`. The Low issues remain open.
 - **Binary under test:** `~/.local/bin/pomme` at commit `8f18fc3`, SHA-256
   `2ecacdebbf25bc96435c25e464f8c5473198ec37c1f6c8e441cc053b4f0e818f`,
   signed Release, Developer ID Application: Wesley Whetstone (2D8XQ77EBQ).
@@ -23,6 +24,7 @@ readiness (#1, #2), `ui screenshot` (#28), `sip status` and `amfi status` on
 ## 1. `--parallel <n>` is rejected together with `--config` (#11)
 
 - **Severity:** High
+- **Status:** Resolved (2026-09-15; b772ee6)
 - **Area:** `create`
 - **Source:** `Sources/PommeCLI/CLI/Commands/LifecycleCommands.swift:135`
 
@@ -79,6 +81,7 @@ takes a different branch and is not classified that way.
 ## 2. `POMME_VM_NAME` is not honored by `exec` before `--` (#14)
 
 - **Severity:** Medium
+- **Status:** Resolved (2026-09-15; 7a690dc)
 - **Area:** `exec`
 - **Source:** `Sources/PommeCLI/CLI/Commands/GuestCommands.swift:149`
 
@@ -114,6 +117,7 @@ on every `exec`.
 ## 3. `cp` into a directory path fails with a data-integrity sounding error (#25)
 
 - **Severity:** Medium
+- **Status:** Resolved (2026-09-15; f76f7bd)
 - **Area:** `cp`
 
 ### Reproduction
@@ -153,6 +157,7 @@ tell those apart from the message.
 ## 4. Detached `exec` does not print its job ID (#15)
 
 - **Severity:** Medium
+- **Status:** Resolved (2026-09-15; 023ca2f)
 - **Area:** `exec`, `jobs`
 
 ### Reproduction
@@ -195,6 +200,7 @@ started from the same command line.
 ## 5. `jobs inspect` prints only `OK` (#18)
 
 - **Severity:** Medium
+- **Status:** Resolved (2026-09-15; 023ca2f)
 - **Area:** `jobs`
 
 ### Reproduction
@@ -233,6 +239,7 @@ and `jobs kill` on an unknown UUID exits 1 with a `not-found` agent error.
 ## 6. `sessions inspect` of a missing session prints `offset=` (#21)
 
 - **Severity:** Medium
+- **Status:** Resolved (2026-09-15; 9e397e6)
 - **Area:** `sessions`
 
 ### Reproduction
@@ -262,6 +269,7 @@ what went wrong, and `offset=` looks like a truncated success line.
 ## 7. Reading past the end of a transcript reports an invalid helper response (#22)
 
 - **Severity:** Medium
+- **Status:** Resolved (2026-09-15; 9e397e6)
 - **Area:** `sessions`
 
 ### Reproduction
@@ -294,6 +302,7 @@ which points investigation at the transport rather than the argument.
 ## 8. `cat vm:/path` reads `vm` as a VM name (#24)
 
 - **Severity:** Medium
+- **Status:** Resolved (2026-09-15; 253c98c)
 - **Area:** `cat`, `cp`
 - **Source:** `Sources/PommeCLI/CLI/Commands/GuestCommands.swift:362,365,400`
 
@@ -327,6 +336,7 @@ never referred to.
 ## 9. Negative option values are reported as a missing value (#37)
 
 - **Severity:** Medium
+- **Status:** Resolved (2026-09-15; d3197bd)
 - **Area:** argument parsing, all commands with numeric options
 
 ### Reproduction
@@ -362,6 +372,7 @@ pass a negative value even where one might be legitimate.
 ## 10. Invalid snapshot names are reported as invalid VM names (#32)
 
 - **Severity:** Medium
+- **Status:** Resolved (2026-09-15; d89a3be)
 - **Area:** `snapshot`
 - **Source:** `Sources/PommeCLI/CLI/Commands/SnapshotCommands.swift:164`
 
@@ -423,6 +434,7 @@ message cannot distinguish absent from unsafe.
 ## 12. UI key errors have no prefix and no list of valid keys (#29)
 
 - **Severity:** Medium
+- **Status:** Resolved (2026-09-15; 60ecf25)
 - **Area:** `ui`
 - **Source:** `Sources/PommeCLI/UIAutomation/PommeRuntimeUIController.swift:79,92`
 
@@ -692,6 +704,7 @@ a hard error for a missing key and no signal at all for a misspelled one.
 ## 20. Dry-run accepts resource sizes the real create rejects (#5)
 
 - **Severity:** Medium
+- **Status:** Resolved (2026-09-15; b666146)
 - **Area:** `create`
 
 ### Reproduction
