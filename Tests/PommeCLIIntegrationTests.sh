@@ -331,6 +331,14 @@ else
   fail "ui type positional value is text, not a VM name"
 fi
 
+expect_failure "screenshot rejects a missing output directory" \
+  "$runner" ui screenshot missing --output /nonexistentdir/s.png
+if grep -q 'No such directory: /nonexistentdir' "$work/stderr"; then
+  pass "screenshot names the missing output directory"
+else
+  fail "screenshot names the missing output directory"
+fi
+
 if [[ $failures -ne 0 ]]; then
   printf '%d of %d contract checks failed\n' "$failures" "$checks" >&2
   exit 1

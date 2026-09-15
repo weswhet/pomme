@@ -261,6 +261,25 @@ struct UIScreenshotCommand: ParsableCommand {
     @Option(name: .customLong("output"), help: "Host output file path.") var outputPath: String
     @OptionGroup var timeout: TimeoutOptions
     @OptionGroup var format: GlobalOptions
+
+    /// The helper writes the file as this user on this filesystem, so a
+    /// missing parent or a directory leaf is reported before any VM lookup.
+    mutating func validate() throws {
+        try Self.validateOutputPath(outputPath)
+    }
+
+    static func validateOutputPath(_ path: String) throws {
+        let absolute = PommeCore.absoluteHostPath(path)
+        let parent = (absolute as NSString).deletingLastPathComponent
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: parent, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw ValidationError("No such directory: \(parent)")
+        }
+        if FileManager.default.fileExists(atPath: absolute, isDirectory: &isDirectory), isDirectory.boolValue {
+            throw ValidationError("\(absolute) is a directory; give a file path.")
+        }
+    }
+
     mutating func run() throws {
         try runUIRequest(
             name: name,
