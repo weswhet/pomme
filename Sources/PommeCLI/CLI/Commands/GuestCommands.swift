@@ -22,13 +22,13 @@ struct GuestExecutionOptions: ParsableArguments {
     @Option(name: .customLong("user"), help: "Guest user name.")
     var user: String?
 
-    @Option(name: .customLong("uid"), help: "Guest numeric user ID.")
+    @Option(name: .customLong("uid"), parsing: .unconditional, help: "Guest numeric user ID.")
     var uid: UInt32?
 
     @Option(name: .customLong("group"), help: "Guest group name.")
     var group: String?
 
-    @Option(name: .customLong("gid"), help: "Guest numeric group ID.")
+    @Option(name: .customLong("gid"), parsing: .unconditional, help: "Guest numeric group ID.")
     var gid: UInt32?
 
     @Option(name: .customLong("guest-stdin"), help: "Absolute guest file used as standard input.")
@@ -400,10 +400,10 @@ struct CatCommand: ParsableCommand {
     @Argument(help: "vm:/absolute/path endpoint.")
     var path: String
 
-    @Option(name: .customLong("offset"), help: "Starting byte offset.")
+    @Option(name: .customLong("offset"), parsing: .unconditional, help: "Starting byte offset.")
     var offset = 0
 
-    @Option(name: .customLong("count"), help: "Maximum bytes to read.")
+    @Option(name: .customLong("count"), parsing: .unconditional, help: "Maximum bytes to read.")
     var count: Int?
 
     @OptionGroup var output: GlobalOptions

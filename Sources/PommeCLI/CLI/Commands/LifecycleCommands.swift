@@ -357,13 +357,16 @@ struct StartCommand: ParsableCommand {
     @Option(name: .customLong("mode"), help: "Boot mode: normal or recovery.")
     var mode: BootMode = .normal
 
-    @Option(name: .customLong("timeout"), help: "Agent readiness timeout in seconds for normal and Recovery boots.")
+    @Option(name: .customLong("timeout"), parsing: .unconditional, help: "Agent readiness timeout in seconds for normal and Recovery boots.")
     var timeout: Double = Constants.defaultRecoveryAgentTimeout
 
     @OptionGroup var output: GlobalOptions
 
+    mutating func validate() throws {
+        guard timeout.isFinite, timeout > 0 else { throw ValidationError("--timeout must be greater than zero.") }
+    }
+
     mutating func run() throws {
-        guard timeout > 0 else { throw ValidationError("--timeout must be greater than zero.") }
         let targets = try VMTargetResolver.names(from: names)
         var options = CLIOptions()
         options.timeout = timeout
@@ -404,13 +407,16 @@ struct RestartCommand: ParsableCommand {
     @Option(name: .customLong("mode"), help: "Override the preserved boot mode.")
     var mode: BootMode?
 
-    @Option(name: .customLong("timeout"), help: "Agent readiness timeout in seconds for normal and Recovery boots.")
+    @Option(name: .customLong("timeout"), parsing: .unconditional, help: "Agent readiness timeout in seconds for normal and Recovery boots.")
     var timeout: Double = Constants.defaultRecoveryAgentTimeout
 
     @OptionGroup var output: GlobalOptions
 
+    mutating func validate() throws {
+        guard timeout.isFinite, timeout > 0 else { throw ValidationError("--timeout must be greater than zero.") }
+    }
+
     mutating func run() throws {
-        guard timeout > 0 else { throw ValidationError("--timeout must be greater than zero.") }
         let targets = try VMTargetResolver.names(from: names)
         var options = CLIOptions()
         options.timeout = timeout

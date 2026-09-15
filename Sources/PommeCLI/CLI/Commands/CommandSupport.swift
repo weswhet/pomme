@@ -33,10 +33,16 @@ struct GlobalOptions: ParsableArguments {
 
 /// Common time limit used by guest operations.
 struct TimeoutOptions: ParsableArguments {
-    @Option(name: .customLong("timeout"), help: "Time limit in seconds.")
+    @Option(name: .customLong("timeout"), parsing: .unconditional, help: "Time limit in seconds.")
     var timeout: Double?
 
     var isExplicitlySet: Bool { timeout != nil }
+
+    /// A negative value is captured rather than mistaken for a missing one,
+    /// so the range check runs at parse time and names the real problem.
+    mutating func validate() throws {
+        if timeout != nil { _ = try value() }
+    }
 
     /// Validates and returns the configured timeout.
     func value() throws -> TimeInterval {

@@ -51,13 +51,16 @@ struct SessionsAttachCommand: ParsableCommand {
     var takeover = false
     @Flag(name: .customLong("from-start"), help: "Replay the transcript from byte offset zero.")
     var fromStart = false
-    @Option(name: .customLong("from-offset"), help: "Replay from this exact transcript byte offset.")
-    var fromOffset: UInt64?
+    @Option(name: .customLong("from-offset"), parsing: .unconditional, help: "Replay from this exact transcript byte offset.")
+    var fromOffset: Int64?
     @OptionGroup var output: GlobalOptions
 
     mutating func validate() throws {
         guard !(fromStart && fromOffset != nil) else {
             throw ValidationError("--from-start conflicts with --from-offset.")
+        }
+        if let fromOffset, fromOffset < 0 {
+            throw ValidationError("--from-offset must not be negative.")
         }
         switch try output.resolvedFormat() {
         case .json, .jsonl:
@@ -72,7 +75,7 @@ struct SessionsAttachCommand: ParsableCommand {
 
     mutating func run() throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
-        let offset = fromStart ? 0 : fromOffset
+        let offset: UInt64? = fromStart ? 0 : fromOffset.map(UInt64.init)
         try CLIOutputWriter.write(
             PommeApplication.terminalSessionAttach(
                 name: target,
@@ -89,16 +92,22 @@ struct SessionsLogsCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "logs", abstract: "Read terminal session transcript bytes.")
     @Argument var name: String?
     @Argument var sessionID: String
-    @Option(name: .customLong("from-offset"), help: "Starting transcript byte offset.")
-    var fromOffset: UInt64 = 0
+    @Option(name: .customLong("from-offset"), parsing: .unconditional, help: "Starting transcript byte offset.")
+    var fromOffset: Int64 = 0
     @Flag(name: .customLong("follow"), help: "Continue until the session exits or is lost.")
     var follow = false
     @OptionGroup var output: GlobalOptions
 
+    mutating func validate() throws {
+        guard fromOffset >= 0 else {
+            throw ValidationError("--from-offset must not be negative.")
+        }
+    }
+
     mutating func run() throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
         let id = try Self.sessionID(sessionID)
-        var offset = fromOffset
+        var offset = UInt64(fromOffset)
         var snapshotEnd: UInt64?
         while true {
             let result = try PommeApplication.terminalSessionLogs(name: target, sessionID: id, offset: offset)
