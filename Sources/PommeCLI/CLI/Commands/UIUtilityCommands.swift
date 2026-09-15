@@ -96,7 +96,7 @@ struct UITypeCommand: ParsableCommand {
     @Argument var name: String?
     @Option(name: .customLong("text"), help: "Text to type.") var text: String?
     @Option(name: .customLong("text-env"), help: "Environment variable containing text to type.") var textEnvironment: String?
-    @Flag(name: .customLong("replace")) var replace = false
+    @Flag(name: .customLong("replace"), help: "Press Command-A before typing so the text replaces the focused field's contents. Off by default.") var replace = false
     @OptionGroup var timeout: TimeoutOptions
     @OptionGroup var output: GlobalOptions
 
@@ -249,21 +249,32 @@ struct UIAICommand: ParsableCommand {
     )
 }
 
+extension SettingsAIMode: ExpressibleByArgument {}
+
 struct UIAISettingsCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "settings",
         abstract: "Navigate System Settings toward a goal. Currently unavailable without a guest accessibility bridge."
     )
     @Argument(help: "[VM name] goal. Uses POMME_VM_NAME when the VM name is omitted.") var arguments: [String] = []
-    @Option(name: .customLong("mode")) var mode = "suggest"
-    @Option(name: .customLong("max-steps"), parsing: .unconditional) var maxSteps = SettingsAIRequest.defaultMaxSteps
-    @Option(name: .customLong("confidence"), parsing: .unconditional) var confidence = SettingsAIRequest.defaultConfidence
-    @Option(name: .customLong("model-timeout"), parsing: .unconditional) var modelTimeout = SettingsAIRequest.defaultModelTimeout
-    @Flag(name: .customLong("deterministic-fallback")) var deterministicFallback = false
-    @Flag(name: .customLong("no-open")) var noOpen = false
-    @Option(name: .customLong("settings-url")) var settingsURL: String?
-    @Option(name: .customLong("until-text")) var untilText: String?
-    @Option(name: .customLong("screenshot-output")) var screenshotOutput: String?
+    @Option(name: .customLong("mode"), help: "suggest proposes one action, step performs one, loop repeats up to --max-steps.")
+    var mode: SettingsAIMode = .suggest
+    @Option(name: .customLong("max-steps"), parsing: .unconditional, help: "Most actions a loop run performs.")
+    var maxSteps = SettingsAIRequest.defaultMaxSteps
+    @Option(name: .customLong("confidence"), parsing: .unconditional, help: "Minimum model confidence, from 0 to 1, required to act.")
+    var confidence = SettingsAIRequest.defaultConfidence
+    @Option(name: .customLong("model-timeout"), parsing: .unconditional, help: "Seconds to wait for each model answer.")
+    var modelTimeout = SettingsAIRequest.defaultModelTimeout
+    @Flag(name: .customLong("deterministic-fallback"), help: "Fall back to text-matching navigation when the model is unavailable. Off by default.")
+    var deterministicFallback = false
+    @Flag(name: .customLong("no-open"), help: "Use the window already on screen instead of opening System Settings first.")
+    var noOpen = false
+    @Option(name: .customLong("settings-url"), help: "x-apple.systempreferences URL to open first. Defaults to System Settings' main window.")
+    var settingsURL: String?
+    @Option(name: .customLong("until-text"), help: "Stop once this text is visible on screen. Unset by default.")
+    var untilText: String?
+    @Option(name: .customLong("screenshot-output"), help: "Host directory for per-step screenshots. Defaults to a new temporary directory.")
+    var screenshotOutput: String?
     @OptionGroup var timeout: TimeoutOptions
     @OptionGroup var output: GlobalOptions
     mutating func validate() throws {
@@ -279,7 +290,7 @@ struct UIAISettingsCommand: ParsableCommand {
         let resolved = try UIPositionalTargetResolver.singleAction(arguments: arguments, action: "ai settings")
         let settings = SettingsAIRequest(
             goal: resolved.action,
-            mode: try SettingsAIMode.parse(mode),
+            mode: mode,
             provider: .appleLocal,
             maxSteps: maxSteps,
             confidenceThreshold: confidence,

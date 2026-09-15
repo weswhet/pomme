@@ -101,7 +101,7 @@ struct ConfigValidateCommand: ParsableCommand {
 }
 
 struct ConfigRenderCommand: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "render", abstract: "Resolve versions and print the exact creation plan.")
+    static let configuration = CommandConfiguration(commandName: "render", abstract: "Resolve a config's versions and print the creation plan.")
     @Argument var path: String
     @OptionGroup var output: GlobalOptions
 

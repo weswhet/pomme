@@ -1,3 +1,5 @@
+import Foundation
+import ArgumentParser
 import Testing
 
 @Suite("Public UI utility command grammar")
@@ -118,6 +120,36 @@ struct UIUtilityCommandTests {
         #expect(throws: Error.self) {
             var invalid = try UIAISettingsCommand.parse(["dev", "Goal", "--mode", "unsupported"])
             try invalid.validate()
+        }
+    }
+}
+
+@Suite("UI command help")
+struct UICommandHelpTests {
+    @Test("ui ai settings lists its modes and describes every option")
+    func aiSettingsHelpDescribesEveryOption() throws {
+        #expect(UIAISettingsCommand.helpMessage(columns: 400).contains("suggest, step, loop"))
+        #expect(try undescribedOptions(UIAISettingsCommand.self).isEmpty)
+    }
+
+    @Test("ui type describes --replace")
+    func typeHelpDescribesReplace() throws {
+        #expect(try undescribedOptions(UITypeCommand.self).isEmpty)
+    }
+
+    @Test("config render names its output as the creation plan")
+    func configRenderAbstract() {
+        #expect(ConfigRenderCommand.helpMessage().contains("creation plan"))
+    }
+
+    /// Named options and flags whose help dump carries no abstract.
+    private func undescribedOptions(_ command: ParsableCommand.Type) throws -> [String] {
+        let dump = try #require(JSONSerialization.jsonObject(with: Data(command._dumpHelp().utf8)) as? [String: Any])
+        let arguments = (dump["command"] as? [String: Any])?["arguments"] as? [[String: Any]] ?? []
+        return arguments.compactMap { argument in
+            guard argument["kind"] as? String != "positional",
+                  (argument["abstract"] as? String ?? "").isEmpty else { return nil }
+            return (argument["valueName"] as? String) ?? "?"
         }
     }
 }

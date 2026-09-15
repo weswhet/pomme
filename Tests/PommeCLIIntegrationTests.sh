@@ -192,6 +192,11 @@ if grep -qi 'unavailable' "$work/stdout"; then
 else
   fail "AI help exposes unavailable bridge"
 fi
+if grep -q 'suggest, step, loop' "$work/stdout"; then
+  pass "AI help lists the modes"
+else
+  fail "AI help lists the modes"
+fi
 for mode in suggest step loop; do
   expect_failure "AI $mode rejects before VM access" env POMME_VM_NAME=pomme-test-nonexistent \
     "$runner" ui ai settings 'Open Keyboard settings' --mode "$mode" --max-steps 1 \
