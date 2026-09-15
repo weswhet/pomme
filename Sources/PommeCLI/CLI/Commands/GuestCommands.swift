@@ -156,7 +156,9 @@ struct ExecCommand: ParsableCommand {
     @OptionGroup var timeout: TimeoutOptions
     @OptionGroup var output: GlobalOptions
 
-    @Argument(parsing: .remaining, help: "Executable and arguments after --.")
+    // Only tokens after `--` form the command, so the optional name can never
+    // swallow the executable when POMME_VM_NAME supplies the VM.
+    @Argument(parsing: .postTerminator, help: "Executable and arguments after --.")
     var command: [String] = []
 
     mutating func validate() throws {
@@ -362,7 +364,7 @@ struct CopyCommand: ParsableCommand {
     @Argument(help: "Host path or NAME:/absolute/path endpoint.")
     var source: String
 
-    @Argument(help: "Host path or NAME:/absolute/path endpoint.")
+    @Argument(help: "Host path or NAME:/absolute/path endpoint. A destination ending in / (or an existing host directory) receives the source's file name.")
     var destination: String
 
     @OptionGroup var output: GlobalOptions
