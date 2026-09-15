@@ -113,6 +113,10 @@ struct VMCreationPlanningTests {
         #expect(results.map(\.vmName) == plans.map(\.name))
         #expect(results.map(\.ok) == [true, true, false, true, true])
         #expect(await probe.maximum == 2)
+
+        await #expect(throws: RunnerError.self) {
+            _ = try await executor.execute(plans, dryRun: false, parallelism: 3)
+        }
     }
 
     @Test("Config dry-run resolves plans but does not install")

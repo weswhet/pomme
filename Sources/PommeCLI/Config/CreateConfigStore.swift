@@ -356,6 +356,10 @@ struct VMCreationExecutionDependencies: Sendable {
 }
 
 struct VMCreationExecutor: Sendable {
+    /// Virtualization runs at most two macOS guests at once; a third install
+    /// would fail after the first two had already started.
+    static let maximumParallelism = 2
+
     let dependencies: VMCreationExecutionDependencies
 
     func execute(
@@ -363,8 +367,8 @@ struct VMCreationExecutor: Sendable {
         dryRun: Bool,
         parallelism: Int
     ) async throws -> [PommeOperationResult] {
-        guard parallelism > 0 else {
-            throw RunnerError.hostCommandFailed("Parallel creation limit must be greater than zero.")
+        guard (1...Self.maximumParallelism).contains(parallelism) else {
+            throw RunnerError.hostCommandFailed("Parallel creation runs at most \(Self.maximumParallelism) VMs at once.")
         }
         if dryRun { return plans.map(dryRunResult) }
         if parallelism == 1 {
