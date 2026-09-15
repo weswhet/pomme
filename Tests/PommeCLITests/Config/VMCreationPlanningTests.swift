@@ -46,6 +46,31 @@ struct VMCreationPlanningTests {
         }
     }
 
+    @Test("Config decode failures name the key or the syntax position in plain words", arguments: [
+        ("yaml", "name: lab\nversions: [latest]\n", "Config is missing required key 'schemaVersion'."),
+        ("json", #"{"name":"lab","versions":["latest"]}"#, "Config is missing required key 'schemaVersion'."),
+        ("toml", "name = \"lab\"\nversions = [\"latest\"]\n", "Config is missing required key 'schemaVersion'."),
+        ("json", #"{"schemaVersion":1,"name":"lab","versions":["latest"],"hardware":{"memory":4}}"#,
+         "Config key 'hardware.memory' must be a string."),
+        ("toml", "schemaVersion = 1\nname = \"lab\"\nversions = [\"latest\"]\n[hardware]\nmemory = 4\n",
+         "Config key 'hardware.memory' must be a string."),
+        ("yaml", "schemaVersion: 1\nname: lab\nversions: [latest\n", "Config is not valid YAML at line "),
+        ("yaml", "schemaVersion: 1\n\tname: lab\n", "Config is not valid YAML at line 2, column "),
+        ("json", #"{"schemaVersion":1,"#, "Config is not valid JSON: "),
+        ("toml", "schemaVersion = = 1\n", "Config is not valid TOML at line 1, column ")
+    ])
+    func decodeFailuresArePlain(extensionName: String, contents: String, expected: String) throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("bad.\(extensionName)")
+        try Data(contents.utf8).write(to: url)
+
+        let error = #expect(throws: RunnerError.self) { try CreateConfigStore.load(path: url.path) }
+        let message = error?.localizedDescription ?? ""
+        #expect(message.hasPrefix(url.standardizedFileURL.path + ": " + expected), "\(message)")
+        #expect(!message.contains("CodingKeys("))
+    }
+
     @Test("Creation configs reject security, credential, and enrollment controls")
     func unsupportedCreationControlsAreRejectedBeforePlanning() throws {
         let directory = try temporaryDirectory()

@@ -54,6 +54,7 @@ enum RunnerError: LocalizedError {
     case invalidCopyEndpoint(String)
     case unsupportedCopy(String)
     case hostCommandFailed(String)
+    case configDecoding(path: String, message: String)
     case runningVMBlocksRecovery(VMReference)
     case missingSIPPassword
     case invalidSIPBootstrapConfiguration(String)
@@ -162,6 +163,8 @@ enum RunnerError: LocalizedError {
             }
         case .guestJobNotFound(let jobID):
             "No detached guest job exists with id \(jobID)."
+        case .configDecoding(let path, let message):
+            "\(path): \(message)"
         case .snapshotNotFound(let vm, let name):
             "No snapshot named \(name) exists for \(vm)."
         case .invalidCopyEndpoint(let endpoint):
