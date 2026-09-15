@@ -359,10 +359,10 @@ struct JobsKillCommand: ParsableCommand {
 struct CopyCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "cp", abstract: "Copy files between the host and a VM.")
 
-    @Argument(help: "Host path or vm:/absolute/path endpoint.")
+    @Argument(help: "Host path or NAME:/absolute/path endpoint.")
     var source: String
 
-    @Argument(help: "Host path or vm:/absolute/path endpoint.")
+    @Argument(help: "Host path or NAME:/absolute/path endpoint.")
     var destination: String
 
     @OptionGroup var output: GlobalOptions
@@ -397,7 +397,7 @@ struct CopyCommand: ParsableCommand {
 struct CatCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "cat", abstract: "Read a guest file through the transfer agent.")
 
-    @Argument(help: "vm:/absolute/path endpoint.")
+    @Argument(help: "NAME:/absolute/path endpoint.")
     var path: String
 
     @Option(name: .customLong("offset"), parsing: .unconditional, help: "Starting byte offset.")
@@ -419,7 +419,7 @@ struct CatCommand: ParsableCommand {
 
     mutating func run() throws {
         guard let target = try VMTargetResolver.endpointName(path) else {
-            throw ValidationError("cat requires a vm:/absolute/path endpoint.")
+            throw ValidationError("cat requires a NAME:/absolute/path endpoint, for example dev:/tmp/output.txt.")
         }
         let prefix = "\(target):"
         let guestPath = "guest:" + path.dropFirst(prefix.count)
