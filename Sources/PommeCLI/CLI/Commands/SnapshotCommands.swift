@@ -161,7 +161,7 @@ enum SnapshotCommandInput {
             throw ValidationError("Snapshot \(action) requires a snapshot name.")
         }
 
-        return Resolved(vm: target, snapshot: try validateVMName(snapshotName))
+        return Resolved(vm: target, snapshot: try validateIdentifier(snapshotName, kind: .snapshot))
     }
 }
 

@@ -672,9 +672,23 @@ func runtimeDirectory(create: Bool = true) throws -> URL {
     return directoryURL
 }
 
+/// The identifiers that share the managed-name character rules. The kind
+/// only changes how a rejection is worded, so an operator who typed a valid
+/// VM name and an invalid snapshot name is told about the snapshot name.
+enum PommeIdentifierKind: String, Sendable {
+    case vm = "VM name"
+    case snapshot = "snapshot name"
+    case template = "template name"
+    case configDerived = "config-derived VM name"
+}
+
 func validateVMName(_ name: String) throws -> String {
+    try validateIdentifier(name, kind: .vm)
+}
+
+func validateIdentifier(_ name: String, kind: PommeIdentifierKind) throws -> String {
     guard !name.isEmpty, name.count <= 64 else {
-        throw RunnerError.invalidVMName(name)
+        throw RunnerError.invalidIdentifier(kind: kind, value: name)
     }
 
     let allowedPunctuation: Set<Character> = [".", "_", "-"]
@@ -682,11 +696,11 @@ func validateVMName(_ name: String) throws -> String {
         let isAlphanumeric = character.isASCII && (character.isLetter || character.isNumber)
         if index == 0 {
             guard isAlphanumeric else {
-                throw RunnerError.invalidVMName(name)
+                throw RunnerError.invalidIdentifier(kind: kind, value: name)
             }
         } else {
             guard isAlphanumeric || allowedPunctuation.contains(character) else {
-                throw RunnerError.invalidVMName(name)
+                throw RunnerError.invalidIdentifier(kind: kind, value: name)
             }
         }
     }

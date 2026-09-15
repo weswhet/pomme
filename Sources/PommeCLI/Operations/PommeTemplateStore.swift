@@ -113,7 +113,7 @@ enum PommeTemplateStore {
     }
 
     static func bundle(for name: String) throws -> BundleLayout {
-        let validName = try validateVMName(name)
+        let validName = try validateIdentifier(name, kind: .template)
         return BundleLayout(rootURL: try directory().appendingPathComponent("\(validName).bundle", isDirectory: true))
     }
 

@@ -324,7 +324,7 @@ struct VMCreationPlanner: Sendable {
         for selector in config.versions {
             let firmware = try await dependencies.firmwareLookup(selector, config.ipswDevice)
             let recoveryProfile = try dependencies.profileSelection(firmware)
-            let name = try validateVMName("\(config.name)-\(firmware.version)")
+            let name = try validateIdentifier("\(config.name)-\(firmware.version)", kind: .configDerived)
             plans.append(.init(
                 name: name,
                 selector: selector,

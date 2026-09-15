@@ -45,7 +45,7 @@ enum VMSnapshotStore {
     static let stagePrefix = ".pomme-snapshot-stage-"
     static let rollbackPrefix = ".pomme-snapshot-rollback-"
 
-    static func snapshotName(_ value: String) throws -> String { try validateVMName(value) }
+    static func snapshotName(_ value: String) throws -> String { try validateIdentifier(value, kind: .snapshot) }
 
     static func snapshotURL(bundle: BundleLayout, name: String) throws -> URL {
         bundle.snapshotsURL.appendingPathComponent(try snapshotName(name), isDirectory: true)

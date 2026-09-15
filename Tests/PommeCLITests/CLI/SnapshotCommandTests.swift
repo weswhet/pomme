@@ -58,8 +58,11 @@ struct SnapshotCommandTests {
         #expect(throws: Error.self) {
             try SnapshotCommandInput.resolve(vm: "dev", snapshot: "", action: "create")
         }
-        #expect(throws: Error.self) {
-            try SnapshotCommandInput.resolve(vm: "dev", snapshot: "before/upgrade", action: "create")
+        do {
+            _ = try SnapshotCommandInput.resolve(vm: "dev", snapshot: "before/upgrade", action: "create")
+            Issue.record("An invalid snapshot name was accepted.")
+        } catch {
+            #expect(error.localizedDescription.hasPrefix("Invalid snapshot name before/upgrade."))
         }
     }
 
