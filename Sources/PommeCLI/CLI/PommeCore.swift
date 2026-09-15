@@ -1612,7 +1612,7 @@ struct PommeCore {
                 account: PommeProvisioningCredentialReference.agentAccount
             )
         }
-        return ["ok": true, "operation": "delete", "name": name, "hostExitCode": 0]
+        return ["ok": true, "operation": "delete", "name": name, "bundlePath": reference.bundle.rootURL.path, "hostExitCode": 0]
     }
 
     static func createVMPayload(
