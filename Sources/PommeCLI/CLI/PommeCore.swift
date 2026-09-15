@@ -4743,6 +4743,14 @@ struct PommeCore {
         return (firmware, url)
     }
 
+    /// A catalog lookup is not a download: a 404 means the catalog does not
+    /// know the device, and any other status is a failed catalog request.
+    static func catalogFailure(statusCode: Int, identifier: String) -> RunnerError {
+        statusCode == 404
+            ? .unknownDeviceIdentifier(identifier)
+            : .catalogRequestFailed(statusCode: statusCode)
+    }
+
     private static func fetchIPSWMEDevice(identifier: String) async throws -> IPSWMEDeviceResponse {
         var components = URLComponents()
         components.scheme = "https"
@@ -4756,7 +4764,7 @@ struct PommeCore {
         defer { session.invalidateAndCancel() }
         let (data, response) = try await session.data(from: url)
         if let response = response as? HTTPURLResponse, !(200..<300).contains(response.statusCode) {
-            throw RunnerError.downloadFailed(statusCode: response.statusCode)
+            throw catalogFailure(statusCode: response.statusCode, identifier: identifier)
         }
         do {
             return try JSONDecoder().decode(IPSWMEDeviceResponse.self, from: data)

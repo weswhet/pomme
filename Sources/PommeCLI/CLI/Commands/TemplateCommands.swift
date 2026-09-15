@@ -60,6 +60,7 @@ struct TemplateCreateCommand: AsyncParsableCommand {
         if restoreImage != nil, ipswDevice != nil {
             throw ValidationError("--ipsw-device is available only with --version.")
         }
+        try IPSWDeviceIdentifier.validate(ipswDevice, flag: "--ipsw-device")
         if let fromTemplate {
             guard provisioned else {
                 throw ValidationError("--from-template is available only with --provisioned.")

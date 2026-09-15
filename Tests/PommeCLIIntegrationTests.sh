@@ -339,6 +339,13 @@ else
   fail "screenshot names the missing output directory"
 fi
 
+expect_failure "ipsw list rejects a malformed device identifier" "$runner" ipsw list --device Bogus
+if grep -q -- '--device must be an Apple model identifier' "$work/stderr"; then
+  pass "ipsw list names the device identifier shape"
+else
+  fail "ipsw list names the device identifier shape"
+fi
+
 if [[ $failures -ne 0 ]]; then
   printf '%d of %d contract checks failed\n' "$failures" "$checks" >&2
   exit 1
