@@ -4158,10 +4158,10 @@ struct PommeCore {
         let error: String?
         if terminal["timedOut"] == .bool(true) {
             exitCode = 124
-            error = "Foreground command timed out; inspect the returned job ID before taking further action."
+            error = "Foreground command timed out; the guest job is still running. Run `pomme jobs list <vm>` to find its ID, then `pomme jobs wait` or `pomme jobs kill`."
         } else if terminal["cancelled"] == .bool(true) {
             exitCode = 130
-            error = "Foreground command was cancelled; inspect the returned job ID before taking further action."
+            error = "Foreground command was cancelled; the guest job may still be running. Run `pomme jobs list <vm>` to find its ID, then `pomme jobs wait` or `pomme jobs kill`."
         } else if terminal["stdoutTruncated"] == .bool(true) || terminal["stderrTruncated"] == .bool(true) {
             exitCode = 1
             error = "Foreground output exceeded the buffered limit; output is incomplete."

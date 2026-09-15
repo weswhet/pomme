@@ -853,26 +853,51 @@ enum PommeApplication {
             return result(title: title, reference: reference, payload: payload,
                           text: agentResponseText(payload))
         }
-        if case .jobList = request, payload["ok"] as? Bool == true {
-            guard let response = payload["result"] as? [String: Any],
-                  let jobs = response["jobs"] as? [[String: Any]] else {
+        return result(title: title, reference: reference, payload: payload,
+                      text: try guestRequestText(for: request, payload: payload))
+    }
+
+    /// Table text for a guest request whose answer is a control payload with
+    /// the agent's result nested under `result`. Job identifiers are printed
+    /// on the same line shape as `jobs list`, so the ID is always the second
+    /// token whichever command produced it.
+    static func guestRequestText(for request: GuestCLIRequest, payload: [String: Any]) throws -> String {
+        let ok = payload["ok"] as? Bool == true
+        let response = payload["result"] as? [String: Any]
+        switch request {
+        case .jobList where ok:
+            guard let response, let jobs = response["jobs"] as? [[String: Any]] else {
                 throw RunnerError.invalidControlResponse("Invalid background job list.")
             }
-            var lines = jobs.map { job -> String in
-                var summary = job
-                summary["state"] = job["exited"] as? Bool == true ? "exited" : "running"
-                return jobSummary(summary)
-            }
+            var lines = jobs.map { backgroundJobText($0) }
             if lines.isEmpty { lines = ["No background jobs."] }
             if response["truncated"] as? Bool == true { lines.append("The job list is truncated.") }
-            return result(title: title, reference: reference, payload: payload,
-                          text: lines.joined(separator: "\n"))
+            return lines.joined(separator: "\n")
+        case .startBackground where ok:
+            if let response, response["detached"] as? Bool == true, response["jobID"] != nil {
+                return backgroundJobText(response)
+            }
+        case .jobStatus where ok:
+            if let response, response["jobID"] != nil {
+                return backgroundJobText(response, includeOutputPending: true)
+            }
+        default:
+            break
         }
-        let text = payload["stdout"] as? String
+        return payload["stdout"] as? String
             ?? payload["error"] as? String
             ?? payload["state"] as? String
             ?? "OK"
-        return result(title: title, reference: reference, payload: payload, text: text)
+    }
+
+    private static func backgroundJobText(_ job: [String: Any], includeOutputPending: Bool = false) -> String {
+        var summary = job
+        summary["state"] = job["exited"] as? Bool == true ? "exited" : "running"
+        var text = jobSummary(summary)
+        if includeOutputPending {
+            text += " outputPending=\(job["outputPending"] as? Bool == true)"
+        }
+        return text
     }
 
     static func ui(name: String, request: GuestUIRequest) throws -> PommeOperationResult {
