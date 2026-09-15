@@ -169,10 +169,16 @@ struct UIKeySequenceCommand: ParsableCommand {
 struct UIClickCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "click", abstract: "Click guest display coordinates.")
     @Argument var name: String?
-    @Option(name: .customLong("x")) var x: Double
-    @Option(name: .customLong("y")) var y: Double
+    @Option(name: .customLong("x"), parsing: .unconditional, help: "Display x coordinate in points, from the left edge.") var x: Double
+    @Option(name: .customLong("y"), parsing: .unconditional, help: "Display y coordinate in points, from the top edge.") var y: Double
     @OptionGroup var timeout: TimeoutOptions
     @OptionGroup var output: GlobalOptions
+    mutating func validate() throws {
+        for (flag, value) in [("--x", x), ("--y", y)] where !(value.isFinite && value >= 0) {
+            throw ValidationError("\(flag) must be a finite display coordinate of zero or more.")
+        }
+    }
+
     mutating func run() throws {
         try runUIRequest(
             name: name,
@@ -217,9 +223,9 @@ struct UIAISettingsCommand: ParsableCommand {
     )
     @Argument(help: "[VM name] goal. Uses POMME_VM_NAME when the VM name is omitted.") var arguments: [String] = []
     @Option(name: .customLong("mode")) var mode = "suggest"
-    @Option(name: .customLong("max-steps")) var maxSteps = SettingsAIRequest.defaultMaxSteps
-    @Option(name: .customLong("confidence")) var confidence = SettingsAIRequest.defaultConfidence
-    @Option(name: .customLong("model-timeout")) var modelTimeout = SettingsAIRequest.defaultModelTimeout
+    @Option(name: .customLong("max-steps"), parsing: .unconditional) var maxSteps = SettingsAIRequest.defaultMaxSteps
+    @Option(name: .customLong("confidence"), parsing: .unconditional) var confidence = SettingsAIRequest.defaultConfidence
+    @Option(name: .customLong("model-timeout"), parsing: .unconditional) var modelTimeout = SettingsAIRequest.defaultModelTimeout
     @Flag(name: .customLong("deterministic-fallback")) var deterministicFallback = false
     @Flag(name: .customLong("no-open")) var noOpen = false
     @Option(name: .customLong("settings-url")) var settingsURL: String?

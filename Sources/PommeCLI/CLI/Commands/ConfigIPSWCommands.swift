@@ -133,7 +133,7 @@ struct IPSWListCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "list", abstract: "List available restore images.")
     @Option(name: .customLong("device"), help: "Apple silicon Mac identifier. Defaults to the host model.")
     var device: String?
-    @Option(name: .customLong("limit"), help: "Maximum number of results.")
+    @Option(name: .customLong("limit"), parsing: .unconditional, help: "Maximum number of results.")
     var limit: Int?
     @OptionGroup var output: GlobalOptions
 
