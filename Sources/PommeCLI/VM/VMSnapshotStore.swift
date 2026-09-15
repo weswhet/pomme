@@ -218,6 +218,11 @@ enum VMSnapshotStore {
     }
 
     private static func loadManifest(at snapshot: URL, verifyingMachineState: Bool) throws -> VMSnapshotManifest {
+        var value = stat()
+        if lstat(snapshot.path, &value) != 0, errno == ENOENT {
+            let bundle = snapshot.deletingLastPathComponent().deletingLastPathComponent()
+            throw RunnerError.snapshotNotFound(vm: bundle.deletingPathExtension().lastPathComponent, name: snapshot.lastPathComponent)
+        }
         try requireDirectory(snapshot)
         let names = try FileManager.default.contentsOfDirectory(atPath: snapshot.path)
         guard Set(names) == Set([manifestName, machineStateName]) else {
