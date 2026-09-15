@@ -10,6 +10,7 @@ enum RunnerError: LocalizedError {
     case downloadFailed(statusCode: Int)
     case invalidSize(flag: String, value: String)
     case memoryBelowGuestMinimum(requested: UInt64, minimum: UInt64)
+    case memoryBelowProvisionalFloor(requested: UInt64, minimum: UInt64)
     case memoryOutsideHostLimits(requested: UInt64, minimum: UInt64, maximum: UInt64)
     case backgroundStartFailed(status: Int32, logURL: URL)
     case backgroundStartTimedOut(pid: Int32, logURL: URL)
@@ -74,6 +75,8 @@ enum RunnerError: LocalizedError {
             "\(flag) requires a positive size such as 60GB, 8192MB, or a raw byte count. Got \(value)."
         case .memoryBelowGuestMinimum(let requested, let minimum):
             "The configured RAM \(byteCountText(requested)) is below the guest minimum \(byteCountText(minimum))."
+        case .memoryBelowProvisionalFloor(let requested, let minimum):
+            "The configured RAM \(byteCountText(requested)) is below the provisional guest minimum \(byteCountText(minimum)). The restore image's exact minimum is enforced once the image is present; no supported image needs less."
         case .memoryOutsideHostLimits(let requested, let minimum, let maximum):
             "The configured RAM \(byteCountText(requested)) is outside this host's supported range \(byteCountText(minimum))...\(byteCountText(maximum))."
         case .backgroundStartFailed(let status, let logURL):

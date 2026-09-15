@@ -98,6 +98,9 @@ struct PommeLocalRestoreImageIdentity: Equatable, Sendable {
     let version: String
     let build: String
     let recoveryProfile: PommeCreateRecoveryProfileDescriptor
+    /// The guest minimum the image itself reports, so a dry run can apply
+    /// the same memory check as the real create.
+    let minimumMemoryBytes: UInt64
 }
 
 /// Non-secret identity exposed to the request-bound Recovery factory. The
@@ -1865,6 +1868,10 @@ struct PommeCore {
             )
         }
 
+        // The floor runs before any download so a too-small request costs
+        // nothing; the image's exact minimum is checked again once loaded.
+        try validateProvisionalMemoryFloor(arguments.sizeOptions.memorySizeBytes)
+
         // All catalog, profile, image, hardware, and immutable identity checks
         // happen before the bundle is touched.  An unknown build or profile
         // therefore cannot leave a partial VM behind.
@@ -2124,6 +2131,9 @@ struct PommeCore {
         }
         let image = try await loadRestoreImage(from: canonicalURL)
         let version = "\(image.operatingSystemVersion.majorVersion).\(image.operatingSystemVersion.minorVersion).\(image.operatingSystemVersion.patchVersion)"
+        guard let requirements = image.mostFeaturefulSupportedConfiguration else {
+            throw RunnerError.noSupportedConfiguration
+        }
         let identity = PommeLocalRestoreImageIdentity(
             canonicalPath: canonicalURL.path,
             version: version,
@@ -2131,12 +2141,90 @@ struct PommeCore {
             recoveryProfile: try PommeRecoveryProfileSelector.descriptor(
                 version: version,
                 build: image.buildVersion
-            )
+            ),
+            minimumMemoryBytes: requirements.minimumSupportedMemorySize
         )
-        guard let requirements = image.mostFeaturefulSupportedConfiguration else {
-            throw RunnerError.noSupportedConfiguration
-        }
         return .init(identity: identity, requirements: requirements)
+    }
+
+    /// Every macOS restore image so far has reported this guest minimum. It
+    /// is applied before any download so a too-small request fails at once,
+    /// and the image's own value is applied as well whenever the image is
+    /// present.
+    static let provisionalGuestMemoryFloorBytes: UInt64 = 4_294_967_296
+
+    static func validateProvisionalMemoryFloor(_ memorySizeBytes: UInt64) throws {
+        try validateMemorySize(memorySizeBytes, requirements: nil)
+        guard memorySizeBytes >= provisionalGuestMemoryFloorBytes else {
+            throw RunnerError.memoryBelowProvisionalFloor(
+                requested: memorySizeBytes,
+                minimum: provisionalGuestMemoryFloorBytes
+            )
+        }
+    }
+
+    /// Where a dry run can find a restore image without downloading one.
+    enum DryRunRestoreSource {
+        case localImage(path: String)
+        case firmware(IPSWMEFirmware)
+        case template(PommeTemplateManifest)
+    }
+
+    struct DryRunMemoryCheck: Equatable {
+        let minimumBytes: UInt64
+        let provisional: Bool
+        let restoreImagePath: String?
+
+        var payload: [String: Any] {
+            var value: [String: Any] = ["bytes": minimumBytes, "provisional": provisional]
+            if let restoreImagePath { value["restoreImage"] = restoreImagePath }
+            return value
+        }
+    }
+
+    /// Applies the memory checks a real create would apply, without the
+    /// download. The floor runs first and offline; the image's exact minimum
+    /// follows when the image is already on disk.
+    static func dryRunMemoryCheck(
+        memoryBytes: UInt64,
+        source: DryRunRestoreSource,
+        vmName: String
+    ) async throws -> DryRunMemoryCheck {
+        try validateProvisionalMemoryFloor(memoryBytes)
+        let localPath: String?
+        switch source {
+        case .localImage(let path):
+            localPath = path
+        case .firmware(let firmware):
+            localPath = (try? cachedRestoreImageURL(for: firmware))?.path
+        case .template(let manifest):
+            localPath = isRegularFile(URL(fileURLWithPath: manifest.restoreImagePath)) ? manifest.restoreImagePath : nil
+        }
+        guard let localPath else {
+            log("Memory check is provisional: the restore image is not present locally, so only the \(byteCountText(provisionalGuestMemoryFloorBytes)) floor was applied.", vmName: vmName)
+            return DryRunMemoryCheck(minimumBytes: provisionalGuestMemoryFloorBytes, provisional: true, restoreImagePath: nil)
+        }
+        let identity = try await inspectLocalRestoreImage(path: localPath)
+        try validateMemorySize(memoryBytes, minimumGuestMemory: identity.minimumMemoryBytes)
+        return DryRunMemoryCheck(minimumBytes: identity.minimumMemoryBytes, provisional: false, restoreImagePath: identity.canonicalPath)
+    }
+
+    /// The completed cache file for a catalog entry, if one exists. This is
+    /// the same rule the download uses to skip a fetch, kept in one place so
+    /// a dry run and the real create agree on what "already present" means.
+    static func cachedRestoreImageURL(for firmware: IPSWMEFirmware) throws -> URL? {
+        let directory = try applicationSupportRoot().appendingPathComponent(Constants.restoreImageDirectoryName, isDirectory: true)
+        return cachedRestoreImageURL(for: firmware, in: directory)
+    }
+
+    static func cachedRestoreImageURL(for firmware: IPSWMEFirmware, in directory: URL) -> URL? {
+        guard let expectedSize = firmware.filesize, expectedSize > 0,
+              let remoteURL = URL(string: firmware.url) else { return nil }
+        let fileName = remoteURL.lastPathComponent.isEmpty
+            ? "macOS-\(firmware.version)-\(firmware.buildid).ipsw"
+            : remoteURL.lastPathComponent
+        let destination = directory.appendingPathComponent(fileName)
+        return fileSize(destination) == expectedSize ? destination : nil
     }
 
     private static func loadRestoreImage(from url: URL) async throws -> VZMacOSRestoreImage {
@@ -2154,6 +2242,10 @@ struct PommeCore {
         _ memorySizeBytes: UInt64,
         requirements: VZMacOSConfigurationRequirements?
     ) throws {
+        try validateMemorySize(memorySizeBytes, minimumGuestMemory: requirements?.minimumSupportedMemorySize)
+    }
+
+    static func validateMemorySize(_ memorySizeBytes: UInt64, minimumGuestMemory: UInt64?) throws {
         let minimum = VZVirtualMachineConfiguration.minimumAllowedMemorySize
         let maximum = VZVirtualMachineConfiguration.maximumAllowedMemorySize
         guard memorySizeBytes >= minimum, memorySizeBytes <= maximum else {
@@ -2163,10 +2255,10 @@ struct PommeCore {
                 maximum: maximum
             )
         }
-        if let requirements, memorySizeBytes < requirements.minimumSupportedMemorySize {
+        if let minimumGuestMemory, memorySizeBytes < minimumGuestMemory {
             throw RunnerError.memoryBelowGuestMinimum(
                 requested: memorySizeBytes,
-                minimum: requirements.minimumSupportedMemorySize
+                minimum: minimumGuestMemory
             )
         }
     }
@@ -4701,7 +4793,7 @@ struct PommeCore {
         let destination = directory.appendingPathComponent(fileName)
         let partial = directory.appendingPathComponent(".\(fileName).part")
         let fileManager = FileManager.default
-        if fileSize(destination) == expectedSize {
+        if cachedRestoreImageURL(for: firmware, in: directory) != nil {
             // A completed destination wins; remove only the deterministic
             // temporary file owned by this download operation.
             try? fileManager.removeItem(at: partial)

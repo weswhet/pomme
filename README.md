@@ -70,6 +70,10 @@ pomme create dev --from-template base --memory 4GB
 pomme template list
 ```
 
+Every create path, `--dry-run` included, requires at least 4 GiB of guest
+memory; when the restore image is already local the image's own minimum is
+applied as well.
+
 A template holds only the restored disk image, auxiliary storage, and
 hardware model. `--from-template` clones them copy-on-write (APFS) under a
 fresh machine identifier and UUID and then runs the same journaled Recovery

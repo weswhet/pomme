@@ -137,6 +137,19 @@ struct VMCreationPlanningTests {
         let results = try await executor.execute([plan], dryRun: true, parallelism: 1)
         #expect(results[0].payload["dryRun"] as? Bool == true)
         #expect(await installs.value == 0)
+
+        let refusing = VMCreationExecutor(dependencies: .init(
+            install: { plan in
+                await installs.increment()
+                return operationResult(name: plan.name, ok: true)
+            },
+            dryRunPreflight: { _ in throw RunnerError.hostCommandFailed("The plan would not install.") }
+        ))
+        let refused = try await refusing.execute([plan], dryRun: true, parallelism: 1)
+        #expect(refused[0].ok == false)
+        #expect(refused[0].payload["error"] as? String == "The plan would not install.")
+        #expect(refused[0].payload["dryRun"] as? Bool == true)
+        #expect(await installs.value == 0)
     }
 
     private func sampleConfig() -> VMCreationConfigV1 {
