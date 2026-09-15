@@ -60,7 +60,7 @@ enum RunnerError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .usage:
-            PommeHelp.text(.primary)
+            "The arguments are not valid. Run 'pomme --help' for usage."
         case .unsupportedHost:
             "Virtualization.framework is not available on this host."
         case .noSupportedConfiguration:
@@ -165,53 +165,6 @@ enum RunnerError: LocalizedError {
             message
         case .keychainError(let message):
             "Host Keychain error: \(message)"
-        }
-    }
-}
-enum PommeHelpPage {
-    case primary, tui, tools, agentHelp, create, config, vm, guest, files, mdm, ui, security, ipsw
-}
-
-enum PommeHelp {
-    static func text(_ page: PommeHelpPage) -> String {
-        switch page {
-        case .primary:
-            """
-            pomme 0.1.0 — create and control Pomme-owned macOS virtual machines
-
-            Usage: pomme <command> [options]
-
-            Commands:
-              create, list, start, stop, restart, pause, resume, delete
-              status, inspect, exec, shell, jobs, cp, cat, agent
-              sip, amfi, mdm, remote-login, screen-sharing, snapshot, config, ipsw, ui, tui
-
-            Run `pomme <command> --help` for command-specific help.
-            """
-        case .tui:
-            "Usage: pomme tui"
-        case .tools:
-            "Usage: pomme tools [--format table|json|jsonl|raw]"
-        case .agentHelp:
-            "pomme-agent-help v1; targets are positional; env=POMME_VM_NAME; agent=status|repair; snapshot=create|list|restore|delete"
-        case .create:
-            "Usage: pomme create NAME (--version SELECTOR|--restore-image PATH) [--boot none|normal|recovery]\n       pomme create NAME --resume"
-        case .config:
-            "Usage: pomme config init|validate|render ..."
-        case .vm:
-            "Usage: pomme start|stop|restart|pause|resume|status|inspect|delete NAME"
-        case .guest:
-            "Usage: pomme exec NAME -- COMMAND [ARGS...]\n       pomme shell NAME EXPRESSION\n       pomme jobs <action> NAME"
-        case .files:
-            "Usage: pomme cp SOURCE DESTINATION\n       pomme cat NAME:/absolute/path"
-        case .mdm:
-            "Usage: pomme mdm NAME --profile PATH [--enrollment-mode supervised|unapproved]"
-        case .ui:
-            "Usage: pomme ui <action> NAME"
-        case .security:
-            "Usage: pomme sip|amfi <status|enable|disable> NAME [--final-state STATE]"
-        case .ipsw:
-            "Usage: pomme ipsw list|download ..."
         }
     }
 }

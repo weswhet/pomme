@@ -280,6 +280,21 @@ else
   fail "delete run-time validation names the delete usage"
 fi
 
+marketing_version="$(sed -n 's/^MARKETING_VERSION = //p' "$repo_root/Config/Shared.xcconfig")"
+expect_success "version prints the build identity" "$runner" --version
+version_line="$(cat "$work/stdout")"
+if [[ -n "$marketing_version" && "$version_line" == "pomme $marketing_version ("?*")" ]]; then
+  pass "version line names the marketing version and commit"
+else
+  fail "version line names the marketing version and commit"
+fi
+expect_failure "create --version without a value is still an option error" "$runner" create example --version
+if grep -q "Missing value for '--version <version>'" "$work/stderr"; then
+  pass "create --version keeps its option meaning"
+else
+  fail "create --version keeps its option meaning"
+fi
+
 if [[ $failures -ne 0 ]]; then
   printf '%d of %d contract checks failed\n' "$failures" "$checks" >&2
   exit 1

@@ -220,7 +220,9 @@
 				CODE_SIGN_STYLE = Manual;
 				DEVELOPMENT_TEAM = "";
 				"DEVELOPMENT_TEAM[sdk=macosx*]" = 2D8XQ77EBQ;
+				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
 				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Config/pomme-Info.plist";
 				PRODUCT_BUNDLE_IDENTIFIER = com.github.weswhet.pomme;
 				PRODUCT_DISPLAY_NAME = pomme;
 				PRODUCT_NAME = pomme;
@@ -241,7 +243,9 @@
 				CODE_SIGN_STYLE = Manual;
 				DEVELOPMENT_TEAM = "";
 				"DEVELOPMENT_TEAM[sdk=macosx*]" = 2D8XQ77EBQ;
+				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
 				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Config/pomme-Info.plist";
 				PRODUCT_BUNDLE_IDENTIFIER = com.github.weswhet.pomme;
 				PRODUCT_DISPLAY_NAME = pomme;
 				PRODUCT_NAME = pomme;

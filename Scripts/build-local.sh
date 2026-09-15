@@ -67,6 +67,7 @@ designated_requirement() {
 }
 
 cd "$repo_root"
+git_commit="$(git describe --always --dirty 2>/dev/null || echo unknown)"
 # Xcode signs the target using its Release entitlement configuration. Do not
 # apply a global entitlement path to Swift package dependency targets.
 rtk proxy xcodebuildmcp macos build \
@@ -82,6 +83,7 @@ rtk proxy xcodebuildmcp macos build \
     'CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO' \
     'ENABLE_HARDENED_RUNTIME=YES' \
     "OTHER_CODE_SIGN_FLAGS=--identifier $identifier --timestamp" \
+    "POMME_GIT_COMMIT=$git_commit" \
   --verbose --output text
 
 [[ -f "$runner" && -x "$runner" && ! -L "$runner" ]] || fail 'The build did not produce a regular executable.'

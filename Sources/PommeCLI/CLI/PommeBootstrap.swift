@@ -35,6 +35,11 @@ enum PommeBootstrap {
             PommeCore.makeLiveRecoveryIntegrationFactory()
         )
 
+        if arguments == ["--version"] {
+            print(PommeBuildInfo.current.versionLine)
+            Foundation.exit(0)
+        }
+
         let publicArguments = PommeCore.normalizedPublicArguments(arguments)
         if publicArguments.contains("--debug") {
             let command = publicArguments.first(where: { !$0.hasPrefix("-") }) ?? "help"
