@@ -5,6 +5,7 @@ struct PommeCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "pomme",
         abstract: "Create and control macOS virtual machines.",
+        discussion: "Run 'pomme --version' to print the version and the commit it was built from.",
         subcommands: [
             CreateCommand.self,
             ListCommand.self,
