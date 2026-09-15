@@ -124,6 +124,52 @@ struct UIUtilityCommandTests {
     }
 }
 
+@Suite("UI type grammar")
+struct UITypeCommandTests {
+    @Test("Positional text follows an optional VM name")
+    func positionalText() throws {
+        let explicit = try UITypeCommand.parse(["t1", "hi"]).target(environmentTarget: nil)
+        let environment = try UITypeCommand.parse(["hi"]).target(environmentTarget: "t2")
+
+        #expect(explicit.name == "t1")
+        #expect(explicit.positionalText == "hi")
+        #expect(environment.name == "t2")
+        #expect(environment.positionalText == "hi")
+    }
+
+    @Test("--text and --text-env take at most a VM name positionally")
+    func explicitTextForms() throws {
+        let text = try UITypeCommand.parse(["t1", "--text", "hi"]).target(environmentTarget: nil)
+        let environmentText = try UITypeCommand.parse(["--text-env", "GREETING"]).target(environmentTarget: nil)
+
+        #expect(text.name == "t1")
+        #expect(text.positionalText == nil)
+        #expect(environmentText.name == nil)
+        #expect(environmentText.positionalText == nil)
+    }
+
+    @Test("Conflicting or missing text forms are rejected", arguments: [
+        ["t1", "hi", "--text", "hi"],
+        ["t1", "--text", "hi", "--text-env", "GREETING"],
+        ["t1", "hi", "--text-env", "GREETING"],
+        [String]()
+    ])
+    func conflictingForms(arguments: [String]) {
+        #expect(throws: (any Error).self) {
+            _ = try UITypeCommand.parse(arguments)
+        }
+    }
+
+    @Test("Positional text without any target names the grammar")
+    func missingTarget() throws {
+        let command = try UITypeCommand.parse(["hi"])
+
+        #expect(throws: ValidationError.self) {
+            _ = try command.target(environmentTarget: nil)
+        }
+    }
+}
+
 @Suite("UI command help")
 struct UICommandHelpTests {
     @Test("ui ai settings lists its modes and describes every option")

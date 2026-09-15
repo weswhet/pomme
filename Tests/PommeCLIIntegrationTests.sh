@@ -192,7 +192,7 @@ if grep -qi 'unavailable' "$work/stdout"; then
 else
   fail "AI help exposes unavailable bridge"
 fi
-if grep -q 'suggest, step, loop' "$work/stdout"; then
+if tr -s ' \n' ' ' <"$work/stdout" | grep -q 'values: suggest, step, loop'; then
   pass "AI help lists the modes"
 else
   fail "AI help lists the modes"
@@ -322,6 +322,13 @@ if grep -q "'table', 'json' or 'jsonl'" "$work/stderr"; then
   pass "raw rejection names the supported formats"
 else
   fail "raw rejection names the supported formats"
+fi
+
+expect_failure "ui type takes positional text" env POMME_VM_NAME=invalid/name "$runner" ui type hi
+if grep -q 'Invalid VM name invalid/name' "$work/stderr"; then
+  pass "ui type positional value is text, not a VM name"
+else
+  fail "ui type positional value is text, not a VM name"
 fi
 
 if [[ $failures -ne 0 ]]; then
