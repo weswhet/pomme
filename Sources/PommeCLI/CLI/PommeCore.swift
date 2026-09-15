@@ -3697,6 +3697,12 @@ struct PommeCore {
         return url
     }
 
+    /// The helper's reply to a lifecycle command. `changed` is false when the
+    /// VM was already in the requested state.
+    static func lifecycleReply(_ command: PommeLifecycleCommand, changed: Bool) -> [String: Any] {
+        ["ok": true, "operation": command.rawValue, "changed": changed, "hostExitCode": 0]
+    }
+
     private static func runtimeControlResponse(
         _ request: PommeVMControlRequest,
         runtime: PommeVMRuntime,
@@ -3706,18 +3712,19 @@ struct PommeCore {
         do {
             switch request {
             case .lifecycle(let command):
+                let changed: Bool
                 switch command {
-                case .pause: try await runtime.pause()
-                case .resume: try await runtime.resume()
+                case .pause: changed = try await runtime.pause()
+                case .resume: changed = try await runtime.resume()
                 case .stop, .forceStop:
                     await exitSignal.beginExitHold()
                     // The response-completion hook releases this hold after
                     // success or failure is written. A concurrent guest-stop
                     // notification remains pending until then as well.
-                    if command == .forceStop { try await runtime.forceStopNow() } else { try await runtime.stop() }
+                    changed = command == .forceStop ? try await runtime.forceStopNow() : try await runtime.stop()
                     await exitSignal.requestExit()
                 }
-                return try jsonLine(["ok": true, "operation": command.rawValue, "hostExitCode": 0])
+                return try jsonLine(lifecycleReply(command, changed: changed))
             case .snapshotSave(let request):
                 try await runtime.saveSnapshotMachineState(in: request.stageName)
                 return try jsonLine(["ok": true, "operation": "snapshot-save", "hostExitCode": 0])

@@ -197,31 +197,40 @@ final class PommeVMRuntime: @unchecked Sendable {
         }
     }
 
-    func stop() async throws {
+    /// Each lifecycle call returns whether it changed the VM's state, so the
+    /// reply can tell a stop, pause, or resume apart from a no-op.
+    @discardableResult
+    func stop() async throws -> Bool {
         let state = await PommeCore.state(of: vm, on: queue)
-        guard state != .stopped else { await teardown(); return }
+        guard state != .stopped else { await teardown(); return false }
         if await PommeCore.canRequestStop(vm, on: queue) {
             do {
                 try await PommeCore.requestStop(vm, on: queue)
-                if await waitUntilStopped(timeout: Constants.gracefulStopTimeoutSeconds) { await teardown(); return }
+                if await waitUntilStopped(timeout: Constants.gracefulStopTimeoutSeconds) { await teardown(); return true }
             } catch { }
         }
         try await forceStop()
         await teardown()
+        return true
     }
 
-    func forceStopNow() async throws { try await forceStop(); await teardown() }
+    @discardableResult
+    func forceStopNow() async throws -> Bool { try await forceStop(); await teardown(); return true }
 
-    func resume() async throws {
+    @discardableResult
+    func resume() async throws -> Bool {
         let state = await PommeCore.state(of: vm, on: queue)
-        guard try VMPauseResumeTransition.requiresFrameworkCall(.resume, state: state, canPause: false, canResume: await PommeCore.canResume(vm, on: queue)) else { return }
+        guard try VMPauseResumeTransition.requiresFrameworkCall(.resume, state: state, canPause: false, canResume: await PommeCore.canResume(vm, on: queue)) else { return false }
         try await PommeCore.resume(vm, on: queue)
+        return true
     }
 
-    func pause() async throws {
+    @discardableResult
+    func pause() async throws -> Bool {
         let state = await PommeCore.state(of: vm, on: queue)
-        guard try VMPauseResumeTransition.requiresFrameworkCall(.pause, state: state, canPause: await PommeCore.canPause(vm, on: queue), canResume: false) else { return }
+        guard try VMPauseResumeTransition.requiresFrameworkCall(.pause, state: state, canPause: await PommeCore.canPause(vm, on: queue), canResume: false) else { return false }
         try await PommeCore.pause(vm, on: queue)
+        return true
     }
 
     func saveSnapshotMachineState(in stageName: String) async throws {

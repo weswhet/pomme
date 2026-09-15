@@ -20,4 +20,27 @@ struct PauseCommandTests {
         #expect(VMFinalState(rawValue: "paused") == .paused)
         #expect(VMFinalState(rawValue: "suspended") == nil)
     }
+
+    @Test("Lifecycle text confirms a change and names a no-op", arguments: [
+        (PommeLifecycleCommand.pause, true, "OK paused"),
+        (.pause, false, "VM is already paused."),
+        (.resume, true, "OK resumed"),
+        (.resume, false, "VM is already running."),
+        (.stop, true, "OK stopped"),
+        (.stop, false, "VM is already stopped."),
+        (.forceStop, true, "OK stopped (forced)"),
+        (.forceStop, false, "VM is already stopped.")
+    ])
+    func lifecycleText(command: PommeLifecycleCommand, changed: Bool, text: String) {
+        #expect(PommeApplication.lifecycleText(command, changed: changed) == text)
+    }
+
+    @Test("The helper's lifecycle reply says whether the state changed")
+    func lifecycleReplyCarriesChanged() {
+        let reply = PommeCore.lifecycleReply(.pause, changed: false)
+
+        #expect(reply["changed"] as? Bool == false)
+        #expect(reply["operation"] as? String == "pause")
+        #expect(reply["ok"] as? Bool == true)
+    }
 }
