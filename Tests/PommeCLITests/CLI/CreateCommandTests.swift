@@ -135,6 +135,25 @@ struct CreateCommandTests {
         #expect(command.output.json)
     }
 
+    @Test("Parallel is a bare flag that names its own misuse")
+    func parallelFlagGrammar() throws {
+        var bare = try CreateCommand.parse(["--config", "create.yaml", "--dry-run", "--parallel"])
+        try bare.validate()
+        #expect(bare.parallel)
+
+        do {
+            var counted = try CreateCommand.parse(["--config", "create.yaml", "--dry-run", "--parallel", "2"])
+            try counted.validate()
+            Issue.record("--parallel 2 was accepted.")
+        } catch {
+            #expect(CreateCommand.fullMessage(for: error).contains("--parallel takes no value"))
+        }
+
+        #expect(throws: Error.self) {
+            _ = try CreateCommand.parse(["--config", "create.yaml", "--parallel-limit", "2"])
+        }
+    }
+
     @Test("Resume rejects creation parameters", arguments: [
         ["research-agent", "--resume", "--version", "26.6.0"],
         ["research-agent", "--resume", "--restore-image", "/tmp/Restore.ipsw"],

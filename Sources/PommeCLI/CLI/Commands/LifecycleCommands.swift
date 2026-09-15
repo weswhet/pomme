@@ -82,11 +82,8 @@ struct CreateCommand: AsyncParsableCommand {
     )
     var resume = false
 
-    @Flag(name: .customLong("parallel"), help: "Create config versions concurrently. Accepts an optional limit; the default is two.")
+    @Flag(name: .customLong("parallel"), help: "Create config members two at a time instead of one after another. Virtualization allows at most two macOS guests, so the flag takes no count.")
     var parallel = false
-
-    @Option(name: .customLong("parallel-limit"), help: .hidden)
-    var parallelLimit: Int?
 
     @OptionGroup var output: GlobalOptions
 
@@ -121,13 +118,18 @@ struct CreateCommand: AsyncParsableCommand {
             _ = try validateVMName(name)
             let creationArgumentsSupplied = configPath != nil || version != nil || restoreImage != nil
                 || fromTemplate != nil || ipswDevice != nil || diskSize != "60GB" || memory != "8GB" || boot != .normal
-                || dryRun || parallel || parallelLimit != nil
+                || dryRun || parallel
             guard !creationArgumentsSupplied else {
                 throw ValidationError("--resume accepts only a VM name and output or debug options.")
             }
             return
         }
         if let configPath {
+            // A count after --parallel lands in the positional name slot; say
+            // so instead of blaming the operator for naming a VM.
+            if parallel, let name, Int(name) != nil {
+                throw ValidationError("--parallel takes no value; config creation runs at most two VMs at once.")
+            }
             let directSettingsWereSupplied = name != nil || version != nil || restoreImage != nil || ipswDevice != nil
                 || fromTemplate != nil
                 || diskSize != "60GB" || memory != "8GB" || boot != .normal
@@ -154,7 +156,7 @@ struct CreateCommand: AsyncParsableCommand {
             if restoreImage != nil, ipswDevice != nil {
                 throw ValidationError("--ipsw-device is available only with --version.")
             }
-            if parallel || parallelLimit != nil {
+            if parallel {
                 throw ValidationError("--parallel is available only with --config.")
             }
             for (flag, value) in [("--disk-size", diskSize), ("--memory", memory)] {
@@ -162,9 +164,6 @@ struct CreateCommand: AsyncParsableCommand {
                     throw ValidationError("\(flag) requires a valid size greater than zero.")
                 }
             }
-        }
-        if let parallelLimit, parallelLimit < 1 {
-            throw ValidationError("--parallel-limit must be greater than zero.")
         }
     }
 
@@ -175,7 +174,7 @@ struct CreateCommand: AsyncParsableCommand {
             return
         }
         if let configPath {
-            let limit = parallelLimit ?? (parallel ? 2 : 1)
+            let limit = parallel ? VMCreationExecutor.maximumParallelism : 1
             let results = try await CreateConfigRunner.run(
                 path: configPath,
                 dryRun: dryRun,
