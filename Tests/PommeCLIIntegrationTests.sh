@@ -267,6 +267,19 @@ else
   fail "key sequence explains target disambiguation"
 fi
 
+expect_failure "status without a target shows status usage" env -u POMME_VM_NAME "$runner" status
+if grep -q '^Usage: pomme status' "$work/stderr" && grep -q "See 'pomme status --help'" "$work/stderr"; then
+  pass "status run-time validation names the status usage"
+else
+  fail "status run-time validation names the status usage"
+fi
+expect_failure "non-interactive delete requires force" "$runner" delete missing </dev/null
+if grep -q '^Usage: pomme delete' "$work/stderr" && grep -q -- '--force' "$work/stderr"; then
+  pass "delete run-time validation names the delete usage"
+else
+  fail "delete run-time validation names the delete usage"
+fi
+
 if [[ $failures -ne 0 ]]; then
   printf '%d of %d contract checks failed\n' "$failures" "$checks" >&2
   exit 1
