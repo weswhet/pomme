@@ -80,6 +80,30 @@ struct PommeAgentExecutionOptionsTests: Sendable {
         }
     }
 
+    @Test("A missing executable, working directory, or user is named")
+    func launchFailuresAreNamed() async throws {
+        let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64))
+        let cases: [(JSONValue, PommeAgentOperationError)] = [
+            (.object(["path": .string("/nonexistent/bin"), "arguments": .array([])]),
+             .described(.notFound, message: "No such executable: /nonexistent/bin")),
+            (.object(["path": .string("/bin/pwd"), "arguments": .array([]), "cwd": .string("/nonexistent")]),
+             .described(.notFound, message: "No such working directory: /nonexistent")),
+            (.object(["path": .string("/bin/pwd"), "arguments": .array([]), "cwd": .string("/bin/pwd")]),
+             .described(.invalid, message: "Working directory /bin/pwd is not a directory"))
+        ]
+        for (payload, expected) in cases {
+            await #expect(throws: expected) {
+                _ = try await agent.perform(.request(operation: "process.start", payload: payload))
+            }
+        }
+        #expect(throws: PommeAgentOperationError.described(.notFound, message: "No such guest user: pomme-no-such-user")) {
+            _ = try PommePrivilege.resolve(["user": .string("pomme-no-such-user")])
+        }
+        #expect(throws: PommeAgentOperationError.described(.notFound, message: "No such guest group: pomme-no-such-group")) {
+            _ = try PommePrivilege.resolve(["user": .string("root"), "group": .string("pomme-no-such-group")])
+        }
+    }
+
     @Test("Privilege resolution returns usable root and current-account groups")
     func privilegeResolutionIncludesRealGroups() throws {
         let rootByName = try #require(try PommePrivilege.resolve(["user": .string("root")]))

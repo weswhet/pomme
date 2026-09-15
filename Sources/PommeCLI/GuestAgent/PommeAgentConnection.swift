@@ -73,7 +73,7 @@ final class PommeAgentConnection: @unchecked Sendable {
                 do {
                     response = .response(to: request, result: try await handler(request))
                 } catch {
-                    let failure = operationFailure(error)
+                    let failure = Self.operationFailure(error)
                     response = .failure(to: request, code: failure.code, message: failure.message)
                 }
             }
@@ -93,7 +93,7 @@ final class PommeAgentConnection: @unchecked Sendable {
         if lifetime == .oneShot { consumed = true }
     }
 
-    private func operationFailure(_ error: Error) -> (code: String, message: String) {
+    static func operationFailure(_ error: Error) -> (code: String, message: String) {
         if let recoveryError = error as? PommeGuestRecoverySecurityError {
             return (recoveryError.recoveryFailureCode.rawValue, "The requested operation could not be completed.")
         }
@@ -101,6 +101,8 @@ final class PommeAgentConnection: @unchecked Sendable {
             return ("operation-failed", "The requested operation could not be completed.")
         }
         switch operationError {
+        case .described(let inner, let message):
+            return (operationFailure(inner).code, message)
         case .unsupported: return ("unsupported-operation", "The requested operation could not be completed.")
         case .activationPending: return ("activation-pending", "The requested operation could not be completed.")
         case .invalid: return ("invalid-operation", "The requested operation could not be completed.")

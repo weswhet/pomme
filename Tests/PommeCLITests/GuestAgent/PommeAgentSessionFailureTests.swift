@@ -45,6 +45,20 @@ struct PommeAgentSessionFailureTests {
         #expect(failure == failure)
     }
 
+    @Test("A described operation failure keeps the inner code and carries its message")
+    func describedFailureCarriesMessage() {
+        let failure = PommeAgentConnection.operationFailure(
+            PommeAgentOperationError.described(.notFound, message: "No such executable: /nonexistent/bin")
+        )
+        let plain = PommeAgentConnection.operationFailure(PommeAgentOperationError.notFound)
+        let rendered = PommeAgentSessionError(code: failure.code, message: failure.message)
+
+        #expect(failure.code == "not-found")
+        #expect(failure.message == "No such executable: /nonexistent/bin")
+        #expect(plain.message == "The requested operation could not be completed.")
+        #expect(rendered.localizedDescription == "Pomme agent request failed (not-found): No such executable: /nonexistent/bin")
+    }
+
     @Test("correlation failures remain protocol errors")
     func wrongCorrelationRemainsProtocolFailure() async throws {
         let harness = try SessionHarness { request in

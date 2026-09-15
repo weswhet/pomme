@@ -798,6 +798,57 @@ enum PommeAgentFileTransaction {
         guard descriptor >= 0, fsync(descriptor) == 0 else { throw PommeAgentProtocol.Error.invalidRequest }
     }
 
+    /// Why an open beneath the verified-parent walk failed, found by walking
+    /// the same components again with lstat. Only diagnostic: the walk
+    /// itself stays the authoritative check.
+    enum OpenFailure: Equatable, Sendable {
+        case missing(String)
+        case notRegular(String, isDirectory: Bool)
+        case permission(String)
+        case unsafe(String)
+    }
+
+    static func diagnoseOpenFailure(_ url: URL, forWrite: Bool) -> OpenFailure? {
+        let path = url.path
+        let pieces = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard let first = pieces.first else { return nil }
+        // The same fixed root aliases the walk resolves lexically.
+        var walked = ["var", "tmp", "etc"].contains(first) ? "/private" : ""
+        var spelled = ""
+        for (index, component) in pieces.enumerated() {
+            walked += "/" + component
+            spelled += "/" + component
+            let isLeaf = index == pieces.count - 1
+            var info = stat()
+            guard lstat(walked, &info) == 0 else {
+                switch errno {
+                case ENOENT, ENOTDIR:
+                    guard isLeaf else { return .missing(spelled) }
+                    guard forWrite else { return .missing(path) }
+                    // A new file is staged in its parent, which must be writable.
+                    let parent = (walked as NSString).deletingLastPathComponent
+                    return access(parent, W_OK) == 0 ? nil : .permission(path)
+                case EACCES:
+                    return .permission(path)
+                default:
+                    return nil
+                }
+            }
+            let type = info.st_mode & S_IFMT
+            if type == S_IFLNK, walked != "/private" { return .unsafe(path) }
+            if !isLeaf {
+                guard type == S_IFDIR || walked == "/private" else { return .missing(path) }
+                continue
+            }
+            if forWrite {
+                return type == S_IFDIR ? .notRegular(path, isDirectory: true) : nil
+            }
+            guard type == S_IFREG else { return .notRegular(path, isDirectory: type == S_IFDIR) }
+            return access(walked, R_OK) == 0 ? nil : .permission(path)
+        }
+        return nil
+    }
+
     static func createAdjacentStage(for destination: URL) throws -> (url: URL, descriptor: Int32) {
         let name = ".pomme-stage-\(UUID().uuidString)"
         let stage = destination.deletingLastPathComponent().appendingPathComponent(name)
