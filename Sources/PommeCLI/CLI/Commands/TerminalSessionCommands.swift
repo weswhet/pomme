@@ -181,7 +181,7 @@ private extension SessionsDeleteCommand {
     static func sessionID(_ value: String) throws -> String { try TerminalSessionCommandSupport.sessionID(value) }
 }
 
-private enum TerminalSessionCommandSupport {
+enum TerminalSessionCommandSupport {
     static func sessionID(_ value: String) throws -> String {
         guard let id = UUID(uuidString: value), id.uuidString.lowercased() == value.lowercased() else {
             throw ValidationError("Session ID must be a UUID.")

@@ -74,6 +74,11 @@ struct PommeDurableTerminalSessionTests {
         let (loggedRecord, loggedBytes) = try await manager.logs(id, from: 90)
         #expect(loggedRecord.transcriptOffset == 100)
         #expect(loggedBytes == Data(bytes[90..<100]))
+        let (_, atEnd) = try await manager.logs(id, from: 100)
+        #expect(atEnd.isEmpty)
+        await #expect(throws: PommeDurableTerminalError.offsetBeyondEnd(offset: 101, length: 100)) {
+            _ = try await manager.logs(id, from: 101)
+        }
 
         let first = try await manager.attach(id, from: 0, takeover: false)
         await #expect(throws: PommeDurableTerminalError.attachmentBusy) {

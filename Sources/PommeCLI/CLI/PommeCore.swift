@@ -3688,7 +3688,19 @@ struct PommeCore {
         case "terminal.logs":
             let id = try terminalSessionID(from: request.payload)
             let offset = try optionalOffset(request.payload["offset"]) ?? 0
-            payload = try await runtime.terminalSessionLogs(id: id, offset: offset)
+            do {
+                payload = try await runtime.terminalSessionLogs(id: id, offset: offset)
+            } catch PommeDurableTerminalError.offsetBeyondEnd(let offset, let length) {
+                // Carry both numbers so the CLI can name the valid range
+                // without a second inspect round trip.
+                return try jsonLine([
+                    "ok": false,
+                    "error": PommeDurableTerminalError.offsetBeyondEnd(offset: offset, length: length).localizedDescription,
+                    "hostExitCode": 1,
+                    "fromOffset": offset,
+                    "transcriptOffset": length
+                ])
+            }
         case "terminal.terminate":
             let id = try terminalSessionID(from: request.payload)
             let force = try strictBoolean(request.payload["force"], default: false)
