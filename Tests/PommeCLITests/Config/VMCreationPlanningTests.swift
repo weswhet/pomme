@@ -71,6 +71,26 @@ struct VMCreationPlanningTests {
         #expect(!message.contains("CodingKeys("))
     }
 
+    @Test("Unknown config keys are rejected with the known keys named", arguments: [
+        ("yaml", "schemaVersion: 1\nname: lab\nversions: [latest]\nbogusKey: 1\n",
+         "Config key 'bogusKey' is not recognized. Known keys: boot, credentials, hardware, ipswDevice, mdm, name, schemaVersion, versions, workflow."),
+        ("json", #"{"schemaVersion":1,"name":"lab","versions":["latest"],"hardware":{"memroy":"4GB"}}"#,
+         "Config key 'hardware.memroy' is not recognized. Known keys: diskSize, memory."),
+        ("yaml", "schemaVersion: 1\nname: lab\nversions: [latest]\nhardware:\n  memroy: 4GB\n",
+         "Config key 'hardware.memroy' is not recognized. Known keys: diskSize, memory."),
+        ("toml", "schemaVersion = 1\nname = \"lab\"\nversions = [\"latest\"]\n[hardware]\nmemroy = \"4GB\"\n",
+         "Config key 'hardware.memroy' is not recognized. Known keys: diskSize, memory.")
+    ])
+    func unknownKeysAreRejected(extensionName: String, contents: String, expected: String) throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("unknown.\(extensionName)")
+        try Data(contents.utf8).write(to: url)
+
+        let error = #expect(throws: RunnerError.self) { try CreateConfigStore.load(path: url.path) }
+        #expect(error?.localizedDescription == expected)
+    }
+
     @Test("Creation configs reject security, credential, and enrollment controls")
     func unsupportedCreationControlsAreRejectedBeforePlanning() throws {
         let directory = try temporaryDirectory()

@@ -358,6 +358,20 @@ else
 fi
 rm -f "$work/cfgbad.yaml"
 
+cat >"$work/goodbogus.yaml" <<'YAML'
+schemaVersion: 1
+name: cfgtest
+versions: [26.6.2]
+bogusKey: true
+YAML
+expect_failure "config validate rejects an unknown key" "$runner" config validate "$work/goodbogus.yaml"
+if grep -q "Config key 'bogusKey' is not recognized" "$work/stderr"; then
+  pass "config unknown key is named"
+else
+  fail "config unknown key is named"
+fi
+rm -f "$work/goodbogus.yaml"
+
 if [[ $failures -ne 0 ]]; then
   printf '%d of %d contract checks failed\n' "$failures" "$checks" >&2
   exit 1
