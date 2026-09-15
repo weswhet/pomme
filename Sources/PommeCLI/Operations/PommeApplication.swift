@@ -595,8 +595,8 @@ enum PommeApplication {
 
         let text = [
             formatInspect(inspectPayload),
-            formatHealth(healthPayload),
-            formatCapabilities(capabilitiesPayload)
+            formatHealth(healthPayload, includeGuestAgent: false),
+            formatCapabilities(capabilitiesPayload, includeGuestAgent: false)
         ].joined(separator: "\n")
         return result(title: "Inspect", reference: reference, payload: payload, text: text)
     }
@@ -2966,10 +2966,10 @@ enum PommeApplication {
         return lines.joined(separator: "\n")
     }
 
-    private static func formatInspect(_ payload: [String: Any]) -> String {
+    static func formatInspect(_ payload: [String: Any]) -> String {
         var lines = [
             "bundle: \(stringValue(payload["bundlePath"]))",
-            "controlSocket: \(stringValue(payload["controlSocket"]))",
+            "pommeSocket: \(stringValue(payload["pommeSocket"]))",
             "helperRunning: \(stringValue(payload["helperRunning"]))",
             "vmState: \(stringValue(payload["vmState"]))",
             "bootMode: \(stringValue(payload["bootMode"]))",
@@ -2983,13 +2983,13 @@ enum PommeApplication {
         return lines.joined(separator: "\n")
     }
 
-    private static func formatHealth(_ payload: [String: Any]) -> String {
-        var lines = [
-            "health: \((payload["healthy"] as? Bool == true) ? "healthy" : "unhealthy")",
-            "vmState: \(stringValue(payload["vmState"]))",
-            "bootMode: \(stringValue(payload["bootMode"]))",
-            formatGuestAgent(payload["guestAgent"] as? [String: Any])
-        ]
+    /// `includeGuestAgent` is false where the inspect text above already
+    /// printed the guest agent line.
+    static func formatHealth(_ payload: [String: Any], includeGuestAgent: Bool = true) -> String {
+        var lines = ["health: \((payload["healthy"] as? Bool == true) ? "healthy" : "unhealthy")"]
+        if includeGuestAgent {
+            lines.append(formatGuestAgent(payload["guestAgent"] as? [String: Any]))
+        }
         for check in payload["checks"] as? [[String: Any]] ?? [] {
             let ok = check["ok"] as? Bool == true ? "ok" : "fail"
             let detail = stringValue(check["detail"])
@@ -2998,15 +2998,13 @@ enum PommeApplication {
         return lines.joined(separator: "\n")
     }
 
-    private static func formatCapabilities(_ payload: [String: Any]) -> String {
+    static func formatCapabilities(_ payload: [String: Any], includeGuestAgent: Bool = true) -> String {
         guard let agent = payload["guestAgent"] as? [String: Any] else {
             return payload["ok"] as? Bool == false ? stringValue(payload["error"]) : "Guest agent is unavailable."
         }
         let capabilities = agent["capabilities"] as? [String] ?? []
-        return [
-            formatGuestAgent(agent),
-            "capabilities: \(capabilities.sorted().joined(separator: ", "))"
-        ].joined(separator: "\n")
+        return ((includeGuestAgent ? [formatGuestAgent(agent)] : [])
+            + ["capabilities: \(capabilities.sorted().joined(separator: ", "))"]).joined(separator: "\n")
     }
 
     private static func formatGuestAgent(_ agent: [String: Any]?) -> String {
