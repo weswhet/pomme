@@ -7,8 +7,6 @@ enum CLIOutputFormat: String, CaseIterable, ExpressibleByArgument {
     case table
     case json
     case jsonl
-    case raw
-
 }
 
 /// Common presentation and diagnostic options.
@@ -16,7 +14,7 @@ struct GlobalOptions: ParsableArguments {
     @Flag(name: .customLong("json"), help: "Print JSON output. Equivalent to --format json.")
     var json = false
 
-    @Option(name: .customLong("format"), help: "Output format: table, json, jsonl, or raw.")
+    @Option(name: .customLong("format"), help: "Output format: table, json, or jsonl.")
     var format: CLIOutputFormat?
 
     @Flag(name: .customLong("debug"), help: "Print verbose diagnostic logging.")
@@ -111,9 +109,13 @@ enum CLIOutputWriter {
             }
         case .jsonl:
             for result in results {
-                print(try jsonLine(resultPayload(result)), terminator: "")
+                let payload = resultPayload(result)
+                let objects = result.jsonlCollectionKeyPath.map { jsonlLines(payload: payload, keyPath: $0) } ?? [payload]
+                for object in objects {
+                    print(try jsonLine(object), terminator: "")
+                }
             }
-        case .table, .raw:
+        case .table:
             for (index, result) in results.enumerated() {
                 let label = results.count > 1 ? (result.vmName ?? "unknown") : nil
                 let rendering = tableRendering(for: result, label: label)
@@ -278,12 +280,28 @@ enum CLIOutputWriter {
         }
     }
 
-    /// Writes an arbitrary payload using the selected representation.
-    static func write(payload: [String: Any], text: String, options: GlobalOptions) throws {
+    /// Writes an arbitrary payload using the selected representation. For a
+    /// list-shaped payload, `jsonlCollection` names the array whose elements
+    /// JSONL prints one per line; `jsonlElements` supplies those objects
+    /// directly when they are not a single array in the payload.
+    static func write(
+        payload: [String: Any],
+        text: String,
+        options: GlobalOptions,
+        jsonlCollection: String? = nil,
+        jsonlElements: [[String: Any]]? = nil
+    ) throws {
         switch try options.resolvedFormat() {
-        case .json, .jsonl:
+        case .json:
             print(try jsonLine(payload), terminator: "")
-        case .table, .raw:
+        case .jsonl:
+            let objects = payload["ok"] as? Bool == false
+                ? [payload]
+                : jsonlElements ?? jsonlCollection.map { jsonlLines(payload: payload, keyPath: [$0]) } ?? [payload]
+            for object in objects {
+                print(try jsonLine(object), terminator: "")
+            }
+        case .table:
             if payload["ok"] as? Bool == false {
                 try writeBytes(Data(("Error: " + text + "\n").utf8), to: STDERR_FILENO)
             } else {
@@ -293,6 +311,21 @@ enum CLIOutputWriter {
         if payload["ok"] as? Bool == false {
             throw ExitCode(PommeCore.hostExitCode(from: payload, default: 1))
         }
+    }
+
+    /// The objects JSONL prints for a list-shaped payload: one per element of
+    /// the array at `keyPath`, none for an empty array, or the whole payload
+    /// when the path does not lead to an array of objects (a failure envelope,
+    /// for example).
+    static func jsonlLines(payload: [String: Any], keyPath: [String]) -> [[String: Any]] {
+        var node: Any = payload
+        for key in keyPath {
+            guard let object = node as? [String: Any], let next = object[key] else {
+                return [payload]
+            }
+            node = next
+        }
+        return node as? [[String: Any]] ?? [payload]
     }
 
     private static func resultPayload(_ result: PommeOperationResult) -> [String: Any] {

@@ -72,12 +72,12 @@ def main():
                 f"got {record['transcriptOffset']} bytes and exit {record.get('exitCode')}; retained"
             )
         for _ in range(2):
-            actual = run("sessions", "logs", args.vm, session_id, "--format", "raw")
+            actual = run("sessions", "logs", args.vm, session_id)
             if actual != expected:
                 raise RuntimeError(f"session {session_id}: byte-exact replay failed; retained")
         tail = run(
             "sessions", "logs", args.vm, session_id,
-            "--from-offset", str(len(expected) - 3), "--format", "raw",
+            "--from-offset", str(len(expected) - 3),
         )
         if tail != b"END":
             raise RuntimeError(f"session {session_id}: offset replay failed; retained")

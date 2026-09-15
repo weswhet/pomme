@@ -116,7 +116,7 @@ struct ConfigRenderCommand: AsyncParsableCommand {
         let text = plans.map {
             "\($0.name)\tmacOS \($0.firmware.version)\t\($0.firmware.buildid)\tboot=\(($0.config.boot ?? .none).rawValue)"
         }.joined(separator: "\n")
-        try CLIOutputWriter.write(payload: payload, text: text, options: output)
+        try CLIOutputWriter.write(payload: payload, text: text, options: output, jsonlCollection: "vms")
     }
 }
 
@@ -164,7 +164,7 @@ struct IPSWListCommand: AsyncParsableCommand {
         let text = result.firmwares.map {
             "\($0.version)\t\($0.buildid)\tsigned=\($0.signed == true)"
         }.joined(separator: "\n")
-        try CLIOutputWriter.write(payload: payload, text: text, options: output)
+        try CLIOutputWriter.write(payload: payload, text: text, options: output, jsonlCollection: "firmwares")
     }
 }
 

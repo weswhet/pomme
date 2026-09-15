@@ -193,7 +193,9 @@ struct UIKeysCommand: ParsableCommand {
             "chaining": Self.chainingNote,
             "separators": ["-", "+"]
         ]
-        try CLIOutputWriter.write(payload: payload, text: lines.joined(separator: "\n"), options: output)
+        let elements = named.map { ["kind": "key", "name": $0.name, "aliases": $0.aliases] as [String: Any] }
+            + modifiers.map { ["kind": "modifier", "prefix": $0.prefix, "aliases": $0.aliases] as [String: Any] }
+        try CLIOutputWriter.write(payload: payload, text: lines.joined(separator: "\n"), options: output, jsonlElements: elements)
     }
 }
 
@@ -321,7 +323,8 @@ struct ToolsCommand: ParsableCommand {
                 "hostExitCode": 0
             ],
             text: groups.map { "\($0.name): \($0.commands.joined(separator: ", "))" }.joined(separator: "\n"),
-            options: output
+            options: output,
+            jsonlCollection: "groups"
         )
     }
 }
@@ -349,7 +352,7 @@ enum CommandCatalog {
     ]
 
     static let agentHelp = """
-    pomme-agent-help v1; target=<vm>|POMME_VM_NAME; output=--format table|json|jsonl|raw|--json; common=--debug|--help|-h
+    pomme-agent-help v1; target=<vm>|POMME_VM_NAME; output=--format table|json|jsonl|--json; common=--debug|--help|-h
     vm=create|list|ls|start|stop|restart|pause|resume|delete|rm|status|inspect|snapshot; agent=status|repair
     snapshot=create|list|restore|delete
     guest=exec|shell|jobs|cp|cat; security=sip|amfi|mdm; access=remote-login|screen-sharing
