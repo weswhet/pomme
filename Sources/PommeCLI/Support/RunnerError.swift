@@ -13,7 +13,7 @@ enum RunnerError: LocalizedError {
     case memoryOutsideHostLimits(requested: UInt64, minimum: UInt64, maximum: UInt64)
     case backgroundStartFailed(status: Int32, logURL: URL)
     case backgroundStartTimedOut(pid: Int32, logURL: URL)
-    case invalidVMName(String)
+    case invalidIdentifier(kind: PommeIdentifierKind, value: String)
     case missingVMNameForCreate
     case bundleCreateUnsupported
     case namedVMNotFound(String)
@@ -80,8 +80,8 @@ enum RunnerError: LocalizedError {
             "The VM helper exited during startup with status \(status). See \(logURL.path)."
         case .backgroundStartTimedOut(let pid, let logURL):
             "Timed out waiting for VM helper pid \(pid) to open its control socket. See \(logURL.path)."
-        case .invalidVMName(let name):
-            "Invalid VM name \(name). Use 1-64 ASCII letters, numbers, dots, underscores, or hyphens, starting with a letter or number."
+        case .invalidIdentifier(let kind, let value):
+            "Invalid \(kind.rawValue) \(value). Use 1-64 ASCII letters, numbers, dots, underscores, or hyphens, starting with a letter or number."
         case .missingVMNameForCreate:
             "Direct creation requires a VM name: `pomme create <name>`."
         case .bundleCreateUnsupported:

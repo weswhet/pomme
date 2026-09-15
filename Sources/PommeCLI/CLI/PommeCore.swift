@@ -2633,7 +2633,7 @@ struct PommeCore {
     /// agent, credential, or journal is involved; a failed restore removes
     /// the partial bundle.
     static func createTemplatePayload(name: String, arguments: CLIOptions) async throws -> [String: Any] {
-        let validName = try validateVMName(name)
+        let validName = try validateIdentifier(name, kind: .template)
         let bundle = try PommeTemplateStore.bundle(for: validName)
         guard !FileManager.default.fileExists(atPath: bundle.rootURL.path) else {
             throw PommeTemplateError.alreadyExists(validName)

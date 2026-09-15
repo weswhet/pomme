@@ -53,7 +53,7 @@ struct TemplateCreateCommand: AsyncParsableCommand {
             }
             version = "latest"
         }
-        _ = try validateVMName(name)
+        _ = try validateIdentifier(name, kind: .template)
         if version != nil, restoreImage != nil {
             throw ValidationError("Choose either --version or --restore-image.")
         }
@@ -67,7 +67,7 @@ struct TemplateCreateCommand: AsyncParsableCommand {
             guard version == nil, restoreImage == nil else {
                 throw ValidationError("Choose either --from-template or a restore image source.")
             }
-            _ = try validateVMName(fromTemplate)
+            _ = try validateIdentifier(fromTemplate, kind: .template)
         } else {
             guard version != nil || restoreImage != nil else {
                 throw ValidationError("Template creation requires --version, --latest, --restore-image, or --from-template with --provisioned.")
