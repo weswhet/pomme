@@ -74,11 +74,18 @@ actor PommeRuntimeUIController {
     }
 
     private func validatedKey(from payload: [String: JSONValue]) throws -> String {
-        guard let key = payload["key"]?.stringValue,
-              let resolved = HostDisplayKey.lookup(key)
-        else { throw RunnerError.invalidUICommand("Unsupported direct VM key.") }
-        _ = resolved
+        guard let key = payload["key"]?.stringValue else {
+            throw RunnerError.invalidUICommand("guest-ui key requires a key name.")
+        }
+        guard HostDisplayKey.lookup(key) != nil else {
+            throw RunnerError.invalidUICommand(Self.unsupportedKeyMessage(key))
+        }
         return key
+    }
+
+    static func unsupportedKeyMessage(_ key: String, index: Int? = nil) -> String {
+        let position = index.map { " at index \($0) of the key sequence" } ?? ""
+        return "Unsupported key '\(key)'\(position). Run `pomme ui keys` for the supported names."
     }
 
     private func validatedKeySequence(from payload: [String: JSONValue]) throws -> [String] {
@@ -86,10 +93,13 @@ actor PommeRuntimeUIController {
               !values.isEmpty,
               values.count <= PommeUIControlRequest.maximumKeyCount
         else { throw RunnerError.invalidUICommand("guest-ui key-sequence requires 1-\(PommeUIControlRequest.maximumKeyCount) keys.") }
-        return try values.map { value in
-            guard let key = value.stringValue,
-                  HostDisplayKey.lookup(key) != nil
-            else { throw RunnerError.invalidUICommand("Unsupported direct VM key.") }
+        return try values.enumerated().map { index, value in
+            guard let key = value.stringValue else {
+                throw RunnerError.invalidUICommand("guest-ui key-sequence requires key names.")
+            }
+            guard HostDisplayKey.lookup(key) != nil else {
+                throw RunnerError.invalidUICommand(Self.unsupportedKeyMessage(key, index: index))
+            }
             return key
         }
     }

@@ -1040,7 +1040,7 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
 
     func sendKey(name: String, timeout: TimeInterval) async throws -> [String: JSONValue] {
         guard let key = HostDisplayKey.lookup(name) else {
-            throw RunnerError.invalidUICommand("Unsupported direct VM key: \(name)")
+            throw RunnerError.invalidUICommand(PommeRuntimeUIController.unsupportedKeyMessage(name))
         }
         let dimensions = try await dispatchKeyPlan(
             [key.inputEventPlan],
@@ -1063,7 +1063,7 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
         }
         let keys = try names.map { name -> HostDisplayKey in
             guard let key = HostDisplayKey.lookup(name) else {
-                throw RunnerError.invalidUICommand("Unsupported direct VM key: \(name)")
+                throw RunnerError.invalidUICommand(PommeRuntimeUIController.unsupportedKeyMessage(name))
             }
             return key
         }

@@ -10,6 +10,7 @@ struct UICommand: ParsableCommand {
             UITypeCommand.self,
             UIKeyCommand.self,
             UIKeySequenceCommand.self,
+            UIKeysCommand.self,
             UIClickCommand.self,
             UIScreenshotCommand.self,
             UIAICommand.self
@@ -166,6 +167,36 @@ struct UIKeySequenceCommand: ParsableCommand {
     }
 }
 
+/// Lists the vocabulary `ui key` and `ui key-sequence` accept. It reads the
+/// same table the helper validates against, so it needs no VM.
+struct UIKeysCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "keys", abstract: "List the key names accepted by ui key and ui key-sequence.")
+    @OptionGroup var output: GlobalOptions
+
+    static let characterNote = "Any single character on a US keyboard; an uppercase letter or shifted symbol implies Shift."
+    static let chainingNote = "Modifier prefixes chain left to right, for example cmd-shift-t; `+` is accepted in place of `-`."
+
+    mutating func run() throws {
+        let named = HostDisplayKey.namedKeys
+        let modifiers = HostDisplayKey.modifierPrefixes
+        var lines = ["KEY\tALIASES"]
+        lines += named.map { "\($0.name)\t\($0.aliases.joined(separator: ", "))" }
+        lines += ["", "MODIFIER\tALIASES"]
+        lines += modifiers.map { "\($0.prefix)\t\($0.aliases.joined(separator: ", "))" }
+        lines += ["", "Characters: \(Self.characterNote)", "Chaining: \(Self.chainingNote)"]
+        let payload: [String: Any] = [
+            "ok": true,
+            "hostExitCode": 0,
+            "namedKeys": named.map { ["name": $0.name, "aliases": $0.aliases] },
+            "modifierPrefixes": modifiers.map { ["prefix": $0.prefix, "aliases": $0.aliases] },
+            "characters": Self.characterNote,
+            "chaining": Self.chainingNote,
+            "separators": ["-", "+"]
+        ]
+        try CLIOutputWriter.write(payload: payload, text: lines.joined(separator: "\n"), options: output)
+    }
+}
+
 struct UIClickCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "click", abstract: "Click guest display coordinates.")
     @Argument var name: String?
@@ -312,7 +343,7 @@ enum CommandCatalog {
         Group(name: "agent", commands: ["agent status", "agent repair"]),
         Group(name: "guest", commands: ["exec", "shell", "jobs", "cp", "cat"]),
         Group(name: "security", commands: ["sip", "amfi", "mdm"]),
-        Group(name: "access", commands: ["remote-login", "screen-sharing", "ui click|key|key-sequence|type|screenshot|ai settings"]),
+        Group(name: "access", commands: ["remote-login", "screen-sharing", "ui click|key|key-sequence|keys|type|screenshot|ai settings"]),
         Group(name: "config", commands: ["config init", "config validate", "config render", "ipsw"]),
         Group(name: "utility", commands: ["tui", "tools", "agent-help"])
     ]
@@ -322,7 +353,7 @@ enum CommandCatalog {
     vm=create|list|ls|start|stop|restart|pause|resume|delete|rm|status|inspect|snapshot; agent=status|repair
     snapshot=create|list|restore|delete
     guest=exec|shell|jobs|cp|cat; security=sip|amfi|mdm; access=remote-login|screen-sharing
-    ui=click|key|key-sequence|type|screenshot|ai settings
+    ui=click|key|key-sequence|keys|type|screenshot|ai settings
     ui-unavailable=ai settings
     config=config init|validate|render; ipsw=list|download; utility=tui|tools|agent-help
     """

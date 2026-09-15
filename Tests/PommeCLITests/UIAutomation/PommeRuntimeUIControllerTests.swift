@@ -17,10 +17,30 @@ struct PommeRuntimeUIControllerTests {
             hostOutputPath: nil
         )
 
-        await #expect(throws: RunnerError.self) {
-            try await controller.perform(request)
+        do {
+            _ = try await controller.perform(request)
+            Issue.record("An unsupported key was accepted.")
+        } catch {
+            #expect(error.localizedDescription.contains("Unsupported key 'raw-scan-code-999'"))
+            #expect(error.localizedDescription.contains("pomme ui keys"))
         }
         #expect(backend.keyCalls == 0)
+
+        let sequence = PommeUIControlRequest(
+            operation: .keySequence,
+            agentPayload: [
+                "operation": .string("key-sequence"),
+                "keys": .array([.string("shift"), .string("a")])
+            ],
+            timeout: 2,
+            hostOutputPath: nil
+        )
+        do {
+            _ = try await controller.perform(sequence)
+            Issue.record("An unsupported key sequence was accepted.")
+        } catch {
+            #expect(error.localizedDescription.contains("Unsupported key 'shift' at index 0"))
+        }
     }
 
     @Test("rejects a concurrent operation while a direct input is in flight")

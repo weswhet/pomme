@@ -121,3 +121,15 @@ struct UIUtilityCommandTests {
         }
     }
 }
+
+@Suite("UI keys listing")
+struct UIKeysCommandTests {
+    @Test("ui keys is registered and takes no VM")
+    func keysIsRegistered() throws {
+        _ = try UIKeysCommand.parse([])
+        _ = try UIKeysCommand.parse(["--format", "json"])
+        #expect(UICommand.helpMessage().contains("keys"))
+        #expect(CommandCatalog.agentHelp.contains("keys"))
+        #expect(CommandCatalog.groups.contains { $0.commands.contains { $0.contains("keys") } })
+    }
+}
