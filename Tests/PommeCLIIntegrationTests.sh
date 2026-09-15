@@ -227,6 +227,7 @@ if grep -q -- '--parallel takes no value' "$work/stderr"; then
 else
   fail "parallel explains that it takes no value"
 fi
+rm -f "$work/parallel.yaml"
 expect_failure "click rejects a negative coordinate" "$runner" ui click missing --x -1 --y 1
 if grep -q -- '--x must be' "$work/stderr"; then
   pass "click names the coordinate range"
@@ -247,7 +248,7 @@ else
   fail "exec name comes from the environment, not the command"
 fi
 expect_success "ui keys lists the key vocabulary" "$runner" ui keys
-if grep -q '^return' "$work/stdout" && grep -q '^cmd-' "$work/stdout"; then
+if grep -q '^return' "$work/stdout" && grep -q '^command-' "$work/stdout"; then
   pass "ui keys names keys and modifier prefixes"
 else
   fail "ui keys names keys and modifier prefixes"
