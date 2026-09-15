@@ -122,83 +122,84 @@ struct HostDisplayKey {
         }
     }
 
+    /// A key that can be named on the command line. The names are the single
+    /// source for both `lookup` and `pomme ui keys`, so the help cannot drift
+    /// from what the helper accepts.
+    struct NamedKey: Sendable {
+        let names: [String]
+        let keyCode: UInt16
+        let characters: String
+        let modifiers: NSEvent.ModifierFlags
+
+        var name: String { names[0] }
+        var aliases: [String] { Array(names.dropFirst()) }
+    }
+
+    /// A modifier spelled as a prefix on another key name, such as `cmd-t`.
+    struct ModifierPrefix: Sendable {
+        let prefixes: [String]
+        let flag: NSEvent.ModifierFlags
+
+        var prefix: String { prefixes[0] }
+        var aliases: [String] { Array(prefixes.dropFirst()) }
+    }
+
+    static let namedKeys: [NamedKey] = [
+        .init(names: ["return", "enter"], keyCode: 36, characters: "\r", modifiers: []),
+        .init(names: ["tab"], keyCode: 48, characters: "\t", modifiers: []),
+        .init(names: ["shift-tab"], keyCode: 48, characters: "\t", modifiers: [.shift]),
+        .init(names: ["space"], keyCode: 49, characters: " ", modifiers: []),
+        .init(names: ["escape", "esc"], keyCode: 53, characters: "\u{1b}", modifiers: []),
+        .init(names: ["delete", "backspace"], keyCode: 51, characters: "\u{8}", modifiers: []),
+        .init(names: ["forward-delete"], keyCode: 117, characters: functionKeyString(0xF728), modifiers: []),
+        .init(names: ["home"], keyCode: 115, characters: functionKeyString(0xF729), modifiers: []),
+        .init(names: ["end"], keyCode: 119, characters: functionKeyString(0xF72B), modifiers: []),
+        .init(names: ["page-up"], keyCode: 116, characters: functionKeyString(0xF72C), modifiers: []),
+        .init(names: ["page-down"], keyCode: 121, characters: functionKeyString(0xF72D), modifiers: []),
+        .init(names: ["left"], keyCode: 123, characters: functionKeyString(0xF702), modifiers: []),
+        .init(names: ["right"], keyCode: 124, characters: functionKeyString(0xF703), modifiers: []),
+        .init(names: ["down"], keyCode: 125, characters: functionKeyString(0xF701), modifiers: []),
+        .init(names: ["up"], keyCode: 126, characters: functionKeyString(0xF700), modifiers: []),
+        .init(names: ["f1"], keyCode: 122, characters: functionKeyString(0xF704), modifiers: []),
+        .init(names: ["f2"], keyCode: 120, characters: functionKeyString(0xF705), modifiers: []),
+        .init(names: ["f3"], keyCode: 99, characters: functionKeyString(0xF706), modifiers: []),
+        .init(names: ["f4"], keyCode: 118, characters: functionKeyString(0xF707), modifiers: []),
+        .init(names: ["f5"], keyCode: 96, characters: functionKeyString(0xF708), modifiers: []),
+        .init(names: ["f6"], keyCode: 97, characters: functionKeyString(0xF709), modifiers: []),
+        .init(names: ["f7"], keyCode: 98, characters: functionKeyString(0xF70A), modifiers: []),
+        .init(names: ["f8"], keyCode: 100, characters: functionKeyString(0xF70B), modifiers: []),
+        .init(names: ["f9"], keyCode: 101, characters: functionKeyString(0xF70C), modifiers: []),
+        .init(names: ["f10"], keyCode: 109, characters: functionKeyString(0xF70D), modifiers: []),
+        .init(names: ["f11"], keyCode: 103, characters: functionKeyString(0xF70E), modifiers: []),
+        .init(names: ["f12"], keyCode: 111, characters: functionKeyString(0xF70F), modifiers: []),
+        .init(names: ["command-space", "cmd-space"], keyCode: 49, characters: " ", modifiers: [.command]),
+    ]
+
+    static let modifierPrefixes: [ModifierPrefix] = [
+        .init(prefixes: ["command-", "cmd-"], flag: .command),
+        .init(prefixes: ["control-", "ctrl-"], flag: .control),
+        .init(prefixes: ["option-", "opt-", "alt-"], flag: .option),
+        .init(prefixes: ["shift-"], flag: .shift),
+    ]
+
+    private static let namedKeysByName: [String: NamedKey] = namedKeys.reduce(into: [:]) { table, key in
+        for name in key.names { table[name] = key }
+    }
+
     static func lookup(_ name: String) -> HostDisplayKey? {
         let normalized = name.lowercased().replacingOccurrences(of: "+", with: "-")
-        switch normalized {
-        case "return", "enter":
-            return key(36, characters: "\r")
-        case "tab":
-            return key(48, characters: "\t")
-        case "shift-tab":
-            return key(48, characters: "\t", modifiers: [.shift])
-        case "space":
-            return key(49, characters: " ")
-        case "escape", "esc":
-            return key(53, characters: "\u{1b}")
-        case "delete", "backspace":
-            return key(51, characters: "\u{8}")
-        case "forward-delete":
-            return key(117, characters: functionKeyString(0xF728))
-        case "home":
-            return key(115, characters: functionKeyString(0xF729))
-        case "end":
-            return key(119, characters: functionKeyString(0xF72B))
-        case "page-up":
-            return key(116, characters: functionKeyString(0xF72C))
-        case "page-down":
-            return key(121, characters: functionKeyString(0xF72D))
-        case "left":
-            return key(123, characters: functionKeyString(0xF702))
-        case "right":
-            return key(124, characters: functionKeyString(0xF703))
-        case "down":
-            return key(125, characters: functionKeyString(0xF701))
-        case "up":
-            return key(126, characters: functionKeyString(0xF700))
-        case "f1":
-            return key(122, characters: functionKeyString(0xF704))
-        case "f2":
-            return key(120, characters: functionKeyString(0xF705))
-        case "f3":
-            return key(99, characters: functionKeyString(0xF706))
-        case "f4":
-            return key(118, characters: functionKeyString(0xF707))
-        case "f5":
-            return key(96, characters: functionKeyString(0xF708))
-        case "f6":
-            return key(97, characters: functionKeyString(0xF709))
-        case "f7":
-            return key(98, characters: functionKeyString(0xF70A))
-        case "f8":
-            return key(100, characters: functionKeyString(0xF70B))
-        case "f9":
-            return key(101, characters: functionKeyString(0xF70C))
-        case "f10":
-            return key(109, characters: functionKeyString(0xF70D))
-        case "f11":
-            return key(103, characters: functionKeyString(0xF70E))
-        case "f12":
-            return key(111, characters: functionKeyString(0xF70F))
-        case "command-space", "cmd-space":
-            return key(49, characters: " ", modifiers: [.command])
-        default:
-            if let commandKey = modifiedKey(named: normalized, prefixes: ["command-", "cmd-"], modifiers: [.command]) {
-                return commandKey
-            }
-            if let controlKey = modifiedKey(named: normalized, prefixes: ["control-", "ctrl-"], modifiers: [.control]) {
-                return controlKey
-            }
-            if let optionKey = modifiedKey(named: normalized, prefixes: ["option-", "opt-", "alt-"], modifiers: [.option]) {
-                return optionKey
-            }
-            if let shiftKey = modifiedKey(named: normalized, prefixes: ["shift-"], modifiers: [.shift]) {
-                return shiftKey
-            }
-            if name.count == 1, let character = name.first {
-                return lookup(character: character)
-            }
-            return nil
+        if let named = namedKeysByName[normalized] {
+            return key(named.keyCode, characters: named.characters, modifiers: named.modifiers)
         }
+        for modifier in modifierPrefixes {
+            if let modified = modifiedKey(named: normalized, prefixes: modifier.prefixes, modifiers: modifier.flag) {
+                return modified
+            }
+        }
+        if name.count == 1, let character = name.first {
+            return lookup(character: character)
+        }
+        return nil
     }
 
     static func lookup(character: Character) -> HostDisplayKey? {

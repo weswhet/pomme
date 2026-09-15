@@ -177,7 +177,11 @@ pomme ui key dev cmd+shift+t
 pomme ui key-sequence dev left right
 pomme ui type dev --text '/usr/bin/id -u'
 pomme ui key dev return
+pomme ui keys
 ```
+
+`pomme ui keys` lists the named keys, modifier prefixes, and aliases that `ui key`
+and `ui key-sequence` accept.
 
 Observe the guest with `pomme ui screenshot dev --output /absolute/private/path.png`.
 Keep Recovery screenshots in a private temporary lab directory, outside the

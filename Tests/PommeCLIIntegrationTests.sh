@@ -208,6 +208,18 @@ for action in key key-sequence; do
     fail "$action reaches target validation"
   fi
 done
+expect_success "ui keys lists the key vocabulary" "$runner" ui keys
+if grep -q '^return' "$work/stdout" && grep -q '^cmd-' "$work/stdout"; then
+  pass "ui keys names keys and modifier prefixes"
+else
+  fail "ui keys names keys and modifier prefixes"
+fi
+expect_success "ui keys renders JSON" "$runner" ui keys --format json
+if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["ok"] and d["namedKeys"] and d["modifierPrefixes"] else 1)' "$work/stdout"; then
+  pass "ui keys JSON carries the vocabulary"
+else
+  fail "ui keys JSON carries the vocabulary"
+fi
 expect_failure "key sequence rejects ambiguous environment target" env POMME_VM_NAME=pomme-test-nonexistent \
   "$runner" ui key-sequence return right
 if grep -q 'ambiguous' "$work/stderr" && grep -q -- '--vm' "$work/stderr"; then
