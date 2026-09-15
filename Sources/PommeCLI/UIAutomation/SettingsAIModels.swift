@@ -10,7 +10,7 @@ private func settingsAIFormattedConfidence(_ confidence: Double) -> String {
     )
 }
 
-enum SettingsAIMode: String, Sendable {
+enum SettingsAIMode: String, CaseIterable, Sendable {
     case suggest
     case step
     case loop
