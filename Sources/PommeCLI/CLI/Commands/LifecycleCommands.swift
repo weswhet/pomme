@@ -365,7 +365,7 @@ struct ListCommand: ParsableCommand {
             return [name, state, mode.isEmpty ? "-" : mode].joined(separator: "\t")
         }
         let text = (["NAME\tSTATE\tMODE"] + lines).joined(separator: "\n")
-        try CLIOutputWriter.write(payload: payload, text: text, options: output)
+        try CLIOutputWriter.write(payload: payload, text: text, options: output, jsonlCollection: "vms")
     }
 }
 

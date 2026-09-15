@@ -142,7 +142,7 @@ struct TemplateListCommand: ParsableCommand {
                 + "\t\($0.isSecurityDisabled ? "sip-off,amfi-off" : "default")"
         }
         let text = (["NAME\tVERSION\tBUILD\tDISK\tOWNER\tSECURITY"] + lines).joined(separator: "\n")
-        try CLIOutputWriter.write(payload: payload, text: text, options: output)
+        try CLIOutputWriter.write(payload: payload, text: text, options: output, jsonlCollection: "templates")
     }
 }
 

@@ -58,6 +58,11 @@ cleanup() {
     [[ -n "$item" ]] || continue
     rm -f -- "$item"
   done < <(find "$work" -mindepth 1 -maxdepth 1 -type f -print)
+  # Inventory reads create an empty app-support layout holding only lock files.
+  if [[ -d "$work/app-support" ]]; then
+    find "$work/app-support" -type f -name '*.lock' -delete
+    find "$work/app-support" -depth -type d -empty -delete
+  fi
   rmdir "$work"
 }
 trap cleanup EXIT
@@ -293,6 +298,25 @@ if grep -q "Missing value for '--version <version>'" "$work/stderr"; then
   pass "create --version keeps its option meaning"
 else
   fail "create --version keeps its option meaning"
+fi
+
+expect_success "jsonl list of an empty inventory" "$runner" list --format jsonl
+if [[ ! -s "$work/stdout" ]]; then
+  pass "jsonl prints no line for an empty inventory"
+else
+  fail "jsonl prints no line for an empty inventory"
+fi
+expect_success "ui keys renders JSONL" "$runner" ui keys --format jsonl
+if python3 -c 'import json,sys; rows=[json.loads(l) for l in open(sys.argv[1])]; sys.exit(0 if len(rows) > 1 and all(r["kind"] in ("key","modifier") for r in rows) else 1)' "$work/stdout"; then
+  pass "ui keys JSONL prints one tagged object per line"
+else
+  fail "ui keys JSONL prints one tagged object per line"
+fi
+expect_failure "raw output format is rejected" "$runner" list --format raw
+if grep -q "'table', 'json' or 'jsonl'" "$work/stderr"; then
+  pass "raw rejection names the supported formats"
+else
+  fail "raw rejection names the supported formats"
 fi
 
 if [[ $failures -ne 0 ]]; then

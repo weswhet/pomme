@@ -9,6 +9,9 @@ struct PommeOperationResult: Sendable {
     let ok: Bool
     let hostExitCode: Int32
     let text: String
+    /// For a list-shaped result, the path to the array JSONL prints one
+    /// element per line.
+    var jsonlCollectionKeyPath: [String]?
     private var payloadValue: [String: JSONValue]
 
     var payload: [String: Any] {
@@ -681,7 +684,9 @@ enum PommeApplication {
     }
 
     static func terminalSessionList(name: String) throws -> PommeOperationResult {
-        try terminalSessionControl(name: name, operation: "terminal.list", payload: [:], title: "Sessions")
+        var result = try terminalSessionControl(name: name, operation: "terminal.list", payload: [:], title: "Sessions")
+        result.jsonlCollectionKeyPath = ["sessions"]
+        return result
     }
 
     static func terminalSessionInspect(name: String, sessionID: String) throws -> PommeOperationResult {
@@ -867,8 +872,12 @@ enum PommeApplication {
             return result(title: title, reference: reference, payload: payload,
                           text: agentResponseText(payload))
         }
-        return result(title: title, reference: reference, payload: payload,
-                      text: try guestRequestText(for: request, payload: payload))
+        var operationResult = result(title: title, reference: reference, payload: payload,
+                                     text: try guestRequestText(for: request, payload: payload))
+        if case .jobList = request {
+            operationResult.jsonlCollectionKeyPath = ["result", "jobs"]
+        }
+        return operationResult
     }
 
     /// Table text for a guest request whose answer is a control payload with

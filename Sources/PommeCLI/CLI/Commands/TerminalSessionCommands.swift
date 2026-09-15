@@ -65,7 +65,7 @@ struct SessionsAttachCommand: ParsableCommand {
         switch try output.resolvedFormat() {
         case .json, .jsonl:
             throw ValidationError("Interactive terminal attachment conflicts with JSON and JSONL output.")
-        case .table, .raw:
+        case .table:
             break
         }
         guard isatty(STDIN_FILENO) == 1, isatty(STDOUT_FILENO) == 1 else {

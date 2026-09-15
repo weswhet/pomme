@@ -217,7 +217,7 @@ enum SnapshotOutput {
             "snapshots": snapshots.map(payload(for:))
         ]
 
-        try CLIOutputWriter.write(payload: listPayload, text: table(vm: vm, snapshots: snapshots), options: options)
+        try CLIOutputWriter.write(payload: listPayload, text: table(vm: vm, snapshots: snapshots), options: options, jsonlCollection: "snapshots")
     }
 
     static func payload(for snapshot: VMSnapshotRecord) -> [String: Any] {
