@@ -104,6 +104,43 @@ struct PommeAgentExecutionOptionsTests: Sendable {
         }
     }
 
+    @Test("Identity defaults come from the passwd record")
+    func identityDefaultsMatchPasswd() throws {
+        let record = try #require(getpwuid(getuid()))
+        let defaults = PommeGuestIdentityEnvironment.defaults(for: getuid())
+
+        #expect(defaults["USER"] == String(cString: record.pointee.pw_name))
+        #expect(defaults["LOGNAME"] == String(cString: record.pointee.pw_name))
+        #expect(defaults["HOME"] == String(cString: record.pointee.pw_dir))
+        #expect(defaults["SHELL"] == String(cString: record.pointee.pw_shell))
+        #expect(defaults["PATH"] == nil)
+    }
+
+    @Test("Guest processes get login variables derived for their account, and explicit values win")
+    func processesReceiveIdentityEnvironment() async throws {
+        let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64))
+        let record = try #require(getpwuid(geteuid()))
+        let account = String(cString: record.pointee.pw_name)
+        let home = String(cString: record.pointee.pw_dir)
+
+        func output(_ environment: [String: JSONValue]) async throws -> String {
+            let started = try await agent.perform(.request(
+                operation: "process.start",
+                payload: .object([
+                    "path": .string("/bin/sh"),
+                    "arguments": .array([.string("-c"), .string("printf '%s|%s|%s' \"$LOGNAME\" \"$USER\" \"$HOME\"")]),
+                    "environment": .object(environment)
+                ])
+            ))
+            let id = try #require(started.objectValue?["jobID"]?.stringValue)
+            let events = try await finish(agent, jobID: try #require(UUID(uuidString: id)))
+            return String(decoding: events.filter { $0.stream == .stdout }.compactMap(\.data).reduce(into: Data()) { $0.append($1) }, as: UTF8.self)
+        }
+
+        #expect(try await output([:]) == "\(account)|\(account)|\(home)")
+        #expect(try await output(["HOME": .string("/x")]) == "\(account)|\(account)|/x")
+    }
+
     @Test("Privilege resolution returns usable root and current-account groups")
     func privilegeResolutionIncludesRealGroups() throws {
         let rootByName = try #require(try PommePrivilege.resolve(["user": .string("root")]))

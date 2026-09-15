@@ -1164,6 +1164,34 @@ struct PommePrivilege: Sendable {
     }
 }
 
+/// The login-like variables a guest process receives for its account, read
+/// from the passwd record: HOME, USER, LOGNAME, and SHELL. PATH is left as the
+/// daemon's.
+enum PommeGuestIdentityEnvironment {
+    struct Record: Equatable, Sendable {
+        let account: String
+        let home: String
+        let shell: String
+    }
+
+    static func passwdRecord(uid: uid_t) -> Record? {
+        guard let record = getpwuid(uid),
+              let account = String(validatingCString: record.pointee.pw_name),
+              let home = String(validatingCString: record.pointee.pw_dir),
+              let shell = String(validatingCString: record.pointee.pw_shell)
+        else { return nil }
+        return Record(account: account, home: home, shell: shell)
+    }
+
+    static func defaults(for uid: uid_t) -> [String: String] {
+        guard let record = passwdRecord(uid: uid) else { return [:] }
+        var values = ["USER": record.account, "LOGNAME": record.account]
+        if !record.home.isEmpty { values["HOME"] = record.home }
+        if !record.shell.isEmpty { values["SHELL"] = record.shell }
+        return values
+    }
+}
+
 enum PommeProcess {
     /// Process settings received through the authenticated request.  The
     /// agent validates them again here because the daemon accepts protocol
@@ -1225,8 +1253,13 @@ enum PommeProcess {
             )
         }
 
-        fileprivate func mergedEnvironment() throws -> [String: String] {
+        /// The daemon's environment, then the login variables of the account
+        /// the process runs as, then the request's explicit values.
+        func mergedEnvironment(uid: uid_t) throws -> [String: String] {
             var merged = ProcessInfo.processInfo.environment
+            for (key, value) in PommeGuestIdentityEnvironment.defaults(for: uid) {
+                merged[key] = value
+            }
             for (key, value) in environment {
                 merged[key] = value
             }
@@ -1341,7 +1374,7 @@ enum PommeProcess {
             throw PommeAgentOperationError.invalid
         }
         try launchPreflight(path: path, cwd: options.cwd)
-        let environment = try options.mergedEnvironment()
+        let environment = try options.mergedEnvironment(uid: identity?.uid ?? geteuid())
         let usesIdentityHelper = try identity.map(requiresIdentityHelper) ?? false
         if usesIdentityHelper, geteuid() != 0 {
             throw PommeAgentOperationError.invalid
