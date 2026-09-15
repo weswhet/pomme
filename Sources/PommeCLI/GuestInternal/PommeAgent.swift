@@ -454,10 +454,14 @@ actor PommeAgent {
         guard path.hasPrefix("/"), !path.contains("\0") else { throw PommeAgentOperationError.invalid }
         let destination = URL(fileURLWithPath: path).standardizedFileURL
         if mode == "stageWrite" {
-            return try mapFileTransactionError { try openStage(destination: destination) }
+            return try describingOpenFailure(destination, forWrite: true) {
+                try mapFileTransactionError { try openStage(destination: destination) }
+            }
         }
         guard mode == "read" else { throw PommeAgentOperationError.invalid }
-        let fd = try mapFileTransactionError { try PommeAgentFileTransaction.openRegular(destination, flags: O_RDONLY) }
+        let fd = try describingOpenFailure(destination, forWrite: false) {
+            try mapFileTransactionError { try PommeAgentFileTransaction.openRegular(destination, flags: O_RDONLY) }
+        }
         let id = UUID(); files[id] = .init(descriptor: fd, readable: true, writable: false, stage: nil, destination: nil, tainted: false)
         return .object(["fileID": .string(id.uuidString.lowercased())])
     }
@@ -667,6 +671,20 @@ actor PommeAgent {
         try PommeAgentJournalStore.remove(at: journalPath)
         update = nil; activationPending = false
         return .object(["finalized": .bool(true)])
+    }
+
+    /// Replaces the generic invalid-operation failure of a file open with the
+    /// cause found by re-examining the path: missing, a directory, not
+    /// readable, or reached through a symbolic link.
+    private func describingOpenFailure<T>(_ url: URL, forWrite: Bool, _ body: () throws -> T) throws -> T {
+        do {
+            return try body()
+        } catch PommeAgentOperationError.invalid {
+            guard let failure = PommeAgentFileTransaction.diagnoseOpenFailure(url, forWrite: forWrite) else {
+                throw PommeAgentOperationError.invalid
+            }
+            throw PommeAgentOperationError(failure)
+        }
     }
 
     private func mapFileTransactionError<T>(_ body: () throws -> T) throws -> T {
@@ -925,6 +943,24 @@ actor PommeAgent {
 enum PommeAgentOperationError: Error, Equatable {
     case unsupported, activationPending, invalid, notFound, io
     case remoteLoginFullDiskAccessRequired, remoteLoginVerificationFailed
+    /// A failure whose wire code comes from the inner case and whose message
+    /// names the specific cause, such as the missing executable.
+    indirect case described(PommeAgentOperationError, message: String)
+}
+
+extension PommeAgentOperationError {
+    init(_ failure: PommeAgentFileTransaction.OpenFailure) {
+        switch failure {
+        case .missing(let path):
+            self = .described(.notFound, message: "No such file or directory: \(path)")
+        case .notRegular(let path, let isDirectory):
+            self = .described(.invalid, message: isDirectory ? "\(path) is a directory" : "\(path) is not a regular file")
+        case .permission(let path):
+            self = .described(.io, message: "Permission denied: \(path)")
+        case .unsafe(let path):
+            self = .described(.invalid, message: "\(path) is reached through a symbolic link, which file transfers do not follow")
+        }
+    }
 }
 
 /// Remote Login's public status is `systemsetup -getremotelogin`; mutations
@@ -1092,11 +1128,17 @@ struct PommePrivilege: Sendable {
         else if case .integer(let supplied) = uid, let parsed = uid_t(exactly: supplied) { record = getpwuid(parsed) }
         else if uid == nil { record = getpwuid(geteuid()) }
         else { record = nil }
-        guard let record, let account = String(validatingCString: record.pointee.pw_name) else { throw PommeAgentOperationError.invalid }
+        guard let record, let account = String(validatingCString: record.pointee.pw_name) else {
+            if let user { throw PommeAgentOperationError.described(.notFound, message: "No such guest user: \(user)") }
+            if case .integer(let supplied) = uid { throw PommeAgentOperationError.described(.notFound, message: "No guest user has uid \(supplied)") }
+            throw PommeAgentOperationError.invalid
+        }
         let resolvedUID = record.pointee.pw_uid
         let resolvedGID: gid_t
         if let group {
-            guard let groupRecord = getgrnam(group) else { throw PommeAgentOperationError.invalid }
+            guard let groupRecord = getgrnam(group) else {
+                throw PommeAgentOperationError.described(.notFound, message: "No such guest group: \(group)")
+            }
             resolvedGID = groupRecord.pointee.gr_gid
         } else if let gid {
             guard case .integer(let supplied) = gid, let parsed = gid_t(exactly: supplied) else {
@@ -1255,6 +1297,33 @@ enum PommeProcess {
     private static let helperEnvironmentDescriptor: Int32 = 4
     private static let helperSuccessMarker: UInt8 = 0x7f
 
+    /// posix_spawn reports ENOENT for both a missing executable and a missing
+    /// working directory, so each is checked first and named. The identity
+    /// helper has no message channel, so these checks also cover its launches.
+    static func launchPreflight(path: String, cwd: String?) throws {
+        var info = stat()
+        guard stat(path, &info) == 0 else {
+            if errno == ENOENT || errno == ENOTDIR {
+                throw PommeAgentOperationError.described(.notFound, message: "No such executable: \(path)")
+            }
+            throw PommeAgentOperationError.described(.io, message: "Executable is not permitted: \(path)")
+        }
+        guard info.st_mode & S_IFMT != S_IFDIR, access(path, X_OK) == 0 else {
+            throw PommeAgentOperationError.described(.io, message: "Executable is not permitted: \(path)")
+        }
+        if let cwd {
+            guard stat(cwd, &info) == 0 else {
+                if errno == ENOENT || errno == ENOTDIR {
+                    throw PommeAgentOperationError.described(.notFound, message: "No such working directory: \(cwd)")
+                }
+                throw PommeAgentOperationError.described(.io, message: "Working directory is not permitted: \(cwd)")
+            }
+            guard info.st_mode & S_IFMT == S_IFDIR else {
+                throw PommeAgentOperationError.described(.invalid, message: "Working directory \(cwd) is not a directory")
+            }
+        }
+    }
+
     static func spawn(
         path: String,
         arguments: [String],
@@ -1271,6 +1340,7 @@ enum PommeProcess {
         else {
             throw PommeAgentOperationError.invalid
         }
+        try launchPreflight(path: path, cwd: options.cwd)
         let environment = try options.mergedEnvironment()
         let usesIdentityHelper = try identity.map(requiresIdentityHelper) ?? false
         if usesIdentityHelper, geteuid() != 0 {

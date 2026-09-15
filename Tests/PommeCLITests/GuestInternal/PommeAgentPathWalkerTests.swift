@@ -5,6 +5,38 @@ import Testing
 
 @Suite("Pomme Recovery path walker")
 struct PommeAgentPathWalkerTests {
+    @Test("An open failure is diagnosed as missing, a directory, unreadable, or a link")
+    func diagnosesOpenFailures() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pomme-diagnose-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer {
+            _ = chmod(root.appendingPathComponent("unreadable").path, 0o600)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let file = root.appendingPathComponent("file")
+        try Data("bytes".utf8).write(to: file)
+        let link = root.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: file)
+        let unreadable = root.appendingPathComponent("unreadable")
+        try Data("bytes".utf8).write(to: unreadable)
+        #expect(chmod(unreadable.path, 0o000) == 0)
+        let missing = root.appendingPathComponent("missing")
+        func diagnose(_ url: URL, write: Bool = false) -> PommeAgentFileTransaction.OpenFailure? {
+            PommeAgentFileTransaction.diagnoseOpenFailure(url, forWrite: write)
+        }
+
+        #expect(diagnose(missing) == .missing(missing.path))
+        #expect(diagnose(root) == .notRegular(root.path, isDirectory: true))
+        #expect(diagnose(link) == .unsafe(link.path))
+        #expect(diagnose(file) == nil)
+        if geteuid() != 0 {
+            #expect(diagnose(unreadable) == .permission(unreadable.path))
+        }
+        #expect(diagnose(missing.appendingPathComponent("x"), write: true) == .missing(missing.path))
+        #expect(diagnose(root.appendingPathComponent("new"), write: true) == nil)
+        #expect(diagnose(URL(fileURLWithPath: "/tmp")) == .notRegular("/tmp", isDirectory: true))
+    }
+
     @Test("accepts observed private alias spellings and lexical var/tmp aliases")
     func acceptsObservedPrivateAliasAndCompatibilitySpellings() throws {
         for layout in [PathWalkerLayout.observedPrivateAlias, .observedAbsolutePrivateAlias] {
