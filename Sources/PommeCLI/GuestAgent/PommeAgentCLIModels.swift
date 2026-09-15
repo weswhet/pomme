@@ -589,9 +589,42 @@ struct CopyRequest: Sendable {
     }
 
     static func parse(source: String, destination: String) throws -> Self {
-        let request = Self(source: try .parse(source), destination: try .parse(destination))
+        let parsedSource = try CopyEndpoint.parse(source)
+        let request = Self(
+            source: parsedSource,
+            destination: try .parse(directoryDestinationExpanded(destination, source: parsedSource))
+        )
         try request.validate()
         return request
+    }
+
+    /// Follows cp(1) for a destination that names a directory: the file keeps
+    /// the source's base name inside it. A guest directory is recognisable
+    /// only by its trailing slash, because the host cannot stat a guest path;
+    /// a host directory is recognised whether or not the slash was typed.
+    /// This runs before any agent traffic, so a bad path fails on the host.
+    static func directoryDestinationExpanded(_ destination: String, source: CopyEndpoint) -> String {
+        let baseName: String
+        switch source {
+        case .host(let url): baseName = url.lastPathComponent
+        case .guest(let path): baseName = URL(fileURLWithPath: path).lastPathComponent
+        }
+        guard !baseName.isEmpty, baseName != "/" else { return destination }
+
+        if destination.hasPrefix("guest:") {
+            return destination.hasSuffix("/") ? destination + baseName : destination
+        }
+        if destination.hasSuffix("/") {
+            return destination + baseName
+        }
+        let hostPath = destination.hasPrefix("/")
+            ? destination
+            : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(destination).path
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: hostPath, isDirectory: &isDirectory), isDirectory.boolValue {
+            return destination + "/" + baseName
+        }
+        return destination
     }
 
     static func parse(from object: [String: Any]) throws -> Self {

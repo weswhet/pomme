@@ -66,6 +66,25 @@ struct PommeAgentCLIModelsTests {
         #expect(GuestCLIRequest.capabilities.controlPayload["operation"] as? String == "agent.describe")
     }
 
+    @Test("Directory destinations receive the source's base name")
+    func directoryDestinationsExpand() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pomme-cp-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        func destinationPath(_ source: String, _ destination: String) throws -> String {
+            try #require(CopyRequest.parse(source: source, destination: destination).destination.payload["path"] as? String)
+        }
+        let standardized = directory.standardizedFileURL.path
+
+        #expect(try destinationPath("/tmp/h.txt", "guest:/tmp/") == "/tmp/h.txt")
+        #expect(try destinationPath("/tmp/h.txt", "guest:/tmp") == "/tmp")
+        #expect(try destinationPath("guest:/etc/hosts", directory.path + "/") == standardized + "/hosts")
+        #expect(try destinationPath("guest:/etc/hosts", directory.path) == standardized + "/hosts")
+        #expect(try destinationPath("guest:/etc/hosts", directory.path + "/new.txt") == standardized + "/new.txt")
+    }
+
     @Test("File requests reject unsafe endpoints and enforce the 32 KiB read limit")
     func fileRequestValidation() throws {
         #expect(throws: RunnerError.self) { try CopyEndpoint.parse("alias:/tmp/file") }
