@@ -8,6 +8,8 @@ enum RunnerError: LocalizedError {
     case restoreImageNeedsDownload
     case tuiRequiresInteractiveTerminal
     case downloadFailed(statusCode: Int)
+    case unknownDeviceIdentifier(String)
+    case catalogRequestFailed(statusCode: Int)
     case invalidSize(flag: String, value: String)
     case memoryBelowGuestMinimum(requested: UInt64, minimum: UInt64)
     case memoryBelowProvisionalFloor(requested: UInt64, minimum: UInt64)
@@ -72,6 +74,10 @@ enum RunnerError: LocalizedError {
             "TUI requires an interactive terminal. Use --help for non-interactive usage."
         case .downloadFailed(let statusCode):
             "The restore image download failed with HTTP \(statusCode)."
+        case .unknownDeviceIdentifier(let identifier):
+            "Unknown device identifier \(identifier)."
+        case .catalogRequestFailed(let statusCode):
+            "The restore-image catalog request failed with HTTP \(statusCode)."
         case .invalidSize(let flag, let value):
             "\(flag) requires a positive size such as 60GB, 8192MB, or a raw byte count. Got \(value)."
         case .memoryBelowGuestMinimum(let requested, let minimum):

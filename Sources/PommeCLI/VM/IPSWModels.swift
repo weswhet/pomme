@@ -31,3 +31,16 @@ struct IPSWMEFirmware: Codable {
     }
 }
 
+/// Shape check for Apple model identifiers such as `Mac16,10` or
+/// `VirtualMac2,1`, so a typo is named before any catalog request.
+enum IPSWDeviceIdentifier {
+    static func isValid(_ value: String) -> Bool {
+        value.range(of: #"^[A-Za-z]+[0-9]+,[0-9]+$"#, options: .regularExpression) != nil
+    }
+
+    /// Throws a `ValidationError` naming `flag` when `value` is present and malformed.
+    static func validate(_ value: String?, flag: String) throws {
+        guard let value, !isValid(value) else { return }
+        throw ValidationError("\(flag) must be an Apple model identifier such as Mac16,10.")
+    }
+}

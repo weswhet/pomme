@@ -215,6 +215,9 @@ enum CreateConfigStore {
                 "Create configs cannot contain MDM enrollment. Use the explicit Pomme MDM operation."
             )
         }
+        if let device = config.ipswDevice, !IPSWDeviceIdentifier.isValid(device) {
+            throw RunnerError.hostCommandFailed("ipswDevice must be an Apple model identifier such as Mac16,10.")
+        }
         if let diskSize = config.hardware?.diskSize, ByteSizeParser.parse(diskSize) == nil {
             throw RunnerError.invalidSize(flag: "hardware.diskSize", value: diskSize)
         }

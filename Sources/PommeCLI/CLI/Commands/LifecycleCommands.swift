@@ -156,6 +156,7 @@ struct CreateCommand: AsyncParsableCommand {
             if restoreImage != nil, ipswDevice != nil {
                 throw ValidationError("--ipsw-device is available only with --version.")
             }
+            try IPSWDeviceIdentifier.validate(ipswDevice, flag: "--ipsw-device")
             if parallel {
                 throw ValidationError("--parallel is available only with --config.")
             }

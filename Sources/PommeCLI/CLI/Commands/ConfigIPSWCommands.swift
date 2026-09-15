@@ -138,6 +138,7 @@ struct IPSWListCommand: AsyncParsableCommand {
     @OptionGroup var output: GlobalOptions
 
     mutating func validate() throws {
+        try IPSWDeviceIdentifier.validate(device, flag: "--device")
         if let limit, limit < 1 {
             throw ValidationError("--limit must be greater than zero.")
         }
@@ -175,6 +176,10 @@ struct IPSWDownloadCommand: AsyncParsableCommand {
     @Option(name: .customLong("device"), help: "Apple silicon Mac identifier. Defaults to the host model.")
     var device: String?
     @OptionGroup var output: GlobalOptions
+
+    mutating func validate() throws {
+        try IPSWDeviceIdentifier.validate(device, flag: "--device")
+    }
 
     mutating func run() async throws {
         let result = try await PommeCore.downloadIPSWFirmware(
