@@ -320,10 +320,11 @@ Offline verification passed 709 Swift tests with no failures or skips
 reboot proof, retained checkpoint recovery, typed pending-snapshot handling,
 secret isolation, exact baseline restoration, and failure-boundary coverage.
 
-The migration resolved three observed differences from Tiddly:
+The migration resolved three observed differences from the predecessor
+implementation:
 
-- Recovery rejected the original NVRAM write. Tiddly writes from normal macOS
-  after SIP is disabled; Pomme now uses that execution environment.
+- Recovery rejected the original NVRAM write. The predecessor wrote from normal
+  macOS after SIP was disabled; Pomme now uses that execution environment.
 - Ordinary SIP disable produced Permissive Security with `sip0=127`,
   `sip0_exists=true`, `sip1=false`, `sip2=true`, and `sip3=true`. This exact
   profile already permits custom boot arguments. Pomme preserves it with
