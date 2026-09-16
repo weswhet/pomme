@@ -239,5 +239,5 @@ Live: `shell t1 'echo $HOME'` → `/var/root`; `exec t1 --user pomme -- /bin/sh
 - `Tests/PommeIdentifierAudit.sh` failed on `Docs/SecurityWorkflows.md:323,325`,
   which carried the retired product name. Those lines predated this work
   (`303a005`); they were reworded afterwards in `cd412cd` and the audit passes.
-- Three private `AnyCodingKey` copies remain in the security and terminal
-  files; migrating them is a separate cleanup.
+- Three private `AnyCodingKey` copies remained in the security and terminal
+  files; they were folded into the shared one afterwards in `eb9d90e`.
