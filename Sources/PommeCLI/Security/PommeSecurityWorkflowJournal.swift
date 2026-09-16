@@ -1359,14 +1359,6 @@ typealias PommeSecurityJournalPhase = PommeSecurityWorkflowPhase
 typealias PommeSecurityJournalIdentity = PommeSecurityWorkflowIdentity
 typealias PommeSecurityJournalStore = PommeSecurityWorkflowJournalStore
 
-private struct AnyCodingKey: CodingKey {
-    let stringValue: String
-    let intValue: Int? = nil
-
-    init?(stringValue: String) { self.stringValue = stringValue }
-    init?(intValue: Int) { return nil }
-}
-
 private func readBoundRegularFile(_ url: URL) throws -> Data {
     let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
     guard descriptor >= 0 else { throw PommeSecurityWorkflowJournalError.invalidIdentity }

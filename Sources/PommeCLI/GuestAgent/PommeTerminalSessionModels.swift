@@ -1076,21 +1076,6 @@ final class PommeTerminalSessionStore: @unchecked Sendable {
 }
 
 private enum PommeTerminalSessionCoding {
-    private struct AnyCodingKey: CodingKey {
-        let stringValue: String
-        let intValue: Int?
-
-        init?(stringValue: String) {
-            self.stringValue = stringValue
-            intValue = nil
-        }
-
-        init?(intValue: Int) {
-            stringValue = String(intValue)
-            self.intValue = intValue
-        }
-    }
-
     static func requireExactKeys(
         _ decoder: Decoder,
         allowed: [String]
@@ -1098,7 +1083,7 @@ private enum PommeTerminalSessionCoding {
         let container = try decoder.container(keyedBy: AnyCodingKey.self)
         guard Set(container.allKeys.map(\.stringValue)) == Set(allowed) else {
             throw DecodingError.dataCorruptedError(
-                forKey: AnyCodingKey(stringValue: "contract")!,
+                forKey: AnyCodingKey(stringValue: "contract"),
                 in: container,
                 debugDescription: "Unknown or missing terminal session fields."
             )

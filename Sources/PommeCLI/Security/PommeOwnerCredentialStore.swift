@@ -58,7 +58,7 @@ struct PommeOwnerCredentialReference: Codable, Equatable, Hashable, Sendable {
     }
 
     init(from decoder: Decoder) throws {
-        let allKeys = try decoder.container(keyedBy: AnyPommeOwnerCodingKey.self).allKeys
+        let allKeys = try decoder.container(keyedBy: AnyCodingKey.self).allKeys
         guard Set(allKeys.map(\.stringValue)) == Set(CodingKeys.allCases.map(\.stringValue)) else {
             throw PommeOwnerCredentialStoreError.invalidReference
         }
@@ -534,12 +534,4 @@ struct PommeOwnerCredentialStore: Sendable {
         }
         return PommeOwnerCredential(reference: reference, password: password)
     }
-}
-
-private struct AnyPommeOwnerCodingKey: CodingKey {
-    let stringValue: String
-    let intValue: Int? = nil
-
-    init?(stringValue: String) { self.stringValue = stringValue }
-    init?(intValue: Int) { return nil }
 }

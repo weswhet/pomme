@@ -1,7 +1,8 @@
 import Foundation
 
-/// A coding key for reading whatever keys a keyed container holds.
-private struct AnyCodingKey: CodingKey {
+/// A coding key for reading whatever keys a keyed container holds, used by
+/// every decoder here that checks a payload's exact key set.
+struct AnyCodingKey: CodingKey {
     let stringValue: String
     let intValue: Int?
 
