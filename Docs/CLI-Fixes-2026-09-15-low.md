@@ -236,8 +236,8 @@ Live: `shell t1 'echo $HOME'` → `/var/root`; `exec t1 --user pomme -- /bin/sh
   request succeeded, including the same `shell` command. It did not recur
   after the second `start`, and the helper log was empty. It is not tied to
   these fixes, and it is not investigated here.
-- `Tests/PommeIdentifierAudit.sh` fails on `Docs/SecurityWorkflows.md:323,325`,
-  which contain the retired name. Those lines predate this work (`303a005`)
-  and are unchanged by it.
+- `Tests/PommeIdentifierAudit.sh` failed on `Docs/SecurityWorkflows.md:323,325`,
+  which carried the retired product name. Those lines predated this work
+  (`303a005`); they were reworded afterwards in `cd412cd` and the audit passes.
 - Three private `AnyCodingKey` copies remain in the security and terminal
   files; migrating them is a separate cleanup.
