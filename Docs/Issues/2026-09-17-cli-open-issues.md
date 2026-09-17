@@ -99,6 +99,71 @@ records the normal startup volume group. The startup-disk selection lives in
 `AuxiliaryStorage` (guest NVRAM), which is the likely carrier, but this was
 not confirmed.
 
+### Code investigation (2026-09-17, no fix applied)
+
+What the host asks for is not in doubt. `VMRuntime.startOrRestore`
+(`Sources/PommeCLI/VM/VMRuntime.swift:179`) sets
+`startUpFromMacOSRecovery = false` for a normal boot, and the helper is
+launched with `--mode normal` (`PommeCore.startRuntimeInBackground`,
+`Sources/PommeCLI/CLI/PommeCore.swift:3568`). Nothing in the tree writes a
+"boot to recovery next" NVRAM variable: the only guest NVRAM write is
+`boot-args` for the AMFI override
+(`PommeRecoverySecurityOperations.swift:3639`). So a normal cold boot that
+lands in the startup picker means the guest firmware no longer has a valid
+startup selection, not that Pomme asked for Recovery.
+
+The most likely way Pomme produces that state is its own stop path.
+
+1. **`stop` hard-kills the guest after 30 seconds, silently.**
+   `VMRuntime.stop()` (`VMRuntime.swift:203-215`) calls `requestStop`, waits
+   `Constants.gracefulStopTimeoutSeconds` (30, `Constants.swift:26`), and
+   otherwise calls `forceStop()`, which is `VZVirtualMachine.stop()`
+   (`PommeCore.swift:1167`) — an immediate power-cut, not a shutdown. The
+   reply is the same either way, so `pomme stop` prints `OK stopped` whether
+   the guest shut down cleanly or was killed mid-write.
+2. **The code already knows 30 seconds is not enough.**
+   `stopForLiveRecovery` (`PommeCore.swift:3307-3331`) documents that "VZ's
+   `requestStop` behaves like a power button, which a freshly booted macOS
+   guest may take the full graceful window to honor", and therefore asks the
+   guest agent to run `/sbin/shutdown -h now` first
+   (`requestGuestShutdownThroughHelper`, `PommeCore.swift:2902`). Provisioning
+   uses the same agent-driven shutdown. The user-facing `PommeApplication.stop`
+   (`PommeApplication.swift:290`) does not: it sends the framework stop
+   directly. So the operator's `stop` is the least safe of the three.
+3. **A paused VM is always hard-killed.** `VMRuntime.stop()` only attempts
+   `requestStop` when `canRequestStop` is true, which VZ reports false while
+   paused, so `stop` on a paused VM goes straight to the power-cut.
+   `snapshotRestore` also force-stops unconditionally before installing the
+   machine state (`PommeApplication.swift:464`).
+
+That fits both failures. `a1` was stopped after being resumed from a stale
+RAM image; `a2` was stopped while sitting in recoveryOS, which has no guest
+agent and is the case the comment above calls out. An unclean power-off while
+macOS is writing its boot state is a plausible way to invalidate the startup
+selection; that last step is guest and firmware behavior and cannot be proven
+from this repository.
+
+A second, weaker candidate is a race the code guards against everywhere
+except the ordinary start path. `waitForLiveRecoveryAuxiliaryStorageRelease`
+(`PommeCore.swift:3355`) and `waitForRequiredSnapshotRestoreAuxiliaryStorageRelease`
+(`PommeCore.swift:1771`) both wait for the previous helper to release the
+auxiliary-storage descriptor before any VZ object is constructed, because
+"a helper can report stopped just before Virtualization releases its
+auxiliary-storage descriptor" and the runtime record is removed before the
+process exits (`runForegroundRuntime`, `PommeCore.swift:3660-3675`).
+`startRuntimeInBackground` performs no such wait, so a `start` issued
+promptly after a `stop` can construct a new VM on an NVRAM file the exiting
+process still owns.
+
+Cheap ways to confirm before changing anything:
+
+- Time the `stop` that precedes the failure. A stop that takes about 30
+  seconds means the graceful window expired and the guest was power-cut.
+- Log which branch `VMRuntime.stop()` took, or have the reply carry it, so a
+  forced stop is visible instead of reading as `OK stopped`.
+- Hash `AuxiliaryStorage` before and after each stop to see when its contents
+  stop matching a bootable selection.
+
 ---
 
 ## 2. Guest commands fail instead of waiting for the agent to connect
@@ -220,6 +285,16 @@ The VM does start: a following `exec` succeeds. `start` prints
 ### Expected result
 
 The final line reports the boot, as `start` does.
+
+### Likely cause
+
+`restart` builds `steps` as `[status, stop, boot]` and `formatBoot`
+(`PommeApplication.swift:3060`) returns the **last** step carrying a
+`response` string. The boot step has no `response`, so before 2026-09-15 the
+formatter fell through to `OK boot mode=…`. Commit `282fb77` (issue 21 of the
+2026-09-14 set) started setting `payload["response"]` on every lifecycle
+result, which gave the stop step one; it is now the last match and wins. This
+is a regression introduced by that fix, not long-standing behavior.
 
 ### Impact
 

@@ -126,6 +126,13 @@ Fifteen issues, filed in `Issues/2026-09-17-cli-open-issues.md`:
 | 14 | Low | `agent repair --final-state` accepts only `previous` |
 | 15 | Low | `create --resume` reports success for a VM with nothing to resume |
 
+Issue 1 was investigated in the code afterwards; the analysis is recorded
+with the issue. In short, the ordinary `stop` power-cuts a guest that has not
+honored the framework's stop request within 30 seconds and reports it as
+`OK stopped`, while the Recovery and provisioning paths deliberately ask the
+guest agent to shut down first. Issue 5 turned out to be a regression from
+`282fb77`, one of the 2026-09-15 fixes.
+
 Issue 1 cost two of the three VMs. `a3` was created specifically to reduce it
 to a deterministic sequence and survived all four candidate sequences, so the
 trigger is still unknown; the issue records exactly what each VM went through
