@@ -353,3 +353,35 @@ private actor ForegroundTransport {
         return []
     }
 }
+@Suite("Foreground interruption messages")
+struct PommeForegroundInterruptionMessageTests {
+    @Test("A signalled timeout says the process was stopped, not that it is listed")
+    func timedOutAndSignalled() {
+        let text = PommeForegroundExecution.interruptionMessage(timedOut: true, terminationRequested: true)
+
+        #expect(text == "Foreground command timed out; the guest process was signalled to stop."
+                + " Use --detach to run a command that outlives the request.")
+        // A foreground job is never in `jobs list`, so it must not be suggested.
+        #expect(!text.contains("jobs list"))
+    }
+
+    @Test("An unsignalled timeout admits the process may still be running")
+    func timedOutWithoutSignal() {
+        for requested in [false, Bool?.none] {
+            let text = PommeForegroundExecution.interruptionMessage(timedOut: true, terminationRequested: requested)
+
+            #expect(text == "Foreground command timed out and the guest process could not be signalled;"
+                    + " it may still be running in the guest.")
+            #expect(!text.contains("jobs list"))
+        }
+    }
+
+    @Test("Cancellation reads the same way without the detach hint")
+    func cancelled() {
+        #expect(PommeForegroundExecution.interruptionMessage(timedOut: false, terminationRequested: true)
+                == "Foreground command was cancelled; the guest process was signalled to stop.")
+        #expect(PommeForegroundExecution.interruptionMessage(timedOut: false, terminationRequested: false)
+                == "Foreground command was cancelled and the guest process could not be signalled;"
+                + " it may still be running in the guest.")
+    }
+}
