@@ -1574,8 +1574,7 @@ struct PommeCore {
             "bootMode": "none",
             "bundlePath": bundle.rootURL.path,
             "pommeSocket": bundle.pommeSocketURL.path,
-            "guestAgent": guestAgentPayload(.offline(role: .normal)),
-            "jobs": []
+            "guestAgent": guestAgentPayload(.offline(role: .normal))
         ]
         if let metadata = try? metadataPayload(bundle: bundle) { payload["metadata"] = metadata }
         return payload

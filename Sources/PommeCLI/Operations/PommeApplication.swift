@@ -3080,13 +3080,15 @@ enum PommeApplication {
         )
     }
 
-    private static func formatStatus(_ payload: [String: Any]) -> String {
-        let jobs = payload["jobs"] as? [[String: Any]] ?? []
+    /// Background jobs live in the guest agent's table, which this payload has
+    /// never carried, so the line no longer claims a count. `jobs list` reads
+    /// the table itself.
+    static func formatStatus(_ payload: [String: Any]) -> String {
         let bootMode = stringValue(payload["bootMode"]).isEmpty ? BootMode.normal.rawValue : stringValue(payload["bootMode"])
-        var lines = ["VM \(stringValue(payload["vmState"])) boot=\(bootMode) helper=\(stringValue(payload["helperRunning"])) jobs=\(jobs.count)"]
-        lines.append(formatGuestAgent(payload["guestAgent"] as? [String: Any]))
-        lines.append(contentsOf: jobs.map(jobSummary))
-        return lines.joined(separator: "\n")
+        return [
+            "VM \(stringValue(payload["vmState"])) boot=\(bootMode) helper=\(stringValue(payload["helperRunning"]))",
+            formatGuestAgent(payload["guestAgent"] as? [String: Any])
+        ].joined(separator: "\n")
     }
 
     static func formatInspect(_ payload: [String: Any]) -> String {
