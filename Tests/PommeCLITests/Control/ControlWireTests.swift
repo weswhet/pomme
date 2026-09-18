@@ -35,7 +35,17 @@ struct ControlWireTests {
 
     @Test("Router exposes lifecycle, snapshot, status, and inspect only")
     func routerIsClosed() throws {
-        guard case .lifecycle(.pause) = try PommeVMControlRouter.route(.init(command: "pause")) else { Issue.record("pause was not routed") ; return }
+        guard case .lifecycle(.pause, _) = try PommeVMControlRouter.route(.init(command: "pause")) else { Issue.record("pause was not routed") ; return }
+        guard case .lifecycle(.stop, false) = try PommeVMControlRouter.route(.init(command: "stop")) else {
+            Issue.record("a stop without the guest-shutdown field was not routed as false")
+            return
+        }
+        guard case .lifecycle(.stop, true) = try PommeVMControlRouter.route(
+            .init(command: "stop", payload: .object(["guestShutdownRequested": .bool(true)]))
+        ) else {
+            Issue.record("a stop carrying the guest-shutdown field was not routed as true")
+            return
+        }
         guard case .status = try PommeVMControlRouter.route(.init(command: "status")) else { Issue.record("status was not routed") ; return }
         guard case .snapshotSave(let request) = try PommeVMControlRouter.route(.init(command: "snapshot-save", payload: .object(["stageName": .string(".pomme-snapshot-stage-a")]))) else { Issue.record("snapshot was not routed") ; return }
         #expect(request.stageName == ".pomme-snapshot-stage-a")
@@ -103,7 +113,7 @@ struct ControlWireTests {
     func streamingSocketRoundTrip() throws {
         let socket = temporarySocketURL()
         let server = PommeControlServer(socketURL: socket, streamHandler: { request, session in
-            guard case .lifecycle(.stop) = request else { return "ERROR unexpected command" }
+            guard case .lifecycle(.stop, _) = request else { return "ERROR unexpected command" }
             do {
                 let input = try session.receive()
                 try session.send(stream: .stdout, data: try input.decodedData())

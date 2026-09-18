@@ -511,7 +511,10 @@ struct PommeAgentPerformRequest: Sendable {
 }
 
 enum PommeVMControlRequest: Sendable {
-    case lifecycle(PommeLifecycleCommand)
+    /// `guestShutdownRequested` is true when the host has already asked the
+    /// guest to shut itself down, which is the only case where waiting out the
+    /// long window can pay off.
+    case lifecycle(PommeLifecycleCommand, guestShutdownRequested: Bool = false)
     case snapshotSave(PommeSnapshotSaveRequest)
     case status
     case inspect

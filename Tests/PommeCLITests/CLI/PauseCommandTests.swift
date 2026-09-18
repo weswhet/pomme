@@ -81,8 +81,41 @@ struct PauseCommandTests {
         #expect(!PommeCore.shouldRequestGuestShutdown(status: [:]))
     }
 
-    @Test("A normal guest gets a longer shutdown window than helper teardown")
-    func guestShutdownWindowIsLongerThanTeardown() {
+    @Test("A restart ends on its boot line")
+    func restartTextEndsOnTheBoot() {
+        let clean: [String: Any] = ["stopMethod": "guest-stopped", "forceRequested": false]
+
+        #expect(PommeApplication.restartText(
+            stopText: "OK stopped", stopPayload: clean, bootText: "OK boot mode=normal"
+        ) == "OK boot mode=normal")
+        #expect(PommeApplication.restartText(
+            stopText: "OK stopped", stopPayload: [:], bootText: "OK Recovery ready"
+        ) == "OK Recovery ready")
+    }
+
+    @Test("A restart that had to power the guest off keeps that line above the boot")
+    func restartTextKeepsAForcedStop() {
+        let forced: [String: Any] = ["stopMethod": "forced", "forceRequested": false]
+        let text = PommeApplication.restartText(
+            stopText: "OK stopped (forced; the guest did not shut itself down)",
+            stopPayload: forced,
+            bootText: "OK boot mode=normal"
+        )
+
+        #expect(text == "OK stopped (forced; the guest did not shut itself down)\nOK boot mode=normal")
+        #expect(text.split(separator: "\n").last.map(String.init) == "OK boot mode=normal")
+    }
+
+    @Test("Only a guest that was asked to shut down gets the longer window")
+    func guestShutdownWindowFollowsTheRequest() {
         #expect(Constants.guestShutdownTimeoutSeconds > Constants.gracefulStopTimeoutSeconds)
+        #expect(PommeVMRuntime.guestShutdownWindow(expectingGuestShutdown: true, bootMode: .normal)
+                == Constants.guestShutdownTimeoutSeconds)
+        // Nobody asked, so the framework request either lands quickly or not
+        // at all; these keep the window they have always had.
+        #expect(PommeVMRuntime.guestShutdownWindow(expectingGuestShutdown: false, bootMode: .normal)
+                == Constants.gracefulStopTimeoutSeconds)
+        #expect(PommeVMRuntime.guestShutdownWindow(expectingGuestShutdown: true, bootMode: .recovery)
+                == Constants.gracefulStopTimeoutSeconds)
     }
 }

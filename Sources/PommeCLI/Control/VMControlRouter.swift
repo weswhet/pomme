@@ -12,7 +12,7 @@ enum PommeVMControlRouter {
         switch request.command {
         case "pause", "resume", "stop", "force-stop":
             guard let command = PommeLifecycleCommand(rawValue: request.command) else { throw RunnerError.invalidControlCommand(request.command) }
-            return .lifecycle(command)
+            return .lifecycle(command, guestShutdownRequested: object["guestShutdownRequested"] as? Bool ?? false)
         case "snapshot-save":
             return .snapshotSave(try PommeSnapshotSaveRequest.parse(from: object))
         case "status":
