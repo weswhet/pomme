@@ -230,6 +230,13 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
         lock.withLock { active?.session }
     }
 
+    /// A candidate that is already authenticating becomes usable in moments,
+    /// which is worth telling a caller apart from an agent that is absent.
+    var unavailableFailure: RunnerError {
+        if case .connecting = lock.withLock({ phase }) { return .guestAgentConnecting }
+        return .guestAgentUnavailable
+    }
+
     /// Captures the currently authenticated session for a security operation.
     /// Every operation made through the returned pin verifies that this exact
     /// session remains active, so a candidate connection cannot replace the
@@ -240,7 +247,7 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
             return active.session
         }
         guard let session else {
-            throw RunnerError.guestAgentUnavailable
+            throw unavailableFailure
         }
         return .init(coordinator: self, session: session, role: role)
     }
@@ -460,14 +467,14 @@ struct PommeAuthenticatedAgentSession: Sendable {
 
 extension PommeAgentVSOCKCoordinator: PommeAgentStreamingSessionProvider {
     func performCorrelated(operation: String, payload: JSONValue?) async throws -> PommeAgentCorrelatedResult {
-        guard let session = lock.withLock({ active?.session }) else { throw RunnerError.guestAgentUnavailable }
+        guard let session = lock.withLock({ active?.session }) else { throw unavailableFailure }
         let response = try await session.requestCorrelated(operation: operation, payload: payload ?? .object([:]))
         return .init(requestID: response.requestID, result: response.result, streamFrames: await session.drainStreams(requestID: response.requestID))
     }
 
     func sendStream(jobID: UUID, stream: PommeAgentProtocol.Stream, requestID: UUID, data: Data?,
                     dimensions: (columns: Int, rows: Int)?, signal: Int32?) async throws -> [PommeAgentJobStreamFrame] {
-        guard let session = lock.withLock({ active?.session }) else { throw RunnerError.guestAgentUnavailable }
+        guard let session = lock.withLock({ active?.session }) else { throw unavailableFailure }
         return try await session.sendStream(jobID: jobID, stream: stream, requestID: requestID, data: data, dimensions: dimensions, signal: signal)
     }
 }

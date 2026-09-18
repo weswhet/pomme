@@ -20,6 +20,13 @@ protocol PommeAgentSessionProvider: Sendable {
     func session() -> (any PommeAgentSessionProtocol)?
     func status() async -> GuestAgentStatusV1
     func teardown()
+    /// Why no session is available, so a guest command can tell an agent that
+    /// is still connecting from one that is not there at all.
+    var unavailableFailure: RunnerError { get }
+}
+
+extension PommeAgentSessionProvider {
+    var unavailableFailure: RunnerError { .guestAgentUnavailable }
 }
 
 struct PommeAgentCorrelatedResult: Sendable {
@@ -273,20 +280,26 @@ final class PommeVMRuntime: @unchecked Sendable {
         try await PommeCore.saveMachineState(vm, to: destination, on: queue)
     }
 
+    /// The provider's own reason for having no session, so a request made
+    /// while the agent is still connecting says so.
+    private var agentUnavailableFailure: RunnerError {
+        agentProvider?.unavailableFailure ?? .guestAgentUnavailable
+    }
+
     /// Every guest operation must pass through the one injected Pomme session.
     func performGuestOperation(_ operation: String, payload: JSONValue? = nil) async throws -> JSONValue {
-        guard let agentSession = agentProvider?.session() else { throw RunnerError.guestAgentUnavailable }
+        guard let agentSession = agentProvider?.session() else { throw agentUnavailableFailure }
         return try await agentSession.perform(operation: operation, payload: payload)
     }
 
     func performGuestOperationCorrelated(_ operation: String, payload: JSONValue? = nil) async throws -> PommeAgentCorrelatedResult {
-        guard let provider = agentProvider as? any PommeAgentStreamingSessionProvider else { throw RunnerError.guestAgentUnavailable }
+        guard let provider = agentProvider as? any PommeAgentStreamingSessionProvider else { throw agentUnavailableFailure }
         return try await provider.performCorrelated(operation: operation, payload: payload)
     }
 
     func sendGuestStream(jobID: UUID, stream: PommeAgentProtocol.Stream, requestID: UUID, data: Data? = nil,
                          dimensions: (columns: Int, rows: Int)? = nil, signal: Int32? = nil) async throws -> [PommeAgentJobStreamFrame] {
-        guard let provider = agentProvider as? any PommeAgentStreamingSessionProvider else { throw RunnerError.guestAgentUnavailable }
+        guard let provider = agentProvider as? any PommeAgentStreamingSessionProvider else { throw agentUnavailableFailure }
         return try await provider.sendStream(jobID: jobID, stream: stream, requestID: requestID, data: data, dimensions: dimensions, signal: signal)
     }
 
