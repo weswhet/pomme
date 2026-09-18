@@ -35,6 +35,16 @@ protocol PommeAgentStreamingSessionProvider: PommeAgentSessionProvider {
     func sendStream(jobID: UUID, stream: PommeAgentProtocol.Stream, requestID: UUID, data: Data?, dimensions: (columns: Int, rows: Int)?, signal: Int32?) async throws -> [PommeAgentJobStreamFrame]
 }
 
+/// How a stop finished, so a clean guest shutdown can be told apart from a
+/// power cut both on the wire and in the CLI's output.
+enum VMStopOutcome: String, Sendable {
+    case alreadyStopped = "already-stopped"
+    case guestStopped = "guest-stopped"
+    case forced
+
+    var changedState: Bool { self != .alreadyStopped }
+}
+
 enum VMPauseResumeTransition {
     enum Action { case pause, resume }
 
@@ -197,25 +207,38 @@ final class PommeVMRuntime: @unchecked Sendable {
         }
     }
 
-    /// Each lifecycle call returns whether it changed the VM's state, so the
-    /// reply can tell a stop, pause, or resume apart from a no-op.
+    /// Each lifecycle call reports whether it changed the VM's state, so the
+    /// reply can tell a stop, pause, or resume apart from a no-op. A stop also
+    /// reports whether the guest shut itself down or had to be powered off.
     @discardableResult
-    func stop() async throws -> Bool {
+    func stop() async throws -> VMStopOutcome {
         let state = await PommeCore.state(of: vm, on: queue)
-        guard state != .stopped else { await teardown(); return false }
-        if await PommeCore.canRequestStop(vm, on: queue) {
+        guard state != .stopped else { await teardown(); return .alreadyStopped }
+        // A paused guest is frozen, so it can never act on the request and
+        // waiting out the window would only delay the power off. The host
+        // resumes a VM it means to shut down cleanly before asking for this.
+        if state != .paused, await PommeCore.canRequestStop(vm, on: queue) {
             do {
                 try await PommeCore.requestStop(vm, on: queue)
-                if await waitUntilStopped(timeout: Constants.gracefulStopTimeoutSeconds) { await teardown(); return true }
+                if await waitUntilStopped(timeout: guestShutdownWindow) {
+                    await teardown()
+                    return .guestStopped
+                }
             } catch { }
         }
         try await forceStop()
         await teardown()
-        return true
+        return .forced
+    }
+
+    /// recoveryOS provably ignores the framework's stop request, so it keeps
+    /// the short window rather than making every Recovery stop wait it out.
+    private var guestShutdownWindow: TimeInterval {
+        bootMode == .normal ? Constants.guestShutdownTimeoutSeconds : Constants.gracefulStopTimeoutSeconds
     }
 
     @discardableResult
-    func forceStopNow() async throws -> Bool { try await forceStop(); await teardown(); return true }
+    func forceStopNow() async throws -> VMStopOutcome { try await forceStop(); await teardown(); return .forced }
 
     @discardableResult
     func resume() async throws -> Bool {

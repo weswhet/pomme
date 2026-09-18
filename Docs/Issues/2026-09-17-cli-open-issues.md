@@ -21,7 +21,9 @@ Severity: **High** feature broken, **Medium** wrong or misleading behavior,
 ## 1. A VM can reach a state where it always boots the Recovery picker
 
 - **Severity:** High
-- **Status:** Open
+- **Status:** Open. The stop path identified below as the likely cause was
+  hardened on 2026-09-18; the failure was never reproducible on demand, so
+  that is a mitigation, not a proven fix.
 - **Area:** lifecycle, `start`
 
 ### Reproduction
@@ -155,14 +157,25 @@ process exits (`runForegroundRuntime`, `PommeCore.swift:3660-3675`).
 promptly after a `stop` can construct a new VM on an NVRAM file the exiting
 process still owns.
 
-Cheap ways to confirm before changing anything:
+### What was changed on 2026-09-18
 
-- Time the `stop` that precedes the failure. A stop that takes about 30
-  seconds means the graceful window expired and the guest was power-cut.
-- Log which branch `VMRuntime.stop()` took, or have the reply carry it, so a
-  forced stop is visible instead of reading as `OK stopped`.
+The stop path now does what `Docs/CreationPerformance-2026-09-13.md` §3.2
+recommended for the public command: ask the guest to shut itself down when the
+agent is connected, resume a paused VM so it can, give a normal guest 120
+seconds rather than 30, and report a power-off as `stopMethod: forced` with
+`OK stopped (forced; the guest did not shut itself down)` instead of a plain
+`OK stopped`. Measured on a fresh VM: a running guest now stops in about 7
+seconds instead of being power-cut at 31, a paused one in about 2, and a
+Recovery stop still forces at 30 seconds but says so.
+
+That removes the mechanism most likely to have produced this failure, and it
+makes the next occurrence self-documenting: whichever stop precedes it will
+have reported `forced`. It does not prove the issue closed. Still open as
+confirmation:
+
 - Hash `AuxiliaryStorage` before and after each stop to see when its contents
   stop matching a bootable selection.
+- Watch for a `forced` stop preceding any future occurrence.
 
 ---
 

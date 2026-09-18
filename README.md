@@ -45,6 +45,10 @@ status, inspect, exec, shell, sessions, jobs, cp, cat, agent, sip, amfi,
 mdm, remote-login, screen-sharing, snapshot, template, config, ipsw, ui, tui
 ```
 
+`stop` asks the guest to shut itself down when the agent is connected, resuming
+a paused VM so it can, and waits before powering the VM off; if it has to power
+off, it says so. `stop --force` powers the VM off immediately.
+
 Create is a durable provisioning workflow, not only an installation command:
 
 ```sh
