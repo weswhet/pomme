@@ -4291,12 +4291,20 @@ struct PommeCore {
         guard let terminal = result.result.objectValue else { throw PommeAgentProtocol.Error.invalidResponse }
         let exitCode: Int
         let error: String?
+        let terminationRequested = terminal["terminationRequested"].flatMap { value -> Bool? in
+            if case .bool(let requested) = value { return requested }
+            return nil
+        }
         if terminal["timedOut"] == .bool(true) {
             exitCode = 124
-            error = "Foreground command timed out; the guest job is still running. Run `pomme jobs list <vm>` to find its ID, then `pomme jobs wait` or `pomme jobs kill`."
+            error = PommeForegroundExecution.interruptionMessage(
+                timedOut: true, terminationRequested: terminationRequested
+            )
         } else if terminal["cancelled"] == .bool(true) {
             exitCode = 130
-            error = "Foreground command was cancelled; the guest job may still be running. Run `pomme jobs list <vm>` to find its ID, then `pomme jobs wait` or `pomme jobs kill`."
+            error = PommeForegroundExecution.interruptionMessage(
+                timedOut: false, terminationRequested: terminationRequested
+            )
         } else if terminal["stdoutTruncated"] == .bool(true) || terminal["stderrTruncated"] == .bool(true) {
             exitCode = 1
             error = "Foreground output exceeded the buffered limit; output is incomplete."

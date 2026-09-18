@@ -105,6 +105,19 @@ enum PommeForegroundExecution {
         }
     }
 
+    /// What to tell the operator when a foreground request ends without the
+    /// guest process exiting. A foreground job is never in `jobs list`, which
+    /// only holds detached ones, and both paths signal the process before
+    /// giving up, so the message says what actually happened to it.
+    static func interruptionMessage(timedOut: Bool, terminationRequested: Bool?) -> String {
+        let ending = timedOut ? "Foreground command timed out" : "Foreground command was cancelled"
+        guard terminationRequested == true else {
+            return ending + " and the guest process could not be signalled; it may still be running in the guest."
+        }
+        return ending + "; the guest process was signalled to stop."
+            + (timedOut ? " Use --detach to run a command that outlives the request." : "")
+    }
+
     private static func checkpoint(clock: ContinuousClock, deadline: ContinuousClock.Instant) throws {
         try Task.checkCancellation()
         guard clock.now < deadline else { throw Error.deadlineReached }

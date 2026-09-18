@@ -288,14 +288,18 @@ struct PommePublicPTYTerminalBridge {
         }
         var payload = object.mapValues(\.publicValue)
         if localTimeout {
+            var terminationRequested: Bool?
             if var result = payload["result"] as? [String: Any] {
+                terminationRequested = result["terminationRequested"] as? Bool
                 result["timedOut"] = true
                 result["cancelled"] = false
                 payload["result"] = result
             }
             payload["ok"] = false
             payload["hostExitCode"] = 124
-            payload["error"] = "Foreground command timed out; the guest job is still running. Run `pomme jobs list <vm>` to find its ID, then `pomme jobs wait` or `pomme jobs kill`."
+            payload["error"] = PommeForegroundExecution.interruptionMessage(
+                timedOut: true, terminationRequested: terminationRequested
+            )
         }
         payload["foreground"] = true
         payload["streamFrames"] = [[String: Any]]()
