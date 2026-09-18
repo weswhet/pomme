@@ -1,8 +1,9 @@
 # Open CLI issues after the 2026-09-17 full-surface exploration
 
-- **Status:** Fourteen of the fifteen issues below are open. Nothing was fixed
-  during the exploration itself; issue 5 was fixed on 2026-09-18, and the stop
-  path named in issue 1's investigation was hardened the same day.
+- **Status:** Eleven of the fifteen issues below are open. Nothing was fixed
+  during the exploration itself; issues 3, 4, and 5 were fixed on 2026-09-18,
+  issue 2 was half fixed, and the stop path named in issue 1's investigation
+  was hardened the same day. See `../CLI-Fixes-2026-09-18.md`.
 - **Binary under test:** `~/.local/bin/pomme` at commit `06ee394`, SHA-256
   `9885a5ad19571244a6db695fb1ef7c2ebb3bffc7b18acb1a842564ca758bc184`,
   signed Release, Developer ID Application: Wesley Whetstone (2D8XQ77EBQ).
@@ -185,7 +186,13 @@ confirmation:
 ## 2. Guest commands fail instead of waiting for the agent to connect
 
 - **Severity:** Medium
-- **Status:** Open
+- **Status:** Partly resolved (2026-09-18; 463c6bf). A security workflow whose
+  final state is a normal boot now waits for the agent as `start` does, so the
+  minutes-long window after `sip`/`amfi` is gone, and the failure text names
+  the agent's state. The other half stays open: an exchange that times out
+  while the agent reports connected, seen once right after a create. That is
+  the guest being slow rather than absent, and a mutating guest operation is
+  deliberately never retried.
 - **Area:** guest agent
 
 ### Reproduction and observed output
@@ -225,7 +232,7 @@ the same underlying condition, so neither is a reliable retry signal.
 ## 3. `exec --timeout` reports a job that does not exist
 
 - **Severity:** Medium
-- **Status:** Open
+- **Status:** Resolved (2026-09-18; 407b611)
 - **Area:** `exec`, `jobs`
 
 ### Reproduction and observed output
@@ -254,7 +261,8 @@ a runaway guest process survived the timeout.
 ## 4. `status` always reports `jobs=0`
 
 - **Severity:** Medium
-- **Status:** Open
+- **Status:** Resolved (2026-09-18; 90034ca; the line drops the count rather
+  than putting a guest round trip in every status call)
 - **Area:** `status`
 
 ### Reproduction and observed output
