@@ -2899,7 +2899,16 @@ struct PommeCore {
     /// Asks the running guest to shut itself down through the helper. A
     /// guest at Setup Assistant ignores the framework's stop request, so
     /// without this the helper stop waits out its graceful timeout.
-    private static func requestGuestShutdownThroughHelper(reference: VMReference) {
+    /// True when the guest can be asked to shut itself down: a running,
+    /// normal-booted VM whose persistent agent is connected. recoveryOS has no
+    /// agent, and a paused or stopping VM cannot run anything.
+    static func shouldRequestGuestShutdown(status: [String: Any]) -> Bool {
+        stringValue(status["vmState"]) == "running"
+            && stringValue(status["bootMode"]) == BootMode.normal.rawValue
+            && normalGuestAgentConnected(status)
+    }
+
+    static func requestGuestShutdownThroughHelper(reference: VMReference) {
         let request = GuestCommandRequest(path: "/sbin/shutdown", arguments: ["-h", "now"], timeout: 10)
         guard let payload = try? request.validatedControlPayload(detached: true) else { return }
         _ = try? sendControlObject(payload, bundle: reference.bundle, timeout: 10)
@@ -2908,7 +2917,7 @@ struct PommeCore {
     /// True only when the status payload reports the persistent guest agent
     /// connected, so an agent-driven shutdown request can actually be
     /// delivered before falling back to the framework's graceful stop.
-    private static func normalGuestAgentConnected(_ payload: [String: Any]) -> Bool {
+    static func normalGuestAgentConnected(_ payload: [String: Any]) -> Bool {
         let agent = payload["guestAgent"] as? [String: Any]
         return GuestAgentStatusV1.ConnectionState(rawValue: stringValue(agent?["connection"])) == .connected
     }
@@ -3326,8 +3335,7 @@ struct PommeCore {
         // to the ordinary graceful stop below.
         if allowAgentShutdown,
            let payload = try? vmStatusPayload(reference: reference),
-           (try? liveRecoveryRunState(from: payload)) == .running(.normal),
-           normalGuestAgentConnected(payload) {
+           shouldRequestGuestShutdown(status: payload) {
             requestGuestShutdownThroughHelper(reference: reference)
         }
         do {
@@ -3698,9 +3706,18 @@ struct PommeCore {
     }
 
     /// The helper's reply to a lifecycle command. `changed` is false when the
-    /// VM was already in the requested state.
-    static func lifecycleReply(_ command: PommeLifecycleCommand, changed: Bool) -> [String: Any] {
-        ["ok": true, "operation": command.rawValue, "changed": changed, "hostExitCode": 0]
+    /// VM was already in the requested state; `stopMethod` says whether the
+    /// guest shut itself down or was powered off.
+    static func lifecycleReply(
+        _ command: PommeLifecycleCommand,
+        changed: Bool,
+        stopOutcome: VMStopOutcome? = nil
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "ok": true, "operation": command.rawValue, "changed": changed, "hostExitCode": 0
+        ]
+        if let stopOutcome { payload["stopMethod"] = stopOutcome.rawValue }
+        return payload
     }
 
     private static func runtimeControlResponse(
@@ -3713,6 +3730,7 @@ struct PommeCore {
             switch request {
             case .lifecycle(let command):
                 let changed: Bool
+                var stopOutcome: VMStopOutcome?
                 switch command {
                 case .pause: changed = try await runtime.pause()
                 case .resume: changed = try await runtime.resume()
@@ -3721,10 +3739,14 @@ struct PommeCore {
                     // The response-completion hook releases this hold after
                     // success or failure is written. A concurrent guest-stop
                     // notification remains pending until then as well.
-                    changed = command == .forceStop ? try await runtime.forceStopNow() : try await runtime.stop()
+                    let outcome = command == .forceStop
+                        ? try await runtime.forceStopNow()
+                        : try await runtime.stop()
+                    stopOutcome = outcome
+                    changed = outcome.changedState
                     await exitSignal.requestExit()
                 }
-                return try jsonLine(lifecycleReply(command, changed: changed))
+                return try jsonLine(lifecycleReply(command, changed: changed, stopOutcome: stopOutcome))
             case .snapshotSave(let request):
                 try await runtime.saveSnapshotMachineState(in: request.stageName)
                 return try jsonLine(["ok": true, "operation": "snapshot-save", "hostExitCode": 0])

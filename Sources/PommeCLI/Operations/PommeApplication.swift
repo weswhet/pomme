@@ -287,8 +287,16 @@ enum PommeApplication {
         return result(title: "Capabilities", reference: reference, payload: payload, text: formatCapabilities(payload))
     }
 
-    static func stop(name: String, force: Bool = false, lease: VMBundleMutationLease? = nil) throws -> PommeOperationResult {
-        try VMBundleMutationLease.withLease(name: name, inherited: lease) { _ in
+    /// `allowGuestShutdown` is false only where the stop precedes a Recovery
+    /// boot: an agent-driven shutdown before one desynchronizes the reviewed
+    /// Recovery navigation route.
+    static func stop(
+        name: String,
+        force: Bool = false,
+        allowGuestShutdown: Bool = true,
+        lease: VMBundleMutationLease? = nil
+    ) throws -> PommeOperationResult {
+        try VMBundleMutationLease.withLease(name: name, inherited: lease) { scope in
         let reference = try namedReference(name)
         let statusPayload = try PommeCore.vmStatusPayload(reference: reference)
         if statusPayload["helperRunning"] as? Bool != true {
@@ -305,8 +313,23 @@ enum PommeApplication {
                 text: "VM is already stopped."
             )
         }
+        // The framework's stop is a power button that a macOS guest may take
+        // the whole graceful window to honor, and cutting power before it
+        // finishes risks its boot state. Ask the guest to shut itself down
+        // first, exactly as the provisioning and Recovery paths do.
+        var requestedGuestShutdown = false
+        if !force, allowGuestShutdown {
+            // The scope lease this stop already holds; a nested acquisition
+            // would be refused.
+            let ready = readyForGuestShutdown(reference: reference, status: statusPayload, lease: scope)
+            if ready {
+                PommeCore.requestGuestShutdownThroughHelper(reference: reference)
+                requestedGuestShutdown = true
+            }
+        }
         var payload = try PommeCore.controlCommandPayload(force ? .forceStop : .stop, reference: reference)
         payload["forceRequested"] = force
+        payload["guestShutdownRequested"] = requestedGuestShutdown
         return lifecycleResult(title: "Stop", command: force ? .forceStop : .stop, reference: reference, payload: payload)
         }
     }
@@ -327,6 +350,32 @@ enum PommeApplication {
         }
     }
 
+    /// A paused guest can neither be asked to shut down nor act on the
+    /// framework's request, so it is resumed first. The agent needs a moment
+    /// to be usable again after that, and a guest that never reports one is
+    /// left to the ordinary stop.
+    private static func readyForGuestShutdown(
+        reference: VMReference,
+        status: [String: Any],
+        lease: VMBundleMutationLease?
+    ) -> Bool {
+        if PommeCore.shouldRequestGuestShutdown(status: status) { return true }
+        guard stringValue(status["vmState"]) == "paused",
+              stringValue(status["bootMode"]) == BootMode.normal.rawValue,
+              let name = reference.name,
+              (try? requireSnapshotLifecycleSucceeded(resume(name: name, lease: lease))) != nil
+        else { return false }
+        let deadline = Date().addingTimeInterval(Constants.resumedGuestAgentReadyTimeoutSeconds)
+        while Date() < deadline {
+            if let resumed = try? PommeCore.vmStatusPayload(reference: reference),
+               PommeCore.shouldRequestGuestShutdown(status: resumed) {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        return false
+    }
+
     private static func lifecycleResult(
         title: String,
         command: PommeLifecycleCommand,
@@ -337,24 +386,40 @@ enum PommeApplication {
             return result(title: title, reference: reference, payload: payload,
                           text: payload["error"] as? String ?? "The \(command.rawValue) request failed.")
         }
-        // A helper from before the changed field always performed the call.
-        let text = lifecycleText(command, changed: payload["changed"] as? Bool ?? true)
+        // A helper from before these fields always performed the call and
+        // reported no stop method.
+        let text = lifecycleText(
+            command,
+            changed: payload["changed"] as? Bool ?? true,
+            stopOutcome: (payload["stopMethod"] as? String).flatMap(VMStopOutcome.init(rawValue:))
+        )
         var payload = payload
         payload["response"] = text
         return result(title: title, reference: reference, payload: payload, text: text)
     }
 
     /// The confirmation line for pause, resume, and stop, or the no-op
-    /// sentence when the VM was already in that state.
-    static func lifecycleText(_ command: PommeLifecycleCommand, changed: Bool) -> String {
-        switch (command, changed) {
-        case (.pause, true): "OK paused"
-        case (.pause, false): "VM is already paused."
-        case (.resume, true): "OK resumed"
-        case (.resume, false): "VM is already running."
-        case (.stop, true): "OK stopped"
-        case (.forceStop, true): "OK stopped (forced)"
-        case (.stop, false), (.forceStop, false): "VM is already stopped."
+    /// sentence when the VM was already in that state. A stop that had to
+    /// power the VM off says so, so an unclean stop is never silent.
+    static func lifecycleText(
+        _ command: PommeLifecycleCommand,
+        changed: Bool,
+        stopOutcome: VMStopOutcome? = nil
+    ) -> String {
+        switch command {
+        case .pause: return changed ? "OK paused" : "VM is already paused."
+        case .resume: return changed ? "OK resumed" : "VM is already running."
+        case .stop, .forceStop: break
+        }
+        guard changed else { return "VM is already stopped." }
+        switch stopOutcome {
+        case .guestStopped: return "OK stopped"
+        case .forced where command == .stop:
+            return "OK stopped (forced; the guest did not shut itself down)"
+        case .forced, .none, .alreadyStopped:
+            // A forced stop the operator asked for, or a helper too old to
+            // report how the VM stopped.
+            return command == .forceStop ? "OK stopped (forced)" : "OK stopped"
         }
     }
 
@@ -576,7 +641,8 @@ enum PommeApplication {
         let statusResult = try status(name: name)
         let statusMode = BootMode(rawValue: stringValue(statusResult.payload["bootMode"])) ?? .normal
         let selectedMode = mode ?? statusMode
-        let stopResult = try stop(name: name, lease: scope)
+        // A Recovery boot must not follow an agent-driven shutdown.
+        let stopResult = try stop(name: name, allowGuestShutdown: selectedMode != .recovery, lease: scope)
         let bootResult = try boot(name: name, mode: selectedMode, options: options, lease: scope)
 
         var payload = bootResult.payload

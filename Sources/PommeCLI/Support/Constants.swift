@@ -24,6 +24,15 @@ enum Constants {
     static let guestKCPasswordCredentialStore = "guestKCPassword"
     static let guestKCPasswordUserMetadataKey = "guestKCPasswordUser"
     static let gracefulStopTimeoutSeconds: TimeInterval = 30
+    /// How long a normal-booted guest gets to power itself down after the
+    /// framework's stop request. macOS can spend a minute on its shutdown
+    /// confirmation alone, and cutting power before it finishes risks leaving
+    /// the guest's boot state unusable. recoveryOS never acts on the request
+    /// and holds no user data, so a Recovery stop keeps the shorter window.
+    static let guestShutdownTimeoutSeconds: TimeInterval = 120
+    /// How long a VM resumed only so it can be shut down cleanly gets to
+    /// report its agent usable again before the ordinary stop takes over.
+    static let resumedGuestAgentReadyTimeoutSeconds: TimeInterval = 15
     static let defaultGuestCommandTimeout: TimeInterval = 60
     static let defaultSIPTimeout: TimeInterval = 300
     static let agentRoundTripTimeout: TimeInterval = 5

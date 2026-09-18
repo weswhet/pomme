@@ -35,12 +35,54 @@ struct PauseCommandTests {
         #expect(PommeApplication.lifecycleText(command, changed: changed) == text)
     }
 
-    @Test("The helper's lifecycle reply says whether the state changed")
+    @Test("A stop says whether the guest shut itself down or was powered off", arguments: [
+        (PommeLifecycleCommand.stop, VMStopOutcome.guestStopped, "OK stopped"),
+        (.stop, .forced, "OK stopped (forced; the guest did not shut itself down)"),
+        (.forceStop, .forced, "OK stopped (forced)"),
+        (.forceStop, .guestStopped, "OK stopped")
+    ])
+    func stopTextNamesTheMethod(command: PommeLifecycleCommand, outcome: VMStopOutcome, text: String) {
+        #expect(PommeApplication.lifecycleText(command, changed: true, stopOutcome: outcome) == text)
+    }
+
+    @Test("An already-stopped VM reads the same whatever the method")
+    func alreadyStoppedText() {
+        #expect(PommeApplication.lifecycleText(.stop, changed: false, stopOutcome: .alreadyStopped)
+                == "VM is already stopped.")
+        #expect(VMStopOutcome.alreadyStopped.changedState == false)
+        #expect(VMStopOutcome.guestStopped.changedState)
+        #expect(VMStopOutcome.forced.changedState)
+    }
+
+    @Test("The helper's lifecycle reply says whether the state changed and how it stopped")
     func lifecycleReplyCarriesChanged() {
         let reply = PommeCore.lifecycleReply(.pause, changed: false)
+        let stopped = PommeCore.lifecycleReply(.stop, changed: true, stopOutcome: .guestStopped)
+        let forced = PommeCore.lifecycleReply(.forceStop, changed: true, stopOutcome: .forced)
 
         #expect(reply["changed"] as? Bool == false)
         #expect(reply["operation"] as? String == "pause")
         #expect(reply["ok"] as? Bool == true)
+        #expect(reply["stopMethod"] == nil)
+        #expect(stopped["stopMethod"] as? String == "guest-stopped")
+        #expect(forced["stopMethod"] as? String == "forced")
+    }
+
+    @Test("A guest shutdown is requested only for a running normal VM with a connected agent")
+    func guestShutdownPreconditions() {
+        func status(_ state: String, _ mode: String, _ connection: String) -> [String: Any] {
+            ["vmState": state, "bootMode": mode, "guestAgent": ["connection": connection]]
+        }
+
+        #expect(PommeCore.shouldRequestGuestShutdown(status: status("running", "normal", "connected")))
+        #expect(!PommeCore.shouldRequestGuestShutdown(status: status("running", "recovery", "connected")))
+        #expect(!PommeCore.shouldRequestGuestShutdown(status: status("paused", "normal", "connected")))
+        #expect(!PommeCore.shouldRequestGuestShutdown(status: status("running", "normal", "disconnected")))
+        #expect(!PommeCore.shouldRequestGuestShutdown(status: [:]))
+    }
+
+    @Test("A normal guest gets a longer shutdown window than helper teardown")
+    func guestShutdownWindowIsLongerThanTeardown() {
+        #expect(Constants.guestShutdownTimeoutSeconds > Constants.gracefulStopTimeoutSeconds)
     }
 }
