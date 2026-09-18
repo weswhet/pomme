@@ -211,7 +211,7 @@ final class PommeVMRuntime: @unchecked Sendable {
     /// reply can tell a stop, pause, or resume apart from a no-op. A stop also
     /// reports whether the guest shut itself down or had to be powered off.
     @discardableResult
-    func stop() async throws -> VMStopOutcome {
+    func stop(expectingGuestShutdown: Bool = false) async throws -> VMStopOutcome {
         let state = await PommeCore.state(of: vm, on: queue)
         guard state != .stopped else { await teardown(); return .alreadyStopped }
         // A paused guest is frozen, so it can never act on the request and
@@ -220,7 +220,11 @@ final class PommeVMRuntime: @unchecked Sendable {
         if state != .paused, await PommeCore.canRequestStop(vm, on: queue) {
             do {
                 try await PommeCore.requestStop(vm, on: queue)
-                if await waitUntilStopped(timeout: guestShutdownWindow) {
+                let window = Self.guestShutdownWindow(
+                    expectingGuestShutdown: expectingGuestShutdown,
+                    bootMode: bootMode
+                )
+                if await waitUntilStopped(timeout: window) {
                     await teardown()
                     return .guestStopped
                 }
@@ -231,10 +235,14 @@ final class PommeVMRuntime: @unchecked Sendable {
         return .forced
     }
 
-    /// recoveryOS provably ignores the framework's stop request, so it keeps
-    /// the short window rather than making every Recovery stop wait it out.
-    private var guestShutdownWindow: TimeInterval {
-        bootMode == .normal ? Constants.guestShutdownTimeoutSeconds : Constants.gracefulStopTimeoutSeconds
+    /// A guest that was asked to shut itself down is worth waiting for. Where
+    /// nobody asked, the framework's request either lands quickly or not at
+    /// all — recoveryOS never acts on it — so those stops keep the short
+    /// window they have always had.
+    static func guestShutdownWindow(expectingGuestShutdown: Bool, bootMode: BootMode) -> TimeInterval {
+        expectingGuestShutdown && bootMode == .normal
+            ? Constants.guestShutdownTimeoutSeconds
+            : Constants.gracefulStopTimeoutSeconds
     }
 
     @discardableResult

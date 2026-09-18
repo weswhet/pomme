@@ -327,7 +327,11 @@ enum PommeApplication {
                 requestedGuestShutdown = true
             }
         }
-        var payload = try PommeCore.controlCommandPayload(force ? .forceStop : .stop, reference: reference)
+        var payload = try PommeCore.controlCommandPayload(
+            force ? .forceStop : .stop,
+            reference: reference,
+            guestShutdownRequested: requestedGuestShutdown
+        )
         payload["forceRequested"] = force
         payload["guestShutdownRequested"] = requestedGuestShutdown
         return lifecycleResult(title: "Stop", command: force ? .forceStop : .stop, reference: reference, payload: payload)
@@ -396,6 +400,17 @@ enum PommeApplication {
         var payload = payload
         payload["response"] = text
         return result(title: title, reference: reference, payload: payload, text: text)
+    }
+
+    /// A restart ends on its boot line. A stop that had to power the guest off
+    /// keeps its own line above it, so an unclean stop is not lost in a
+    /// restart the way it would be if only the boot were reported.
+    static func restartText(stopText: String, stopPayload: [String: Any], bootText: String) -> String {
+        guard stopPayload["stopMethod"] as? String == VMStopOutcome.forced.rawValue,
+              stopPayload["forceRequested"] as? Bool != true,
+              !stopText.isEmpty
+        else { return bootText }
+        return stopText + "\n" + bootText
     }
 
     /// The confirmation line for pause, resume, and stop, or the no-op
@@ -649,11 +664,18 @@ enum PommeApplication {
         payload["operation"] = "restart"
         payload["preservedMode"] = mode == nil
         payload["steps"] = [statusResult.payload, stopResult.payload, bootResult.payload]
+        // The boot result already carries the line this restart should end on.
+        // Re-formatting `payload` would read the steps above instead, whose
+        // last response is the stop's.
         return result(
             title: "Restart",
             reference: try namedReference(name),
             payload: payload,
-            text: formatBoot(payload)
+            text: restartText(
+                stopText: stopResult.text,
+                stopPayload: stopResult.payload,
+                bootText: bootResult.text
+            )
         )
         }
     }

@@ -26,7 +26,7 @@ struct PommeSecurityHelperShutdownTests {
         let server = PommeControlServer(
             socketURL: socket,
             afterResponse: { request, response in
-                guard case .lifecycle(.stop) = request else { return }
+                guard case .lifecycle(.stop, _) = request else { return }
                 log.append(response.ok ? "after-response-started-ok" : "after-response-started-error")
                 _ = await responseRead.wait()
                 log.append("after-response-after-read")
@@ -37,7 +37,7 @@ struct PommeSecurityHelperShutdownTests {
                 afterRelease.release()
             }
         ) { request in
-            guard case .lifecycle(.stop) = request else { return "ERROR unexpected command" }
+            guard case .lifecycle(.stop, _) = request else { return "ERROR unexpected command" }
             log.append("handler-started")
             await signal.beginExitHold()
             await signal.requestExit()
@@ -110,7 +110,7 @@ struct PommeSecurityHelperShutdownTests {
         let server = PommeControlServer(
             socketURL: socket,
             afterResponse: { request, response in
-                guard case .lifecycle(.stop) = request else { return }
+                guard case .lifecycle(.stop, _) = request else { return }
                 log.append(response.ok ? "after-response-started-ok" : "after-response-started-error")
                 afterResponseStarted.release()
                 _ = await hookRelease.wait()
@@ -119,7 +119,7 @@ struct PommeSecurityHelperShutdownTests {
                 afterRelease.release()
             }
         ) { request in
-            guard case .lifecycle(.stop) = request else { return "ERROR unexpected command" }
+            guard case .lifecycle(.stop, _) = request else { return "ERROR unexpected command" }
             log.append("handler-started")
             await signal.beginExitHold()
             await signal.requestExit()

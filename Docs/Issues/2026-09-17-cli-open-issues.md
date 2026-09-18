@@ -1,6 +1,8 @@
 # Open CLI issues after the 2026-09-17 full-surface exploration
 
-- **Status:** All fifteen issues below are open. Nothing was fixed in this pass.
+- **Status:** Fourteen of the fifteen issues below are open. Nothing was fixed
+  during the exploration itself; issue 5 was fixed on 2026-09-18, and the stop
+  path named in issue 1's investigation was hardened the same day.
 - **Binary under test:** `~/.local/bin/pomme` at commit `06ee394`, SHA-256
   `9885a5ad19571244a6db695fb1ef7c2ebb3bffc7b18acb1a842564ca758bc184`,
   signed Release, Developer ID Application: Wesley Whetstone (2D8XQ77EBQ).
@@ -161,8 +163,9 @@ process still owns.
 
 The stop path now does what `Docs/CreationPerformance-2026-09-13.md` §3.2
 recommended for the public command: ask the guest to shut itself down when the
-agent is connected, resume a paused VM so it can, give a normal guest 120
-seconds rather than 30, and report a power-off as `stopMethod: forced` with
+agent is connected, resume a paused VM so it can, give a guest that was asked
+to shut down 120 seconds rather than 30 while every other stop keeps its old
+window, and report a power-off as `stopMethod: forced` with
 `OK stopped (forced; the guest did not shut itself down)` instead of a plain
 `OK stopped`. Measured on a fresh VM: a running guest now stops in about 7
 seconds instead of being power-cut at 31, a paused one in about 2, and a
@@ -281,7 +284,8 @@ reports none. The JSON consumer sees no field at all.
 ## 5. `restart` prints only `OK stopped`
 
 - **Severity:** Low
-- **Status:** Open
+- **Status:** Resolved (2026-09-18; the restart line now comes from the boot
+  result, and a forced stop keeps its own line above it)
 - **Area:** `restart`
 
 ### Reproduction and observed output

@@ -1447,9 +1447,12 @@ struct PommeCore {
 
     static func controlCommandPayload(
         _ command: PommeLifecycleCommand,
-        reference: VMReference
+        reference: VMReference,
+        guestShutdownRequested: Bool = false
     ) throws -> [String: Any] {
-        let payload = try sendControlObject(["command": command.rawValue], bundle: reference.bundle)
+        var request: [String: Any] = ["command": command.rawValue]
+        if guestShutdownRequested { request["guestShutdownRequested"] = true }
+        let payload = try sendControlObject(request, bundle: reference.bundle)
         var result = payload
         result["operation"] = command.rawValue
         if let name = reference.name { result["name"] = name }
@@ -3649,7 +3652,7 @@ struct PommeCore {
         let server = PommeControlServer(
             socketURL: bundle.pommeSocketURL,
             afterResponse: { request, _ in
-                guard case .lifecycle(let command) = request,
+                guard case .lifecycle(let command, _) = request,
                       command == .stop || command == .forceStop
                 else { return }
                 await exitSignal.endExitHold()
@@ -3728,7 +3731,7 @@ struct PommeCore {
     ) async -> String {
         do {
             switch request {
-            case .lifecycle(let command):
+            case .lifecycle(let command, let guestShutdownRequested):
                 let changed: Bool
                 var stopOutcome: VMStopOutcome?
                 switch command {
@@ -3741,7 +3744,7 @@ struct PommeCore {
                     // notification remains pending until then as well.
                     let outcome = command == .forceStop
                         ? try await runtime.forceStopNow()
-                        : try await runtime.stop()
+                        : try await runtime.stop(expectingGuestShutdown: guestShutdownRequested)
                     stopOutcome = outcome
                     changed = outcome.changedState
                     await exitSignal.requestExit()

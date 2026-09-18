@@ -133,16 +133,21 @@ with the persistent agent connected, the host first asks the guest to run
 `shutdown -h now`, then sends the framework stop; the framework's request
 alone behaves like a power button that macOS may take a full minute to act on.
 A paused VM is resumed first, because a paused guest can neither be asked to
-shut down nor act on the framework's request; `--force` skips that. The guest then has `guestShutdownTimeoutSeconds` (120) to power itself
-down, or `gracefulStopTimeoutSeconds` (30) in Recovery, which never acts on the
-request. Only after that window does the helper stop the VM outright.
+shut down nor act on the framework's request; `--force` skips that. A stop
+whose guest was asked to shut down carries `guestShutdownRequested` and gives
+it `guestShutdownTimeoutSeconds` (120) to finish. Every other stop, including
+one in Recovery, which never acts on the request, keeps
+`gracefulStopTimeoutSeconds` (30): where nothing asked the guest to shut down,
+the framework's request either lands quickly or not at all. Only after that
+window does the helper stop the VM outright.
 
 The lifecycle reply carries `changed` and, for a stop, `stopMethod`:
 `guest-stopped` when the guest powered itself down, `forced` when the VM was
 stopped outright, and `already-stopped` for a no-op. `pomme stop` reports a
 forced stop in its own output rather than presenting it as a clean one, so an
 unclean stop is never silent. `stop --force` asks for that outright stop
-deliberately and always reports `forced`.
+deliberately and always reports `forced`. `restart` ends on its boot line and
+keeps a forced stop's line above it.
 
 ## Terminal-session control operations
 
