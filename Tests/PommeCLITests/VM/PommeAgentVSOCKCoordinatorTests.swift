@@ -297,6 +297,26 @@ struct PommeAgentVSOCKCoordinatorTests {
         provider.teardown()
     }
 
+    @Test("A guest request names why no session is available")
+    func unavailableFailureNamesThePhase() async throws {
+        let transport = FakeTransport()
+        let coordinator = PommeAgentVSOCKCoordinator(transport: transport, secretProvider: { _ in Self.token })
+        let provider: any PommeAgentSessionProvider = coordinator
+
+        // Nothing has connected yet: the guest may simply still be booting.
+        if case .guestAgentUnavailable = provider.unavailableFailure {} else {
+            Issue.record("an absent agent was not reported as unavailable")
+        }
+        #expect(provider.unavailableFailure.errorDescription?.contains("still booting") == true)
+        #expect(RunnerError.guestAgentConnecting.errorDescription
+                == "PommeAgent is connecting on port \(Constants.pommeAgentPort); retry in a moment.")
+
+        try coordinator.attachNormal()
+        transport.connect(FakeConnection(token: Self.token), port: PommeAgentPort.persistentNormal)
+        _ = await eventually { await provider.status() }
+        provider.teardown()
+    }
+
     @Test("Guest stream frames stay correlated with their unary response")
     func correlatedGuestStreams() async throws {
         let transport = FakeTransport()

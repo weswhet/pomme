@@ -3192,6 +3192,27 @@ struct PommeCore {
         try await retained.stop()
     }
 
+    /// A workflow that leaves the VM running normally should hand back a VM
+    /// that can already take guest commands, the way `start` does; otherwise
+    /// the next command fails for as long as the guest takes to boot. The
+    /// security result is authoritative, so an agent that does not connect in
+    /// time is logged rather than failing the workflow that already succeeded.
+    private static func waitForFinalStateGuestAgent(reference: VMReference, payload: [String: Any]) {
+        do {
+            _ = try waitForGuestAgentConnection(
+                reference: reference,
+                payload: payload,
+                deadline: ProcessInfo.processInfo.systemUptime + Constants.defaultRecoveryAgentTimeout,
+                timeout: Constants.defaultRecoveryAgentTimeout
+            )
+        } catch {
+            log(
+                "Final-state guest agent wait did not complete: \(error.localizedDescription)",
+                vmName: reference.displayName
+            )
+        }
+    }
+
     /// A freshly provisioned guest sitting in Setup Assistant ignores the
     /// framework's stop request, so `runtime.stop()` would wait out the full
     /// graceful timeout before forcing. When the normal agent is connected,
@@ -3429,11 +3450,12 @@ struct PommeCore {
             // A requested stopped final state boots nothing afterwards.
             try await stopForLiveRecovery(reference: reference, allowAgentShutdown: true)
         case .normal:
-            _ = try startRuntimeInBackground(
+            let payload = try startRuntimeInBackground(
                 reference: reference,
                 bootMode: .normal,
                 timeout: Constants.defaultRecoveryAgentTimeout
             )
+            waitForFinalStateGuestAgent(reference: reference, payload: payload)
         case .recovery:
             _ = try startRuntimeInBackground(
                 reference: reference,

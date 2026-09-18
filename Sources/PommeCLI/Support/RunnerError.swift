@@ -37,6 +37,7 @@ enum RunnerError: LocalizedError {
     case guestAgentProbeTimedOut
     case invalidGuestCommand(String)
     case guestAgentUnavailable
+    case guestAgentConnecting
     case guestAgentDisconnected
     case guestAgentTimedOut(String)
     case guestAgentError(String)
@@ -133,7 +134,10 @@ enum RunnerError: LocalizedError {
         case .guestAgentProbeTimedOut:
             "Timed out connecting to PommeAgent."
         case .guestAgentUnavailable:
-            "PommeAgent is not connected on port \(Constants.pommeAgentPort)."
+            "PommeAgent is not connected on port \(Constants.pommeAgentPort). A guest that is still "
+                + "booting connects on its own; `pomme status` reports when it does."
+        case .guestAgentConnecting:
+            "PommeAgent is connecting on port \(Constants.pommeAgentPort); retry in a moment."
         case .guestAgentDisconnected:
             "The authenticated agent connection closed before a response arrived."
         case .guestAgentTimedOut(let operation):
