@@ -41,7 +41,16 @@ import json
 import os
 
 value = json.loads(os.environ["POMME_APP_PATH_JSON"])
-print(value.get("appPath") or value.get("path") or value.get("executablePath") or "")
+# schemaVersion 2 nests the artifact under data.artifacts; older output carried
+# the path at the top level.
+sources = [value.get("data", {}).get("artifacts", {}), value]
+for source in sources:
+    path = source.get("appPath") or source.get("path") or source.get("executablePath")
+    if path:
+        print(path)
+        break
+else:
+    print("")
 PY
 )"
 fi
