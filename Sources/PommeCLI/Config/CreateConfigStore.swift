@@ -473,7 +473,12 @@ struct VMCreationExecutionDependencies: Sendable {
                 source: .firmware(plan.firmware),
                 vmName: plan.name
             )
-            return ["memoryMinimum": check.payload]
+            var payload: [String: Any] = ["memoryMinimum": check.payload]
+            payload.merge(PommeCore.provisioningDisclosure(
+                virtualization: PommeCore.usesVirtualizationProvisioning(
+                    guestVersion: plan.firmware.version, firstBootEligible: true)
+            )) { _, new in new }
+            return payload
         }
     )
 }

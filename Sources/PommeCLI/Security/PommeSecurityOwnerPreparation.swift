@@ -406,6 +406,17 @@ struct PommeSecurityOwnerVerification: Equatable, Sendable {
   let startupVolumeGroupUUID: UUID
 }
 
+/// Read-only account and login proof for an owner created by Virtualization.
+/// This is not a complete desktop proof: callers must also use the normal
+/// agent's stable Aqua-session and Dock verification for `owner.uniqueID`
+/// before admitting a Recovery transaction or completing provisioning.
+struct PommeSecurityFrameworkOwnerVerification: Equatable, Sendable {
+  let owner: PommeSecurityOwnerVerification
+  let startupRootVolumeUUID: UUID
+  let automaticLoginVerified: Bool
+  let consoleUserVerified: Bool
+}
+
 struct PommeSecurityOwnerLoginRestrictions: Equatable, Sendable {
   let fileVaultEnabled: Bool
   let managedLoginWindow: Bool
@@ -672,6 +683,57 @@ struct PommeSecurityOwnerPreparation: Sendable {
       evidence: evidence, requireFullName: requireFullName)
     try phase(.verifyOwner, .receipt)
     return verification
+  }
+
+  /// Verifies a framework-created owner without account creation, login
+  /// configuration, or Setup Assistant mutation. The password must be the
+  /// original scoped credential; this boundary never generates a replacement.
+  /// On subsequent verification the caller must supply the persisted volume
+  /// group in `identity` and the persisted GeneratedUID, when available.
+  /// A successful result still requires the caller's stable Aqua/Dock proof.
+  func verifyFrameworkProvisionedOwner(
+    password: String,
+    expectedGeneratedUID: UUID? = nil
+  ) async throws -> PommeSecurityFrameworkOwnerVerification {
+    guard identity.username == "pomme", identity.fullName == "Pomme" else {
+      throw PommeSecurityOwnerPreparationError.invalidIdentity
+    }
+    try identity.validate()
+    guard !password.isEmpty else { throw PommeSecurityOwnerPreparationError.credentialRequired }
+    try phase(.verifyOwner, .intent)
+    try await authenticateOwner(password: password)
+    let evidence = try collectEvidence()
+    let owner = try verifyOwnerEvidence(evidence: evidence, requireFullName: true)
+    try phase(.verifyOwner, .receipt)
+    guard owner.uniqueID >= 501,
+      expectedGeneratedUID == nil || owner.generatedUID == expectedGeneratedUID
+    else { throw PommeSecurityOwnerPreparationError.ownerVerificationFailed }
+
+    try verifyAutoLoginStatus()
+    guard try autoLoginUser() == identity.username else {
+      throw PommeSecurityOwnerPreparationError.autoLoginVerificationFailed
+    }
+    // stat without -L uses lstat: the type bits reject symbolic links and
+    // nonregular files. Require exactly one link and never read the contents.
+    let metadata = try run(
+      .init(
+        executable: "/usr/bin/stat",
+        arguments: ["-f", "%u:%g:%p:%l", "/etc/kcpassword"]
+      ),
+      kind: .loginWindow,
+      acceptedExitCodes: [0]
+    )
+    guard ["0:0:100400:1", "0:0:100600:1"].contains(
+      metadata.trimmingCharacters(in: .whitespacesAndNewlines))
+    else {
+      throw PommeSecurityOwnerPreparationError.autoLoginVerificationFailed
+    }
+    guard try consoleIdentity() == "\(identity.username):\(owner.uniqueID)" else {
+      throw PommeSecurityOwnerPreparationError.ownerVerificationFailed
+    }
+    return .init(
+      owner: owner, startupRootVolumeUUID: evidence.startupIdentity.rootVolumeUUID,
+      automaticLoginVerified: true, consoleUserVerified: true)
   }
 
   private func verifyFreshOwnerAfterCreation(
@@ -1965,13 +2027,12 @@ struct PommeSecurityOwnerPreparation: Sendable {
       acceptedExitCodes: [0, 1]
     )
     let text = normalized(output)
-    if text.contains("secure token is enabled") || text.contains("securetoken is enabled") {
-      return true
+    let enabled = text.contains("secure token is enabled") || text.contains("securetoken is enabled")
+    let disabled = text.contains("secure token is disabled") || text.contains("securetoken is disabled")
+    guard enabled != disabled else {
+      throw PommeSecurityOwnerPreparationError.malformedEvidence(.secureToken)
     }
-    if text.contains("secure token is disabled") || text.contains("securetoken is disabled") {
-      return false
-    }
-    throw PommeSecurityOwnerPreparationError.malformedEvidence(.secureToken)
+    return enabled
   }
 
   private func administratorStatus(_ username: String) throws -> Bool {

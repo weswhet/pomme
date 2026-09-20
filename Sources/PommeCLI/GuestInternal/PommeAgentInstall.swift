@@ -255,7 +255,7 @@ struct PommeAgentRecoveryInstaller: Sendable {
         }
     }
 
-    private func installTransaction(executable: Data, token: Data, plist: Data, paths: Paths) throws {
+    func installTransaction(executable: Data, token: Data, plist: Data, paths: Paths) throws {
         try PommeAgentFileTransaction.ensureDirectory(
             paths.privateDirectory,
             mode: 0o700,

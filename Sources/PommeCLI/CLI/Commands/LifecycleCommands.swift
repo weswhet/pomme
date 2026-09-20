@@ -253,7 +253,7 @@ struct CreateCommand: AsyncParsableCommand {
                 source: memorySource,
                 vmName: vmName
             )
-            let payload: [String: Any] = [
+            var payload: [String: Any] = [
                 "ok": true,
                 "dryRun": true,
                 "name": vmName,
@@ -272,6 +272,9 @@ struct CreateCommand: AsyncParsableCommand {
                     "digest": selectedProfile.digest
                 ]
             ]
+            payload.merge(PommeCore.provisioningDisclosure(virtualization:
+                PommeCore.usesVirtualizationProvisioning(guestVersion: selectedProfile.version,
+                    firstBootEligible: true))) { _, new in new }
             try CLIOutputWriter.write(
                 payload: payload,
                 text: "Would create \(vmName) (disk \(diskSize), memory \(memory), boot \(boot.rawValue)).",
@@ -309,7 +312,7 @@ struct CreateCommand: AsyncParsableCommand {
                 source: .template(manifest),
                 vmName: vmName
             )
-            let payload: [String: Any] = [
+            var payload: [String: Any] = [
                 "ok": true,
                 "dryRun": true,
                 "name": vmName,
@@ -328,6 +331,9 @@ struct CreateCommand: AsyncParsableCommand {
                     "digest": descriptor.digest
                 ]
             ]
+            payload.merge(PommeCore.provisioningDisclosure(virtualization:
+                PommeCore.usesVirtualizationProvisioning(guestVersion: manifest.version,
+                    firstBootEligible: !manifest.isProvisioned))) { _, new in new }
             try CLIOutputWriter.write(
                 payload: payload,
                 text: "Would create \(vmName) from template \(manifest.name) (macOS \(manifest.version) \(manifest.build), disk \(manifest.diskSizeBytes / (1 << 30))GB, memory \(memory), boot \(boot.rawValue)).",

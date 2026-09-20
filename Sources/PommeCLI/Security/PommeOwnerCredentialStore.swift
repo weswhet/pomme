@@ -40,6 +40,40 @@ struct PommeOwnerCredentialReference: Codable, Equatable, Hashable, Sendable {
 
     var username: String { account }
 
+    /// Captures the immutable host-side binding before a guest volume group exists.
+    init(vmUUID: UUID, machineIdentifierSHA256: String, diskImageFileResourceID: String, account: String = "pomme") throws {
+        guard Self.isSHA256(machineIdentifierSHA256),
+              Self.isSafeResourceID(diskImageFileResourceID),
+              account == "pomme"
+        else { throw PommeOwnerCredentialStoreError.invalidReference }
+        self.vmUUID = vmUUID
+        self.machineIdentifierSHA256 = machineIdentifierSHA256.lowercased()
+        self.diskImageFileResourceID = diskImageFileResourceID
+        self.account = account
+        self.generatedUID = nil
+        self.service = pommeCredentialService(forUUID: vmUUID.uuidString)
+        self.ownershipMarker = Self.makeMarker(vmUUID: vmUUID, machineIdentifierSHA256: machineIdentifierSHA256,
+                                              diskImageFileResourceID: diskImageFileResourceID, account: account, generatedUID: nil)
+    }
+
+    /// Adds a guest-verified identity without changing the Keychain item binding.
+    func bindingGeneratedUID(_ verifiedUID: UUID) throws -> Self {
+        guard generatedUID == nil || generatedUID == verifiedUID else {
+            throw PommeOwnerCredentialStoreError.ownershipMismatch
+        }
+        return Self(base: self, generatedUID: verifiedUID)
+    }
+
+    private init(base: Self, generatedUID: UUID) {
+        vmUUID = base.vmUUID
+        machineIdentifierSHA256 = base.machineIdentifierSHA256
+        diskImageFileResourceID = base.diskImageFileResourceID
+        account = base.account
+        self.generatedUID = generatedUID
+        service = base.service
+        ownershipMarker = base.ownershipMarker
+    }
+
     func matches(_ identity: PommeSecurityWorkflowIdentity) -> Bool {
         vmUUID == identity.vmUUID
             && machineIdentifierSHA256 == identity.machineIdentifierSHA256
@@ -138,7 +172,9 @@ struct PommeOwnerCredentialReference: Codable, Equatable, Hashable, Sendable {
 }
 
 /// An in-memory candidate.  It is intentionally not Codable or printable.
-struct PommeOwnerCredentialIntent: Sendable {
+struct PommeOwnerCredentialIntent: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    var description: String { "PommeOwnerCredentialIntent(redacted)" }
+    var debugDescription: String { description }
     let reference: PommeOwnerCredentialReference
     fileprivate let passwordData: Data
 
@@ -158,7 +194,9 @@ struct PommeOwnerCredentialIntent: Sendable {
     }
 }
 
-struct PommeOwnerCredential: Sendable {
+struct PommeOwnerCredential: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    var description: String { "PommeOwnerCredential(redacted)" }
+    var debugDescription: String { description }
     let reference: PommeOwnerCredentialReference
     let password: String
 }
@@ -177,7 +215,15 @@ enum PommeOwnerCredentialKeychainAdd: Sendable {
     case failed(status: OSStatus)
 }
 
+enum PommeOwnerCredentialKeychainRemove: Sendable {
+    case removed
+    case missing
+    case locked(status: OSStatus)
+    case failed(status: OSStatus)
+}
+
 protocol PommeOwnerCredentialKeychainClient: Sendable {
+    func remove(service: String, account: String, ownershipMarker: Data) -> PommeOwnerCredentialKeychainRemove
     func read(service: String, account: String) -> PommeOwnerCredentialKeychainRead
     func add(
         service: String,
@@ -195,6 +241,27 @@ struct PommeSystemOwnerCredentialKeychainClient: PommeOwnerCredentialKeychainCli
 
     init(keychainPath: String = defaultLoginKeychainPath()) {
         self.keychainPath = keychainPath
+    }
+
+    func remove(service: String, account: String, ownershipMarker: Data) -> PommeOwnerCredentialKeychainRemove {
+        var keychain: SecKeychain?
+        let openStatus = SecKeychainOpen(keychainPath, &keychain)
+        guard openStatus == errSecSuccess, let keychain else { return .failed(status: openStatus) }
+        guard (try? hostKeychainIsUnlocked(keychain)) == true else {
+            return .locked(status: errSecInteractionNotAllowed)
+        }
+        var query = hostKeychainLookupQuery(service: service, account: account, keychain: keychain)
+        // Match ownership in the deletion itself, so a replacement between read and
+        // delete cannot remove a colliding item.
+        query[kSecAttrGeneric as String] = ownershipMarker
+        let status = SecItemDelete(query as CFDictionary)
+        switch status {
+        case errSecSuccess: return .removed
+        case errSecItemNotFound: return .missing
+        case errSecInteractionNotAllowed, errSecAuthFailed, errSecUserCanceled:
+            return .locked(status: status)
+        default: return .failed(status: status)
+        }
     }
 
     func read(service: String, account: String) -> PommeOwnerCredentialKeychainRead {
@@ -292,6 +359,7 @@ enum PommeOwnerCredentialStoreError: Error, Equatable, LocalizedError, Sendable 
     case keychainMissing
     case keychainReadFailed(status: OSStatus)
     case keychainCreateFailed(status: OSStatus)
+    case keychainRemoveFailed(status: OSStatus)
     case keychainReadBackFailed(status: OSStatus)
     case credentialMissingAfterStore
     case credentialCollision
@@ -308,6 +376,7 @@ enum PommeOwnerCredentialStoreError: Error, Equatable, LocalizedError, Sendable 
         case .keychainMissing: "Pomme owner credential is missing."
         case .keychainReadFailed: "Pomme owner credential Keychain read failed."
         case .keychainCreateFailed: "Pomme owner credential Keychain creation failed."
+        case .keychainRemoveFailed: "Pomme owner credential Keychain removal failed."
         case .keychainReadBackFailed: "Pomme owner credential could not be read back after creation."
         case .credentialMissingAfterStore: "Pomme owner credential is missing after a successful account transaction."
         case .credentialCollision: "Pomme owner credential scope is occupied by an unrelated item."
@@ -367,6 +436,10 @@ struct PommeOwnerCredentialStore: Sendable {
             account: account,
             generatedUID: generatedUID
         )
+        return try prepare(reference: reference)
+    }
+
+    private func prepare(reference: PommeOwnerCredentialReference) throws -> PommeOwnerCredentialIntent {
         let entropyResult = random.bytes(32)
         guard case .success(let entropy) = entropyResult else {
             if case .failure(let status) = entropyResult {
@@ -379,6 +452,37 @@ struct PommeOwnerCredentialStore: Sendable {
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
         return try PommeOwnerCredentialIntent(reference: reference, password: password)
+    }
+
+    /// Use only before first-boot intent. After intent, callers must use `read`.
+    func readOrCreate(reference: PommeOwnerCredentialReference) throws -> PommeOwnerCredential {
+        do { return try read(reference) }
+        catch PommeOwnerCredentialStoreError.keychainMissing {
+            return try store(prepare(reference: reference))
+        }
+    }
+
+    func remove(reference: PommeOwnerCredentialReference) throws {
+        switch keychain.read(service: reference.service, account: reference.account) {
+        case .missing: return
+        case .found(_, let marker):
+            guard marker == Data(reference.ownershipMarker.utf8) else {
+                throw PommeOwnerCredentialStoreError.credentialCollision
+            }
+        case .locked(let status): throw PommeOwnerCredentialStoreError.keychainLocked(status: status)
+        case .failed(let status): throw PommeOwnerCredentialStoreError.keychainReadFailed(status: status)
+        }
+        switch keychain.remove(service: reference.service, account: reference.account,
+                               ownershipMarker: Data(reference.ownershipMarker.utf8)) {
+        case .removed: return
+        case .missing:
+            // Distinguish concurrent removal from a concurrent colliding replacement.
+            do { _ = try read(reference) }
+            catch PommeOwnerCredentialStoreError.keychainMissing { return }
+            throw PommeOwnerCredentialStoreError.keychainRemoveFailed(status: errSecItemNotFound)
+        case .locked(let status): throw PommeOwnerCredentialStoreError.keychainLocked(status: status)
+        case .failed(let status): throw PommeOwnerCredentialStoreError.keychainRemoveFailed(status: status)
+        }
     }
 
     func store(_ intent: PommeOwnerCredentialIntent) throws -> PommeOwnerCredential {

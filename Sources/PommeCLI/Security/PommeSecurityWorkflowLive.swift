@@ -193,6 +193,11 @@ extension PommeSecurityWorkflow {
     }
     let dependencies = PommeSecurityWorkflowDependencies(
       observe: {
+        // Framework owners must still prove their saved identity and desktop
+        // when SIP already matches, before the engine can issue a no-op receipt.
+        if operation.isSIP {
+          _ = try await owner.prepareFrameworkOwnerIfPresent(progress: progress, advance: false)
+        }
         switch initialAMFIObservation {
         case .state(let state)?: return state
         case .retainedNormalCheckpoint?:
@@ -323,6 +328,59 @@ struct PommeSecurityFreshOwnerPreferenceRecovery: Sendable {
   }
 }
 
+/// The framework path has one credential source and no account/login mutation
+/// callbacks. A failed exact read or native proof cannot enter legacy resolution.
+struct PommeSecurityFrameworkOwnerPreparation: Sendable {
+  let credentialReference: PommeOwnerCredentialReference
+  let generatedUID: UUID
+  let startupVolumeGroupUUID: UUID
+  let readCredential: @Sendable (PommeOwnerCredentialReference) throws -> PommeOwnerCredential
+  let verifyOwner: @Sendable (String, UUID) async throws -> PommeSecurityFrameworkOwnerVerification
+  let verifyDesktop: @Sendable (String, UInt32) async throws -> Void
+
+  func prepare(progress: PommeSecurityWorkflowProgress, advance: Bool = true) async throws
+    -> PommeGuestSecurityCredentials
+  {
+    guard credentialReference.account == "pomme",
+      credentialReference.matches(progress.journal.identity),
+      credentialReference.generatedUID == nil || credentialReference.generatedUID == generatedUID,
+      startupVolumeGroupUUID == progress.journal.identity.startupVolumeGroupUUID
+    else { throw PommeSecurityWorkflowJournalError.identityMismatch }
+    try progress.update {
+      try progress.store.recordOwnerIntent(
+        $0, accountUsername: credentialReference.account,
+        ownerPreparation: .existing, lease: progress.lease)
+    }
+    try progress.update {
+      try progress.store.setCredential($0, credential: credentialReference, lease: progress.lease)
+    }
+    let credential = try readCredential(credentialReference)
+    guard credential.reference == credentialReference else {
+      throw PommeOwnerCredentialStoreError.invalidReference
+    }
+    let proof = try await verifyOwner(credential.password, generatedUID)
+    let owner = proof.owner
+    guard owner.username == credentialReference.account, owner.generatedUID == generatedUID,
+      owner.startupVolumeGroupUUID == startupVolumeGroupUUID,
+      owner.passwordVerified, owner.isAdministrator, owner.secureTokenEnabled,
+      owner.isAPFSVolumeOwner, owner.uniqueID >= 501,
+      proof.automaticLoginVerified, proof.consoleUserVerified
+    else { throw PommeSecurityOwnerPreparationError.ownerVerificationFailed }
+    try await verifyDesktop(owner.username, owner.uniqueID)
+    try progress.update {
+      try progress.store.bind(
+        $0, volumeVUID: proof.startupRootVolumeUUID.uuidString.lowercased(), lease: progress.lease)
+    }
+    try progress.update {
+      try progress.store.recordOwnerVerified($0, generatedUID: owner.generatedUID, lease: progress.lease)
+    }
+    if advance && [.credentialPending, .credentialStored].contains(progress.journal.phase) {
+      try progress.advance(.accountCreationVerified)
+    }
+    return try .init(username: owner.username, password: credential.password)
+  }
+}
+
 /// Coordinates durable owner intent with native guest checks. Only the fresh
 /// branch is allowed to create an account or alter automatic login.
 private struct PommeSecurityLiveOwnerPreparation: Sendable {
@@ -341,6 +399,9 @@ private struct PommeSecurityLiveOwnerPreparation: Sendable {
   func prepare(progress: PommeSecurityWorkflowProgress) async throws
     -> PommeGuestSecurityCredentials
   {
+    if let framework = try await prepareFrameworkOwnerIfPresent(progress: progress) {
+      return framework
+    }
     PommeCore.log(
       "Authenticating the persistent normal agent for owner preparation.",
       vmName: reference.displayName)
@@ -424,6 +485,30 @@ private struct PommeSecurityLiveOwnerPreparation: Sendable {
       try progress.advance(.accountCreationVerified)
     }
     return authorization
+  }
+
+  func prepareFrameworkOwnerIfPresent(
+    progress: PommeSecurityWorkflowProgress, advance: Bool = true
+  ) async throws -> PommeGuestSecurityCredentials? {
+    guard let context = try PommeCore.frameworkProvisionedOwner(reference: reference) else {
+      return nil
+    }
+    try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
+    try await normal.authenticate(requirePrivateInput: true)
+    let helper = preparation(username: "pomme", progress: progress, priorProvisioningAbsent: false)
+    return try await PommeSecurityFrameworkOwnerPreparation(
+      credentialReference: context.credentialReference,
+      generatedUID: context.generatedUID,
+      startupVolumeGroupUUID: context.startupVolumeGroupUUID,
+      readCredential: { try credentials.read($0) },
+      verifyOwner: { password, expectedUID in
+        try await helper.verifyFrameworkProvisionedOwner(
+          password: password, expectedGeneratedUID: expectedUID)
+      },
+      verifyDesktop: { username, uniqueID in
+        try await normal.verifyConsoleLogin(username: username, uniqueID: uniqueID)
+      }
+    ).prepare(progress: progress, advance: advance)
   }
 
   private func prepareFresh(

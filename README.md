@@ -60,10 +60,19 @@ pomme create dev --resume
 
 Before creating anything, Pomme resolves and verifies the restore-image build,
 English locale, `1280×800` display geometry, closed Recovery profile, and
-immutable agent identity. It installs macOS, boots straight into Recovery to
-install the signed persistent agent, verifies the normal agent, and restores
-`none`, `normal`, or `recovery` as requested. SIP and AMFI are never changed
-by creation.
+immutable agent identity. On macOS 27 hosts with a fresh macOS 27 guest, it uses
+Apple's first-boot provisioning to create the `pomme` account, enable automatic
+login, and temporarily enable Remote Login. Pomme finds the guest through its
+DHCP lease, pins its SSH host key on first connection, and installs the signed
+agent over SSH. It then verifies the agent and owner account and turns Remote
+Login off. The generated password stays in the host login Keychain.
+
+Older hosts, older guests, already-provisioned templates, and existing legacy
+journals retain Recovery agent installation. Both routes restore `none`,
+`normal`, or `recovery` as requested. SIP and AMFI are never changed by creation.
+
+Apple describes the macOS 27 first-boot account and Remote Login options in
+[Expand the capabilities of your Virtualization app](https://developer.apple.com/videos/play/wwdc2026/224/?time=63).
 
 The restore is the slow part (about four minutes for a 20 GB image). Do it
 once into a template, then clone:
@@ -80,9 +89,8 @@ applied as well.
 
 A template holds only the restored disk image, auxiliary storage, and
 hardware model. `--from-template` clones them copy-on-write (APFS) under a
-fresh machine identifier and UUID and then runs the same journaled Recovery
-bootstrap and verification, so a VM is ready in roughly two and a half
-minutes instead of seven. Every VM cloned from a template inherits its disk
+fresh machine identifier and UUID and then runs the applicable journaled
+bootstrap and verification. Every VM cloned from a template inherits its disk
 size.
 
 Creating the owner account an authenticated workflow needs is the other slow

@@ -3,6 +3,51 @@ import Testing
 
 @Suite("Pomme normal guest owner preparation")
 struct PommeSecurityOwnerPreparationTests {
+  @Test("Framework owner verification returns identity and login proofs without mutation", arguments: [
+    "", "artifactReadOnly",
+  ])
+  func frameworkOwnerProof(artifact: String) async throws {
+    let fixture = FrameworkOwnerProofFixture(failure: artifact)
+    let proof = try await fixture.preparation.verifyFrameworkProvisionedOwner(
+      password: FrameworkOwnerProofFixture.password,
+      expectedGeneratedUID: fixture.base.generatedUID
+    )
+    #expect(proof.owner.generatedUID == fixture.base.generatedUID)
+    #expect(proof.owner.startupVolumeGroupUUID == fixture.base.volumeGroupUUID)
+    #expect(proof.startupRootVolumeUUID == fixture.base.rootVolumeUUID)
+    #expect(proof.owner.uniqueID == 501)
+    #expect(proof.owner.passwordVerified && proof.owner.isAdministrator)
+    #expect(proof.owner.secureTokenEnabled && proof.owner.isAPFSVolumeOwner)
+    #expect(proof.automaticLoginVerified && proof.consoleUserVerified)
+    fixture.expectReadOnlyAndRedacted()
+    #expect(!String(describing: proof).contains(FrameworkOwnerProofFixture.password))
+  }
+
+  @Test("Framework owner proof fails closed for each missing account and login proof", arguments: [
+    "password", "admin", "token", "apfs", "volumeGroup", "generatedUID", "numericUID",
+    "home", "fullName", "autologin", "preference", "artifactOwner", "artifactGroup", "artifactMode",
+    "artifactSymlink", "artifactDirectory", "artifactLinks", "artifactMissing", "console",
+    "executorError", "ptyError", "ambiguousToken",
+  ])
+  func frameworkOwnerMissingProof(failure: String) async throws {
+    let fixture = FrameworkOwnerProofFixture(failure: failure)
+    do {
+      _ = try await fixture.preparation.verifyFrameworkProvisionedOwner(
+        password: FrameworkOwnerProofFixture.password,
+        expectedGeneratedUID: failure == "generatedUID" ? UUID() : fixture.base.generatedUID
+      )
+      Issue.record("Missing framework owner proof was accepted: \(failure)")
+    } catch {
+      #expect(error is PommeSecurityOwnerPreparationError)
+      if failure == "ambiguousToken" {
+        #expect(error as? PommeSecurityOwnerPreparationError == .malformedEvidence(.secureToken))
+      }
+      #expect(!String(describing: error).contains(FrameworkOwnerProofFixture.password))
+      #expect(!error.localizedDescription.contains(FrameworkOwnerProofFixture.password))
+    }
+    fixture.expectReadOnlyAndRedacted()
+  }
+
   @Test("Probe requires host ownership and prior-provisioning evidence for freshness")
   func freshnessBindsHostEvidence() throws {
     let fixture = OwnerPreparationFixture()
@@ -1876,6 +1921,10 @@ private final class OwnerPreparationFixture: @unchecked Sendable {
   private var guestPathsValue: [String] = []
   private var guestArgumentsValue: [[String]] = []
 
+  init(existingOwner: Bool = false) {
+    createdValue = existingOwner
+  }
+
   var ptyCommands: [PommeSecurityOwnerPTYCommand] { lock.withLock { commandsValue } }
   var guestPaths: [String] { lock.withLock { guestPathsValue } }
   var guestArguments: [[String]] { lock.withLock { guestArgumentsValue } }
@@ -2822,5 +2871,101 @@ private final class OwnerPreparationFixture: @unchecked Sendable {
     </dict></array>
     </dict></plist>
     """
+  }
+}
+
+private final class FrameworkOwnerProofFixture: @unchecked Sendable {
+  static let password = "framework-private-password-never-rendered"
+  let base = OwnerPreparationFixture(existingOwner: true)
+  let failure: String
+  private let lock = NSLock()
+  private var commands: [PommeSecurityOwnerPTYCommand] = []
+
+  init(failure: String = "") {
+    self.failure = failure
+  }
+
+  var preparation: PommeSecurityOwnerPreparation {
+    .init(
+      identity: .init(
+        expectedVolumeGroupUUID: failure == "volumeGroup" ? UUID() : base.volumeGroupUUID),
+      executeGuest: execute,
+      executePrivatePTY: authenticate
+    )
+  }
+
+  func authenticate(_ command: PommeSecurityOwnerPTYCommand, _ password: String) async throws -> Int32 {
+    lock.withLock { commands.append(command) }
+    #expect(password == Self.password)
+    #expect(command == .init(executable: "/usr/bin/dscl", arguments: [".", "-authonly", "pomme"]))
+    if failure == "ptyError" { throw NSError(domain: Self.password, code: 1) }
+    return failure == "password" ? 1 : 0
+  }
+
+  func execute(_ request: GuestCommandRequest) throws -> GuestCommandResult {
+    lock.withLock { commands.append(.init(executable: request.path, arguments: request.arguments)) }
+    if failure == "executorError" {
+      throw NSError(domain: Self.password, code: 1)
+    }
+    var output: String?
+    var exitCode = 0
+    switch (request.path, request.arguments) {
+    case ("/usr/bin/dsmemberutil", _) where failure == "admin":
+      output = "user pomme is not a member of group admin\n"
+    case ("/usr/sbin/sysadminctl", ["-secureTokenStatus", "pomme"]) where failure == "token":
+      output = "Secure token is DISABLED for user pomme\n"
+    case ("/usr/sbin/sysadminctl", ["-secureTokenStatus", "pomme"]) where failure == "ambiguousToken":
+      output = "Secure token is ENABLED for user pomme\nSecureToken is DISABLED for user pomme\n"
+    case ("/usr/sbin/diskutil", ["apfs", "listUsers", "/"]) where failure == "apfs":
+      output = base.apfsUsers.replacingOccurrences(of: "Volume Owner: Yes", with: "Volume Owner: No")
+    case ("/usr/bin/id", ["-u", "pomme"]) where failure == "numericUID":
+      output = "502\n"
+    case ("/usr/bin/dscl", let arguments)
+      where arguments.contains("/Users/pomme") && ["home", "fullName"].contains(failure):
+      let original = try base.execute(request)
+      output = String(decoding: original.stdout, as: UTF8.self)
+        .replacingOccurrences(of: failure == "home" ? "/Users/pomme" : "RealName: Pomme", with: "wrong")
+    case ("/usr/sbin/sysadminctl", ["-autologin", "status"]) where failure == "autologin":
+      output = "Automatic login is off.\n"
+    case ("/usr/bin/defaults", let arguments) where arguments.last == "autoLoginUser" && failure == "preference":
+      output = "someoneelse\n"
+    case ("/usr/bin/stat", ["-f", "%u:%g:%p:%l", "/etc/kcpassword"]):
+      output = [
+        "artifactOwner": "501:0:100600:1", "artifactMode": "0:0:100644:1",
+        "artifactGroup": "0:20:100600:1", "artifactReadOnly": "0:0:100400:1",
+        "artifactSymlink": "0:0:120600:1", "artifactDirectory": "0:0:40600:1",
+        "artifactLinks": "0:0:100600:2",
+      ][failure] ?? "0:0:100600:1"
+      if failure == "artifactMissing" { exitCode = 1 }
+    case ("/usr/bin/stat", ["-f", "%Su:%u", "/dev/console"]):
+      output = failure == "console" ? "root:0\n" : "pomme:501\n"
+    default:
+      return try base.execute(request)
+    }
+    return .init(
+      exitCode: exitCode, signal: nil, stdout: Data((output ?? "").utf8), stderr: Data(),
+      stdoutTruncated: false, stderrTruncated: false, exited: true
+    )
+  }
+
+  func expectReadOnlyAndRedacted() {
+    let recorded = lock.withLock { commands }
+    for command in recorded {
+      #expect(!String(describing: command).contains(Self.password))
+      switch command.executable {
+      case "/usr/bin/dscl":
+        #expect(["-authonly", "-list", "-read"].contains(command.arguments[1]))
+      case "/usr/sbin/sysadminctl":
+        #expect(command.arguments == ["-secureTokenStatus", "pomme"]
+          || command.arguments == ["-autologin", "status"])
+      case "/usr/sbin/diskutil":
+        #expect(["info", "apfs"].contains(command.arguments[0]))
+        #expect(!command.arguments.contains("deleteUser"))
+      case "/usr/bin/defaults":
+        #expect(command.arguments.first == "read")
+      default:
+        #expect(["/bin/test", "/usr/bin/stat", "/usr/bin/id", "/usr/bin/dsmemberutil"].contains(command.executable))
+      }
+    }
   }
 }

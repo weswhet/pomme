@@ -197,6 +197,36 @@ struct VMCreationPlanningTests {
         #expect(await installs.value == 0)
     }
 
+    @Test("Live config dry-run discloses provisioning without credentials", arguments: ["27.0", "26.6.0"])
+    func liveDryRunProvisioningDisclosure(version: String) async throws {
+        let plan = VMCreationPlan(
+            name: "lab-\(version)", selector: version,
+            firmware: firmware(version: version, build: "dry-run-\(UUID().uuidString)"),
+            config: sampleConfig(),
+            recoveryProfile: PommeRecoveryProfileSelector.tahoe2660Build25G72
+        )
+        let executor = VMCreationExecutor(dependencies: .init(
+            install: { _ in
+                Issue.record("Dry-run must not install a guest.")
+                throw TestFailure.failed
+            },
+            dryRunPreflight: VMCreationExecutionDependencies.live.dryRunPreflight
+        ))
+        let result = try #require(await executor.execute([plan], dryRun: true, parallelism: 1).first)
+        #expect(result.ok)
+        let virtualization = PommeCore.usesVirtualizationProvisioning(
+            guestVersion: version, firstBootEligible: true)
+        #expect(result.payload["guestProvisioning"] as? String == (virtualization ? "virtualization" : "recovery"))
+        #expect(result.payload["agentInstallMethod"] as? String == (virtualization ? "ssh-bootstrap" : "recovery"))
+        #expect(result.payload["automaticLogin"] as? String == (virtualization ? "enabled" : "legacy"))
+        #expect(result.payload["remoteLogin"] as? String == (virtualization ? "off" : "legacy"))
+        #expect(result.payload["account"] as? String == (virtualization ? "pomme" : nil))
+        let rendered = String(decoding: try JSONSerialization.data(withJSONObject: result.payload), as: UTF8.self)
+        for secretField in ["password", "agentToken", "ownerCredential", "keychain", "bootstrapRequest"] {
+            #expect(!rendered.localizedCaseInsensitiveContains(secretField))
+        }
+    }
+
     private func sampleConfig() -> VMCreationConfigV1 {
         VMCreationConfigV1(
             schemaVersion: 1,

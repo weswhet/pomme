@@ -1,6 +1,82 @@
 import Foundation
 @preconcurrency import Virtualization
 
+/// In-memory only. The caller must authenticate the provisionGuest journal
+/// before constructing this capability; the marker durably records dispatch.
+final class PommeMacGuestProvisioningIntent: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    private let fullName: String
+    private let username: String
+    private let password: String
+    private let logsInAutomatically: Bool
+    private let enablesRemoteLogin: Bool
+    private let guestMajor: Int
+    private let markDispatched: @Sendable () throws -> Void
+    private let lock = NSLock()
+    private var consumed = false
+
+    init(fullName: String = "Pomme", username: String = "pomme", password: String,
+         logsInAutomatically: Bool = true, enablesRemoteLogin: Bool = true,
+         guestMajor: Int, markDispatched: @escaping @Sendable () throws -> Void) {
+        self.fullName = fullName
+        self.username = username
+        self.password = password
+        self.logsInAutomatically = logsInAutomatically
+        self.enablesRemoteLogin = enablesRemoteLogin
+        self.guestMajor = guestMajor
+        self.markDispatched = markDispatched
+    }
+
+    var description: String { "PommeMacGuestProvisioningIntent(<redacted>)" }
+    var debugDescription: String { description }
+    var customMirror: Mirror { Mirror(self, children: [:]) }
+
+    static func isSupported(hostMajor: Int, guestMajor: Int) -> Bool {
+        hostMajor >= 27 && guestMajor == 27
+    }
+
+    func validate(bootMode: BootMode, hasSavedState: Bool, requiresRestore: Bool,
+                  hostMajor: Int) throws {
+        guard bootMode == .normal, !hasSavedState, !requiresRestore,
+              Self.isSupported(hostMajor: hostMajor, guestMajor: guestMajor) else {
+            throw RunnerError.virtualMachineState("Guest provisioning requires a supported cold normal first boot.")
+        }
+    }
+
+    /// A failed setter or marker consumes this capability too: retries require
+    /// revalidating durable intent, never replaying an ambiguous first boot.
+    func prepareDispatch(setOptions: () throws -> Void) throws {
+        try lock.withLock {
+            guard !consumed else {
+                throw RunnerError.virtualMachineState("Guest provisioning dispatch was already attempted.")
+            }
+            consumed = true
+            do {
+                try setOptions()
+                try markDispatched()
+            } catch {
+                // Framework and callback errors can contain credential values.
+                throw RunnerError.virtualMachineState("Guest provisioning dispatch preparation failed.")
+            }
+        }
+    }
+
+    @available(macOS 27, *)
+    func prepareDispatch(options: VZMacOSVirtualMachineStartOptions) throws {
+        guard !options.startUpFromMacOSRecovery else {
+            throw RunnerError.virtualMachineState("Guest provisioning is unavailable in Recovery.")
+        }
+        try prepareDispatch {
+            let provisioning = VZMacGuestProvisioningOptions()
+            provisioning.fullName = fullName
+            provisioning.username = username
+            provisioning.password = password
+            provisioning.logsInAutomatically = logsInAutomatically
+            provisioning.enablesRemoteLogin = enablesRemoteLogin
+            try options.setGuestProvisioning(provisioning)
+        }
+    }
+}
+
 /// The sole VM-side bridge to guest-agent behavior. Guest implementation
 /// owners provide this protocol; lifecycle/control code neither selects nor
 /// probes an alternate transport.
@@ -108,6 +184,7 @@ final class PommeVMRuntime: @unchecked Sendable {
     private let terminalAdmissionCleanup: (@Sendable () async -> Bool)?
     private let uiController: PommeRuntimeUIController
     private let bootMode: BootMode
+    private let guestProvisioningIntent: PommeMacGuestProvisioningIntent?
     private let terminalGeneration: UUID
     private let terminalSessions: PommeDurableTerminalSessionManager
     private let terminalMutationGate = PommeTerminalMutationGate()
@@ -123,7 +200,8 @@ final class PommeVMRuntime: @unchecked Sendable {
          saveStateURL: URL, snapshotsURL: URL, requiredSnapshotRestoreURL: URL,
          agentProvider: (any PommeAgentSessionProvider)?, bootMode: BootMode,
          terminalAdmission: (@Sendable (UUID) async throws -> Void)? = nil,
-         terminalAdmissionCleanup: (@Sendable () async -> Bool)? = nil) {
+         terminalAdmissionCleanup: (@Sendable () async -> Bool)? = nil,
+         guestProvisioningIntent: PommeMacGuestProvisioningIntent? = nil) {
         self.vm = vm
         self.configuration = configuration
         self.queue = queue
@@ -145,6 +223,7 @@ final class PommeVMRuntime: @unchecked Sendable {
             )
         )
         self.bootMode = bootMode
+        self.guestProvisioningIntent = guestProvisioningIntent
         let terminalGeneration = UUID()
         self.terminalGeneration = terminalGeneration
         self.terminalSessions = PommeDurableTerminalSessionManager(
@@ -156,6 +235,12 @@ final class PommeVMRuntime: @unchecked Sendable {
 
     func start() async throws {
         do {
+            try guestProvisioningIntent?.validate(
+                bootMode: bootMode,
+                hasSavedState: FileManager.default.fileExists(atPath: saveStateURL.path),
+                requiresRestore: FileManager.default.fileExists(atPath: requiredSnapshotRestoreURL.path),
+                hostMajor: ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+            )
             switch bootMode {
             case .normal: try await startOrRestore()
             case .recovery: try await startRecovery()
@@ -195,7 +280,21 @@ final class PommeVMRuntime: @unchecked Sendable {
         }
         let options = VZMacOSVirtualMachineStartOptions()
         options.startUpFromMacOSRecovery = false
-        try await PommeCore.start(vm, options: options, on: queue)
+        if let guestProvisioningIntent {
+            if #available(macOS 27, *) {
+                try guestProvisioningIntent.prepareDispatch(options: options)
+            } else {
+                throw RunnerError.virtualMachineState("Guest provisioning requires macOS 27.")
+            }
+        }
+        do {
+            try await PommeCore.start(vm, options: options, on: queue)
+        } catch {
+            if guestProvisioningIntent != nil {
+                throw RunnerError.virtualMachineState("Guest provisioning first boot failed; inspect durable dispatch state before retrying.")
+            }
+            throw error
+        }
     }
 
     private func startRecovery() async throws {
@@ -257,6 +356,9 @@ final class PommeVMRuntime: @unchecked Sendable {
 
     @discardableResult
     func resume() async throws -> Bool {
+        guard guestProvisioningIntent == nil else {
+            throw RunnerError.virtualMachineState("A guest provisioning runtime cannot resume saved or paused state.")
+        }
         let state = await PommeCore.state(of: vm, on: queue)
         guard try VMPauseResumeTransition.requiresFrameworkCall(.resume, state: state, canPause: false, canResume: await PommeCore.canResume(vm, on: queue)) else { return false }
         try await PommeCore.resume(vm, on: queue)

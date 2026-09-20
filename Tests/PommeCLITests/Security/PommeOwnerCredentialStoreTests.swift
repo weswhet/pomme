@@ -4,6 +4,108 @@ import Testing
 
 @Suite("Security owner credential store", .serialized)
 struct PommeOwnerCredentialStoreTests {
+    @Test("Preboot reference preserves binding and strictly decodes")
+    func prebootBinding() throws {
+        let identity = CredentialFixture().identity
+        let reference = try PommeOwnerCredentialReference(vmUUID: identity.vmUUID,
+            machineIdentifierSHA256: identity.machineIdentifierSHA256,
+            diskImageFileResourceID: identity.diskImageFileResourceID)
+        #expect(reference == (try PommeOwnerCredentialReference(identity: identity, account: "pomme")))
+        let encoded = try JSONEncoder().encode(reference)
+        #expect(try JSONDecoder().decode(PommeOwnerCredentialReference.self, from: encoded) == reference)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object["password"] = "forbidden-secret"
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode(PommeOwnerCredentialReference.self, from: JSONSerialization.data(withJSONObject: object))
+        }
+        object.removeValue(forKey: "password")
+        object["service"] = "unrelated-service"
+        #expect(throws: PommeOwnerCredentialStoreError.invalidReference) {
+            try JSONDecoder().decode(PommeOwnerCredentialReference.self, from: JSONSerialization.data(withJSONObject: object))
+        }
+        #expect(throws: PommeOwnerCredentialStoreError.invalidReference) {
+            try PommeOwnerCredentialReference(vmUUID: identity.vmUUID, machineIdentifierSHA256: "bad", diskImageFileResourceID: "1:2")
+        }
+        #expect(throws: PommeOwnerCredentialStoreError.invalidReference) {
+            try PommeOwnerCredentialReference(vmUUID: identity.vmUUID, machineIdentifierSHA256: identity.machineIdentifierSHA256,
+                                             diskImageFileResourceID: "1:2", account: "other")
+        }
+        let uid = UUID()
+        let bound = try reference.bindingGeneratedUID(uid)
+        #expect(bound.generatedUID == uid)
+        #expect(bound.ownershipMarker == reference.ownershipMarker)
+        #expect(bound.service == reference.service)
+        #expect(bound.matches(identity))
+        #expect(try bound.bindingGeneratedUID(uid) == bound)
+        #expect(throws: PommeOwnerCredentialStoreError.ownershipMismatch) { try bound.bindingGeneratedUID(UUID()) }
+    }
+
+    @Test("Read or create generates only on absence and resumes with the stored password")
+    func readOrCreate() throws {
+        let reference = try PommeOwnerCredentialReference(identity: CredentialFixture().identity, account: "pomme")
+        let keychain = FakeOwnerKeychain()
+        let store = PommeOwnerCredentialStore(keychain: keychain)
+        let saved = try store.readOrCreate(reference: reference)
+        let noGeneration = PommeOwnerCredentialStore(keychain: keychain, random: .init { _ in
+            Issue.record("Existing credential must not generate entropy")
+            return .failure(errSecIO)
+        })
+        #expect(try noGeneration.readOrCreate(reference: reference).password == saved.password)
+        #expect(keychain.addCalls.count == 1)
+        keychain.readResult = .found(passwordData: Data("secret".utf8), ownershipMarker: nil)
+        #expect(throws: PommeOwnerCredentialStoreError.credentialCollision) { try noGeneration.readOrCreate(reference: reference) }
+        keychain.readResult = .locked(status: errSecInteractionNotAllowed)
+        #expect(throws: PommeOwnerCredentialStoreError.keychainLocked(status: errSecInteractionNotAllowed)) {
+            try noGeneration.readOrCreate(reference: reference)
+        }
+    }
+
+    @Test("Removal is exact, idempotent, and fails closed")
+    func removal() throws {
+        let reference = try PommeOwnerCredentialReference(identity: CredentialFixture().identity, account: "pomme")
+        let keychain = FakeOwnerKeychain()
+        let store = PommeOwnerCredentialStore(keychain: keychain)
+        _ = try store.readOrCreate(reference: reference)
+        try store.remove(reference: reference)
+        try store.remove(reference: reference)
+        #expect(keychain.removeCalls == 1)
+        #expect(keychain.items.isEmpty)
+        keychain.readResult = .locked(status: errSecInteractionNotAllowed)
+        #expect(throws: PommeOwnerCredentialStoreError.keychainLocked(status: errSecInteractionNotAllowed)) { try store.remove(reference: reference) }
+        keychain.readResult = .failed(status: errSecIO)
+        #expect(throws: PommeOwnerCredentialStoreError.keychainReadFailed(status: errSecIO)) { try store.remove(reference: reference) }
+        #expect(keychain.removeCalls == 1)
+        keychain.readResult = .found(passwordData: Data("secret".utf8), ownershipMarker: nil)
+        #expect(throws: PommeOwnerCredentialStoreError.credentialCollision) { try store.remove(reference: reference) }
+        #expect(keychain.removeCalls == 1)
+        keychain.readResult = .found(passwordData: Data("secret".utf8), ownershipMarker: Data(reference.ownershipMarker.utf8))
+        keychain.removeResult = .locked(status: errSecInteractionNotAllowed)
+        #expect(throws: PommeOwnerCredentialStoreError.keychainLocked(status: errSecInteractionNotAllowed)) { try store.remove(reference: reference) }
+        keychain.removeResult = .failed(status: errSecIO)
+        #expect(throws: PommeOwnerCredentialStoreError.keychainRemoveFailed(status: errSecIO)) { try store.remove(reference: reference) }
+        keychain.removeResult = .missing
+        keychain.readResults = [.found(passwordData: Data("secret".utf8), ownershipMarker: Data(reference.ownershipMarker.utf8)),
+                                .found(passwordData: Data("collision-secret".utf8), ownershipMarker: nil)]
+        #expect(throws: PommeOwnerCredentialStoreError.credentialCollision) { try store.remove(reference: reference) }
+        #expect(!String(describing: PommeOwnerCredentialStoreError.keychainRemoveFailed(status: errSecIO)).contains("secret"))
+        keychain.readResults = [.found(passwordData: Data("secret".utf8), ownershipMarker: Data(reference.ownershipMarker.utf8)), .missing]
+        try store.remove(reference: reference)
+    }
+
+    @Test("A concurrent creator wins without replacement")
+    func readOrCreateDuplicate() throws {
+        let reference = try PommeOwnerCredentialReference(identity: CredentialFixture().identity, account: "pomme")
+        let keychain = FakeOwnerKeychain()
+        keychain.addResult = .duplicate
+        keychain.readResults = [.missing, .missing,
+            .found(passwordData: Data("winner-secret".utf8), ownershipMarker: Data(reference.ownershipMarker.utf8))]
+        let store = PommeOwnerCredentialStore(keychain: keychain)
+        #expect(try store.readOrCreate(reference: reference).password == "winner-secret")
+        #expect(keychain.addCalls.count == 1)
+        keychain.readResults = [.missing, .missing,
+            .found(passwordData: Data("unrelated-secret".utf8), ownershipMarker: nil)]
+        #expect(throws: PommeOwnerCredentialStoreError.credentialCollision) { try store.readOrCreate(reference: reference) }
+    }
     @Test("Generates, stores, and reads an immutable identity-scoped credential")
     func generatedCredential() throws {
         let fixture = CredentialFixture()
@@ -23,6 +125,9 @@ struct PommeOwnerCredentialStoreTests {
         #expect(keychain.addCalls.count == 1)
         #expect(try store.read(intent.reference).password == intent.password)
         #expect(intent.reference.ownershipMarker.contains(intent.password) == false)
+        #expect(!String(describing: intent).contains(intent.password))
+        #expect(!String(reflecting: saved).contains(saved.password))
+        #expect(!String(decoding: try JSONEncoder().encode(intent.reference), as: UTF8.self).contains(intent.password))
     }
 
     @Test("A retry with the same reference reuses the stored password")
@@ -188,6 +293,17 @@ private final class FakeOwnerKeychain: PommeOwnerCredentialKeychainClient, @unch
     var readResults: [PommeOwnerCredentialKeychainRead] = []
     var addResult: PommeOwnerCredentialKeychainAdd?
     var addCalls: [(String, String, Data, Data)] = []
+    var removeCalls = 0
+    var removeResult: PommeOwnerCredentialKeychainRemove?
+
+    func remove(service: String, account: String, ownershipMarker: Data) -> PommeOwnerCredentialKeychainRemove {
+        removeCalls += 1
+        if let removeResult { return removeResult }
+        let key = service + "|" + account
+        guard let item = items[key], item.marker == ownershipMarker else { return .missing }
+        items.removeValue(forKey: key)
+        return .removed
+    }
 
     func read(service: String, account: String) -> PommeOwnerCredentialKeychainRead {
         if !readResults.isEmpty { return readResults.removeFirst() }

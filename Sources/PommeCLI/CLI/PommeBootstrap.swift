@@ -7,6 +7,12 @@ import Foundation
 /// enter the host command tree.
 enum PommeBootstrap {
     static func main(arguments: [String] = Array(CommandLine.arguments.dropFirst())) async {
+        if ProcessInfo.processInfo.environment["POMME_INTERNAL_ASKPASS"] == "1" {
+            Foundation.exit(PommeBootstrapAskpass.run())
+        }
+        if arguments.first == PommeNormalBootstrapInstaller.flag {
+            Foundation.exit(PommeNormalBootstrapInstaller.run(arguments: arguments))
+        }
         if arguments.first == "--pomme-agent" {
             let exitCode = PommeAgentDaemon.run(arguments: arguments)
             Foundation.exit(exitCode)
