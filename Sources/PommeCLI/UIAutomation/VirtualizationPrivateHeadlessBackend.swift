@@ -79,12 +79,92 @@ struct VirtualizationPrivateABIMethod: Equatable, Sendable {
     var identity: String { "\(className).\(selectorName)" }
 }
 
+/// One qualified way `_VZVNCServer` publishes guest frames. macOS 26 delivers
+/// them to a `_VZFramebufferObserver`; macOS 27 renamed the same callback, with
+/// the same type encoding and the same `FrameUpdate` layout, onto a
+/// `_VZDisplayPresenterObserver`. Only the names moved, so one variant carries
+/// all three facts that must agree.
+struct VirtualizationPrivateFrameObservation: Equatable, Sendable {
+    /// Generation-neutral, so naming the resolved variant in a diagnostic
+    /// reveals nothing about the private interface behind it.
+    let variantName: String
+    let protocolName: String
+    let selectorName: String
+    let encoding: String
+    /// Set when the observer must be told its virtual machine before attaching
+    /// a display. The later interface routes frames through the machine's
+    /// accessor, and an observer with no accessor is skipped when frames are
+    /// published, so attaching a display alone registers an observer that is
+    /// never delivered to.
+    let virtualMachineSelectorName: String?
+    let virtualMachineEncoding: String?
+
+    var method: VirtualizationPrivateABIMethod {
+        .init(className: "_VZVNCServer", selectorName: selectorName, encoding: encoding)
+    }
+
+    var virtualMachineMethod: VirtualizationPrivateABIMethod? {
+        guard let virtualMachineSelectorName, let virtualMachineEncoding else { return nil }
+        return .init(
+            className: "_VZVNCServer",
+            selectorName: virtualMachineSelectorName,
+            encoding: virtualMachineEncoding
+        )
+    }
+}
+
+/// The runtime facts a frame-observation variant is selected on. Injectable so
+/// the selection is provable without the host that ships each interface.
+struct VirtualizationPrivateFrameObservationProbe: Sendable {
+    /// True only when the named protocol exists and `_VZVNCServer` adopts it.
+    let observerConforms: @Sendable (String) -> Bool
+    /// The type encoding of the named selector on `_VZVNCServer`, when present.
+    let selectorEncoding: @Sendable (String) -> String?
+    /// The encoding the protocol itself requires of the callback, so a callback
+    /// that was renamed *and* reshaped cannot qualify on the class declaration
+    /// alone.
+    let protocolRequirementEncoding: @Sendable (String, String) -> String?
+
+    static let live = Self(
+        observerConforms: { protocolName in
+            guard let observerProtocol = objc_getProtocol(protocolName),
+                  let observerClass = NSClassFromString("_VZVNCServer")
+            else { return false }
+            return class_conformsToProtocol(observerClass, observerProtocol)
+        },
+        selectorEncoding: { selectorName in
+            guard let observerClass: AnyClass = NSClassFromString("_VZVNCServer"),
+                  let method = class_getInstanceMethod(
+                    observerClass,
+                    NSSelectorFromString(selectorName)
+                  ),
+                  let encoding = method_getTypeEncoding(method)
+            else { return nil }
+            return String(cString: encoding)
+        },
+        protocolRequirementEncoding: { protocolName, selectorName in
+            guard let observerProtocol = objc_getProtocol(protocolName) else { return nil }
+            let description = protocol_getMethodDescription(
+                observerProtocol,
+                NSSelectorFromString(selectorName),
+                true,
+                true
+            )
+            guard let types = description.types else { return nil }
+            return String(cString: types)
+        }
+    )
+}
+
 enum VirtualizationPrivateABIPreflight {
     static let supportedArchitecture = "arm64"
     static let frameworkIdentifier = "com.apple.Virtualization"
     static let frameworkPath = "/System/Library/Frameworks/Virtualization.framework"
 
-    static let requiredMethods = [
+    /// Every selector the backend calls that is identical on every qualified
+    /// host. The frame-observation callback is not here: it is named by the
+    /// resolved ``VirtualizationPrivateFrameObservation``.
+    static let sharedRequiredMethods = [
         VirtualizationPrivateABIMethod(
             className: "_VZVNCServer",
             selectorName: "initWithPort:",
@@ -94,11 +174,6 @@ enum VirtualizationPrivateABIPreflight {
             className: "_VZVNCServer",
             selectorName: "setGraphicsDisplay:",
             encoding: "v24@0:8@16"
-        ),
-        VirtualizationPrivateABIMethod(
-            className: "_VZVNCServer",
-            selectorName: "framebuffer:didUpdateFrame:",
-            encoding: "v40@0:8@16{shared_ptr<const VzCore::Hardware::FrameUpdate>=^{FrameUpdate}^{__shared_weak_count}}24"
         ),
         VirtualizationPrivateABIMethod(
             className: "VZVirtualMachine",
@@ -142,6 +217,92 @@ enum VirtualizationPrivateABIPreflight {
         )
     ]
 
+    /// Both qualified interfaces carry the same callback shape, so the encoding
+    /// is one constant rather than two that could drift apart.
+    static let frameUpdateEncoding =
+        "v40@0:8@16{shared_ptr<const VzCore::Hardware::FrameUpdate>="
+        + "^{FrameUpdate}^{__shared_weak_count}}24"
+
+    /// Ordered, closed, and exhaustive: a host that publishes neither interface
+    /// is rejected rather than approximated.
+    static let frameObservationVariants = [
+        VirtualizationPrivateFrameObservation(
+            variantName: "gen1",
+            protocolName: "_VZFramebufferObserver",
+            selectorName: "framebuffer:didUpdateFrame:",
+            encoding: frameUpdateEncoding,
+            virtualMachineSelectorName: nil,
+            virtualMachineEncoding: nil
+        ),
+        VirtualizationPrivateFrameObservation(
+            variantName: "gen2",
+            protocolName: "_VZDisplayPresenterObserver",
+            selectorName: "presenter:didUpdateFrame:",
+            encoding: frameUpdateEncoding,
+            virtualMachineSelectorName: "setVirtualMachine:",
+            virtualMachineEncoding: "v24@0:8@16"
+        )
+    ]
+
+    /// Accepts a variant only when its protocol, its adoption by
+    /// `_VZVNCServer`, the protocol's own callback requirement, and the class's
+    /// exact callback encoding all agree, so knowing two interfaces never
+    /// loosens what any one host must prove.
+    ///
+    /// Exactly one variant may qualify. A host that still declares a superseded
+    /// interface while delivering through its successor would otherwise let the
+    /// backend subclass a callback nothing publishes to, and every capture
+    /// would time out behind a green preflight.
+    static func resolveFrameObservation(
+        using probe: VirtualizationPrivateFrameObservationProbe = .live
+    ) throws -> VirtualizationPrivateFrameObservation {
+        let qualified = frameObservationVariants.filter { variant in
+            probe.observerConforms(variant.protocolName)
+                && probe.selectorEncoding(variant.selectorName) == variant.encoding
+                && probe.protocolRequirementEncoding(
+                    variant.protocolName,
+                    variant.selectorName
+                ) == variant.encoding
+        }
+        guard qualified.count == 1, let observation = qualified.first else {
+            throw VirtualizationPrivateHeadlessError(
+                .privateABIMismatch,
+                detail: qualified.isEmpty
+                    ? "No qualified private frame observation interface is available."
+                    : "More than one private frame observation interface qualifies."
+            )
+        }
+        return observation
+    }
+
+    /// Resolved once: a running host cannot change which interface it ships.
+    private static let liveFrameObservation:
+        Result<VirtualizationPrivateFrameObservation, VirtualizationPrivateHeadlessError> = {
+            do {
+                return .success(try resolveFrameObservation())
+            } catch let error as VirtualizationPrivateHeadlessError {
+                return .failure(error)
+            } catch {
+                return .failure(
+                    VirtualizationPrivateHeadlessError(
+                        .privateABIMismatch,
+                        detail: "No qualified private frame observation interface is available."
+                    )
+                )
+            }
+        }()
+
+    static func frameObservation() throws -> VirtualizationPrivateFrameObservation {
+        try liveFrameObservation.get()
+    }
+
+    static func requiredMethods(
+        for observation: VirtualizationPrivateFrameObservation
+    ) -> [VirtualizationPrivateABIMethod] {
+        sharedRequiredMethods + [observation.method]
+            + (observation.virtualMachineMethod.map { [$0] } ?? [])
+    }
+
     static var environment: VirtualizationPrivateABIEnvironment {
         let bundle = Bundle(for: VZVirtualMachine.self)
         return .init(
@@ -155,7 +316,8 @@ enum VirtualizationPrivateABIPreflight {
 
     static func validate(
         environment: VirtualizationPrivateABIEnvironment,
-        observedMethods: [String: String]
+        observedMethods: [String: String],
+        requiring requiredMethods: [VirtualizationPrivateABIMethod]
     ) throws {
         guard environment.architecture == supportedArchitecture else {
             throw VirtualizationPrivateHeadlessError(
@@ -182,16 +344,16 @@ enum VirtualizationPrivateABIPreflight {
     }
 
     static func validateRuntime() throws {
-        try validate(environment: environment, observedMethods: observedMethodEncodings())
-        guard let framebufferObserverProtocol = objc_getProtocol("_VZFramebufferObserver"),
-              let observerClass = NSClassFromString("_VZVNCServer"),
-              class_conformsToProtocol(observerClass, framebufferObserverProtocol)
-        else {
-            throw VirtualizationPrivateHeadlessError(
-                .privateABIMismatch,
-                detail: "The private framebuffer observer protocol is unavailable or incompatible."
-            )
-        }
+        // Resolving the variant already proves the observer protocol exists,
+        // that `_VZVNCServer` adopts it, and that the callback encoding is
+        // exact, so no separate protocol guard follows.
+        let observation = try frameObservation()
+        let methods = requiredMethods(for: observation)
+        try validate(
+            environment: environment,
+            observedMethods: observedMethodEncodings(for: methods),
+            requiring: methods
+        )
         guard let monitorClass = NSClassFromString("_VZHIDEventMonitor"),
               class_getInstanceSize(monitorClass) == 24,
               let filterIvar = class_getInstanceVariable(monitorClass, "_filter"),
@@ -217,7 +379,9 @@ enum VirtualizationPrivateABIPreflight {
         }
     }
 
-    static func observedMethodEncodings() -> [String: String] {
+    static func observedMethodEncodings(
+        for requiredMethods: [VirtualizationPrivateABIMethod]
+    ) -> [String: String] {
         requiredMethods.reduce(into: [:]) { result, requirement in
             guard let cls: AnyClass = NSClassFromString(requirement.className),
                   let method = class_getInstanceMethod(
@@ -598,7 +762,7 @@ enum HeadlessFramebufferFrameLayout {
     }
 }
 
-private final class HeadlessFramebufferCaptureState: @unchecked Sendable {
+final class HeadlessFramebufferCaptureState: @unchecked Sendable {
     private struct CompletedFrame {
         let requestID: UInt64
         let result: Result<QueueConfined<CGImage>, Error>
@@ -616,6 +780,44 @@ private final class HeadlessFramebufferCaptureState: @unchecked Sendable {
     /// without waiting for another publish; damage-only updates never replace
     /// it because they carry no surface.
     private var latestSurface: Unmanaged<IOSurface>?
+    private var sourceIdentity: ObjectIdentifier?
+    private var sourceGeneration: UInt64 = 0
+    private var requestCompletionSuppressed = false
+
+    /// Initial registration can synchronously replay an obsolete boot frame.
+    /// Keep its surface for later damage callbacks, but await the asynchronous
+    /// messenger publication before completing the first capture.
+    func suppressRequestCompletion<T>(_ operation: () throws -> T) rethrows -> T {
+        let previous = lock.withLock {
+            let previous = requestCompletionSuppressed
+            requestCompletionSuppressed = true
+            return previous
+        }
+        defer { lock.withLock { requestCompletionSuppressed = previous } }
+        return try operation()
+    }
+
+    deinit { latestSurface?.release() }
+
+    /// A new presenter invalidates every retained surface from its predecessor.
+    func associateSource(_ source: AnyObject?) {
+        lock.withLock {
+            let identity = source.map(ObjectIdentifier.init)
+            // nil explicitly detaches a display, including gen1 where no
+            // presenter identity is installed in the first place.
+            guard identity == nil || identity != sourceIdentity else { return }
+            sourceIdentity = identity
+            sourceGeneration &+= 1
+            renderingRequestID = nil
+            completedFrame = nil
+            latestSurface?.release()
+            latestSurface = nil
+        }
+    }
+
+    func acceptsSource(_ source: AnyObject) -> Bool {
+        lock.withLock { sourceIdentity == ObjectIdentifier(source) }
+    }
 
     var hasLatestSurface: Bool {
         lock.withLock { latestSurface != nil }
@@ -667,26 +869,41 @@ private final class HeadlessFramebufferCaptureState: @unchecked Sendable {
         }
     }
 
-    func receive(sharedFrameUpdatePointer: UnsafeRawPointer?) {
-        // Damage-only updates do not carry a surface. Keep waiting for the next
-        // full framebuffer update instead of consuming the pending request.
-        guard let surfacePointer = HeadlessFramebufferFrameLayout.surfacePointer(
+    @discardableResult
+    func receive(
+        sharedFrameUpdatePointer: UnsafeRawPointer?,
+        allowDamageReuse: Bool = false,
+        source: AnyObject? = nil
+    ) -> Bool {
+        guard let sharedFrameUpdatePointer,
+              sharedFrameUpdatePointer.load(as: UnsafeRawPointer?.self) != nil else { return false }
+        let surfacePointer = HeadlessFramebufferFrameLayout.surfacePointer(
             sharedFrameUpdatePointer: sharedFrameUpdatePointer
-        ) else { return }
-        let incomingSurface = Unmanaged<IOSurface>.fromOpaque(surfacePointer).retain()
-        let (requestID, replacedSurface) = lock.withLock { () -> (UInt64?, Unmanaged<IOSurface>?) in
-            let replaced = latestSurface
-            latestSurface = incomingSurface
-            guard let pendingRequestID, renderingRequestID == nil else { return (nil, replaced) }
-            renderingRequestID = pendingRequestID
-            return (pendingRequestID, replaced)
-        }
-        replacedSurface?.release()
-        guard let requestID else { return }
-
-        let retainedSurface = QueueConfined(
-            value: Unmanaged<IOSurface>.fromOpaque(surfacePointer).retain()
         )
+        let (accepted, requestID, retained, generation) = lock.withLock {
+            () -> (Bool, UInt64?, Unmanaged<IOSurface>?, UInt64) in
+            // Validation and cache mutation share one lock. A callback from an
+            // old presenter cannot install its surface after reassociation.
+            if let source, sourceIdentity != ObjectIdentifier(source) {
+                return (false, nil, nil, sourceGeneration)
+            }
+            let incomingSurface = surfacePointer.map { Unmanaged<IOSurface>.fromOpaque($0).retain() }
+            if let incomingSurface {
+                latestSurface?.release()
+                latestSurface = incomingSurface
+            }
+            // A damage callback is fresh evidence for the same presenter's
+            // retained scanout. A timer alone never makes a cached surface fresh.
+            guard !requestCompletionSuppressed,
+                  incomingSurface != nil || allowDamageReuse,
+                  let surface = latestSurface,
+                  let pendingRequestID, renderingRequestID == nil
+            else { return (true, nil, nil, sourceGeneration) }
+            renderingRequestID = pendingRequestID
+            return (true, pendingRequestID, surface.retain(), sourceGeneration)
+        }
+        guard let requestID, let retained else { return accepted }
+        let retainedSurface = QueueConfined(value: retained)
         renderQueue.async { [weak self, retainedSurface] in
             let retained = retainedSurface.value
             let surface = retained.takeUnretainedValue()
@@ -697,6 +914,7 @@ private final class HeadlessFramebufferCaptureState: @unchecked Sendable {
             guard width > 0, height > 0 else {
                 self.finish(
                     requestID: requestID,
+                    generation: generation,
                     result: .failure(VirtualizationPrivateHeadlessError(
                         .frameInvalid,
                         detail: "The private framebuffer IOSurface has invalid dimensions."
@@ -709,6 +927,7 @@ private final class HeadlessFramebufferCaptureState: @unchecked Sendable {
             guard let rendered = self.context.createCGImage(image, from: bounds) else {
                 self.finish(
                     requestID: requestID,
+                    generation: generation,
                     result: .failure(VirtualizationPrivateHeadlessError(
                         .frameInvalid,
                         detail: "The private framebuffer IOSurface could not be rendered."
@@ -718,9 +937,11 @@ private final class HeadlessFramebufferCaptureState: @unchecked Sendable {
             }
             self.finish(
                 requestID: requestID,
+                generation: generation,
                 result: .success(QueueConfined(value: rendered))
             )
         }
+        return accepted
     }
 
     func takeResult(requestID: UInt64) -> Result<QueueConfined<CGImage>, Error>? {
@@ -742,10 +963,11 @@ private final class HeadlessFramebufferCaptureState: @unchecked Sendable {
 
     private func finish(
         requestID: UInt64,
+        generation: UInt64,
         result: Result<QueueConfined<CGImage>, Error>
     ) {
         lock.withLock {
-            guard renderingRequestID == requestID else { return }
+            guard renderingRequestID == requestID, sourceGeneration == generation else { return }
             pendingRequestID = nil
             renderingRequestID = nil
             completedFrame = CompletedFrame(requestID: requestID, result: result)
@@ -765,21 +987,47 @@ private enum HeadlessFramebufferObserverRuntime {
     ) -> Void
 
     private static nonisolated(unsafe) var stateAssociationKey: UInt8 = 0
-    private static let frameUpdateSelector = NSSelectorFromString("framebuffer:didUpdateFrame:")
+    private static nonisolated(unsafe) var completedInitialAssociationKey: UInt8 = 0
+    /// Named by the host's resolved frame-observation variant, so the subclass
+    /// overrides the callback this host actually publishes to.
+    private static let frameUpdateSelector: Selector? =
+        (try? VirtualizationPrivateABIPreflight.frameObservation())
+            .map { NSSelectorFromString($0.selectorName) }
     private static let subclassName = "PommePrivateHeadlessFramebufferObserver"
 
     private static let frameUpdateImplementation: FrameUpdateIMP = {
-        observer, _, _, sharedFrameUpdatePointer in
+        observer, selector, source, sharedFrameUpdatePointer in
         guard let state = objc_getAssociatedObject(
             observer,
             &stateAssociationKey
         ) as? HeadlessFramebufferCaptureState else { return }
-        state.receive(sharedFrameUpdatePointer: sharedFrameUpdatePointer)
+        let gen2 = superclassFrameUpdate != nil
+        // Retain the IOSurface before the superclass moves and clears the
+        // shared_ptr argument. Its handler replenishes presenter frame credit.
+        guard state.receive(
+            sharedFrameUpdatePointer: sharedFrameUpdatePointer,
+            allowDamageReuse: gen2,
+            source: gen2 ? source : nil
+        ) else { return }
+        superclassFrameUpdate?(observer, selector, source, sharedFrameUpdatePointer)
     }
 
+    private static let superclassFrameUpdate: FrameUpdateIMP? = {
+        guard (try? VirtualizationPrivateABIPreflight.frameObservation().variantName) == "gen2",
+              let superclass = NSClassFromString("_VZVNCServer"),
+              let selector = frameUpdateSelector,
+              let method = class_getInstanceMethod(superclass, selector),
+              let encoding = method_getTypeEncoding(method),
+              String(cString: encoding) == VirtualizationPrivateABIPreflight.frameUpdateEncoding
+        else { return nil }
+        return unsafeBitCast(method_getImplementation(method), to: FrameUpdateIMP.self)
+    }()
+
     private static let observerClass: AnyClass? = {
-        if let existing = NSClassFromString(subclassName) { return existing }
-        guard let superclass = NSClassFromString("_VZVNCServer"),
+        // This process owns this subclass. Do not trust a colliding runtime class.
+        guard NSClassFromString(subclassName) == nil else { return nil }
+        guard let frameUpdateSelector,
+              let superclass = NSClassFromString("_VZVNCServer"),
               let callbackMethod = class_getInstanceMethod(superclass, frameUpdateSelector),
               let callbackEncoding = method_getTypeEncoding(callbackMethod),
               let subclass = objc_allocateClassPair(superclass, subclassName, 0)
@@ -798,6 +1046,9 @@ private enum HeadlessFramebufferObserverRuntime {
     }()
 
     static func make(state: HeadlessFramebufferCaptureState) throws -> AnyObject {
+        // Names the missing interface rather than reporting a bare allocation
+        // failure when this host publishes no qualified frame observation.
+        _ = try VirtualizationPrivateABIPreflight.frameObservation()
         guard let observerClass,
               let allocated = class_createInstance(observerClass, 0) as AnyObject?,
               let method = class_getInstanceMethod(
@@ -828,6 +1079,104 @@ private enum HeadlessFramebufferObserverRuntime {
             .OBJC_ASSOCIATION_RETAIN_NONATOMIC
         )
         return observer
+    }
+
+    /// Associates the observer with its virtual machine, where the resolved
+    /// interface requires it, so the observer has the accessor that frame
+    /// delivery is routed through.
+    static func associateVirtualMachine(_ virtualMachine: AnyObject, on observer: AnyObject) throws {
+        let observation = try VirtualizationPrivateABIPreflight.frameObservation()
+        guard let selectorName = observation.virtualMachineSelectorName else { return }
+        let selector = NSSelectorFromString(selectorName)
+        guard let method = class_getInstanceMethod(object_getClass(observer), selector) else {
+            throw VirtualizationPrivateHeadlessError(
+                .privateABIMismatch,
+                detail: "The private headless observer association selector disappeared."
+            )
+        }
+        let associate = unsafeBitCast(
+            method_getImplementation(method),
+            to: SetGraphicsDisplayIMP.self
+        )
+        associate(observer, selector, virtualMachine)
+    }
+
+    private typealias ObjectGetterIMP = @convention(c) (AnyObject, Selector) -> AnyObject?
+    private typealias AssociatePresenterIMP = @convention(c) (
+        AnyObject, Selector, AnyObject, AnyObject
+    ) -> Void
+
+    /// Read only object ivars whose runtime type, bounds, and actual class agree.
+    private static func objectIvar(_ name: String, on object: AnyObject) throws -> AnyObject? {
+        guard let cls = object_getClass(object),
+              let ivar = class_getInstanceVariable(cls, name),
+              let rawType = ivar_getTypeEncoding(ivar)
+        else { throw abiError() }
+        let type = String(cString: rawType)
+        let offset = ivar_getOffset(ivar)
+        guard type.hasPrefix("@\""), type.hasSuffix("\""),
+              offset >= MemoryLayout<UnsafeRawPointer>.size,
+              offset % MemoryLayout<UnsafeRawPointer>.alignment == 0,
+              offset <= class_getInstanceSize(cls) - MemoryLayout<UnsafeRawPointer>.size,
+              let declaredClass = NSClassFromString(String(type.dropFirst(2).dropLast()))
+        else { throw abiError() }
+        guard let value = object_getIvar(object, ivar) as AnyObject? else { return nil }
+        var actualClass: AnyClass? = object_getClass(value)
+        while let current = actualClass {
+            if current === declaredClass { return value }
+            actualClass = class_getSuperclass(current)
+        }
+        throw abiError()
+    }
+
+    private static func abiError() -> VirtualizationPrivateHeadlessError {
+        .init(.privateABIMismatch, detail: "The gen2 presenter association metadata did not qualify.")
+    }
+
+    /// Called on the VM queue; never synchronously wait for the accessor queue here.
+    static func accessor(on observer: AnyObject) throws -> AnyObject? {
+        try objectIvar("_accessor", on: observer)
+    }
+
+    static func accessorQueue(_ accessor: AnyObject) throws -> DispatchQueue {
+        let selector = NSSelectorFromString("queue")
+        guard let method = class_getInstanceMethod(object_getClass(accessor), selector),
+              let encoding = method_getTypeEncoding(method),
+              String(cString: encoding) == "@16@0:8"
+        else { throw abiError() }
+        let get = unsafeBitCast(method_getImplementation(method), to: ObjectGetterIMP.self)
+        guard let queue = get(accessor, selector) as? DispatchQueue else { throw abiError() }
+        return queue
+    }
+
+    /// Runs on the accessor queue, after its asynchronous initialization work.
+    static func associatePresenter(
+        accessor: AnyObject, observer: AnyObject, state: HeadlessFramebufferCaptureState
+    ) throws -> Bool {
+        guard let current = try objectIvar("_accessor", on: observer), current === accessor,
+              let presenter = try objectIvar("_presenter", on: accessor)
+        else { return false }
+        if state.acceptsSource(presenter) { return true }
+        let selector = NSSelectorFromString("virtualMachineAccessor:associateWithDisplayPresenter:")
+        guard let method = class_getInstanceMethod(object_getClass(observer), selector),
+              let encoding = method_getTypeEncoding(method),
+              String(cString: encoding) == "v32@0:8@16@24",
+              superclassFrameUpdate != nil
+        else { throw abiError() }
+        state.associateSource(presenter)
+        let associate = unsafeBitCast(method_getImplementation(method), to: AssociatePresenterIMP.self)
+        if objc_getAssociatedObject(observer, &completedInitialAssociationKey) == nil {
+            state.suppressRequestCompletion {
+                associate(observer, selector, accessor, presenter)
+            }
+            objc_setAssociatedObject(
+                observer, &completedInitialAssociationKey, NSNumber(value: true),
+                .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+            )
+        } else {
+            associate(observer, selector, accessor, presenter)
+        }
+        return true
     }
 
     static func setDisplay(_ display: AnyObject?, on observer: AnyObject) throws {
@@ -1288,25 +1637,32 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
     private func captureFrame(timeout: TimeInterval) async throws -> CGImage {
         try VirtualizationPrivateABIPreflight.validateRuntime()
         let resources = try captureResources()
-        try ensureFramebufferObserver(display: resources.display)
-        // The retained surface is the live framebuffer: render it now rather
-        // than waiting for the guest to publish another update. A static
-        // screen therefore captures immediately instead of timing out.
-        if let image = try framebufferCaptureState.renderLatestSurface() {
-            try Self.validateFrame(
-                image,
-                expectedWidth: resources.width,
-                expectedHeight: resources.height
-            )
-            return image
-        }
+        // Ask for a frame before re-arming, so the update that registration
+        // republishes completes this request instead of only refreshing the
+        // retained surface.
         let requestID = try framebufferCaptureState.beginRequest()
         do {
             let deadline = Date().addingTimeInterval(max(0.1, timeout))
+            let gen2 = try VirtualizationPrivateABIPreflight.frameObservation().variantName == "gen2"
+            try await ensureFramebufferObserver(display: resources.display, deadline: deadline, gen2: gen2)
+            // A host that republishes on registration answers within the first
+            // poll. Falling back to the retained surface only after that keeps
+            // a static screen fast without serving it a stale frame first.
+            let freshFrameBudget = Date().addingTimeInterval(min(0.5, max(0.1, timeout)))
             while Date() < deadline {
                 try Task.checkCancellation()
                 if let result = framebufferCaptureState.takeResult(requestID: requestID) {
                     let image = try result.get().value
+                    try Self.validateFrame(
+                        image,
+                        expectedWidth: resources.width,
+                        expectedHeight: resources.height
+                    )
+                    return image
+                }
+                if !gen2, Date() >= freshFrameBudget,
+                   let image = try framebufferCaptureState.renderLatestSurface() {
+                    framebufferCaptureState.cancel(requestID: requestID)
                     try Self.validateFrame(
                         image,
                         expectedWidth: resources.width,
@@ -1326,18 +1682,24 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
         }
     }
 
-    private func ensureFramebufferObserver(display: VZGraphicsDisplay) throws {
+    private func ensureFramebufferObserver(
+        display: VZGraphicsDisplay, deadline: Date, gen2: Bool
+    ) async throws {
         try queue.sync {
             try requireRunning()
             let displayIdentity = ObjectIdentifier(display)
             if let framebufferObserver, observedDisplayIdentity == displayIdentity {
-                // Once a full update has been published its surface is
-                // retained, so the observer stays attached. Re-arm only while
-                // no surface has arrived yet: registration publishes the
-                // framebuffer's last full update.
-                guard !framebufferCaptureState.hasLatestSurface else { return }
+                // Request registration again for every capture. A static gen2
+                // presenter can stop publishing after its initial update even
+                // when frames are acknowledged. Replacing the accessor requests
+                // a fresh registration callback without accepting a timed cache.
                 try HeadlessFramebufferObserverRuntime.setDisplay(
                     nil,
+                    on: framebufferObserver.value
+                )
+                framebufferCaptureState.associateSource(nil)
+                try HeadlessFramebufferObserverRuntime.associateVirtualMachine(
+                    virtualMachine.value,
                     on: framebufferObserver.value
                 )
                 try HeadlessFramebufferObserverRuntime.setDisplay(
@@ -1352,13 +1714,49 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
                     on: framebufferObserver.value
                 )
             }
+            framebufferCaptureState.associateSource(nil)
             let observer = try HeadlessFramebufferObserverRuntime.make(
                 state: framebufferCaptureState
+            )
+            try HeadlessFramebufferObserverRuntime.associateVirtualMachine(
+                virtualMachine.value,
+                on: observer
             )
             try HeadlessFramebufferObserverRuntime.setDisplay(display, on: observer)
             framebufferObserver = QueueConfined(value: observer)
             observedDisplayIdentity = displayIdentity
         }
+        guard gen2 else { return }
+        while Date() < deadline {
+            try Task.checkCancellation()
+            let objects: QueueConfined<(AnyObject, AnyObject)>? = try queue.sync {
+                try requireRunning()
+                guard let observer = framebufferObserver?.value,
+                      let accessor = try HeadlessFramebufferObserverRuntime.accessor(on: observer)
+                else { return nil }
+                return QueueConfined(value: (observer, accessor))
+            }
+            if let objects {
+                let accessorQueue = try HeadlessFramebufferObserverRuntime.accessorQueue(objects.value.1)
+                let ready: Bool = try await Self.awaitCallback(timeout: deadline.timeIntervalSinceNow) { completion in
+                    accessorQueue.async { [framebufferCaptureState = self.framebufferCaptureState] in
+                        do {
+                            completion(.success(try HeadlessFramebufferObserverRuntime.associatePresenter(
+                                accessor: objects.value.1,
+                                observer: objects.value.0,
+                                state: framebufferCaptureState
+                            )))
+                        } catch { completion(.failure(error)) }
+                    }
+                }
+                if ready { return }
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        throw VirtualizationPrivateHeadlessError(
+            .frameTimeout,
+            detail: "The gen2 display presenter did not become ready before the deadline."
+        )
     }
 
     static func awaitCallback<Value: Sendable>(
