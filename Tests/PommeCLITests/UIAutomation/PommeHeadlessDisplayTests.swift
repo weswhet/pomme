@@ -1,6 +1,7 @@
 import Foundation
 @preconcurrency import AppKit
 import Testing
+import IOSurface
 
 @Suite("Virtualization private headless backend")
 struct VirtualizationPrivateHeadlessBackendTests {
@@ -50,8 +51,11 @@ struct VirtualizationPrivateHeadlessBackendTests {
         await #expect(throws: CancellationError.self) { try await task.value }
     }
 
-    @Test("Runtime ABI accepts any host build with the exact private interface")
-    func abiMatching() throws {
+    @Test(
+        "Runtime ABI accepts any host build with the exact private interface",
+        arguments: VirtualizationPrivateABIPreflight.frameObservationVariants
+    )
+    func abiMatching(observation: VirtualizationPrivateFrameObservation) throws {
         let environment = VirtualizationPrivateABIEnvironment(
             architecture: "arm64",
             hostBuild: "99Z999",
@@ -59,25 +63,41 @@ struct VirtualizationPrivateHeadlessBackendTests {
             frameworkVersion: "999.1",
             frameworkPath: "/System/Library/Frameworks/Virtualization.framework"
         )
+        let required = VirtualizationPrivateABIPreflight.requiredMethods(for: observation)
         let encodings = Dictionary(uniqueKeysWithValues:
-            VirtualizationPrivateABIPreflight.requiredMethods.map { ($0.identity, $0.encoding) }
+            required.map { ($0.identity, $0.encoding) }
         )
         try VirtualizationPrivateABIPreflight.validate(
             environment: environment,
-            observedMethods: encodings
+            observedMethods: encodings,
+            requiring: required
         )
 
-        var wrongEncoding = encodings
-        wrongEncoding[VirtualizationPrivateABIPreflight.requiredMethods[0].identity] = "v16@0:8"
-        do {
-            try VirtualizationPrivateABIPreflight.validate(
-                environment: environment,
-                observedMethods: wrongEncoding
-            )
-            Issue.record("Expected a private ABI mismatch")
-        } catch let error as VirtualizationPrivateHeadlessError {
-            #expect(error.code == .privateABIMismatch)
-            #expect(!error.partialInputPossible)
+        // Every entry is load-bearing, including the variant's own callback.
+        for requirement in required {
+            var wrongEncoding = encodings
+            wrongEncoding[requirement.identity] = "v16@0:8"
+            do {
+                try VirtualizationPrivateABIPreflight.validate(
+                    environment: environment,
+                    observedMethods: wrongEncoding,
+                    requiring: required
+                )
+                Issue.record("Expected a private ABI mismatch for \(requirement.identity)")
+            } catch let error as VirtualizationPrivateHeadlessError {
+                #expect(error.code == .privateABIMismatch)
+                #expect(!error.partialInputPossible)
+            }
+
+            var missing = encodings
+            missing.removeValue(forKey: requirement.identity)
+            #expect(throws: VirtualizationPrivateHeadlessError.self) {
+                try VirtualizationPrivateABIPreflight.validate(
+                    environment: environment,
+                    observedMethods: missing,
+                    requiring: required
+                )
+            }
         }
 
         let unsupportedArchitecture = VirtualizationPrivateABIEnvironment(
@@ -90,7 +110,8 @@ struct VirtualizationPrivateHeadlessBackendTests {
         do {
             try VirtualizationPrivateABIPreflight.validate(
                 environment: unsupportedArchitecture,
-                observedMethods: encodings
+                observedMethods: encodings,
+                requiring: required
             )
             Issue.record("Expected an unsupported architecture failure")
         } catch let error as VirtualizationPrivateHeadlessError {
@@ -107,7 +128,8 @@ struct VirtualizationPrivateHeadlessBackendTests {
         do {
             try VirtualizationPrivateABIPreflight.validate(
                 environment: unexpectedFramework,
-                observedMethods: encodings
+                observedMethods: encodings,
+                requiring: required
             )
             Issue.record("Expected a private ABI mismatch")
         } catch let error as VirtualizationPrivateHeadlessError {
@@ -115,17 +137,225 @@ struct VirtualizationPrivateHeadlessBackendTests {
         }
     }
 
-    @Test("The installed runtime is either exactly qualified or rejected")
+    /// The oldest host whose private Virtualization interface Pomme qualifies.
+    /// Below it a mismatch is expected; at or above it a mismatch is a
+    /// regression. A runtime check, not `#available`: this is a claim about the
+    /// host being tested, not about the SDK the tests were built against.
+    private static let privateABISupportFloor = OperatingSystemVersion(
+        majorVersion: 26,
+        minorVersion: 0,
+        patchVersion: 0
+    )
+
+    /// Tolerating a mismatch on a supported host is what let the macOS 27
+    /// rename pass this suite while `create` was failing.
+    @Test("A supported host qualifies exactly; an older host is rejected, never approximated")
     func installedRuntimeABI() throws {
-        let observed = VirtualizationPrivateABIPreflight.observedMethodEncodings()
+        let isSupportedHost = ProcessInfo.processInfo
+            .isOperatingSystemAtLeast(Self.privateABISupportFloor)
         do {
             try VirtualizationPrivateABIPreflight.validateRuntime()
-            for method in VirtualizationPrivateABIPreflight.requiredMethods {
-                #expect(observed[method.identity] == method.encoding)
+            let observation = try VirtualizationPrivateABIPreflight.frameObservation()
+            let methods = VirtualizationPrivateABIPreflight.requiredMethods(for: observation)
+            let observed = VirtualizationPrivateABIPreflight.observedMethodEncodings(for: methods)
+            for method in methods {
+                #expect(observed[method.identity] == method.encoding, "\(method.identity)")
             }
         } catch let error as VirtualizationPrivateHeadlessError {
-            #expect(error.code == .privateABIMismatch || error.code == .unsupportedArchitecture)
+            #expect(
+                !isSupportedHost || error.code == .unsupportedArchitecture,
+                "A supported host no longer qualifies: \(error.code.rawValue)."
+            )
         }
+    }
+
+    /// The layout `HeadlessFramebufferFrameLayout` decodes is only valid for
+    /// this exact callback shape, so the constant is pinned rather than merely
+    /// shared between the variants.
+    @Test("The frame callback shape is the one the frame layout decodes")
+    func frameUpdateEncodingIsPinned() {
+        #expect(
+            VirtualizationPrivateABIPreflight.frameUpdateEncoding
+                == "v40@0:8@16{shared_ptr<const VzCore::Hardware::FrameUpdate>="
+                + "^{FrameUpdate}^{__shared_weak_count}}24"
+        )
+        for variant in VirtualizationPrivateABIPreflight.frameObservationVariants {
+            #expect(variant.encoding == VirtualizationPrivateABIPreflight.frameUpdateEncoding)
+        }
+    }
+
+    @Test("The frame observation table is closed and unambiguous")
+    func frameObservationTableIsWellFormed() {
+        let variants = VirtualizationPrivateABIPreflight.frameObservationVariants
+        let shared = VirtualizationPrivateABIPreflight.sharedRequiredMethods
+        #expect(variants.count >= 2)
+        #expect(Set(variants.map(\.variantName)).count == variants.count)
+        #expect(Set(variants.map(\.protocolName)).count == variants.count)
+        #expect(Set(variants.map(\.selectorName)).count == variants.count)
+        for variant in variants {
+            #expect(variant.method.className == "_VZVNCServer")
+            #expect(!shared.contains(variant.method))
+            // The association selector, where the interface needs one, is part
+            // of what the host must prove.
+            let extra = variant.virtualMachineMethod.map { [$0] } ?? []
+            for method in extra {
+                #expect(method.className == "_VZVNCServer")
+                #expect(!shared.contains(method))
+            }
+            #expect(
+                VirtualizationPrivateABIPreflight.requiredMethods(for: variant)
+                    == shared + [variant.method] + extra
+            )
+        }
+    }
+
+    @Test("Each known host publishes exactly one qualified frame observation")
+    func frameObservationVariantSelection() throws {
+        let variants = VirtualizationPrivateABIPreflight.frameObservationVariants
+        let framebuffer = try #require(variants.first { $0.variantName == "gen1" })
+        let presenter = try #require(variants.first { $0.variantName == "gen2" })
+
+        // The rename moved names only; a drifting encoding would mean the
+        // callback shape changed and the frame layout can no longer be reused.
+        #expect(framebuffer.encoding == presenter.encoding)
+        #expect(framebuffer.protocolName != presenter.protocolName)
+        #expect(framebuffer.selectorName != presenter.selectorName)
+
+        for variant in [framebuffer, presenter] {
+            let resolved = try VirtualizationPrivateABIPreflight.resolveFrameObservation(
+                using: Self.probe(publishing: [variant])
+            )
+            #expect(resolved == variant)
+            #expect(
+                VirtualizationPrivateABIPreflight.requiredMethods(for: variant)
+                    == VirtualizationPrivateABIPreflight.sharedRequiredMethods
+                    + [variant.method]
+                    + (variant.virtualMachineMethod.map { [$0] } ?? [])
+            )
+            #expect(!VirtualizationPrivateABIPreflight.sharedRequiredMethods.contains(variant.method))
+        }
+
+        // A host that still declares a superseded interface alongside its
+        // successor cannot prove which one actually delivers.
+        #expect(throws: VirtualizationPrivateHeadlessError.self) {
+            try VirtualizationPrivateABIPreflight.resolveFrameObservation(
+                using: Self.probe(publishing: variants)
+            )
+        }
+    }
+
+    @Test("An unqualified frame observation interface is rejected, never approximated")
+    func frameObservationRejection() throws {
+        let presenter = try #require(
+            VirtualizationPrivateABIPreflight.frameObservationVariants
+                .first { $0.variantName == "gen2" }
+        )
+
+        // No interface at all.
+        #expect(throws: VirtualizationPrivateHeadlessError.self) {
+            try VirtualizationPrivateABIPreflight.resolveFrameObservation(
+                using: Self.probe(publishing: [])
+            )
+        }
+
+        // The selector is present with an unexpected encoding.
+        #expect(throws: VirtualizationPrivateHeadlessError.self) {
+            try VirtualizationPrivateABIPreflight.resolveFrameObservation(
+                using: .init(
+                    observerConforms: { $0 == presenter.protocolName },
+                    selectorEncoding: { $0 == presenter.selectorName ? "v24@0:8@16" : nil },
+                    protocolRequirementEncoding: { _, _ in presenter.encoding }
+                )
+            )
+        }
+
+        // The protocol exists but `_VZVNCServer` does not adopt it.
+        #expect(throws: VirtualizationPrivateHeadlessError.self) {
+            try VirtualizationPrivateABIPreflight.resolveFrameObservation(
+                using: .init(
+                    observerConforms: { _ in false },
+                    selectorEncoding: { $0 == presenter.selectorName ? presenter.encoding : nil },
+                    protocolRequirementEncoding: { _, _ in presenter.encoding }
+                )
+            )
+        }
+
+        // The protocol is adopted but the callback is absent.
+        #expect(throws: VirtualizationPrivateHeadlessError.self) {
+            try VirtualizationPrivateABIPreflight.resolveFrameObservation(
+                using: .init(
+                    observerConforms: { $0 == presenter.protocolName },
+                    selectorEncoding: { _ in nil },
+                    protocolRequirementEncoding: { _, _ in presenter.encoding }
+                )
+            )
+        }
+
+        // The class declares the exact callback but the protocol requires a
+        // different shape: a rename that also reshaped the callback.
+        #expect(throws: VirtualizationPrivateHeadlessError.self) {
+            try VirtualizationPrivateABIPreflight.resolveFrameObservation(
+                using: .init(
+                    observerConforms: { $0 == presenter.protocolName },
+                    selectorEncoding: { $0 == presenter.selectorName ? presenter.encoding : nil },
+                    protocolRequirementEncoding: { _, _ in "v24@0:8@16" }
+                )
+            )
+        }
+    }
+
+    @Test("A mismatched protocol and callback pairing never resolves")
+    func frameObservationRejectsCrossedInterfaces() throws {
+        let variants = VirtualizationPrivateABIPreflight.frameObservationVariants
+        #expect(throws: VirtualizationPrivateHeadlessError.self) {
+            try VirtualizationPrivateABIPreflight.resolveFrameObservation(
+                using: .init(
+                    observerConforms: { $0 == variants[0].protocolName },
+                    selectorEncoding: { $0 == variants[1].selectorName ? variants[1].encoding : nil },
+                    protocolRequirementEncoding: { _, _ in variants[1].encoding }
+                )
+            )
+        }
+    }
+
+    /// The private interface is never named to a user, so the reported reason
+    /// cannot carry a protocol, selector, or encoding.
+    @Test("Frame observation failures never name the private interface")
+    func frameObservationFailureIsRedacted() {
+        let variants = VirtualizationPrivateABIPreflight.frameObservationVariants
+        let secrets = variants.flatMap { [$0.protocolName, $0.selectorName, $0.encoding] }
+        for probe in [Self.probe(publishing: []), Self.probe(publishing: variants)] {
+            do {
+                _ = try VirtualizationPrivateABIPreflight.resolveFrameObservation(using: probe)
+                Issue.record("Expected a private ABI mismatch")
+            } catch let error as VirtualizationPrivateHeadlessError {
+                #expect(error.code == .privateABIMismatch)
+                let description = error.errorDescription ?? ""
+                for secret in secrets {
+                    #expect(!description.contains(secret))
+                }
+                #expect(!description.contains("_VZ"))
+            } catch {
+                Issue.record("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    /// A host that publishes exactly the named variants and nothing else.
+    private static func probe(
+        publishing variants: [VirtualizationPrivateFrameObservation]
+    ) -> VirtualizationPrivateFrameObservationProbe {
+        .init(
+            observerConforms: { name in variants.contains { $0.protocolName == name } },
+            selectorEncoding: { name in
+                variants.first { $0.selectorName == name }?.encoding
+            },
+            protocolRequirementEncoding: { protocolName, selectorName in
+                variants.first {
+                    $0.protocolName == protocolName && $0.selectorName == selectorName
+                }?.encoding
+            }
+        )
     }
 
     @Test("Screenshot conversion accepts CGImage and NSImage")
@@ -175,6 +405,100 @@ struct VirtualizationPrivateHeadlessBackendTests {
                 ) == nil)
             }
         }
+    }
+
+    @Test("Presenter replacement discards retained scanout before damage reuse")
+    func presenterReplacementDiscardsSurface() throws {
+        let state = HeadlessFramebufferCaptureState()
+        let first = NSObject()
+        let second = NSObject()
+        let surface = try #require(IOSurfaceCreate([
+            kIOSurfaceWidth: 2,
+            kIOSurfaceHeight: 2,
+            kIOSurfaceBytesPerElement: 4,
+            kIOSurfaceBytesPerRow: 8,
+            kIOSurfaceAllocSize: 16
+        ] as CFDictionary))
+        state.associateSource(first)
+        var frame = [UInt64](repeating: 0, count: 2)
+        frame.withUnsafeMutableBytes { bytes in
+            bytes.storeBytes(of: Unmanaged.passUnretained(surface).toOpaque(), as: UnsafeMutableRawPointer.self)
+            bytes.storeBytes(of: UInt8(1), toByteOffset: 8, as: UInt8.self)
+            var pointer: UnsafeRawPointer? = bytes.baseAddress.map(UnsafeRawPointer.init)
+            withUnsafePointer(to: &pointer) { shared in
+                state.receive(sharedFrameUpdatePointer: UnsafeRawPointer(shared))
+                #expect(state.hasLatestSurface)
+                state.associateSource(first)
+                #expect(state.hasLatestSurface)
+                state.associateSource(second)
+                #expect(!state.hasLatestSurface)
+                #expect(!state.acceptsSource(first))
+                #expect(state.acceptsSource(second))
+                // Simulate a delayed full callback from the detached presenter.
+                #expect(!state.receive(
+                    sharedFrameUpdatePointer: UnsafeRawPointer(shared),
+                    allowDamageReuse: true,
+                    source: first
+                ))
+                #expect(!state.hasLatestSurface)
+                bytes.storeBytes(of: UInt8(0), toByteOffset: 8, as: UInt8.self)
+                state.receive(sharedFrameUpdatePointer: UnsafeRawPointer(shared), allowDamageReuse: true, source: second)
+                #expect(!state.hasLatestSurface)
+                // Gen1 has no presenter identity; explicit detach still clears
+                // its retained scanout even when both old/new identities are nil.
+                state.associateSource(nil)
+                bytes.storeBytes(of: UInt8(1), toByteOffset: 8, as: UInt8.self)
+                state.receive(sharedFrameUpdatePointer: UnsafeRawPointer(shared))
+                #expect(state.hasLatestSurface)
+                state.associateSource(nil)
+                #expect(!state.hasLatestSurface)
+            }
+        }
+    }
+
+    @Test("Cold registration caches replay but waits for a later frame callback")
+    func coldRegistrationWaitsForPublication() async throws {
+        let state = HeadlessFramebufferCaptureState()
+        let source = NSObject()
+        let surface = try #require(IOSurfaceCreate([
+            kIOSurfaceWidth: 2,
+            kIOSurfaceHeight: 2,
+            kIOSurfaceBytesPerElement: 4,
+            kIOSurfaceBytesPerRow: 8,
+            kIOSurfacePixelFormat: 0x42475241,
+            kIOSurfaceAllocSize: 16
+        ] as CFDictionary))
+        state.associateSource(source)
+        let request = try state.beginRequest()
+        func deliver() {
+            var frame = [UInt64](repeating: 0, count: 2)
+            frame.withUnsafeMutableBytes { bytes in
+                bytes.storeBytes(of: Unmanaged.passUnretained(surface).toOpaque(), as: UnsafeMutableRawPointer.self)
+                bytes.storeBytes(of: UInt8(1), toByteOffset: 8, as: UInt8.self)
+                var pointer = bytes.baseAddress.map(UnsafeRawPointer.init)
+                withUnsafePointer(to: &pointer) { shared in
+                    _ = state.receive(sharedFrameUpdatePointer: UnsafeRawPointer(shared), source: source)
+                }
+            }
+        }
+        state.suppressRequestCompletion { deliver() }
+        #expect(state.hasLatestSurface)
+        // Allow any accidentally scheduled render to finish before checking.
+        try await Task.sleep(nanoseconds: 50_000_000)
+        #expect(state.takeResult(requestID: request) == nil)
+        deliver()
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            if let result = state.takeResult(requestID: request) {
+                let image = try result.get().value
+                #expect(image.width == 2)
+                #expect(image.height == 2)
+                return
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        Issue.record("The first asynchronous publication did not complete capture")
+        state.cancel(requestID: request)
     }
 
     @Test("Frame validation rejects wrong-sized and blank frames")
