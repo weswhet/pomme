@@ -4528,6 +4528,15 @@ struct PommeCore {
             )
             try repository.commit(completed, replacing: intent.generation)
         } catch {
+            // Repair reports the same redacted failure code the orchestrator
+            // logs, so the command that exists to diagnose a retained journal
+            // does not say strictly less than `create --resume` about the same
+            // failure.
+            log(
+                "provisioning phase \(next.phase.rawValue) failed "
+                    + "[code=\(PommeProvisioningFailureDiagnostic.code(for: error))].",
+                vmName: intent.plan.vm.name
+            )
             let digest = PommeProvisioningDigest.sha256(Data(String(describing: error).utf8))
             let failed = try PommeProvisioningCoordinator.appendingResult(
                 to: intent,
@@ -4538,7 +4547,7 @@ struct PommeCore {
                 signer: signer
             )
             try repository.commit(failed, replacing: intent.generation)
-            throw PommeProvisioningError.phaseFailed(.installRecoveryAgent)
+            throw PommeProvisioningError.phaseFailed(next.phase, vmName: intent.plan.vm.name)
         }
         let payload: [String: Any] = [
             "ok": true,
