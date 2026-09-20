@@ -2,25 +2,31 @@ import ArgumentParser
 import Foundation
 import Testing
 
+/// Explicitly typed so the compiler does not infer the tuple shape for every
+/// element; inferring it across the whole literal exceeds the type checker's
+/// budget and fails the build.
+private let negativeValueCases: [(command: String, arguments: [String], expected: String)] = [
+    ("ui click", ["dev", "--x", "-1", "--y", "5"], "--x must be a finite display coordinate of zero or more."),
+    ("ui click", ["dev", "--x", "5", "--y", "-1"], "--y must be a finite display coordinate of zero or more."),
+    ("ipsw list", ["--limit", "-1"], "--limit must be greater than zero."),
+    ("start", ["dev", "--timeout", "-5"], "--timeout must be greater than zero."),
+    ("restart", ["dev", "--timeout", "-5"], "--timeout must be greater than zero."),
+    ("exec", ["dev", "--timeout", "-5", "--", "/bin/true"], "--timeout must be greater than zero."),
+    ("cat", ["dev:/tmp/x", "--offset", "-1"], "--offset must not be negative."),
+    ("cat", ["dev:/tmp/x", "--count", "-1"], "--count must not be negative."),
+    ("sessions logs", ["dev", "00000000-0000-0000-0000-000000000000", "--from-offset", "-1"], "--from-offset must not be negative."),
+    ("ui ai settings", ["dev", "Goal", "--max-steps", "-1"], "requires a positive integer"),
+    ("ui ai settings", ["dev", "Goal", "--confidence", "-1"], "between 0 and 1"),
+    ("ui ai settings", ["dev", "Goal", "--model-timeout", "-1"], "positive number of seconds"),
+    ("exec", ["dev", "--uid", "-1", "--", "/bin/true"], "The value '-1' is invalid for '--uid <uid>'"),
+]
+
 @Suite("Numeric option parsing")
 struct NumericOptionTests {
     /// Each numeric option captures a value that starts with `-` instead of
     /// reporting it missing, so the range check names the real problem.
-    @Test("Negative values reach the range check of every numeric option", arguments: [
-        ("ui click", ["dev", "--x", "-1", "--y", "5"], "--x must be a finite display coordinate of zero or more."),
-        ("ui click", ["dev", "--x", "5", "--y", "-1"], "--y must be a finite display coordinate of zero or more."),
-        ("ipsw list", ["--limit", "-1"], "--limit must be greater than zero."),
-        ("start", ["dev", "--timeout", "-5"], "--timeout must be greater than zero."),
-        ("restart", ["dev", "--timeout", "-5"], "--timeout must be greater than zero."),
-        ("exec", ["dev", "--timeout", "-5", "--", "/bin/true"], "--timeout must be greater than zero."),
-        ("cat", ["dev:/tmp/x", "--offset", "-1"], "--offset must not be negative."),
-        ("cat", ["dev:/tmp/x", "--count", "-1"], "--count must not be negative."),
-        ("sessions logs", ["dev", "00000000-0000-0000-0000-000000000000", "--from-offset", "-1"], "--from-offset must not be negative."),
-        ("ui ai settings", ["dev", "Goal", "--max-steps", "-1"], "requires a positive integer"),
-        ("ui ai settings", ["dev", "Goal", "--confidence", "-1"], "between 0 and 1"),
-        ("ui ai settings", ["dev", "Goal", "--model-timeout", "-1"], "positive number of seconds"),
-        ("exec", ["dev", "--uid", "-1", "--", "/bin/true"], "The value '-1' is invalid for '--uid <uid>'"),
-    ])
+    @Test("Negative values reach the range check of every numeric option",
+          arguments: negativeValueCases)
     func negativeValuesReachRangeChecks(command: String, arguments: [String], expected: String) throws {
         let message = try Self.validationMessage(command: command, arguments: arguments)
         #expect(message.contains(expected), "\(command) \(arguments): \(message)")
