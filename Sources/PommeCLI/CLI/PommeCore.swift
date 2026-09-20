@@ -8,6 +8,26 @@ private enum PommeLogContext {
     @TaskLocal static var sink: (@Sendable (String) -> Void)?
 }
 
+/// Closed diagnostics deliberately cannot accept any bootstrap data or errors.
+struct PommeBootstrapDiagnostics {
+    enum Stage: String, CaseIterable {
+        case started, journalValidated, ownerReferenceVerified, dispatchMarkerVerified
+        case agentCredentialAvailable, runtimeRecordAbsent, runtimeStartAttempted, runtimeStartSucceeded
+        case workspaceVerified, discoveryStarted, keyPinned, sshUIDVerified
+        case discoveryCandidateSelected, discoveryKeyscanSucceeded, discoveryLeaseVerified
+        case requestVerified, stagingVerified, installerInvoked, agentConnected
+    }
+
+    private(set) var stage: Stage = .started
+
+    mutating func checkpoint(_ stage: Stage) -> String {
+        self.stage = stage
+        return "bootstrap checkpoint stage=\(stage.rawValue)"
+    }
+
+    func failure() -> String { "bootstrap failed stage=\(stage.rawValue)" }
+}
+
 private enum PommeProvisioningCredentialReference {
     /// This account is intentionally fixed. The VM UUID is the Keychain
     /// service scope, so callers cannot select an arbitrary credential.
@@ -109,6 +129,18 @@ struct PommeLocalRestoreImageIdentity: Equatable, Sendable {
 struct PommeProvisioningRuntimeMetadata: Codable, Equatable, Sendable {
     let vmUUID: UUID
     let startupVolumeGroupUUID: UUID?
+}
+
+struct PommeFrameworkProvisionedOwnerContext: Sendable {
+    let credentialReference: PommeOwnerCredentialReference
+    let generatedUID: UUID
+    let startupVolumeGroupUUID: UUID
+}
+
+struct PommeProvisioningDispatchMarker: Codable, Equatable, Sendable {
+    let vmUUID: UUID
+    let planDigest: String
+    let attempt: UInt64
 }
 
 private final class PommeRetainedRuntime: @unchecked Sendable {
@@ -286,6 +318,7 @@ struct PommeCore {
 
     private static let provisioningEffectsLock = NSLock()
     nonisolated(unsafe) private static var installedProvisioningEffects: PommeProvisioningEffects?
+    nonisolated(unsafe) private static var installedProvisioningV2Effects: PommeProvisioningV2Effects?
     private static let provisioningRecoveryAdapterLock = NSLock()
     nonisolated(unsafe) private static var provisioningRecoveryAdapter: (@Sendable (PommeProvisioningPlan, PommeProvisioningFinalState) async throws -> String)?
     private static let retainedRuntimeLock = NSLock()
@@ -299,6 +332,62 @@ struct PommeCore {
         provisioningEffectsLock.lock()
         installedProvisioningEffects = effects
         provisioningEffectsLock.unlock()
+    }
+
+    static func installProvisioningV2Effects(_ effects: PommeProvisioningV2Effects?) {
+        provisioningEffectsLock.withLock { installedProvisioningV2Effects = effects }
+    }
+
+    static func usesVirtualizationProvisioning(
+        guestVersion: String, firstBootEligible: Bool, hostMajor: Int,
+        apiAvailable: Bool
+    ) -> Bool {
+        firstBootEligible && apiAvailable && hostMajor >= 27
+            && PommeProvisioningV2RouteSelector.select(
+                hostSupportsProvisioning: true, guestVersion: guestVersion) == .virtualization
+    }
+
+    static func usesVirtualizationProvisioning(guestVersion: String, firstBootEligible: Bool) -> Bool {
+        guard #available(macOS 27, *) else { return false }
+        return usesVirtualizationProvisioning(guestVersion: guestVersion,
+            firstBootEligible: firstBootEligible,
+            hostMajor: ProcessInfo.processInfo.operatingSystemVersion.majorVersion, apiAvailable: true)
+    }
+
+    static func provisioningDisclosure(virtualization: Bool) -> [String: String] {
+        var fields = ["guestProvisioning": virtualization ? "virtualization" : "recovery",
+                      "agentInstallMethod": virtualization ? "ssh-bootstrap" : "recovery",
+                      "automaticLogin": virtualization ? "enabled" : "legacy",
+                      "remoteLogin": virtualization ? "off" : "legacy"]
+        if virtualization { fields["account"] = "pomme" }
+        return fields
+    }
+
+    /// Runtime disclosure describes proven state, unlike dry-run output which
+    /// describes the requested final state. A provision intent is not a proof.
+    static func provisioningDisclosure(journal: PommeProvisioningV2Journal) -> [String: String] {
+        var fields = provisioningDisclosure(virtualization: true)
+        if !journal.events.contains(where: { $0.phase == .verifyNormalAgent && $0.kind == .receipt }) {
+            fields["automaticLogin"] = "pending"
+            fields["remoteLogin"] = "unknown"
+        }
+        return fields
+    }
+
+    private static func provisioningDisclosure(bundle: BundleLayout) throws -> [String: String] {
+        guard try provisioningSchemaIfPresent(bundle: bundle) == 2 else {
+            return provisioningDisclosure(virtualization: false)
+        }
+        return try provisioningDisclosure(journal: loadProvisioningV2(reference: .init(name: nil, bundle: bundle)))
+    }
+
+    private static func discloseProvisioningState(_ payload: inout [String: Any], bundle: BundleLayout) throws {
+        let fields = try provisioningDisclosure(bundle: bundle)
+        payload.merge(fields) { _, new in new }
+        if var metadata = payload["metadata"] as? [String: Any] {
+            metadata.merge(fields) { _, new in new }
+            payload["metadata"] = metadata
+        }
     }
 
     /// Returns the immutable VM identity and the optional APFS startup
@@ -436,6 +525,14 @@ struct PommeCore {
     /// changing it or replacing the persistent agent it pins.
     static func securityProvisioningPlan(reference: VMReference) throws -> PommeProvisioningPlan {
         let plan = try loadOwnedProvisioningPlan(reference: reference)
+        if try provisioningSchema(bundle: reference.bundle) == 2 {
+            let journal = try loadProvisioningV2(reference: reference)
+            guard journal.plan == plan, journal.events.last?.kind == .receipt,
+                  journal.events.last?.phase == .restoreFinalState else {
+                throw PommeProvisioningV2Error.invalidJournal
+            }
+            return plan
+        }
         let key = try Data(contentsOf: provisioningKeyURL(bundle: reference.bundle))
         let journal = try provisioningRepository(
             bundleURL: reference.bundle.rootURL,
@@ -455,6 +552,19 @@ struct PommeCore {
         try loadOwnedProvisioningPlan(reference: reference).normalAgent.executableDigest
     }
 
+    static func frameworkProvisionedOwner(reference: VMReference) throws -> PommeFrameworkProvisionedOwnerContext? {
+        guard try provisioningSchemaIfPresent(bundle: reference.bundle) == 2 else { return nil }
+        let plan = try securityProvisioningPlan(reference: reference)
+        let journal = try loadProvisioningV2(reference: reference)
+        guard let owner = journal.ownerReference, let generatedUID = owner.generatedUID,
+              let group = journal.startupVolumeGroupUUID,
+              try provisioningRuntimeMetadata(for: plan).startupVolumeGroupUUID == group else {
+            throw PommeProvisioningV2Error.ownershipMismatch
+        }
+        try validateProvisioningOwnerReference(owner, plan: plan)
+        return .init(credentialReference: owner, generatedUID: generatedUID, startupVolumeGroupUUID: group)
+    }
+
     /// Runs one owner-preparation command through the running normal VM helper.
     /// The helper captures an authenticated coordinator pin before
     /// `agent.describe` and reuses it for process start, status, stream, and
@@ -464,14 +574,23 @@ struct PommeCore {
         reference: VMReference,
         expectedExecutableDigest: String,
         command: PommeSecurityOwnerPTYCommand,
-        password: String
+        password: String,
+        provisioningVerification: Bool = false
     ) async throws -> Int32 {
         guard PommeProvisioningDigest.isSHA256(expectedExecutableDigest),
               expectedExecutableDigest == expectedExecutableDigest.lowercased()
         else { throw PommeSecurityWorkflowError.agentUnverified }
 
         guard !password.isEmpty else { throw PommePrivatePTYRunner.Error.invalidSecret }
-        let plan = try securityProvisioningPlan(reference: reference)
+        let plan: PommeProvisioningPlan
+        if provisioningVerification {
+            let journal = try loadProvisioningV2(reference: reference)
+            guard journal.events.last?.phase == .verifyNormalAgent,
+                  journal.events.last?.kind == .intent else { throw PommeProvisioningV2Error.invalidJournal }
+            plan = try loadOwnedProvisioningPlan(reference: reference)
+        } else {
+            plan = try securityProvisioningPlan(reference: reference)
+        }
         guard plan.normalAgent.protocolVersion == PommeAgentProtocol.version,
               plan.normalAgent.executableDigest == expectedExecutableDigest,
               try stableVMRunState(reference: reference) == .running(.normal)
@@ -867,33 +986,34 @@ struct PommeCore {
         ) else { throw PommeRecoverySessionError.finalStateUnverified }
     }
 
-    private static func loadOwnedProvisioningPlan(
+    static func loadOwnedProvisioningPlan(
         reference: VMReference
     ) throws -> PommeProvisioningPlan {
         let bundle = reference.bundle
         let keyURL = provisioningKeyURL(bundle: bundle)
-        guard isRegularFile(keyURL),
-              isRegularFile(provisioningJournalURL(bundle: bundle))
+        guard isRegularFile(keyURL)
         else { throw PommeProvisioningError.ownershipMismatch }
         let key = try Data(contentsOf: keyURL, options: .mappedIfSafe)
         guard key.count >= 32 else { throw PommeProvisioningError.integrityFailure }
-        let signer = try PommeProvisioningJournalSigner(key: key)
-        let journal = try provisioningRepository(
-            bundleURL: bundle.rootURL,
-            signer: signer
-        ).load()
-        try journal.plan.validate()
-        guard journal.plan.vm.bundlePath == reference.standardizedPath,
-              reference.name == nil || journal.plan.vm.name == reference.name
+        let plan: PommeProvisioningPlan
+        if try provisioningSchema(bundle: bundle) == 2 {
+            plan = try provisioningV2Repository(bundle: bundle, key: key).load().plan
+        } else {
+            plan = try provisioningRepository(bundleURL: bundle.rootURL,
+                signer: PommeProvisioningJournalSigner(key: key)).load().plan
+        }
+        try plan.validate()
+        guard plan.vm.bundlePath == reference.standardizedPath,
+              reference.name == nil || plan.vm.name == reference.name
         else { throw PommeProvisioningError.ownershipMismatch }
         let ownershipData = try Data(
             contentsOf: provisioningOwnershipURL(bundle: bundle),
             options: .mappedIfSafe
         )
-        guard try JSONDecoder().decode(PommeVMOwnership.self, from: ownershipData) == journal.plan.vm else {
+        guard try JSONDecoder().decode(PommeVMOwnership.self, from: ownershipData) == plan.vm else {
             throw PommeProvisioningError.ownershipMismatch
         }
-        return journal.plan
+        return plan
     }
 
     private static func liveRecoveryProfileEvidence(
@@ -1513,10 +1633,12 @@ struct PommeCore {
             if payload["guestAgent"] == nil {
                 payload["guestAgent"] = guestAgentPayload(.offline(role: .normal))
             }
+            try discloseProvisioningState(&payload, bundle: reference.bundle)
             return payload
         } catch RunnerError.noRunningVM {
             var payload = offlineStatusPayload(bundle: reference.bundle)
             if let name = reference.name { payload["name"] = name }
+            try discloseProvisioningState(&payload, bundle: reference.bundle)
             return payload
         }
     }
@@ -1532,6 +1654,7 @@ struct PommeCore {
         payload["bundlePath"] = reference.bundle.rootURL.path
         if let metadata = try? metadataPayload(bundle: reference.bundle) { payload["metadata"] = metadata }
         if payload["guestAgent"] == nil { payload["guestAgent"] = guestAgentPayload(.offline(role: .normal)) }
+        try discloseProvisioningState(&payload, bundle: reference.bundle)
         return payload
     }
 
@@ -1604,17 +1727,106 @@ struct PommeCore {
         if (try? runtimeRecord(for: reference.bundle)) != nil {
             throw RunnerError.virtualMachineState("Stop the VM before deleting it.")
         }
-        let credentialUUID = vmUUID(for: reference.bundle).flatMap(UUID.init(uuidString:))
-        try FileManager.default.removeItem(at: reference.bundle.rootURL)
-        if let credentialUUID {
-            // Delete only the credential bound to this exact Pomme VM UUID;
-            // an absent item is an idempotent cleanup success.
-            try removeProvisioningAgentCredential(
-                vmUUID: credentialUUID,
-                account: PommeProvisioningCredentialReference.agentAccount
-            )
+        let schema = try provisioningSchemaIfPresent(bundle: reference.bundle)
+        let ownedPlan = try schema.map { _ in try loadOwnedProvisioningPlan(reference: reference) }
+        let credentialUUID = try deletionCredentialUUID(plan: ownedPlan, bundle: reference.bundle)
+        // Resolve and authenticate the reference while its owning bundle is
+        // still present. A failed credential cleanup must retain the journal.
+        var ownerReference: PommeOwnerCredentialReference?
+        if schema == 2 {
+            let journal = try loadProvisioningV2(reference: reference)
+            guard journal.plan == ownedPlan else { throw PommeProvisioningError.ownershipMismatch }
+            if let owner = journal.ownerReference {
+                try validateProvisioningOwnerReference(owner, plan: journal.plan)
+                ownerReference = owner
+            }
         }
+        let ownerStore = PommeOwnerCredentialStore()
+        let agentStore = PommeAgentCredentialStore()
+        // Snapshot both exact secrets before the first delete. Restoration uses
+        // these bytes only; no random source or provisioned-password generator
+        // is reachable from the deletion transaction.
+        let ownerSnapshot: PommeOwnerCredential?
+        if let ownerReference {
+            do { ownerSnapshot = try ownerStore.read(ownerReference) }
+            catch PommeOwnerCredentialStoreError.keychainMissing { ownerSnapshot = nil }
+        } else { ownerSnapshot = nil }
+        let agentSnapshot: String?
+        if let credentialUUID {
+            do { agentSnapshot = try agentStore.read(vmUUID: credentialUUID, account: PommeProvisioningCredentialReference.agentAccount) }
+            catch PommeAgentCredentialStore.Error.credentialMissing { agentSnapshot = nil }
+        } else { agentSnapshot = nil }
+        try performProvisioningDeletion(cleanupOwner: {
+            if let ownerReference { try ownerStore.remove(reference: ownerReference) }
+        }, cleanupAgent: {
+            if let credentialUUID {
+                try agentStore.remove(vmUUID: credentialUUID,
+                    account: PommeProvisioningCredentialReference.agentAccount)
+            }
+        }, removeBundle: { try FileManager.default.removeItem(at: reference.bundle.rootURL) },
+        restoreOwner: {
+            if let ownerSnapshot {
+                let restored = try ownerStore.store(.init(reference: ownerSnapshot.reference, password: ownerSnapshot.password))
+                guard restored.reference == ownerSnapshot.reference, restored.password == ownerSnapshot.password else {
+                    throw PommeOwnerCredentialStoreError.credentialCollision
+                }
+            }
+        }, restoreAgent: {
+            if let credentialUUID, let agentSnapshot {
+                let restored = try agentStore.readOrCreate(vmUUID: credentialUUID,
+                    account: PommeProvisioningCredentialReference.agentAccount, generate: { agentSnapshot })
+                guard restored == agentSnapshot else { throw PommeAgentCredentialStore.Error.unexpectedCredentialData }
+            }
+        })
         return ["ok": true, "operation": "delete", "name": name, "bundlePath": reference.bundle.rootURL.path, "hostExitCode": 0]
+    }
+
+    /// The authenticated provisioning plan owns credential scope. Metadata may
+    /// corroborate that UUID but cannot select a different Keychain item or
+    /// suppress cleanup by omitting the UUID. Unjournaled legacy VMs keep their
+    /// original optional metadata behavior.
+    static func deletionCredentialUUID(plan: PommeProvisioningPlan?, bundle: BundleLayout) throws -> UUID? {
+        guard let plan else { return vmUUID(for: bundle).flatMap(UUID.init(uuidString:)) }
+        guard plan.vm.bundlePath == bundle.rootURL.standardizedFileURL.path else {
+            throw PommeProvisioningError.ownershipMismatch
+        }
+        var info = stat()
+        if lstat(bundle.metadataURL.path, &info) != 0 {
+            guard errno == ENOENT else { throw PommeProvisioningError.ownershipMismatch }
+            return plan.vm.uuid
+        }
+        do {
+            let data = try PommeAgentFileTransaction.readRegular(bundle.metadataURL, maximumBytes: 1024 * 1024)
+            guard let metadata = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw PommeProvisioningError.ownershipMismatch
+            }
+            if let raw = metadata[Constants.vmUUIDMetadataKey] {
+                guard let text = raw as? String, let uuid = UUID(uuidString: text), uuid == plan.vm.uuid else {
+                    throw PommeProvisioningError.ownershipMismatch
+                }
+            }
+        } catch { throw PommeProvisioningError.ownershipMismatch }
+        return plan.vm.uuid
+    }
+
+    static func performProvisioningDeletion(cleanupOwner: () throws -> Void,
+        cleanupAgent: () throws -> Void, removeBundle: () throws -> Void,
+        restoreOwner: () throws -> Void, restoreAgent: () throws -> Void) throws {
+        do {
+            try cleanupOwner()
+            try cleanupAgent()
+            try removeBundle()
+        } catch {
+            // A store can report failure after applying its mutation. Restore
+            // both snapshots, even when the first removal reports an error.
+            var rollbackFailed = false
+            do { try restoreOwner() } catch { rollbackFailed = true }
+            do { try restoreAgent() } catch { rollbackFailed = true }
+            guard !rollbackFailed else {
+                throw RunnerError.hostCommandFailed("VM deletion failed and exact credential restoration could not be verified. The retained VM requires credential recovery.")
+            }
+            throw error
+        }
     }
 
     static func createVMPayload(
@@ -1843,6 +2055,7 @@ struct PommeCore {
         let input: PommeProvisioningInput
         let signer: PommeProvisioningJournalSigner
         let restoreImage: URL
+        let virtualization: Bool
     }
 
     /// Keeps the configuration requirements beside the durable identity so
@@ -1912,7 +2125,16 @@ struct PommeCore {
                 )
             }
             try writeProvisioningPreparation(preparation, bundle: reference.bundle)
-            try await orchestrator.start(preparation.plan)
+            if preparation.virtualization {
+                let key = try Data(contentsOf: provisioningKeyURL(bundle: reference.bundle))
+                try await PommeProvisioningV2Orchestrator(
+                    signer: PommeProvisioningV2Signer(key: key),
+                    repository: provisioningV2Repository(bundle: reference.bundle, key: key),
+                    effects: provisioningV2Effects()
+                ).start(preparation.plan)
+            } else {
+                try await orchestrator.start(preparation.plan)
+            }
         } catch {
             // Never delete a failed VM or its journal.  The caller can resume
             // the exact plan after correcting the external integration.
@@ -1927,12 +2149,13 @@ struct PommeCore {
             "bundlePath": reference.bundle.rootURL.path,
             "restoreImage": preparation.restoreImage.path,
             "provisioning": [
-                "schema": PommeProvisioningPlan.schemaVersion,
+                "schema": preparation.virtualization ? 2 : 1,
                 "planDigest": preparation.plan.digest,
                 "finalState": preparation.plan.finalState.rawValue,
-                "journal": provisioningJournalURL(bundle: reference.bundle).path
+                "journal": (preparation.virtualization ? provisioningV2JournalURL(bundle: reference.bundle) : provisioningJournalURL(bundle: reference.bundle)).path
             ]
         ]
+        payload.merge(provisioningDisclosure(virtualization: preparation.virtualization)) { _, new in new }
         if let metadata = try? metadataPayload(bundle: reference.bundle) {
             payload["metadata"] = metadata
         }
@@ -1953,6 +2176,7 @@ struct PommeCore {
         let requirements: VZMacOSConfigurationRequirements?
         let diskSizeBytes: UInt64
         let templateBundlePath: String?
+        let firstBootEligible: Bool
     }
 
     private static func restoreImageSource(
@@ -1976,7 +2200,8 @@ struct PommeCore {
             hardwareModelData: requirements.hardwareModel.dataRepresentation,
             requirements: requirements,
             diskSizeBytes: disk,
-            templateBundlePath: nil
+            templateBundlePath: nil,
+            firstBootEligible: true
         )
     }
 
@@ -2006,7 +2231,8 @@ struct PommeCore {
             hardwareModelData: hardwareModelData,
             requirements: nil,
             diskSizeBytes: manifest.diskSizeBytes,
-            templateBundlePath: bundle.rootURL.standardizedFileURL.path
+            templateBundlePath: bundle.rootURL.standardizedFileURL.path,
+            firstBootEligible: !manifest.isProvisioned
         )
     }
 
@@ -2082,7 +2308,9 @@ struct PommeCore {
         )
         try input.validate(for: plan)
         let signer = try provisioningSigner(bundleURL: reference.bundle.rootURL)
-        return .init(plan: plan, input: input, signer: signer, restoreImage: source.restoreImage)
+        return .init(plan: plan, input: input, signer: signer, restoreImage: source.restoreImage,
+                     virtualization: usesVirtualizationProvisioning(guestVersion: version,
+                         firstBootEligible: source.firstBootEligible))
     }
 
     private static func provisioningFinalState(_ mode: VMCreationConfigV1.BootMode) -> PommeProvisioningFinalState {
@@ -2102,6 +2330,541 @@ struct PommeCore {
             restoreFinalState: { plan in try await restoreProvisioningFinalState(plan) },
             recoveryRepair: { plan, state in try await repairProvisioningAgent(plan, finalState: state) }
         )
+    }
+
+    private static func provisioningV2Effects() -> PommeProvisioningV2Effects {
+        if let injected = provisioningEffectsLock.withLock({ installedProvisioningV2Effects }) { return injected }
+        return .init(
+            verifyOwnership: { try await verifyProvisioningOwnership($0) },
+            prepareOwnerReference: { plan in
+                let reference = try captureProvisioningOwnerReference(plan: plan)
+                _ = try PommeOwnerCredentialStore().readOrCreate(reference: reference)
+                return reference
+            },
+            install: { try await installProvisioningVM($0) },
+            provisionGuest: { try await provisionVirtualizationGuest($0) },
+            bootstrapNormalAgent: { try await bootstrapNormalAgent($0) },
+            verifyNormalAgent: { try await verifyFrameworkProvisioning($0) },
+            restoreFinalState: { plan in
+                let bundle = provisioningReference(for: plan).bundle
+                var metadata = try metadataPayload(bundle: bundle)
+                metadata.merge(try provisioningDisclosure(bundle: bundle)) { _, new in new }
+                try writeMetadataPayload(metadata, bundle: bundle)
+                try cleanupBootstrapWorkspace(plan: plan, completed: true)
+                return try await restoreProvisioningFinalState(plan)
+            }, provisionGuestWasDispatched: { try provisioningWasDispatched(plan: $0) })
+    }
+
+    static func captureProvisioningOwnerReference(plan: PommeProvisioningPlan) throws -> PommeOwnerCredentialReference {
+        let bundle = provisioningReference(for: plan).bundle
+        let machine = try PommeSSHBootstrap.privateRead(bundle.machineIdentifierURL,
+            owner: geteuid(), allowedModes: [0o600, 0o644])
+        let descriptor = open(bundle.diskImageURL.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw PommeProvisioningV2Error.ownershipMismatch }
+        defer { close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+              info.st_nlink == 1, info.st_uid == geteuid(), !machine.isEmpty else {
+            throw PommeProvisioningV2Error.ownershipMismatch
+        }
+        return try .init(vmUUID: plan.vm.uuid,
+            machineIdentifierSHA256: PommeProvisioningDigest.sha256(machine),
+            diskImageFileResourceID: "\(info.st_dev):\(info.st_ino)")
+    }
+
+    static func validateProvisioningOwnerReference(_ reference: PommeOwnerCredentialReference,
+                                                    plan: PommeProvisioningPlan) throws {
+        let captured = try captureProvisioningOwnerReference(plan: plan)
+        guard reference.vmUUID == captured.vmUUID,
+              reference.machineIdentifierSHA256 == captured.machineIdentifierSHA256,
+              reference.diskImageFileResourceID == captured.diskImageFileResourceID,
+              reference.account == captured.account, reference.service == captured.service,
+              reference.ownershipMarker == captured.ownershipMarker else {
+            throw PommeProvisioningV2Error.ownershipMismatch
+        }
+    }
+
+    static func persistProvisioningDispatch(_ marker: PommeProvisioningDispatchMarker, at url: URL) throws {
+        guard marker.attempt > 0, PommeProvisioningDigest.isSHA256(marker.planDigest) else {
+            throw PommeProvisioningV2Error.invalidJournal
+        }
+        let descriptor = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw PommeProvisioningV2Error.ambiguousProvisionGuest }
+        defer { close(descriptor) }
+        try PommeAgentFileTransaction.writeAll(descriptor, data: try JSONEncoder().encode(marker))
+        guard fsync(descriptor) == 0 else { throw PommeProvisioningV2Error.ambiguousProvisionGuest }
+        let parent = open(url.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard parent >= 0 else { throw PommeProvisioningV2Error.ambiguousProvisionGuest }
+        defer { close(parent) }
+        guard fsync(parent) == 0 else { throw PommeProvisioningV2Error.ambiguousProvisionGuest }
+    }
+
+    static func provisioningDispatchExists(at url: URL, vmUUID: UUID, planDigest: String) throws -> Bool {
+        var info = stat()
+        if lstat(url.path, &info) != 0 {
+            guard errno == ENOENT else { throw PommeProvisioningV2Error.ambiguousProvisionGuest }
+            return false
+        }
+        do {
+            let marker = try JSONDecoder().decode(PommeProvisioningDispatchMarker.self,
+                from: PommeSSHBootstrap.privateRead(url, owner: geteuid(), allowedModes: [0o600]))
+            guard marker.vmUUID == vmUUID, marker.planDigest == planDigest, marker.attempt > 0 else {
+                throw PommeProvisioningV2Error.ambiguousProvisionGuest
+            }
+            return true
+        } catch { throw PommeProvisioningV2Error.ambiguousProvisionGuest }
+    }
+
+    private static func provisioningWasDispatched(plan: PommeProvisioningPlan) throws -> Bool {
+        let bundle = provisioningReference(for: plan).bundle
+        return try provisioningDispatchExists(at: provisioningRoot(bundle: bundle)
+            .appendingPathComponent("provisioning-v2.dispatched"), vmUUID: plan.vm.uuid, planDigest: plan.digest)
+    }
+
+    private static func provisionVirtualizationGuest(_ plan: PommeProvisioningPlan) async throws -> String {
+        let reference = provisioningReference(for: plan)
+        let journal = try loadProvisioningV2(reference: reference)
+        guard journal.plan == plan, let event = journal.events.last,
+              event.kind == .intent, event.phase == .provisionGuest,
+              let owner = journal.ownerReference,
+              usesVirtualizationProvisioning(guestVersion: plan.restore.version, firstBootEligible: true),
+              retainedRuntime(for: plan.vm.bundlePath) == nil,
+              (try? runtimeRecord(for: reference.bundle)) == nil else {
+            throw PommeProvisioningV2Error.invalidJournal
+        }
+        try validateProvisioningOwnerReference(owner, plan: plan)
+        if let templatePath = try loadProvisioningInput(for: plan).templateBundlePath {
+            guard try !PommeTemplateStore.manifest(in: BundleLayout(rootURL: URL(fileURLWithPath: templatePath))).isProvisioned else {
+                throw PommeProvisioningV2Error.invalidJournal
+            }
+        }
+        let password = try PommeOwnerCredentialStore().read(owner).password
+        _ = try provisioningAgentCredential(for: plan)
+        let marker = PommeProvisioningDispatchMarker(vmUUID: plan.vm.uuid, planDigest: plan.digest, attempt: event.attempt)
+        let markerURL = provisioningRoot(bundle: reference.bundle).appendingPathComponent("provisioning-v2.dispatched")
+        let intent = PommeMacGuestProvisioningIntent(password: password, guestMajor: 27,
+            markDispatched: { try persistProvisioningDispatch(marker, at: markerURL) })
+        let retained = try await startProvisioningRuntime(plan: plan, mode: .normal,
+            attachAgent: true, guestProvisioningIntent: intent)
+        retainRuntime(retained, for: plan.vm.bundlePath)
+        return try receiptDigest("provision-guest", plan: plan, bundle: reference.bundle)
+    }
+
+    private static func verifyFrameworkProvisioning(_ plan: PommeProvisioningPlan) async throws -> PommeProvisioningV2Verification {
+        enum Stage: String {
+            case ownerReference, normalRebootAndAgent, authenticate, ownerProof, desktopProof
+            case persistVolumeIdentity, remoteLoginOff, complete
+        }
+        var stage = Stage.ownerReference
+        func checkpoint(_ next: Stage) {
+            stage = next
+            log("framework verification checkpoint stage=\(stage.rawValue)")
+        }
+        checkpoint(.ownerReference)
+        do {
+        let reference = provisioningReference(for: plan)
+        let journal = try loadProvisioningV2(reference: reference)
+        guard journal.plan == plan, journal.events.last?.phase == .verifyNormalAgent,
+              journal.events.last?.kind == .intent, let owner = journal.ownerReference else {
+            throw PommeProvisioningV2Error.invalidJournal
+        }
+        try validateProvisioningOwnerReference(owner, plan: plan)
+        let password = try PommeOwnerCredentialStore().read(owner).password
+        // A plain normal boot proves that automatic login survives the one-time
+        // framework provisioning options and hands the VM to its durable helper.
+        checkpoint(.normalRebootAndAgent)
+        _ = try await verifyNormalAgent(plan)
+        let normal = PommeSecurityNormalAgent(reference: reference,
+            expectedExecutableDigest: plan.normalAgent.executableDigest)
+        checkpoint(.authenticate)
+        try await normal.authenticate(requirePrivateInput: true)
+        checkpoint(.ownerProof)
+        let preparation = PommeSecurityOwnerPreparation(
+            identity: .init(username: "pomme", expectedVolumeGroupUUID:
+                try provisioningRuntimeMetadata(for: plan).startupVolumeGroupUUID),
+            executeGuest: { try normal.execute($0) },
+            executePrivatePTY: { command, secret in
+                try await runSecurityPrivatePTY(reference: reference,
+                    expectedExecutableDigest: plan.normalAgent.executableDigest,
+                    command: command, password: secret, provisioningVerification: true)
+            })
+        let proof = try await preparation.verifyFrameworkProvisionedOwner(password: password,
+            expectedGeneratedUID: owner.generatedUID)
+        checkpoint(.desktopProof)
+        _ = try await normal.verifyConsoleLogin(username: owner.account, uniqueID: proof.owner.uniqueID)
+        checkpoint(.persistVolumeIdentity)
+        try persistProvisioningStartupVolumeGroup(proof.owner.startupVolumeGroupUUID, for: plan)
+        // systemsetup's setter requires Full Disk Access on macOS 27. Stop
+        // this temporary launchd service directly, then independently read back.
+        checkpoint(.remoteLoginOff)
+        try disableFrameworkRemoteLogin(execute: normal.execute)
+        checkpoint(.complete)
+        return .init(receiptDigest: try receiptDigest("verify-framework-owner", plan: plan, bundle: reference.bundle),
+                     ownerReference: try owner.bindingGeneratedUID(proof.owner.generatedUID),
+                     startupVolumeGroupUUID: proof.owner.startupVolumeGroupUUID)
+        } catch {
+            log("framework verification failed stage=\(stage.rawValue)")
+            // These closed error types contain only fixed cases, enum labels,
+            // and numeric exit statuses, never guest output or credentials.
+            if let known = error as? PommeSecurityOwnerPreparationError { log(known.localizedDescription) }
+            else if let known = error as? PommeSecurityNormalAgentError { log(known.localizedDescription) }
+            else if let known = error as? PommeSecurityWorkflowError { log(known.localizedDescription) }
+            throw error
+        }
+    }
+
+    static func disableFrameworkRemoteLogin(execute: (GuestCommandRequest) throws -> GuestCommandResult) throws {
+        func run(_ path: String, _ arguments: [String]) throws -> GuestCommandResult {
+            let result = try execute(.init(path: path, arguments: arguments, timeout: 30))
+            guard result.exited, !result.detached, !result.timedOut, result.signal == nil,
+                  result.exitCode != nil, !result.stdoutTruncated, !result.stderrTruncated else {
+                throw PommeProvisioningV2Error.phaseFailed(.verifyNormalAgent)
+            }
+            return result
+        }
+        let service = "system/com.openssh.sshd"
+        guard try run("/bin/launchctl", ["disable", service]).exitCode == 0 else {
+            throw PommeProvisioningV2Error.phaseFailed(.verifyNormalAgent)
+        }
+        // Already-unloaded services are valid on resume; the readbacks below
+        // determine success independently of bootout's status.
+        _ = try run("/bin/launchctl", ["bootout", service])
+        let setting = try run("/usr/sbin/systemsetup", ["-getremotelogin"])
+        let job = try run("/bin/launchctl", ["print", service])
+        guard setting.exitCode == 0,
+              String(decoding: setting.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == "Remote Login: Off",
+              job.exitCode != 0,
+              String(decoding: job.stderr, as: UTF8.self).contains("Could not find service \"com.openssh.sshd\"") else {
+            throw PommeProvisioningV2Error.phaseFailed(.verifyNormalAgent)
+        }
+    }
+
+    /// A bounded private subprocess channel. Neither subprocess diagnostics nor
+    /// input bytes are propagated to logs or errors, including launch failures.
+    static func runBootstrapProcess(_ executable: String, arguments: [String],
+        environment: [String: String] = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"],
+        input: Data? = nil, timeout: TimeInterval = 30) throws -> Data {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.environment = environment
+        let output = Pipe()
+        let incoming = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = incoming
+        do { try process.run() } catch { throw PommeSSHBootstrapError.processLaunchFailed }
+        defer {
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            process.waitUntilExit()
+        }
+        try incoming.fileHandleForWriting.write(contentsOf: input ?? Data())
+        try incoming.fileHandleForWriting.close()
+        try output.fileHandleForWriting.close()
+        let fd = output.fileHandleForReading.fileDescriptor
+        guard fcntl(fd, F_SETFL, O_NONBLOCK) == 0 else { throw PommeSSHBootstrapError.invalid }
+        var bytes = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while true {
+            let count = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+            if count > 0 {
+                guard bytes.count + count <= 64 * 1024 else { throw PommeSSHBootstrapError.invalid }
+                bytes.append(contentsOf: buffer.prefix(count))
+            } else if count == 0, !process.isRunning { break }
+            else if count < 0, errno != EAGAIN, errno != EINTR { throw PommeSSHBootstrapError.invalid }
+            guard ProcessInfo.processInfo.systemUptime < deadline else { throw PommeSSHBootstrapError.processTimedOut }
+            if count <= 0 { Thread.sleep(forTimeInterval: 0.01) }
+        }
+        guard process.terminationStatus == 0 else { throw PommeSSHBootstrapError.processExited(process.terminationStatus) }
+        return bytes
+    }
+
+    private static func bootstrapAgentMatches(_ status: GuestAgentStatusV1,
+                                               plan: PommeProvisioningPlan) throws -> Bool {
+        guard status.connection == .connected else { return false }
+        guard status.role == .normal, status.protocolVersion == plan.normalAgent.protocolVersion,
+              status.executableDigest == plan.normalAgent.executableDigest,
+              supportsProvisioningAgentCapabilities(status.capabilities),
+              status.capabilities.contains("remoteLogin.set") else { throw PommeSSHBootstrapError.invalid }
+        return true
+    }
+
+    private static func bootstrapNormalAgent(_ plan: PommeProvisioningPlan) async throws -> String {
+        var diagnostics = PommeBootstrapDiagnostics()
+        log(diagnostics.checkpoint(.started))
+        do {
+        let reference = provisioningReference(for: plan)
+        let journal = try loadProvisioningV2(reference: reference)
+        guard journal.plan == plan, journal.events.last?.phase == .bootstrapNormalAgent,
+              journal.events.last?.kind == .intent, let owner = journal.ownerReference,
+              let provision = journal.events.first(where: { $0.phase == .provisionGuest && $0.kind == .receipt }) else {
+            throw PommeProvisioningV2Error.invalidJournal
+        }
+        log(diagnostics.checkpoint(.journalValidated))
+        try validateProvisioningOwnerReference(owner, plan: plan)
+        log(diagnostics.checkpoint(.ownerReferenceVerified))
+        let root = provisioningRoot(bundle: reference.bundle)
+        let marker = try JSONDecoder().decode(PommeProvisioningDispatchMarker.self,
+            from: PommeSSHBootstrap.privateRead(root.appendingPathComponent("provisioning-v2.dispatched"),
+                owner: geteuid(), allowedModes: [0o600]))
+        guard marker == .init(vmUUID: plan.vm.uuid, planDigest: plan.digest, attempt: provision.attempt) else {
+            throw PommeProvisioningV2Error.ambiguousProvisionGuest
+        }
+        log(diagnostics.checkpoint(.dispatchMarkerVerified))
+        let token = Data(try existingProvisioningAgentCredential(for: plan).utf8)
+        log(diagnostics.checkpoint(.agentCredentialAvailable))
+        let retained: PommeRetainedRuntime
+        if let existing = retainedRuntime(for: plan.vm.bundlePath) { retained = existing }
+        else {
+            guard (try? runtimeRecord(for: reference.bundle)) == nil else { throw PommeSSHBootstrapError.invalid }
+            log(diagnostics.checkpoint(.runtimeRecordAbsent))
+            log(diagnostics.checkpoint(.runtimeStartAttempted))
+            retained = try await startProvisioningRuntime(plan: plan, mode: .normal, attachAgent: true)
+            log(diagnostics.checkpoint(.runtimeStartSucceeded))
+            retainRuntime(retained, for: plan.vm.bundlePath)
+        }
+        guard let coordinator = retained.coordinator, retained.mode == .normal else { throw PommeSSHBootstrapError.invalid }
+        if try await bootstrapAgentMatches(coordinator.status(), plan: plan) {
+            log(diagnostics.checkpoint(.agentConnected))
+            try cleanupBootstrapWorkspace(plan: plan, completed: false)
+            return try receiptDigest("bootstrap-normal-agent", plan: plan, bundle: reference.bundle)
+        }
+        let workspace = root.appendingPathComponent("ssh-bootstrap", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: workspace.path) {
+            try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700])
+        }
+        var workspaceInfo = stat()
+        guard lstat(workspace.path, &workspaceInfo) == 0, workspaceInfo.st_mode & S_IFMT == S_IFDIR,
+              workspaceInfo.st_uid == geteuid(), workspaceInfo.st_mode & 0o777 == 0o700,
+              workspace.resolvingSymlinksInPath().path == workspace.path else { throw PommeSSHBootstrapError.invalid }
+        guard Set(try FileManager.default.contentsOfDirectory(atPath: workspace.path))
+            .isSubset(of: ["known_hosts", "owner-reference.json", "request.json", "pomme", "agent.token"]) else {
+            throw PommeSSHBootstrapError.invalid
+        }
+        let knownHosts = workspace.appendingPathComponent("known_hosts")
+        log(diagnostics.checkpoint(.workspaceVerified))
+        let ownerFile = workspace.appendingPathComponent("owner-reference.json")
+        try persistBootstrapOwnerReference(owner, at: ownerFile)
+        let identity = try runningExecutableIdentity()
+        try PommeAgentArtifactStore.Dependencies().verifyCodeSignature(identity.url)
+        let machine = try loadProvisioningInput(for: plan).machineIdentifierData
+        let mac = stableVMMACAddress(machineIdentifierData: machine)
+        let deadline = ProcessInfo.processInfo.systemUptime + PommeSSHBootstrap.firstBootReadinessTimeout
+        var discovered: (address: String, key: Data)?
+        log(diagnostics.checkpoint(.discoveryStarted))
+        while discovered == nil {
+            do {
+                discovered = try PommeSSHBootstrap.discoverHostKey(stableMAC: mac, readLeases: {
+                    try PommeSSHBootstrap.readLeases()
+                }, scan: { ip in
+                    let output = try runBootstrapProcess("/usr/bin/ssh-keyscan", arguments: ["-T", "5", "-t", "ed25519", ip])
+                    return String(decoding: output, as: UTF8.self)
+                }, onEvent: { event in
+                    switch event {
+                    case .candidateSelected: log(diagnostics.checkpoint(.discoveryCandidateSelected))
+                    case .keyscanSucceeded: log(diagnostics.checkpoint(.discoveryKeyscanSucceeded))
+                    case .leaseVerified: log(diagnostics.checkpoint(.discoveryLeaseVerified))
+                    }
+                })
+            } catch {
+                guard ProcessInfo.processInfo.systemUptime < deadline else { throw PommeSSHBootstrapError.invalid }
+                try await Task.sleep(for: .seconds(1))
+            }
+        }
+        guard let discovered else { throw PommeSSHBootstrapError.invalid }
+        let address = discovered.address
+        try PommeSSHBootstrap.pinHostKey(discovered.key, at: knownHosts)
+        log(diagnostics.checkpoint(.keyPinned))
+        func authenticatedProcess(_ executable: String, arguments: [String], sudoSuffix: Data? = nil, timeout: TimeInterval = 30) throws -> Data {
+            // Recheck the DHCP target immediately before every credential-bearing
+            // operation, including retries and the first connection after keyscan.
+            let current = try PommeSSHBootstrap.address(leases: PommeSSHBootstrap.readLeases(), stableMAC: mac)
+            guard current == address else { throw PommeSSHBootstrapError.invalid }
+            var stdin = Data()
+            defer { stdin.resetBytes(in: 0..<stdin.count); stdin.removeAll() }
+            if let sudoSuffix {
+                stdin = Data(try PommeOwnerCredentialStore().read(owner).password.utf8)
+                stdin.append(10); stdin.append(sudoSuffix)
+            }
+            return try runBootstrapProcess(executable, arguments: arguments,
+                environment: PommeBootstrapAskpass.environment(executable: identity.url, ownerReference: ownerFile),
+                input: stdin, timeout: timeout)
+        }
+        let uidBytes = try authenticatedProcess("/usr/bin/ssh", arguments: PommeSSHBootstrap.arguments(
+            address: address, knownHosts: knownHosts, command: "/usr/bin/id -u"))
+        guard let uid = UInt32(String(decoding: uidBytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)),
+              uid >= 501 else { throw PommeSSHBootstrapError.invalid }
+        log(diagnostics.checkpoint(.sshUIDVerified))
+        let requestURL = workspace.appendingPathComponent("request.json")
+        let request: PommeBootstrapRequest
+        if FileManager.default.fileExists(atPath: requestURL.path) {
+            request = try JSONDecoder().decode(PommeBootstrapRequest.self,
+                from: PommeSSHBootstrap.privateRead(requestURL, owner: geteuid(), allowedModes: [0o600]))
+        } else {
+            request = try .init(vmUUID: plan.vm.uuid, requestID: UUID(), planSHA256: plan.digest,
+                executableSHA256: plan.normalAgent.executableDigest,
+                expiresAt: Int64(Date().timeIntervalSince1970) + 3600, stagingOwner: uid, token: token)
+            try persistExactBootstrapFile(try JSONEncoder().encode(request), at: requestURL, mode: 0o600)
+        }
+        try request.authenticate(token: token, vmUUID: plan.vm.uuid,
+            planSHA256: plan.digest, executableSHA256: plan.normalAgent.executableDigest)
+        guard request.stagingOwner == uid else { throw PommeSSHBootstrapError.invalid }
+        log(diagnostics.checkpoint(.requestVerified))
+        let artifact: URL
+        if identity.sha256 == plan.normalAgent.executableDigest {
+            try PommeAgentArtifactStore.Dependencies().verifyCodeSignature(identity.url)
+            artifact = identity.url
+        } else {
+            artifact = try PommeAgentArtifactStore(rootURL: applicationSupportRoot(create: false))
+                .resolve(sha256: plan.normalAgent.executableDigest)
+        }
+        let executable = try PommeAgentFileTransaction.readRegular(artifact,
+            maximumBytes: PommeRecoveryStagingBuilder.maximumExecutableBytes)
+        guard PommeBootstrapRequest.digest(executable) == plan.normalAgent.executableDigest else { throw PommeSSHBootstrapError.invalid }
+        try persistExactBootstrapFile(executable, at: workspace.appendingPathComponent("pomme"), mode: 0o700)
+        let remote = "/private/var/tmp/pomme-bootstrap-\(request.requestID.uuidString.lowercased())"
+        let mkdir = "umask 077; if [ -e '\(remote)' ] || [ -L '\(remote)' ]; then [ ! -L '\(remote)' ] && [ -d '\(remote)' ] && [ \"$(/usr/bin/stat -f '%u:%Lp' '\(remote)')\" = '\(uid):700' ] && [ \"$(/bin/ls -A '\(remote)')\" = \"$(/usr/bin/printf 'pomme\\nrequest.json')\" ] && /usr/bin/printf existing; else /bin/mkdir '\(remote)' && /usr/bin/printf new; fi"
+        let stagingState = try authenticatedProcess("/usr/bin/ssh", arguments: PommeSSHBootstrap.arguments(
+            address: address, knownHosts: knownHosts, command: mkdir))
+        guard stagingState == Data("new".utf8) || stagingState == Data("existing".utf8) else { throw PommeSSHBootstrapError.invalid }
+        for name in ["pomme", "request.json"] {
+            let local = workspace.appendingPathComponent(name)
+            let mode: mode_t = name == "pomme" ? 0o700 : 0o600
+            let bytes = try PommeSSHBootstrap.privateRead(local, owner: geteuid(), allowedModes: [mode],
+                maximum: PommeRecoveryStagingBuilder.maximumExecutableBytes)
+            let hash = PommeBootstrapRequest.digest(bytes)
+            let path = remote + "/" + name
+            if stagingState == Data("existing".utf8) {
+                let check = "[ ! -L '\(path)' ] && [ -f '\(path)' ] && [ \"$(/usr/bin/stat -f '%u:%Lp:%l' '\(path)')\" = '\(uid):\(String(mode, radix: 8)):1' ] && [ \"$(/usr/bin/shasum -a 256 '\(path)' | /usr/bin/cut -d ' ' -f 1)\" = '\(hash)' ]"
+                _ = try authenticatedProcess("/usr/bin/ssh", arguments: PommeSSHBootstrap.arguments(
+                    address: address, knownHosts: knownHosts, command: check))
+            } else {
+                _ = try authenticatedProcess("/usr/bin/scp", arguments: PommeSSHBootstrap.scpArguments(
+                    address: address, knownHosts: knownHosts, source: local, requestID: request.requestID),
+                    timeout: 120)
+            }
+        }
+        let renewed = try request.renewed(token: token, now: Date(), vmUUID: plan.vm.uuid, planSHA256: plan.digest,
+            executableSHA256: plan.normalAgent.executableDigest, requestID: request.requestID, stagingOwner: uid)
+        // Renew only in the root-private stream. The authenticated original
+        // stays unchanged at both endpoints, so interruption cannot strand two
+        // different durable manifests or a half-committed renewal file.
+        let stagedRequestHash = PommeBootstrapRequest.digest(try PommeSSHBootstrap.privateRead(requestURL, owner: geteuid(), allowedModes: [0o600]))
+        let renewedLine = try JSONEncoder().encode(renewed).base64EncodedString()
+        try renewed.verify(token: token, now: Date(), vmUUID: plan.vm.uuid, planSHA256: plan.digest, executableSHA256: plan.normalAgent.executableDigest)
+        log(diagnostics.checkpoint(.stagingVerified))
+        log(diagnostics.checkpoint(.installerInvoked))
+        _ = try authenticatedProcess("/usr/bin/ssh", arguments: PommeSSHBootstrap.arguments(
+            address: address, knownHosts: knownHosts, command: PommeSSHBootstrap.installerCommand(request: renewed, stagedRequestSHA256: stagedRequestHash)),
+            sudoSuffix: Data((String(decoding: token, as: UTF8.self) + "\n" + renewedLine + "\n").utf8), timeout: 120)
+        let agentDeadline = ProcessInfo.processInfo.systemUptime + 120
+        while !(try await bootstrapAgentMatches(coordinator.status(), plan: plan)) {
+            guard ProcessInfo.processInfo.systemUptime < agentDeadline else { throw PommeSSHBootstrapError.invalid }
+            try await Task.sleep(for: .milliseconds(250))
+        }
+        // Keep the authenticated original request and host-key pin for replay.
+        log(diagnostics.checkpoint(.agentConnected))
+        // The guest received its token only through the root-private stdin path.
+        try cleanupBootstrapWorkspace(plan: plan, completed: false)
+        return try receiptDigest("bootstrap-normal-agent", plan: plan, bundle: reference.bundle)
+        } catch {
+            log(diagnostics.failure())
+            if let processError = error as? PommeSSHBootstrapError {
+                switch processError {
+                case .processLaunchFailed, .processTimedOut, .processExited:
+                    log(processError.localizedDescription)
+                case .invalid: break
+                }
+            }
+            throw error
+        }
+    }
+
+    private static func cleanupBootstrapWorkspace(plan: PommeProvisioningPlan, completed: Bool) throws {
+        let bundle = provisioningReference(for: plan).bundle
+        let workspace = provisioningRoot(bundle: bundle).appendingPathComponent("ssh-bootstrap")
+        var info = stat()
+        if lstat(workspace.path, &info) != 0 {
+            guard errno == ENOENT else { throw PommeSSHBootstrapError.invalid }
+            return
+        }
+        guard info.st_mode & S_IFMT == S_IFDIR, info.st_uid == geteuid(), info.st_mode & 0o777 == 0o700,
+              workspace.resolvingSymlinksInPath().path == workspace.path else { throw PommeSSHBootstrapError.invalid }
+        let names = Set(try FileManager.default.contentsOfDirectory(atPath: workspace.path))
+        guard names.isSubset(of: ["pomme", "agent.token", "request.json", "known_hosts", "owner-reference.json"]) else {
+            throw PommeSSHBootstrapError.invalid
+        }
+        let journal = try loadProvisioningV2(reference: provisioningReference(for: plan))
+        let token = Data(try existingProvisioningAgentCredential(for: plan).utf8)
+        var removals: [URL] = []
+        for name in names.sorted() {
+            let url = workspace.appendingPathComponent(name)
+            let data = try PommeSSHBootstrap.privateRead(url, owner: geteuid(),
+                allowedModes: [name == "pomme" ? 0o700 : 0o600], maximum: PommeRecoveryStagingBuilder.maximumExecutableBytes)
+            switch name {
+            case "pomme":
+                guard PommeBootstrapRequest.digest(data) == plan.normalAgent.executableDigest else { throw PommeSSHBootstrapError.invalid }
+            case "agent.token":
+                guard data == token else { throw PommeSSHBootstrapError.invalid }
+            case "owner-reference.json":
+                let reference = try JSONDecoder().decode(PommeOwnerCredentialReference.self, from: data)
+                try validateProvisioningOwnerReference(reference, plan: plan)
+            case "request.json":
+                let request = try JSONDecoder().decode(PommeBootstrapRequest.self, from: data)
+                // Cleanup authenticates identity without extending request lifetime.
+                try request.verify(token: token, now: Date(timeIntervalSince1970: TimeInterval(request.expiresAt - 1)),
+                    vmUUID: plan.vm.uuid, planSHA256: plan.digest, executableSHA256: plan.normalAgent.executableDigest)
+            case "known_hosts":
+                let text = String(decoding: data, as: UTF8.self)
+                guard let ip = text.split(whereSeparator: \.isWhitespace).first,
+                      try PommeSSHBootstrap.scannedHostKey(text, address: String(ip)) == data else { throw PommeSSHBootstrapError.invalid }
+            default: throw PommeSSHBootstrapError.invalid
+            }
+            if completed || name == "pomme" || name == "agent.token" { removals.append(url) }
+        }
+        if completed {
+            guard journal.events.contains(where: { $0.phase == .verifyNormalAgent && $0.kind == .receipt }) else {
+                throw PommeProvisioningV2Error.invalidJournal
+            }
+        }
+        for url in removals { guard unlink(url.path) == 0 else { throw PommeSSHBootstrapError.invalid } }
+        if completed { guard rmdir(workspace.path) == 0 else { throw PommeSSHBootstrapError.invalid } }
+    }
+
+    /// JSON key order is not identity: a resumed process must accept the same
+    /// signed owner reference without rewriting an existing private file.
+    static func persistBootstrapOwnerReference(_ owner: PommeOwnerCredentialReference, at url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(owner)
+        let fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        if fd < 0 {
+            guard errno == EEXIST else { throw PommeSSHBootstrapError.invalid }
+            let existing = try PommeSSHBootstrap.privateRead(url, owner: geteuid(), allowedModes: [0o600])
+            guard let decoded = try? JSONDecoder().decode(PommeOwnerCredentialReference.self, from: existing),
+                  decoded == owner else { throw PommeSSHBootstrapError.invalid }
+            return
+        }
+        defer { close(fd) }
+        guard fchmod(fd, 0o600) == 0 else { throw PommeSSHBootstrapError.invalid }
+        try PommeAgentFileTransaction.writeAll(fd, data: data)
+        guard fsync(fd) == 0 else { throw PommeSSHBootstrapError.invalid }
+    }
+
+    static func persistExactBootstrapFile(_ data: Data, at url: URL, mode: mode_t) throws {
+        let fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode)
+        if fd < 0 {
+            guard errno == EEXIST,
+                  try PommeSSHBootstrap.privateRead(url, owner: geteuid(), allowedModes: [mode],
+                    maximum: max(data.count, 1)) == data else { throw PommeSSHBootstrapError.invalid }
+            return
+        }
+        defer { close(fd) }
+        guard fchmod(fd, mode) == 0 else { throw PommeSSHBootstrapError.invalid }
+        try PommeAgentFileTransaction.writeAll(fd, data: data)
+        guard fsync(fd) == 0 else { throw PommeSSHBootstrapError.invalid }
     }
 
     private static func resolveCreateRestoreImageURL(_ arguments: CLIOptions) async throws -> URL {
@@ -2463,6 +3226,72 @@ struct PommeCore {
         provisioningRoot(bundle: bundle).appendingPathComponent("provisioning-v1.json")
     }
 
+    static func provisioningV2JournalURL(bundle: BundleLayout) -> URL {
+        provisioningRoot(bundle: bundle).appendingPathComponent("provisioning-v2.json")
+    }
+
+    static func provisioningSchemaIfPresent(bundle: BundleLayout) throws -> Int? {
+        func exists(_ url: URL) throws -> Bool {
+            var info = stat()
+            if lstat(url.path, &info) != 0 {
+                guard errno == ENOENT else { throw PommeProvisioningError.ownershipMismatch }
+                return false
+            }
+            guard info.st_mode & S_IFMT == S_IFREG, info.st_uid == geteuid(),
+                  info.st_nlink == 1, info.st_mode & 0o777 == 0o600 else {
+                throw PommeProvisioningError.ownershipMismatch
+            }
+            return true
+        }
+        let v1 = try exists(provisioningJournalURL(bundle: bundle))
+        let v2 = try exists(provisioningV2JournalURL(bundle: bundle))
+        guard !(v1 && v2) else { throw PommeProvisioningError.ownershipMismatch }
+        return v2 ? 2 : v1 ? 1 : nil
+    }
+
+    static func provisioningSchema(bundle: BundleLayout) throws -> Int {
+        guard let schema = try provisioningSchemaIfPresent(bundle: bundle) else {
+            throw PommeProvisioningError.ownershipMismatch
+        }
+        return schema
+    }
+
+    static func loadProvisioningV2(reference: VMReference) throws -> PommeProvisioningV2Journal {
+        guard try provisioningSchema(bundle: reference.bundle) == 2 else {
+            throw PommeProvisioningV2Error.invalidJournal
+        }
+        let key = try PommeSSHBootstrap.privateRead(provisioningKeyURL(bundle: reference.bundle),
+            owner: geteuid(), allowedModes: [0o600])
+        let journal = try provisioningV2Repository(bundle: reference.bundle, key: key).load()
+        guard journal.plan.vm.bundlePath == reference.standardizedPath,
+              reference.name == nil || journal.plan.vm.name == reference.name else {
+            throw PommeProvisioningV2Error.ownershipMismatch
+        }
+        return journal
+    }
+
+    static func provisioningV2Repository(bundle: BundleLayout, key: Data) throws -> PommeFileProvisioningV2JournalRepository {
+        let highWater = provisioningRoot(bundle: bundle).appendingPathComponent("provisioning-v2.high-water")
+        let read: @Sendable () throws -> UInt64 = {
+            var info = stat()
+            if lstat(highWater.path, &info) != 0 {
+                guard errno == ENOENT else { throw PommeProvisioningV2Error.generationFailure }
+                return 0
+            }
+            let bytes = try PommeSSHBootstrap.privateRead(highWater, owner: geteuid(), allowedModes: [0o600])
+            guard let value = UInt64(String(decoding: bytes, as: UTF8.self)), value > 0 else {
+                throw PommeProvisioningV2Error.generationFailure
+            }
+            return value
+        }
+        return .init(journalURL: provisioningV2JournalURL(bundle: bundle),
+            signer: try PommeProvisioningV2Signer(key: key), loadHighWater: read,
+            advanceHighWater: { previous, next in
+                guard try read() == previous, next > previous else { throw PommeProvisioningV2Error.generationFailure }
+                try writePrivate(Data(String(next).utf8), to: highWater)
+            })
+    }
+
     private static func provisioningSigner(bundleURL: URL) throws -> PommeProvisioningJournalSigner {
         let root = bundleURL.appendingPathComponent(".pomme", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -2656,6 +3485,9 @@ struct PommeCore {
         metadata["displayWidth"] = plan.display.width
         metadata["displayHeight"] = plan.display.height
         metadata["provisioningPlanDigest"] = plan.digest
+        for (key, value) in try provisioningDisclosure(bundle: bundle) {
+            metadata[key] = value
+        }
         metadata["guestAgent"] = [
             "identifier": plan.normalAgent.identifier,
             "protocolVersion": plan.normalAgent.protocolVersion,
@@ -2998,7 +3830,8 @@ struct PommeCore {
     private static func startProvisioningRuntime(
         plan: PommeProvisioningPlan,
         mode: BootMode,
-        attachAgent: Bool
+        attachAgent: Bool,
+        guestProvisioningIntent: PommeMacGuestProvisioningIntent? = nil
     ) async throws -> PommeRetainedRuntime {
         let bundle = BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
         let input = try loadProvisioningInput(for: plan)
@@ -3122,7 +3955,8 @@ struct PommeCore {
             agentProvider: coordinator,
             bootMode: mode,
             terminalAdmission: terminalAdmissionEffect,
-            terminalAdmissionCleanup: terminalAdmissionCleanup
+            terminalAdmissionCleanup: terminalAdmissionCleanup,
+            guestProvisioningIntent: guestProvisioningIntent
         )
         do {
             try await runtime.start()
@@ -3655,9 +4489,7 @@ struct PommeCore {
         guard VZVirtualMachine.isSupported else { throw RunnerError.unsupportedHost }
         let bundle = reference.bundle
         try bundle.validateForRun()
-        let signer = try provisioningSigner(bundleURL: bundle.rootURL)
-        let repository = try provisioningRepository(bundleURL: bundle.rootURL, signer: signer)
-        let plan = try repository.load().plan
+        let plan = try loadOwnedProvisioningPlan(reference: reference)
         guard plan.vm.bundlePath == bundle.rootURL.standardizedFileURL.path,
               plan.vm.name == (reference.name ?? plan.vm.name)
         else { throw PommeProvisioningError.ownershipMismatch }
@@ -4421,6 +5253,24 @@ struct PommeCore {
             throw VMBundleMutationLease.Error.invalidScope(name: name)
         }
         let reference = try namedVMReference(name, requireExists: true)
+        if try provisioningSchema(bundle: reference.bundle) == 2 {
+            let journal = try loadProvisioningV2(reference: reference)
+            _ = try loadOwnedProvisioningPlan(reference: reference)
+            let key = try PommeSSHBootstrap.privateRead(provisioningKeyURL(bundle: reference.bundle),
+                owner: geteuid(), allowedModes: [0o600])
+            try await PommeProvisioningV2Orchestrator(
+                signer: PommeProvisioningV2Signer(key: key),
+                repository: provisioningV2Repository(bundle: reference.bundle, key: key),
+                effects: provisioningV2Effects()).resume(expectedPlan: journal.plan)
+            var payload: [String: Any] = ["ok": true, "operation": "create-resume", "name": name,
+                "bundlePath": reference.standardizedPath, "hostExitCode": 0,
+                "provisioning": ["schema": 2, "planDigest": journal.plan.digest,
+                    "finalState": journal.plan.finalState.rawValue,
+                    "journal": provisioningV2JournalURL(bundle: reference.bundle).path]]
+            payload.merge(provisioningDisclosure(virtualization: true)) { _, new in new }
+            return .init(title: "Resume Create", vmName: name, ok: true, hostExitCode: 0,
+                text: "OK resumed Pomme provisioning for \(name).", payload: payload)
+        }
         let signer = try provisioningSigner(bundleURL: reference.bundle.rootURL)
         let repository = try provisioningRepository(bundleURL: reference.bundle.rootURL, signer: signer)
         let journal = try repository.load()
@@ -4433,7 +5283,7 @@ struct PommeCore {
             effects: provisioningEffects()
         )
         try await orchestrator.resume(expectedPlan: journal.plan)
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "ok": true,
             "operation": "create-resume",
             "name": name,
@@ -4445,6 +5295,7 @@ struct PommeCore {
             ],
             "hostExitCode": 0
         ]
+        payload.merge(provisioningDisclosure(virtualization: false)) { _, new in new }
         return PommeOperationResult(
             title: "Resume Create",
             vmName: name,
@@ -4482,6 +5333,7 @@ struct PommeCore {
             throw VMBundleMutationLease.Error.invalidScope(name: name)
         }
         let reference = try namedVMReference(name, requireExists: true)
+        try validateProvisioningRepairSchema(provisioningSchema(bundle: reference.bundle))
         let signer = try provisioningSigner(bundleURL: reference.bundle.rootURL)
         let repository = try provisioningRepository(bundleURL: reference.bundle.rootURL, signer: signer)
         let journal = try repository.load()
@@ -4566,6 +5418,14 @@ struct PommeCore {
             text: "OK repaired the Pomme agent through Recovery for \(name).",
             payload: payload
         )
+    }
+
+    static func validateProvisioningRepairSchema(_ schema: Int) throws {
+        guard schema == 1 else {
+            throw RunnerError.hostCommandFailed(
+                "Recovery agent repair is unavailable for framework-provisioned VMs. Use `pomme inspect NAME` for diagnosis or `pomme create NAME --resume` to resume incomplete creation."
+            )
+        }
     }
 
     /// Convert a status snapshot into the only final-state vocabulary that an

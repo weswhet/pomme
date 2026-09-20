@@ -52,6 +52,10 @@ private actor PommeMDMRestorationProof {
 }
 
 enum PommeApplication {
+    static func provisioningSummary(_ payload: [String: Any]) -> String {
+        guard payload["guestProvisioning"] as? String == "virtualization" else { return "" }
+        return " provisioning=virtualization agent=ssh-bootstrap account=pomme automaticLogin=enabled remoteLogin=off"
+    }
     private static let provisioningServicesLock = NSLock()
     nonisolated(unsafe) private static var provisioningServices = makeProvisioningServices()
     private static let recoveryIntegrationLock = NSLock()
@@ -1137,7 +1141,7 @@ enum PommeApplication {
             reference: reference,
             payload: payload,
             text: payload["ok"] as? Bool == true
-                ? "OK created name=\(plan.name) version=\(plan.firmware.version)"
+                ? "OK created name=\(plan.name) version=\(plan.firmware.version)" + provisioningSummary(payload)
                 : stringValue(payload["error"])
         )
         }
@@ -3164,7 +3168,7 @@ enum PommeApplication {
 
     private static func formatCreate(_ payload: [String: Any]) -> String {
         if payload["ok"] as? Bool == true {
-            return "OK created name=\(stringValue(payload["name"])) bundle=\(stringValue(payload["bundlePath"]))"
+            return "OK created name=\(stringValue(payload["name"])) bundle=\(stringValue(payload["bundlePath"]))" + provisioningSummary(payload)
         }
         return "create failed: \(stringValue(payload["error"]))"
     }
