@@ -907,16 +907,24 @@ enum PommeApplication {
         switch operation {
         case "terminal.list":
             let sessions = response["sessions"] as? [[String: Any]] ?? []
-            return sessions.isEmpty
-                ? "No terminal sessions."
-                : sessions.map { terminalSessionSummary($0) }.joined(separator: "\n")
+            guard !sessions.isEmpty else { return "No terminal sessions." }
+            let summaries = sessions.map { terminalSessionSummary($0) }.joined(separator: "\n")
+            return summaries + terminalSessionStalenessNote(response)
         case "terminal.inspect":
-            return terminalSessionSummary(response)
+            return terminalSessionSummary(response) + terminalSessionStalenessNote(response)
         case "terminal.logs":
             return response["dataBase64"] as? String ?? ""
         default:
             return response["error"] as? String ?? "OK"
         }
+    }
+
+    /// Named only when the guest agent is away, so an operator does not read a
+    /// remembered session state as a currently observed one.
+    private static func terminalSessionStalenessNote(_ response: [String: Any]) -> String {
+        let connection = stringValue(response["guestAgentConnection"])
+        guard !connection.isEmpty, connection != "connected" else { return "" }
+        return "\nThe guest agent is \(connection); each state is the last one recorded."
     }
 
     private static func terminalSessionSummary(_ session: [String: Any]) -> String {

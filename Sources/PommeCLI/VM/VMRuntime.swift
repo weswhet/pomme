@@ -366,11 +366,24 @@ final class PommeVMRuntime: @unchecked Sendable {
         ]
     }
 
+    /// Durable session records are host-side, so they answer while the guest
+    /// agent is away. Their guest-observed fields are only as fresh as the last
+    /// contact, so every reply names the connection that produced them rather
+    /// than presenting a remembered state as a current one.
+    private var terminalSessionAgentConnection: String {
+        get async {
+            let role: GuestAgentStatusV1.Role = bootMode == .normal ? .normal : .recovery
+            let agent = await agentProvider?.status() ?? .offline(role: role)
+            return agent.connection.rawValue
+        }
+    }
+
     func terminalSessionList(pageToken: String? = nil, pageSize: Int = 128) async throws -> [String: Any] {
         let (records, nextPageToken) = try await terminalSessions.page(pageToken: pageToken, pageSize: pageSize)
         return [
             "sessions": records.map(\.publicPayload),
             "nextPageToken": nextPageToken ?? NSNull(),
+            "guestAgentConnection": await terminalSessionAgentConnection,
             "hostExitCode": 0
         ]
     }
@@ -384,7 +397,9 @@ final class PommeVMRuntime: @unchecked Sendable {
 
     func terminalSessionInspect(id: UUID) async throws -> [String: Any] {
         let record = try await terminalSessions.inspect(id)
-        return record.publicPayload
+        var payload = record.publicPayload
+        payload["guestAgentConnection"] = await terminalSessionAgentConnection
+        return payload
     }
 
     func terminalSessionLogs(id: UUID, offset: UInt64) async throws -> [String: Any] {
