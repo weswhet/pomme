@@ -169,27 +169,29 @@ struct ExecCommand: ParsableCommand {
     }
 
     mutating func run() throws {
-        let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
-        let directRequest = try GuestCommandRequest.direct(
-            command,
-            timeout: timeout.value(),
-            flagName: "exec"
-        )
-        let request = try execution.apply(to: directRequest)
-        let result: PommeOperationResult
-        if request.pty {
-            result = try PommeApplication.terminalSessionCreate(
-                name: target,
-                payload: request.terminalPayload(),
-                title: "Exec",
-                attach: !detach
+        try PommeRecoveryDebugContext.$screenshotsEnabled.withValue(output.debug) {
+            let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
+            let directRequest = try GuestCommandRequest.direct(
+                command,
+                timeout: timeout.value(),
+                flagName: "exec"
             )
-        } else {
-            result = detach
-                ? try PommeEnvironment.live().guest.request(target, .startBackground(request), "Exec")
-                : try PommeEnvironment.live().guest.execute(target, request)
+            let request = try execution.apply(to: directRequest)
+            let result: PommeOperationResult
+            if request.pty {
+                result = try PommeApplication.terminalSessionCreate(
+                    name: target,
+                    payload: request.terminalPayload(),
+                    title: "Exec",
+                    attach: !detach
+                )
+            } else {
+                result = detach
+                    ? try PommeEnvironment.live().guest.request(target, .startBackground(request), "Exec")
+                    : try PommeEnvironment.live().guest.execute(target, request)
+            }
+            try CLIOutputWriter.write(result, options: output)
         }
-        try CLIOutputWriter.write(result, options: output)
     }
 }
 
@@ -219,29 +221,31 @@ struct ShellCommand: ParsableCommand {
     }
 
     mutating func run() throws {
-        let resolution = try resolveTargetAndExpression()
-        let bareShell = resolution.expression == nil
-        let directRequest: GuestCommandRequest
-        if let expression = resolution.expression {
-            directRequest = GuestCommandRequest.shell(expression, timeout: try timeout.value())
-        } else {
-            directRequest = GuestCommandRequest(path: "/bin/sh", arguments: [], timeout: try timeout.value())
+        try PommeRecoveryDebugContext.$screenshotsEnabled.withValue(output.debug) {
+            let resolution = try resolveTargetAndExpression()
+            let bareShell = resolution.expression == nil
+            let directRequest: GuestCommandRequest
+            if let expression = resolution.expression {
+                directRequest = GuestCommandRequest.shell(expression, timeout: try timeout.value())
+            } else {
+                directRequest = GuestCommandRequest(path: "/bin/sh", arguments: [], timeout: try timeout.value())
+            }
+            let request = try execution.apply(to: directRequest, implicitPTY: bareShell)
+            let result: PommeOperationResult
+            if bareShell {
+                result = try PommeApplication.terminalSessionCreate(
+                    name: resolution.target,
+                    payload: request.terminalPayload(shell: true),
+                    title: "Shell",
+                    attach: !detach
+                )
+            } else {
+                result = detach
+                    ? try PommeEnvironment.live().guest.request(resolution.target, .startBackground(request), "Shell")
+                    : try PommeEnvironment.live().guest.execute(resolution.target, request)
+            }
+            try CLIOutputWriter.write(result, options: output)
         }
-        let request = try execution.apply(to: directRequest, implicitPTY: bareShell)
-        let result: PommeOperationResult
-        if bareShell {
-            result = try PommeApplication.terminalSessionCreate(
-                name: resolution.target,
-                payload: request.terminalPayload(shell: true),
-                title: "Shell",
-                attach: !detach
-            )
-        } else {
-            result = detach
-                ? try PommeEnvironment.live().guest.request(resolution.target, .startBackground(request), "Shell")
-                : try PommeEnvironment.live().guest.execute(resolution.target, request)
-        }
-        try CLIOutputWriter.write(result, options: output)
     }
 
     private func resolveTargetAndExpression() throws -> (target: String, expression: String?) {

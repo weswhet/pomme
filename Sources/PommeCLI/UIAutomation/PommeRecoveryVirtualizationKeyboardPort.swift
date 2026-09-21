@@ -273,6 +273,9 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
   private let readiness: PommeRecoveryObservationReadiness
   private let metrics: PommeRecoveryPerformanceMetrics
   private let log: @Sendable (String) -> Void
+  /// Optional and host-local only. It is deliberately not part of the
+  /// navigation profile, durable receipt, or Recovery guest protocol.
+  private let screenshotRecorder: PommeRecoveryNavigationScreenshotRecorder?
   private var navigationRoute: PommeRecoveryNavigationRoute = .reviewedMenus
   private var hasObservedOrDelivered = false
   private var navigationEventIndex = 0
@@ -282,12 +285,14 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     backend: VirtualizationPrivateHeadlessBackend,
     timeout: TimeInterval,
     metrics: PommeRecoveryPerformanceMetrics = .init(),
+    screenshotRecorder: PommeRecoveryNavigationScreenshotRecorder? = nil,
     log: @escaping @Sendable (String) -> Void = { PommeCore.log($0) }
   ) {
     self.backend = backend
     self.timeout = timeout
     self.metrics = metrics
     self.log = log
+    self.screenshotRecorder = screenshotRecorder
     let recognizer = SettingsAIOCRRecognizer(
       onRecognition: { seconds in
         metrics.record(.ocr, seconds: seconds)
@@ -397,6 +402,7 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
       return [logicalFrame, logicalFrame]
     } catch let error as PommeRecoveryVirtualizationPortError {
       if case .observationTimedOut = error {
+        try await screenshotRecorder?.captureTimeout(awaiting: expectation.logicalFrames)
         let lastObserved = await readiness.lastObservedFrameDiagnostic()
         log(
           "Recovery navigation observation timed out "
@@ -420,8 +426,22 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     }
     let inputStart = PommeRecoveryPerformanceMetrics.now()
     defer { metrics.record(.input, since: inputStart) }
-    _ = try await backend.awaitInputReadiness(timeout: timeout)
-    _ = try await backend.sendKey(name: Self.backendKeyName(for: key), timeout: timeout)
+    try await PommeRecoveryNavigationScreenshotRecorder.captureBeforeNavigationInput(
+      recorder: screenshotRecorder,
+      from: event.preEventFrame,
+      key: event.key,
+      expectedDestinations: event.acceptedPostEventFrames,
+      awaitInputReadiness: { [backend, timeout] in
+        _ = try await backend.awaitInputReadiness(timeout: timeout)
+      },
+      reproveAfterCapture: { [weak self, event] in
+        guard let self else { throw PommeRecoveryVirtualizationPortError.unprovenFrame }
+        try await self.reproveNavigationEvent(event)
+      },
+      deliver: { [backend, key, timeout] in
+        _ = try await backend.sendKey(name: Self.backendKeyName(for: key), timeout: timeout)
+      }
+    )
     let coarseFrameBeforeDelivery = Self.coarseFrame(for: event.preEventFrame)
     pendingPostEvent = event
     let coarseFrameAfterDelivery = event.acceptedPostEventFrames
@@ -445,7 +465,24 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     log(metrics.summary(phase: phase))
   }
 
+  /// Host-local diagnostic metadata for the invoking CLI/helper. This value
+  /// is intentionally separate from Recovery receipts and guest messages.
+  func recoveryDebugScreenshotDirectory() async -> URL? {
+    await screenshotRecorder?.directory()
+  }
+
+  func recoveryDebugScreenshotFiles() async -> [URL] {
+    await screenshotRecorder?.savedFiles() ?? []
+  }
+
+  func recoveryDebugScreenshotWarnings() async -> [String] {
+    await screenshotRecorder?.warnings() ?? []
+  }
+
   func submitTerminalLine(_ command: String) async throws {
+    // No Terminal command entry, launcher submission, or resulting output is
+    // part of Recovery navigation evidence.
+    await screenshotRecorder?.disable()
     guard PommeRecoveryTerminalCommand.isKeyboardSafe(command) else {
       throw PommeRecoveryVirtualizationPortError.unsafeLauncher
     }
@@ -511,6 +548,37 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
   private var currentNavigationEvent: PommeRecoveryNavigationEvent? {
     guard navigationEventIndex < navigationRoute.eventTrace.count else { return nil }
     return navigationRoute.eventTrace[navigationEventIndex]
+  }
+
+  /// A debug capture is deliberately bounded but may take long enough for a
+  /// transient Recovery surface to change. Before the key is sent, obtain a
+  /// new stable closed observation of the same authorized event.
+  private func reproveNavigationEvent(_ event: PommeRecoveryNavigationEvent) async throws {
+    guard let expected = Self.coarseFrame(for: event.preEventFrame) else {
+      throw PommeRecoveryVirtualizationPortError.unprovenFrame
+    }
+    let context: PommeRecoveryFrameClassificationContext = event.preEventFrame == .languageEnglish
+      ? .optionsActivated
+      : .unproven
+    let frames: [PommeRecoveryFrame]
+    do {
+      frames = try await readiness.waitForExpectedStablePair(
+        expected,
+        context: context,
+        timeout: timeout
+      )
+    } catch let error as PommeRecoveryVirtualizationPortError {
+      if case .observationTimedOut = error {
+        // This is a second, post-capture proof rather than the normal
+        // navigation observer. Take one diagnostic frame directly; it does
+        // not re-enter readiness and therefore cannot recurse.
+        try await screenshotRecorder?.captureTimeout(awaiting: [event.preEventFrame])
+      }
+      throw error
+    }
+    guard frames.count == 2, frames.allSatisfy({ $0 == expected }) else {
+      throw PommeRecoveryVirtualizationPortError.unprovenFrame
+    }
   }
 
   private var navigationExpectation: NavigationExpectation? {

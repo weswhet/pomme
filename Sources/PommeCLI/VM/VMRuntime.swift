@@ -144,6 +144,26 @@ enum VMPauseResumeTransition {
     }
 }
 
+/// Separates host-control diagnostic intent from the closed payload forwarded
+/// to PommeAgentProtocol. Parsing here also gives direct runtime callers the
+/// same default and type checks as the control router.
+struct PommeTerminalSessionCreateControlInput: Sendable {
+    let recoveryDebugScreenshots: Bool
+    let guestPayload: [String: JSONValue]
+
+    init(payload: [String: JSONValue]) throws {
+        if let value = payload["recoveryDebugScreenshots"] {
+            guard case .bool(let enabled) = value else {
+                throw RunnerError.invalidControlCommand("terminal.session")
+            }
+            recoveryDebugScreenshots = enabled
+        } else {
+            recoveryDebugScreenshots = false
+        }
+        guestPayload = payload.filter { $0.key != "recoveryDebugScreenshots" }
+    }
+}
+
 /// Serializes host-side terminal mutations across the attachment stream and
 /// out-of-band sessions commands. The guest rejects skipped sequences, so an
 /// in-flight input cannot race a concurrent terminate or resize.
@@ -180,7 +200,7 @@ final class PommeVMRuntime: @unchecked Sendable {
     private let requiredSnapshotRestoreURL: URL
     private let queueExecutor: PommeVMQueueExecutor
     private let agentProvider: (any PommeAgentSessionProvider)?
-    private let terminalAdmission: (@Sendable (UUID) async throws -> Void)?
+    private let terminalAdmission: (@Sendable (UUID, Bool) async throws -> PommeRecoveryDebugScreenshotMetadata?)?
     private let terminalAdmissionCleanup: (@Sendable () async -> Bool)?
     private let uiController: PommeRuntimeUIController
     private let bootMode: BootMode
@@ -199,7 +219,7 @@ final class PommeVMRuntime: @unchecked Sendable {
     init(vm: VZVirtualMachine, configuration: VZVirtualMachineConfiguration, queue: DispatchQueue,
          saveStateURL: URL, snapshotsURL: URL, requiredSnapshotRestoreURL: URL,
          agentProvider: (any PommeAgentSessionProvider)?, bootMode: BootMode,
-         terminalAdmission: (@Sendable (UUID) async throws -> Void)? = nil,
+         terminalAdmission: (@Sendable (UUID, Bool) async throws -> PommeRecoveryDebugScreenshotMetadata?)? = nil,
          terminalAdmissionCleanup: (@Sendable () async -> Bool)? = nil,
          guestProvisioningIntent: PommeMacGuestProvisioningIntent? = nil) {
         self.vm = vm
@@ -414,58 +434,75 @@ final class PommeVMRuntime: @unchecked Sendable {
         } else {
             sessionID = UUID()
         }
+        let controlInput = try PommeTerminalSessionCreateControlInput(payload: payload)
+        let debugMetadata: PommeRecoveryDebugScreenshotMetadata?
         if bootMode == .recovery, let terminalAdmission {
-            try await terminalAdmission(sessionID)
+            debugMetadata = try await terminalAdmission(sessionID, controlInput.recoveryDebugScreenshots)
+        } else {
+            debugMetadata = nil
         }
-        try await requireTerminalCapability()
-        var guestPayload = payload
-        guestPayload["sessionID"] = .string(sessionID.uuidString.lowercased())
-        guestPayload["sequence"] = .integer(0)
-        guestPayload["mutationDigest"] = .string(
-            PommeTerminalMutationDigest.make(operation: "terminal.create", payload: payload)
-        )
-        let result = try await performGuestOperation("terminal.create", payload: .object(guestPayload))
-        guard let values = result.objectValue,
-              let rawPID = values["pid"],
-              case .integer(let pid) = rawPID,
-              pid > 0
-        else { throw RunnerError.invalidControlResponse("Invalid terminal creation receipt.") }
-        let path = values["path"]?.stringValue ?? payload["path"]?.stringValue ?? "/bin/sh"
-        let arguments = values["arguments"]?.arrayValue?.compactMap(\.stringValue)
-            ?? payload["arguments"]?.arrayValue?.compactMap(\.stringValue)
-            ?? []
-        let record: PommeDurableTerminalRecord
         do {
-            record = try await terminalSessions.register(.init(
-                sessionID: sessionID,
-                role: bootMode == .normal ? .normal : .recovery,
-                bootGeneration: terminalGeneration,
-                pid: pid,
-                executable: path,
-                arguments: arguments
-            ))
-        } catch {
-            // Admission is host-durable: if the host cannot create its
-            // transcript record, do not leave an unowned guest process behind.
-            let cleanup: [String: JSONValue] = [
-                "sessionID": .string(sessionID.uuidString.lowercased()),
-                "sequence": .integer(1),
-                "force": .bool(true),
-                "mutationDigest": .string(PommeTerminalMutationDigest.make(
-                    operation: "terminal.terminate",
-                    payload: ["sessionID": .string(sessionID.uuidString.lowercased()), "force": .bool(true)]
+            try await requireTerminalCapability()
+            var guestPayload = controlInput.guestPayload
+            guestPayload["sessionID"] = .string(sessionID.uuidString.lowercased())
+            guestPayload["sequence"] = .integer(0)
+            guestPayload["mutationDigest"] = .string(
+                // Preserve the established mutation digest semantics while
+                // excluding the host-only debug field.
+                PommeTerminalMutationDigest.make(operation: "terminal.create", payload: controlInput.guestPayload)
+            )
+            let result = try await performGuestOperation("terminal.create", payload: .object(guestPayload))
+            guard let values = result.objectValue,
+                  let rawPID = values["pid"],
+                  case .integer(let pid) = rawPID,
+                  pid > 0
+            else { throw RunnerError.invalidControlResponse("Invalid terminal creation receipt.") }
+            let path = values["path"]?.stringValue ?? payload["path"]?.stringValue ?? "/bin/sh"
+            let arguments = values["arguments"]?.arrayValue?.compactMap(\.stringValue)
+                ?? payload["arguments"]?.arrayValue?.compactMap(\.stringValue)
+                ?? []
+            let record: PommeDurableTerminalRecord
+            do {
+                record = try await terminalSessions.register(.init(
+                    sessionID: sessionID,
+                    role: bootMode == .normal ? .normal : .recovery,
+                    bootGeneration: terminalGeneration,
+                    pid: pid,
+                    executable: path,
+                    arguments: arguments
                 ))
+            } catch {
+                // Admission is host-durable: if the host cannot create its
+                // transcript record, do not leave an unowned guest process behind.
+                let cleanup: [String: JSONValue] = [
+                    "sessionID": .string(sessionID.uuidString.lowercased()),
+                    "sequence": .integer(1),
+                    "force": .bool(true),
+                    "mutationDigest": .string(PommeTerminalMutationDigest.make(
+                        operation: "terminal.terminate",
+                        payload: ["sessionID": .string(sessionID.uuidString.lowercased()), "force": .bool(true)]
+                    ))
+                ]
+                _ = try? await performGuestOperation("terminal.terminate", payload: .object(cleanup))
+                _ = try? await performGuestOperation("terminal.release", payload: .object(["sessionID": .string(sessionID.uuidString.lowercased())]))
+                throw error
+            }
+            startTerminalPump(sessionID)
+            var response: [String: Any] = [
+                "sessionID": sessionID.uuidString.lowercased(),
+                "session": record.publicPayload,
+                "hostExitCode": 0
             ]
-            _ = try? await performGuestOperation("terminal.terminate", payload: .object(cleanup))
-            _ = try? await performGuestOperation("terminal.release", payload: .object(["sessionID": .string(sessionID.uuidString.lowercased())]))
-            throw error
+            if let debugMetadata {
+                response.merge(debugMetadata.controlPayload, uniquingKeysWith: { _, new in new })
+            }
+            return response
+        } catch {
+            guard let debugMetadata,
+                  !(error is PommeRecoveryTerminalAdmissionControlFailure)
+            else { throw error }
+            throw PommeRecoveryTerminalAdmissionControlFailure(error, debugMetadata: debugMetadata)
         }
-        startTerminalPump(sessionID)
-        return [
-            "sessionID": sessionID.uuidString.lowercased(),
-            "session": record.publicPayload,
-            "hostExitCode": 0
-        ]
     }
 
     /// Durable session records are host-side, so they answer while the guest

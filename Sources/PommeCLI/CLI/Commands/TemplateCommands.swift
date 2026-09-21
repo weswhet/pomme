@@ -82,6 +82,7 @@ struct TemplateCreateCommand: AsyncParsableCommand {
     }
 
     mutating func run() async throws {
+        try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(output.debug) {
         if provisioned {
             var restoreArgs: [String] = []
             if let fromTemplate { restoreArgs += ["--from-template", fromTemplate] }
@@ -110,6 +111,7 @@ struct TemplateCreateCommand: AsyncParsableCommand {
         let payload = try await PommeCore.createTemplatePayload(name: name, arguments: options)
         let text = "OK created template \(name) macOS \(PommeCore.stringValue(payload["version"])) (\(PommeCore.stringValue(payload["build"])))"
         try CLIOutputWriter.write(payload: payload, text: text, options: output)
+        }
     }
 }
 

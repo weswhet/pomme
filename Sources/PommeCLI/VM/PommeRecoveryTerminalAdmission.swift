@@ -2,6 +2,55 @@ import Darwin
 import Foundation
 @preconcurrency import Virtualization
 
+/// Host-only Recovery navigation artifacts. This is intentionally separate
+/// from guest-agent and provisioning data: the directory is a private,
+/// retained diagnostic artifact, not guest protocol state or journal input.
+struct PommeRecoveryDebugScreenshotMetadata: Equatable, Sendable {
+    let directory: String?
+    let files: [String]
+    let warnings: [String]
+
+    init(directory: String?, files: [String], warnings: [String]) {
+        self.directory = directory
+        self.files = files
+        self.warnings = warnings
+    }
+
+    init?(recorder: PommeRecoveryNavigationScreenshotRecorder?) async {
+        guard let recorder else { return nil }
+        self.init(
+            directory: await recorder.directory()?.path,
+            files: await recorder.savedFiles().map(\.lastPathComponent),
+            warnings: await recorder.warnings()
+        )
+    }
+
+    var controlPayload: [String: Any] {
+        var payload: [String: Any] = [
+            "recoveryDebugScreenshotFiles": files,
+            "recoveryDebugScreenshotWarnings": warnings,
+        ]
+        if let directory { payload["recoveryDebugScreenshotDirectory"] = directory }
+        return payload
+    }
+}
+
+/// Control responses normally carry terminal failures as a bounded JSON
+/// result. Preserve host-only screenshot metadata on that existing route so
+/// the invoking CLI can render it without extending PommeAgentProtocol or the
+/// public output schema.
+struct PommeRecoveryTerminalAdmissionControlFailure: Error, LocalizedError, Sendable {
+    let message: String
+    let debugMetadata: PommeRecoveryDebugScreenshotMetadata
+
+    init(_ error: any Swift.Error, debugMetadata: PommeRecoveryDebugScreenshotMetadata) {
+        message = error.localizedDescription
+        self.debugMetadata = debugMetadata
+    }
+
+    var errorDescription: String? { message }
+}
+
 /// State captured by the ordinary-Recovery VSOCK listener before the first
 /// terminal is admitted. The token is installed only after the host has
 /// built and attached the exact request-bound staging share; it remains in
@@ -162,6 +211,7 @@ actor PommeRecoveryTerminalAdmission {
     private let executableResolver: @Sendable () throws -> URL
     private var phase: Phase = .idle
     private var staging: PommeRecoveryStaging?
+    private var debugScreenshotRecorder: PommeRecoveryNavigationScreenshotRecorder?
 
     init(
         plan: PommeProvisioningPlan,
@@ -183,12 +233,18 @@ actor PommeRecoveryTerminalAdmission {
         self.executableResolver = executableResolver
     }
 
-    func ensure(sessionID: UUID) async throws {
+    func ensure(
+        sessionID: UUID,
+        recoveryDebugScreenshots: Bool = false
+    ) async throws -> PommeRecoveryDebugScreenshotMetadata? {
         switch phase {
         case .idle:
             break
         case .admitted:
-            return
+            // This request did not drive Recovery navigation. In particular,
+            // a later non-debug terminal must not receive another caller's
+            // prior artifact directory.
+            return nil
         case .admitting, .failed, .cleaned:
             throw Error.alreadyAttempted
         }
@@ -231,13 +287,23 @@ actor PommeRecoveryTerminalAdmission {
             )
 
             var interaction = try PommeTahoeRecoveryInteraction(evidence: profile)
+            let backend = VirtualizationPrivateHeadlessBackend(
+                virtualMachine: vm,
+                configuration: configuration,
+                queue: queue
+            )
+            if recoveryDebugScreenshots {
+                debugScreenshotRecorder = PommeRecoveryNavigationScreenshotRecorder(
+                    vmName: plan.vm.name,
+                    capture: { timeout in try await backend.recoveryFrame(timeout: timeout) }
+                )
+            } else {
+                debugScreenshotRecorder = nil
+            }
             let terminal = PommeRecoveryVirtualizationKeyboardPort(
-                backend: VirtualizationPrivateHeadlessBackend(
-                    virtualMachine: vm,
-                    configuration: configuration,
-                    queue: queue
-                ),
-                timeout: Constants.defaultRecoveryAgentTimeout
+                backend: backend,
+                timeout: Constants.defaultRecoveryAgentTimeout,
+                screenshotRecorder: debugScreenshotRecorder
             )
             let disposition = await interaction.driveToTerminalAndLaunch(
                 using: terminal,
@@ -253,10 +319,14 @@ actor PommeRecoveryTerminalAdmission {
             try bootstrap.staging.removeHostArtifacts()
             staging = nil
             phase = .admitted
+            return await PommeRecoveryDebugScreenshotMetadata(recorder: debugScreenshotRecorder)
         } catch {
             let cleanupComplete = await abandonAdmission()
-            if !cleanupComplete { throw Error.cleanupFailed }
-            if let admissionError = error as? PommeRecoveryTerminalAdmission.Error {
+            let outcome: any Swift.Error = cleanupComplete ? error : PommeRecoveryTerminalAdmission.Error.cleanupFailed
+            if let debugMetadata = await PommeRecoveryDebugScreenshotMetadata(recorder: debugScreenshotRecorder) {
+                throw PommeRecoveryTerminalAdmissionControlFailure(outcome, debugMetadata: debugMetadata)
+            }
+            if let admissionError = outcome as? PommeRecoveryTerminalAdmission.Error {
                 throw admissionError
             }
             throw Error.unavailable

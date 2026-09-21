@@ -57,11 +57,13 @@ struct AgentRepairCommand: AsyncParsableCommand {
     }
 
     mutating func run() async throws {
-        let result = try await PommeApplication.agentRepair(
-            name: name,
-            finalState: finalState.rawValue
-        )
-        try CLIOutputWriter.write(result, options: output)
+        try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(output.debug) {
+            let result = try await PommeApplication.agentRepair(
+                name: name,
+                finalState: finalState.rawValue
+            )
+            try CLIOutputWriter.write(result, options: output)
+        }
     }
 }
 

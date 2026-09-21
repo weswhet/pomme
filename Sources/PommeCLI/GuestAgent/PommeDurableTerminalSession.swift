@@ -121,7 +121,10 @@ struct PommeTerminalSessionControlRequest: Sendable {
         let allowed: Set<String>
         switch operation {
         case "terminal.create":
-            allowed = ["sessionID", "path", "arguments", "shell", "cwd", "environment", "user", "uid", "group", "gid", "columns", "rows"]
+            // This is strictly host-control diagnostic intent. The runtime
+            // consumes it before building the guest-agent payload, so it can
+            // never become a guest protocol field.
+            allowed = ["sessionID", "path", "arguments", "shell", "cwd", "environment", "user", "uid", "group", "gid", "columns", "rows", "recoveryDebugScreenshots"]
         case "terminal.list":
             allowed = ["pageToken", "pageSize"]
         case "terminal.inspect", "terminal.delete":
@@ -151,7 +154,7 @@ struct PommeTerminalSessionControlRequest: Sendable {
                 throw RunnerError.invalidControlCommand(operation)
             }
         }
-        for key in ["shell", "takeover", "force"] where payload[key] != nil {
+        for key in ["shell", "takeover", "force", "recoveryDebugScreenshots"] where payload[key] != nil {
             guard case .bool? = payload[key] else { throw RunnerError.invalidControlCommand(operation) }
         }
         if let arguments = payload["arguments"] {

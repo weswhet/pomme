@@ -56,6 +56,7 @@ pomme create dev --latest                 # installs, verifies the agent, leaves
 pomme create dev --version 26.6.0 --shutdown
 pomme create dev --latest --recovery
 pomme create dev --resume
+pomme create dev --resume --debug
 ```
 
 Before creating anything, Pomme resolves and verifies the restore-image build,
@@ -131,6 +132,24 @@ The local build script retains signed agent artifacts by SHA-256. Recovery
 installation after a host rebuild uses the original pinned artifact, not a
 replacement digest; missing or altered artifacts fail closed.
 
+### Recovery debug screenshots
+
+`--debug` retains a full-resolution PNG immediately before each automatic
+Recovery navigation action, including navigation used by create/resume, agent
+repair, SIP, AMFI, MDM enrollment, and an ordinary Recovery shell admission.
+Pomme prints the private directory and saved filenames to standard error. Each Recovery attempt
+uses its own `pomme-recovery-debug-…` directory under the host temporary
+directory; images remain available after either success or failure and are not
+pruned automatically. Full-resolution frames can show local identifiers, so
+remove the printed private directory manually when you no longer need it.
+
+Capture is diagnostic only: it never changes public table, JSON, or JSONL
+output, capture failures warn and let the original navigation continue, and no
+images are made unless Recovery navigation actually begins. Screenshot work is
+bounded to two additional seconds per attempt. PNG capture stops before a
+Terminal command is entered, so neither launcher submission nor command output
+is recorded.
+
 Config-driven creation supports JSON, YAML, TOML, and Pkl. Every member is
 profile-qualified during whole-batch preflight. After execution begins,
 successful siblings remain when another member fails.
@@ -146,6 +165,7 @@ temporary `PommeRecoverySession`. Both speak the authenticated
 ```sh
 pomme agent status dev
 pomme agent repair dev --final-state previous
+pomme agent repair dev --final-state previous --debug
 ```
 
 Repair is Recovery-only. Agent status reports a closed `guestAgent` object with

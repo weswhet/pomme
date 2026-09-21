@@ -169,6 +169,7 @@ struct CreateCommand: AsyncParsableCommand {
     }
 
     mutating func run() async throws {
+        try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(output.debug) {
         if resume {
             let result = try await PommeApplication.createResume(name: try validateVMName(name!))
             try CLIOutputWriter.write(result, options: output)
@@ -291,6 +292,7 @@ struct CreateCommand: AsyncParsableCommand {
             startMode: boot.startMode
         )
         try CLIOutputWriter.write(result, options: output)
+        }
     }
 
     /// Template creates inherit the template's disk size. An explicit
