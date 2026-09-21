@@ -24,10 +24,12 @@ struct SIPStatusCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
-        try CLIOutputWriter.write(
-            await PommeEnvironment.live().security.sip(target, .status, workflow.finalState, false),
-            options: workflow.output
-        )
+        try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(workflow.output.debug) {
+            try CLIOutputWriter.write(
+                await PommeEnvironment.live().security.sip(target, .status, workflow.finalState, false),
+                options: workflow.output
+            )
+        }
     }
 }
 
@@ -40,10 +42,12 @@ struct SIPEnableCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
-        try CLIOutputWriter.write(
-            await PommeEnvironment.live().security.sip(target, .enable, workflow.finalState, force),
-            options: workflow.output
-        )
+        try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(workflow.output.debug) {
+            try CLIOutputWriter.write(
+                await PommeEnvironment.live().security.sip(target, .enable, workflow.finalState, force),
+                options: workflow.output
+            )
+        }
     }
 }
 
@@ -56,10 +60,12 @@ struct SIPDisableCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
-        try CLIOutputWriter.write(
-            await PommeEnvironment.live().security.sip(target, .disable, workflow.finalState, force),
-            options: workflow.output
-        )
+        try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(workflow.output.debug) {
+            try CLIOutputWriter.write(
+                await PommeEnvironment.live().security.sip(target, .disable, workflow.finalState, force),
+                options: workflow.output
+            )
+        }
     }
 }
 
@@ -79,10 +85,12 @@ struct AMFIStatusCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
-        try CLIOutputWriter.write(
-            await PommeEnvironment.live().security.amfi(target, .status, workflow.finalState, false),
-            options: workflow.output
-        )
+        try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(workflow.output.debug) {
+            try CLIOutputWriter.write(
+                await PommeEnvironment.live().security.amfi(target, .status, workflow.finalState, false),
+                options: workflow.output
+            )
+        }
     }
 }
 
@@ -95,10 +103,12 @@ struct AMFIEnableCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
-        try CLIOutputWriter.write(
-            await PommeEnvironment.live().security.amfi(target, .enable, workflow.finalState, force),
-            options: workflow.output
-        )
+        try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(workflow.output.debug) {
+            try CLIOutputWriter.write(
+                await PommeEnvironment.live().security.amfi(target, .enable, workflow.finalState, force),
+                options: workflow.output
+            )
+        }
     }
 }
 
@@ -111,10 +121,12 @@ struct AMFIDisableCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
-        try CLIOutputWriter.write(
-            await PommeEnvironment.live().security.amfi(target, .disable, workflow.finalState, force),
-            options: workflow.output
-        )
+        try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(workflow.output.debug) {
+            try CLIOutputWriter.write(
+                await PommeEnvironment.live().security.amfi(target, .disable, workflow.finalState, force),
+                options: workflow.output
+            )
+        }
     }
 }
 
@@ -146,10 +158,12 @@ struct MDMCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
-        let result = try await PommeEnvironment.live().security.mdmEnroll(
-            target, profile, guestPath, timeout.value(), enrollmentMode, force
-        )
-        try CLIOutputWriter.write(result, options: output)
+        try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(output.debug) {
+            let result = try await PommeEnvironment.live().security.mdmEnroll(
+                target, profile, guestPath, timeout.value(), enrollmentMode, force
+            )
+            try CLIOutputWriter.write(result, options: output)
+        }
     }
 }
 

@@ -926,13 +926,21 @@ struct PommeCore {
             verifyBootstrapAttachment: { resources.hasExactBootstrapAttachment() },
             stopReapAndClean: { try await resources.stopReapAndClean() }
         )
+        let backend = VirtualizationPrivateHeadlessBackend(
+            virtualMachine: vm,
+            configuration: configuration,
+            queue: queue
+        )
+        let screenshotRecorder = PommeRecoveryDebugContext.screenshotsEnabled
+            ? PommeRecoveryNavigationScreenshotRecorder(
+                vmName: plan.vm.name,
+                capture: { timeout in try await backend.recoveryFrame(timeout: timeout) }
+            )
+            : nil
         let terminal = PommeRecoveryVirtualizationKeyboardPort(
-            backend: VirtualizationPrivateHeadlessBackend(
-                virtualMachine: vm,
-                configuration: configuration,
-                queue: queue
-            ),
-            timeout: Constants.defaultRecoveryAgentTimeout
+            backend: backend,
+            timeout: Constants.defaultRecoveryAgentTimeout,
+            screenshotRecorder: screenshotRecorder
         )
         return .init(
             coordinator: coordinator,
@@ -3932,11 +3940,14 @@ struct PommeCore {
             terminalAdmission = nil
         }
 
-        let terminalAdmissionEffect: (@Sendable (UUID) async throws -> Void)?
+        let terminalAdmissionEffect: (@Sendable (UUID, Bool) async throws -> PommeRecoveryDebugScreenshotMetadata?)?
         let terminalAdmissionCleanup: (@Sendable () async -> Bool)?
         if let terminalAdmission {
-            terminalAdmissionEffect = { sessionID in
-                try await terminalAdmission.ensure(sessionID: sessionID)
+            terminalAdmissionEffect = { sessionID, recoveryDebugScreenshots in
+                try await terminalAdmission.ensure(
+                    sessionID: sessionID,
+                    recoveryDebugScreenshots: recoveryDebugScreenshots
+                )
             }
             terminalAdmissionCleanup = {
                 await terminalAdmission.cleanup()
@@ -4629,7 +4640,11 @@ struct PommeCore {
                 return try correlatedResultJSON(result)
             }
         } catch {
-            return (try? jsonLine(["ok": false, "error": error.localizedDescription, "hostExitCode": 1]))
+            var payload: [String: Any] = ["ok": false, "error": error.localizedDescription, "hostExitCode": 1]
+            if let diagnosticFailure = error as? PommeRecoveryTerminalAdmissionControlFailure {
+                payload.merge(diagnosticFailure.debugMetadata.controlPayload, uniquingKeysWith: { _, new in new })
+            }
+            return (try? jsonLine(payload))
                 ?? "{\"ok\":false,\"hostExitCode\":1}"
         }
     }

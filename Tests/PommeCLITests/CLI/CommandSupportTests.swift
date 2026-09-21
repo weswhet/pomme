@@ -1,3 +1,5 @@
+import ArgumentParser
+import Darwin
 import Foundation
 import Testing
 
@@ -55,6 +57,97 @@ struct CommandSupportTests {
         let payload: [String: Any] = ["ok": true, "result": ["jobs": [["jobID": "j1"]]]]
 
         #expect(CLIOutputWriter.jsonlLines(payload: payload, keyPath: ["result", "jobs"]).map { $0["jobID"] as? String } == ["j1"])
+    }
+
+    @Test("Recovery helper diagnostics stay on stderr for successful and failed JSON and JSONL results")
+    func recoveryHelperDiagnosticsDoNotLeakIntoStructuredOutput() throws {
+        // Exercise the metadata boundary used by PommeApplication.terminalSessionCreate,
+        // then the actual public writer, without a VM, socket, or production test seam.
+        for format in ["json", "jsonl"] {
+            for ok in [true, false] {
+                let directory = "/tmp/pomme-recovery-debug-test-2026-09-20T23-10-26.123Z-attempt"
+                let filename = "0001_2026-09-20T23-10-26.123Z_recoveryUtilities_shift-command-t_to_terminal.png"
+                let warning = "capture timed out"
+                var payload: [String: Any] = [
+                    "ok": ok,
+                    "sessionID": "session-test",
+                    "operation": "terminal.create",
+                    "recoveryDebugScreenshotDirectory": directory,
+                    "recoveryDebugScreenshotFiles": [filename],
+                    "recoveryDebugScreenshotWarnings": [warning],
+                ]
+                if !ok { payload["error"] = "Recovery navigation failed." }
+                let options = try GlobalOptions.parse(["--format", format])
+                var exitCode: ExitCode?
+
+                let captured = try captureStandardOutputAndError {
+                    PommeRecoveryDebugScreenshotOutput.renderAndRemove(from: &payload)
+                    do {
+                        try CLIOutputWriter.write(
+                            operationResult(ok: ok, text: "session session-test", payload: payload),
+                            options: options
+                        )
+                    } catch let error as ExitCode {
+                        exitCode = error
+                    }
+                }
+
+                let lines = captured.stdout.split(separator: "\n")
+                #expect(lines.count == 1)
+                let object = try #require(JSONSerialization.jsonObject(with: Data(captured.stdout.utf8)) as? [String: Any])
+                #expect(object["ok"] as? Bool == ok)
+                #expect(object["sessionID"] as? String == "session-test")
+                #expect(object["hostExitCode"] as? Int == (ok ? 0 : 1))
+                #expect(exitCode == (ok ? nil : ExitCode(1)))
+                if !ok { #expect(object["error"] as? String == "Recovery navigation failed.") }
+                for key in ["recoveryDebugScreenshotDirectory", "recoveryDebugScreenshotFiles", "recoveryDebugScreenshotWarnings"] {
+                    #expect(object[key] == nil)
+                    #expect(!captured.stdout.contains(key))
+                }
+                for diagnostic in [directory, filename, warning] {
+                    #expect(!captured.stdout.contains(diagnostic))
+                    #expect(captured.stderr.contains(diagnostic))
+                }
+                #expect(captured.stderr.contains("Recovery debug screenshots: " + directory))
+                #expect(captured.stderr.contains("Warning: Recovery debug screenshot " + warning))
+            }
+        }
+    }
+
+    /// Keep descriptor redirection synchronous and restore both streams even if
+    /// rendering throws. Small synthetic responses fit within the pipe buffers.
+    private func captureStandardOutputAndError(_ body: () throws -> Void) throws -> (stdout: String, stderr: String) {
+        let output = Pipe()
+        let error = Pipe()
+        fflush(nil)
+        let originalOutput = dup(STDOUT_FILENO)
+        let originalError = dup(STDERR_FILENO)
+        guard originalOutput >= 0, originalError >= 0 else {
+            if originalOutput >= 0 { close(originalOutput) }
+            if originalError >= 0 { close(originalError) }
+            throw POSIXError(.EBADF)
+        }
+        defer {
+            fflush(nil)
+            dup2(originalOutput, STDOUT_FILENO)
+            dup2(originalError, STDERR_FILENO)
+            close(originalOutput)
+            close(originalError)
+        }
+        guard dup2(output.fileHandleForWriting.fileDescriptor, STDOUT_FILENO) >= 0,
+              dup2(error.fileHandleForWriting.fileDescriptor, STDERR_FILENO) >= 0 else {
+            throw POSIXError(.EBADF)
+        }
+        try body()
+        fflush(nil)
+        dup2(originalOutput, STDOUT_FILENO)
+        dup2(originalError, STDERR_FILENO)
+        try output.fileHandleForWriting.close()
+        try error.fileHandleForWriting.close()
+        return (
+            String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self),
+            String(decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        )
     }
 
     @Test("The raw output format is no longer accepted")

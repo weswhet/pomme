@@ -31,6 +31,34 @@ struct PommeDurableTerminalSessionTests {
             "operation": .string("terminal.list"),
             "pageSize": .integer(1)
         ])
+        let recoveryDebug = try PommeTerminalSessionControlRequest.parse(from: [
+            "operation": .string("terminal.create"),
+            "recoveryDebugScreenshots": .bool(true)
+        ])
+        #expect(recoveryDebug.payload["recoveryDebugScreenshots"] == .bool(true))
+        #expect(throws: Error.self) {
+            _ = try PommeTerminalSessionControlRequest.parse(from: [
+                "operation": .string("terminal.create"),
+                "recoveryDebugScreenshots": .string("true")
+            ])
+        }
+        let hostOnlyInput = try PommeTerminalSessionCreateControlInput(payload: [
+            "path": .string("/bin/sh"),
+            "recoveryDebugScreenshots": .bool(true)
+        ])
+        #expect(hostOnlyInput.recoveryDebugScreenshots)
+        #expect(hostOnlyInput.guestPayload["recoveryDebugScreenshots"] == nil)
+        #expect(hostOnlyInput.guestPayload["path"] == .string("/bin/sh"))
+        #expect(!(try PommeTerminalSessionCreateControlInput(payload: [:])).recoveryDebugScreenshots)
+        let directoryFailure = PommeRecoveryDebugScreenshotMetadata(
+            directory: nil,
+            files: [],
+            warnings: ["directory creation failed"]
+        )
+        let diagnosticPayload = directoryFailure.controlPayload
+        #expect(diagnosticPayload["recoveryDebugScreenshotDirectory"] == nil)
+        #expect(diagnosticPayload["recoveryDebugScreenshotFiles"] as? [String] == [])
+        #expect(diagnosticPayload["recoveryDebugScreenshotWarnings"] as? [String] == ["directory creation failed"])
         #expect(throws: Error.self) {
             _ = try PommeTerminalSessionControlRequest.parse(from: [
                 "operation": .string("terminal.list"),

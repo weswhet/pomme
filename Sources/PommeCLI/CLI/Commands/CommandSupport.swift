@@ -17,7 +17,10 @@ struct GlobalOptions: ParsableArguments {
     @Option(name: .customLong("format"), help: "Output format: table, json, or jsonl.")
     var format: CLIOutputFormat?
 
-    @Flag(name: .customLong("debug"), help: "Print verbose diagnostic logging.")
+    @Flag(
+        name: .customLong("debug"),
+        help: "Print verbose diagnostics and retain Recovery navigation screenshots in a private temporary directory."
+    )
     var debug = false
 
     /// Returns the selected output format after validating shorthand combinations.
@@ -26,6 +29,37 @@ struct GlobalOptions: ParsableArguments {
             throw ValidationError("--json conflicts with --format \(format.rawValue).")
         }
         return json ? .json : (format ?? .table)
+    }
+}
+
+/// Invocation-scoped diagnostics for automatic Recovery navigation.  This is
+/// deliberately task-local: Recovery workflows launch nested tasks, while
+/// parallel creates must get independent recorder instances rather than share
+/// an invocation-global mutable object.
+enum PommeRecoveryDebugContext {
+    @TaskLocal static var screenshotsEnabled = false
+}
+
+/// Internal helper metadata is useful to a person running `--debug`, but is
+/// not part of Pomme's public JSON contract.  Consume it at the CLI boundary
+/// before table, JSON, or JSONL rendering.
+enum PommeRecoveryDebugScreenshotOutput {
+    static let directoryKey = "recoveryDebugScreenshotDirectory"
+    static let filesKey = "recoveryDebugScreenshotFiles"
+    static let warningsKey = "recoveryDebugScreenshotWarnings"
+
+    static func renderAndRemove(from payload: inout [String: Any]) {
+        let directory = payload.removeValue(forKey: directoryKey) as? String
+        let files = payload.removeValue(forKey: filesKey) as? [String] ?? []
+        let warnings = payload.removeValue(forKey: warningsKey) as? [String] ?? []
+        guard directory?.isEmpty == false || !warnings.isEmpty else { return }
+        var lines: [String] = []
+        if let directory, !directory.isEmpty {
+            lines.append("Recovery debug screenshots: \(directory)")
+            lines.append(contentsOf: files.map { "  \($0)" })
+        }
+        lines.append(contentsOf: warnings.map { "Warning: Recovery debug screenshot \($0)." })
+        FileHandle.standardError.write(Data((lines.joined(separator: "\n") + "\n").utf8))
     }
 }
 
