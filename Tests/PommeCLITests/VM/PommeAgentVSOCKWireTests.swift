@@ -4,6 +4,62 @@ import Testing
 
 @Suite("Pomme agent VSOCK wire")
 struct PommeAgentVSOCKWireTests {
+    @Test("Signal exchange requires its response even after a correlated exit stream", arguments: ["response", "silent", "exitOnly"])
+    func signalResponseDeadlineCharacterization(mode: String) throws {
+        let jobID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        let request = PommeAgentProtocol.Envelope.request(
+            operation: "process.signal",
+            payload: .object(["jobID": .string(jobID), "signal": .integer(15)])
+        )
+        let response = PommeAgentProtocol.Envelope.response(
+            to: request, result: .object(["jobID": .string(jobID), "signalled": .bool(true)])
+        )
+        let exit = PommeAgentProtocol.Envelope(
+            kind: .stream, requestID: request.requestID, operation: "process.exit",
+            payload: .object(["jobID": .string(jobID), "stream": .string("exit"), "signal": .integer(15)])
+        )
+        let ready = DispatchSemaphore(value: 0)
+        let exchangeFinished = DispatchSemaphore(value: 0)
+        try Self.withWire(peer: { fileDescriptor in
+            // Queue the exit before starting the deadline, so this case does
+            // not depend on scheduling the peer within a short timeout.
+            if mode == "exitOnly" {
+                try Self.writeAll(try PommeAgentProtocol.encode(exit), to: fileDescriptor)
+            }
+            ready.signal()
+            // One-byte reads leave any duplicate request bytes on the socket.
+            let received = try PommeAgentProtocol.decode(Self.readLine(from: fileDescriptor, maximumReadBytes: 1))
+            guard received == request else { throw WireTestError.unexpectedRequest }
+            if mode == "response" {
+                try Self.writeAll(try PommeAgentProtocol.encode(response), to: fileDescriptor)
+            }
+            guard exchangeFinished.wait(timeout: .now() + .seconds(2)) == .success else {
+                throw WireTestError.peerTimedOut
+            }
+            var byte: UInt8 = 0
+            let count = Darwin.recv(fileDescriptor, &byte, 1, MSG_DONTWAIT)
+            let savedErrno = errno
+            #expect(count == -1)
+            #expect(savedErrno == EAGAIN || savedErrno == EWOULDBLOCK)
+        }) { wire in
+            defer { exchangeFinished.signal() }
+            try #require(ready.wait(timeout: .now() + .seconds(2)) == .success)
+            if mode == "response" {
+                let delivered = try wire.exchange(try PommeAgentProtocol.encode(request), timeout: 1)
+                let lines = delivered.split(separator: 0x0A, omittingEmptySubsequences: true)
+                try #require(lines.count == 1)
+                #expect(try PommeAgentProtocol.decode(Data(lines[0])) == response)
+            } else {
+                do {
+                    _ = try wire.exchange(try PommeAgentProtocol.encode(request), timeout: 0.05)
+                    Issue.record("Withheld signal response must time out, never return partial exit frames")
+                } catch RunnerError.guestAgentTimedOut(let operation) {
+                    #expect(operation == "Pomme agent exchange")
+                }
+            }
+        }
+    }
+
     @Test("stream input returns a response without synthetic output")
     func streamInputZeroOutputAck() throws {
         let request = PommeAgentProtocol.Envelope(
@@ -277,7 +333,7 @@ struct PommeAgentVSOCKWireTests {
         return try PommeAgentProtocol.decode(line)
     }
 
-    private static func readLine(from fileDescriptor: Int32) throws -> Data {
+    private static func readLine(from fileDescriptor: Int32, maximumReadBytes: Int = 4_096) throws -> Data {
         var buffered = Data()
         let deadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
         while true {
@@ -294,7 +350,7 @@ struct PommeAgentVSOCKWireTests {
             guard result > 0, descriptor.revents & Int16(POLLIN) != 0 else {
                 throw WireTestError.peerTimedOut
             }
-            var bytes = [UInt8](repeating: 0, count: 4_096)
+            var bytes = [UInt8](repeating: 0, count: maximumReadBytes)
             let count = bytes.withUnsafeMutableBytes { Darwin.read(fileDescriptor, $0.baseAddress, $0.count) }
             if count > 0 {
                 buffered.append(contentsOf: bytes.prefix(Int(count)))

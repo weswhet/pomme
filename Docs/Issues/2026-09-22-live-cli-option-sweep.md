@@ -1496,3 +1496,25 @@ without same-job cleanup proof. This confirms fail-closed behavior on the
 new build but leaves the full first-owner workflow unsuccessful. The next
 investigation targets the signal exchange and delayed-response boundaries,
 without replaying an uncertain signal or widening proof acceptance.
+
+### Signal exchange characterization
+
+Read-only tracing found no blocking native termination wait in `process.signal`:
+the guest issues group/process `kill` calls, then uses nonblocking reap/output
+checks before writing stream frames and the final correlated response. The
+host wire waits for that response, not merely a stream frame. Its timeout closes
+the authenticated connection; the immediate ordinary cleanup-status request
+cannot establish proof on the disconnected session.
+
+A real socketpair characterization now covers a correlated signal response,
+a withheld response, and a correlated exit stream with the response withheld.
+Both withheld cases throw the exact exchange timeout, never return a partial
+response, and write exactly one signal request. Peer synchronization and joined
+cleanup avoid near-deadline scheduling sleeps. The first run exposed only a
+test assertion comparing raw JSON key order; comparing decoded envelopes fixed
+that assertion without a production change. Focused wire, foreground, and
+coordinator suites passed 35 functions / 86 executions, zero failures/skips:
+`test_macos_2026-09-22T13-24-36-586Z_pid23524_17e91d71.xcresult`.
+This characterizes existing fail-closed behavior, not the cause of the live
+delay or a transport fix. Any subsequent retry must obtain new authenticated
+same-job cleanup proof rather than inferring success from a missing response.
