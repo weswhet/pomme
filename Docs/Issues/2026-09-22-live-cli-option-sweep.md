@@ -1453,3 +1453,46 @@ failures or skips:
 `test_macos_2026-09-22T13-02-56-186Z_pid19434_e01c9770.xcresult`.
 The cleanup is committed before building another signed Release. Its new guest
 binary still requires live validation; earlier pinned guests are not replaced.
+
+Cleanup commit `5a30a3e` built and installed through the canonical signed
+Release workflow. Signature, exact entitlement, designated-requirement, and
+archive checks passed. The installed digest is
+`d64e754e120fef42698b6688f79925396d84b6c9d77298123628adabd52e274a`;
+fresh login resolution and reported commit match. All 104 CLI checks passed.
+The build reported existing PommeCore and GuestMDMEnrollment warnings; those
+files are unchanged. New comparison `pomme-agent-owner26-20260922i` uses the
+same internal IPSW, 40 GB disk / 4 GB RAM, and `--boot none` after dry-run
+preflight. Existing VMs remain stopped; 139 GiB was available internally.
+
+Creation began at 13:06:05Z, restore reached 100% at 13:09:57Z, Terminal was
+verified at 13:11:24Z, and marker proof passed on attempt 2 at 13:11:27Z.
+Normal-agent verification passed and public status confirmed stopped with no
+helper. The VM UUID is `4c39e416-4ab5-48b9-aaf4-fef22d553158`, startup-volume
+group `60a52b9b-12d7-4940-b0d3-f4c9bf0f03d9`, and immutable plan digest
+`d11ba48042b48e3e2a798138a2a52fb96a14e1fbd41ee576c789d11fe465fa82`.
+It pins the new `d64e754e…52e274a` agent. First-owner SIP disable follows
+without intervening guest probes or account edits.
+
+The cleanup-build first-owner command began at 13:12:35Z. The existing
+owner-completion status-1 boot retry began at 13:13:57Z; owner completion passed
+at 13:14:51Z and Setup Assistant at 13:14:54Z. Desktop verification started
+at 13:15:11Z. The workflow failed at 13:16:00Z with
+`normal-agent-aqua-timedOut`, `exited=false`, `outputComplete=false`, and
+`terminationRequested=false`, then restored stopped state before SIP mutation.
+
+The closed helper log was captured before any new boot. At 13:15:55Z it
+reported `boundary=checkpoint`, `elapsedMs=15457`, `jobEstablished=true`,
+`pollCount=19`, `errorKind=foregroundDeadline`. At 13:16:00Z it reported
+`boundary=signal`, `elapsedMs=20459`, the same job-established/poll-count fields,
+and `errorKind=agentTimeout`. Thus the single cleanup signal exchange hit its
+five-second agent timeout after the original foreground deadline. This is
+newly identified transport uncertainty at cleanup, not a console-start/status
+reproduction and not evidence that SIGTERM was delivered or the child exited.
+
+Public status confirmed stopped with no helper. The closed journal projection
+is `phase=autologinIntent`, `operation=sipDisable`, `requestedFinalState=previous`.
+The VM retains its exact creation pin and progress; no retry was permitted
+without same-job cleanup proof. This confirms fail-closed behavior on the
+new build but leaves the full first-owner workflow unsuccessful. The next
+investigation targets the signal exchange and delayed-response boundaries,
+without replaying an uncertain signal or widening proof acceptance.
