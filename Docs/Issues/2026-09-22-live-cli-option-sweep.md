@@ -12,7 +12,7 @@ observations are recorded below; historical rows retain their original status.
 | CLI discovery omissions / `agent-help` output ambiguity | Fixed in `e0f6544`; signed CLI contract and live compatibility checks passed. |
 | macOS 27 inactive Language Chooser / framebuffer replay | Guarded activation and replay-policy fixes validated; complete SIP/AMFI status workflows passed. |
 | Recovery Terminal marker recognition | Bounded prompt-punctuation and word-encoding/output-separation fixes validated; not a claim of universal OCR reliability. |
-| macOS 26 first-owner desktop readiness / cleanup | Same-job cleanup-verified retry and pinned reconnect adapter implemented. Two fresh signed-candidate SIP cycles passed; original intermittent signal delay and earlier console transport failure remain unexplained. |
+| macOS 26 first-owner desktop readiness / cleanup | Same-job cleanup-verified retry and pinned reconnect adapter implemented. Three fresh signed-candidate SIP cycles passed, including a live Aqua timeout recovered after instrumentation cleanup; original intermittent signal delay and earlier console transport failure remain unexplained. |
 | macOS 27 creation `ownerProof` | Open; subsequent internal-drive baseline passed without a targeted fix. |
 | macOS 26 creation `verifyNormalAgent` / slow first boot | Open historical failure; subsequent internal-drive creations passed without establishing its cause. |
 | macOS 27 restart after pause/resume | Open; subsequent internal-drive sequences passed without reproducing the missing helper. |
@@ -1766,3 +1766,56 @@ error propagation, single-start/single-signal assertions, cleanup receipts, and
 all readiness/reconnect bounds remain. Temporary-symbol searches in Sources
 and Tests and `git diff --check` passed. This cleanup is committed before the
 signed Release build and fresh internal-drive live validation.
+
+Cleanup commit `a3852a5` built and installed through the canonical signed Release
+workflow. Signature, exact entitlements, designated-requirement compatibility,
+and signed-artifact archival checks passed. Installed SHA-256:
+`55142e268e4402985cb6012326df6450687fca094888ffad3937bc1701887b5a`.
+Fresh-login command resolution and version matched; all 104 CLI contract checks
+and 21 installer regression checks passed. Four existing PommeCore warnings
+remain outside this cleanup. All twelve retained VMs were stopped before
+preflight. Fresh `pomme-agent-owner26-20260922l` creation began at 15:07:57Z
+using the same internal 26.6.2/25G83 IPSW, explicit 40 GB disk / 4 GB RAM,
+and `--boot none`; 61 GiB was free internally. No retained VM was reset and
+no external storage is used.
+
+Restore reached 100% at 15:11:51Z, Terminal verification at 15:13:19Z, and
+second-attempt marker proof at 15:13:22Z. Normal-agent verification passed and
+creation returned stopped, independently confirmed by public status. VM UUID:
+`4631bbe6-33d2-4ad0-82b5-2ac74c1fa1f7`; startup-volume group:
+`2a6bfc5c-5626-4883-8192-8f0fb2df46d9`; immutable plan digest:
+`02686510ca39f044fc561e0e31f58b090be57f1d3ca226f7a7573f127f8e1899`.
+The VM pins the installed `55142e26…887b5a` agent. First-owner SIP disable
+began at 15:14:21Z without standalone guest probes or owner changes.
+
+The existing fresh-owner preference reboot retry began at 15:15:43Z. Owner
+completion passed at 15:16:39Z, Setup Assistant at 15:16:42Z, and desktop
+verification began at 15:16:58Z. At 15:17:39Z the permanent diagnostic reported
+`normal-agent-aqua-timedOut`, with `exited=false`, `outputComplete=false`, and
+`terminationRequested=true`. The workflow subsequently completed desktop proof
+and advanced to authenticated Recovery at 15:18:13Z. This exercises the bounded
+cleanup-verified retry in the instrumentation-free signed build. It does not
+establish that reconnect was required or explain the underlying probe delay.
+
+SIP disable passed second-attempt Recovery marker proof at 15:20:14Z, then
+normal-boot verification and stopped-state restoration after 15:21:19Z. The
+result reported `configuredDisabled=true` with normal-boot, runtime,
+enforcement, and final-state verification all true. Public status independently
+confirmed stopped with no helper before matching SIP enable was started to
+restore the original security setting. No AMFI change was made.
+
+Matching SIP enable began at 15:21:41Z, passed first-attempt Recovery marker
+proof at 15:24:11Z, and completed normal-boot verification and stopped-state
+restoration after 15:25:13Z. The result reported `configuredDisabled=false`
+and all verification fields true. Public inventory confirmed all thirteen
+internal VMs stopped with no helpers. The `...22l` journal is
+`restorationComplete`, `sipEnable`, `previous`. Internal free space is 35 GiB;
+another fresh installation requires a capacity decision, not smaller test
+resources or external storage. No retained VM or pinned artifact was deleted.
+
+The instrumentation-free candidate therefore passed fresh creation and a full
+first-owner SIP disable/enable cycle, including a timed-out Aqua probe followed
+by successful bounded cleanup/retry. This is stronger than a no-timeout
+compatibility comparison, but does not establish the original delay's cause,
+live reconnect recovery, or resolution of the earlier console transport error.
+The live outcome is committed before moving to further investigation.
