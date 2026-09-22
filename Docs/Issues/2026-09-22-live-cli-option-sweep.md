@@ -547,3 +547,46 @@ PNG files also had equal decoded pixels, checked without logging their digests.
 This supplies a repeatable real-image prompt-recognition failure, not evidence
 that the earlier missing-exact-marker failures share its cause. The result is
 `test_macos_2026-09-22T08-51-37-315Z_pid66241_e807a27f.xcresult`.
+
+### Narrow prompt-punctuation correction
+
+The repeated real-image failure was minimized to one OCR spelling difference:
+the visible leading hyphen in the fresh `-bash-3.2#` prompt was recognized as
+U+2014 EM DASH. The remaining prompt characters were correct, but the anchored
+prompt matcher accepted only the ASCII hyphen. Adding a blank output line
+before the prompt still failed all ten replays. Test-only crop-scale comparisons
+recovered that prompt at scales 1, 3, and 4, but no single scale recovered all
+observed marker cases. No crop-scale or marker-format change is justified by
+those results.
+
+The six additional real Terminal marker comparisons passed four cases and
+missed the exact marker for `HHHHHHHHHH` and `EHEHEHEHEH`. Those remain a
+separate unresolved recognition problem. The narrow candidate accepts the
+observed em dash only in the existing optional leading-hyphen position of the
+anchored shell-prompt pattern. It retains the exact marker, Terminal, and
+below-marker prompt requirements; it does not treat arbitrary nearby text or
+command echo as a fresh prompt. Tests-first verification and signed live
+validation follow before claiming that correction complete.
+
+The manual VM was returned to its original stopped state. Public `stop`
+reported its existing forced-stop fallback because Recovery did not shut down
+itself; a subsequent status check verified stopped with no helper. No security
+settings, credentials, creation records, or pinned agent artifacts changed.
+
+The new permanent regression failed against the unchanged matcher (one failed,
+eight passed), then all nine permanent Terminal-recognition tests passed with
+the single-character-class correction. Three temporary image-backed cases also
+passed: ten serial replays each of the original mixed-marker frame, the extra
+blank-line frame, and the baseline, for 30/30 strict proofs. All temporary
+corpus, scale-matrix, private-path, and Unicode diagnostic tests/imports were
+removed before committing. Read-only review found no proof-gate regression;
+the existing Terminal, exact-marker, and prompt-order checks remain intact.
+All 21 local installer regression checks also passed.
+
+The cleaned permanent suite run passed all 80 tests across language activation,
+interaction, profile selection, virtualization keyboard delivery, navigation,
+and Terminal recognition, with no failures. Result:
+`test_macos_2026-09-22T09-01-02-073Z_pid68986_5696bd72.xcresult`.
+The candidate is committed before the canonical signed Release build and live
+SIP-status compatibility checks. The remaining exact-marker misses are not
+represented as fixed by this prompt correction.
