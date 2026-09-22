@@ -1573,3 +1573,51 @@ cleanup-adapter, daemon, wire, and coordinator suites passed 103 test functions 
 All 21 offline installer checks also passed. These results do not establish
 the cause of the live signal delay or a successful live reconnect. The change
 and documentation are committed before signed Release and fresh-VM validation.
+
+Candidate `e38d50a` built and installed through the canonical signed Release
+workflow. Signature, exact entitlements, designated-requirement compatibility,
+and archive checks passed. Installed SHA-256:
+`2728f132889ac0d96f750731bf750b8717680e0cce97ce401998359e10e36d7e`.
+Fresh login resolution and the reported commit matched; all 104 CLI contract
+checks passed. Four existing PommeCore warnings remain outside this change.
+After dry-run preflight and confirmation that all ten existing VMs were stopped,
+fresh `pomme-agent-owner26-20260922j` creation began at 14:12:40Z. It uses the
+same internal 26.6.2/25G83 IPSW, explicit 40 GB disk / 4 GB RAM, and `--boot none`.
+There was 112 GiB free internally; no external drive, retained VM reset, or
+creation-pin replacement is involved.
+
+Restore reached 100% at 14:16:19Z, Recovery Terminal at 14:17:46Z, and marker
+proof passed on attempt 1 at 14:17:48Z. Creation passed normal-agent verification
+and returned stopped; public status independently confirmed no helper. VM UUID:
+`8f979849-b72c-460a-ab29-1a367d1a54dd`; startup-volume group:
+`a5f87069-a66e-4367-82d1-7534ce461616`; immutable plan digest:
+`3bb45d246f3af95c09e1ca4a4ceaaae6bb79436f4812c1d16ba74cdd8fde2932`.
+The VM pins the installed `2728f132…0e36d7e` agent. First-owner SIP disable
+began at 14:18:49Z without standalone guest probes or owner changes.
+
+The existing fresh-owner preference reboot retry began at 14:20:14Z. Owner
+completion passed at 14:21:04Z and Setup Assistant completion at 14:21:07Z.
+Desktop verification began at 14:21:24Z and the workflow advanced to Recovery
+at 14:22:19Z. No timeout or reconnect was observed in the collected output;
+this establishes successful desktop-proof compatibility, not live exercise
+of the new reconnect path or resolution of the intermittent signal delay.
+
+SIP disable passed first-attempt Recovery marker proof at 14:24:20Z and then
+fresh normal-boot verification. It returned `configuredDisabled=true` with
+normal-boot, runtime, enforcement, and final-state verification all true. Public
+status separately confirmed stopped with no helper. Matching SIP enable began
+at 14:25:38Z to restore the original security setting; no AMFI change was made.
+
+SIP enable passed second-attempt marker proof at 14:28:20Z, verified a fresh
+normal boot, and restored stopped state after 14:29:20Z. The result reported
+`configuredDisabled=false` and all normal-boot, runtime, enforcement, and
+final-state verification fields true. Public inventory confirmed all eleven
+internal VMs stopped with no helpers; the journal projection for `...22j` is
+`restorationComplete`, `sipEnable`, `previous`. Internal free space is 87 GiB.
+
+This completes signed-build compatibility validation through a fresh creation
+and full first-owner SIP disable/enable cycle. The intermittent live signal
+timeout did not have an observed recurrence, so live reconnect recovery is not
+yet established; deterministic reconnect and rejection coverage passed. The
+temporary closed transport diagnostics remain for that open investigation.
+No other issue is being declared fixed by this successful comparison.
