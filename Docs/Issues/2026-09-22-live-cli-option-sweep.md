@@ -1131,3 +1131,50 @@ VSOCK budget after the caller disconnects; that uncertainty returns failure and
 never starts another probe. The candidate does not claim a three-second bound
 on guest-side request execution. Cancellation and the original deadline are
 rechecked before subsequent requests and before accepting stable proof.
+
+Candidate `e84f32a` was committed before the canonical signed Release build.
+Build, signature, exact entitlements, designated-requirement compatibility,
+and signed-agent archiving passed. The installed SHA-256 is
+`4cdd14436372c930ad2943a10b1827fe19671e0ffba4f6505d1f183dcc6b2c98`.
+A fresh login shell resolves `/Users/wes/.local/bin/pomme` and reports that
+commit; all 104 CLI contract checks passed. The four existing PommeCore build
+warnings are unrelated to this candidate. All five retained VMs were confirmed
+stopped, and internal storage had 245 GiB available before this comparison.
+
+Fresh `pomme-agent-owner26-20260922e` creation began at 11:38:20Z from the
+same internal cached macOS 26.6.2/25G83 image, explicitly using a 40 GB disk,
+4 GB RAM, and `--boot none`. Dry-run preflight confirmed the exact experimental
+profile and Recovery route. This run tests the first-owner workflow, not a
+reset or credential replacement on a previously provisioned owner.
+
+Restore reached 100% at 11:42:02Z. Recovery navigation reached Terminal at
+11:43:30Z, and marker proof passed on attempt 2 at 11:43:33Z. Creation then
+passed normal-agent verification and returned stopped state, independently
+confirmed by public status. The new VM UUID is
+`617748c1-e04e-4967-b697-29a5e1335e71`, startup-volume group
+`fda5f1f3-bfd2-4fe5-8558-c821e1d6e14c`, and immutable plan digest
+`8dc8c9026c4efd8bd61c157dd9f2ac666509a0257cb57dfce34d3477d7d10de2`.
+It pins the installed `4cdd1443…c6b2c98` agent. The original fresh-owner
+`sip disable --force --final-state previous` began at 11:44:36Z without
+intervening guest probes or account changes.
+
+The candidate's fresh-owner run failed at a different readiness stage. Owner
+creation/verification passed, and the unchanged owner-completion status-1 boot
+retry began at 11:45:53Z. The retry passed owner completion at 11:46:46Z and
+Setup Assistant completion at 11:46:49Z. Desktop verification began at
+11:47:06Z. Five Aqua probes completed in approximately 0.331, 0.285, 0.118,
+0.082, and 0.037 seconds, with console/Aqua matched but desktop not matched.
+The next Aqua probe completed in 5.085 seconds at 11:47:24Z, with a reap and
+no recorded wait errors. The following process-list probe failed at 11:47:40Z
+with `normal-agent-ps-timedOut`, `exited=false`, `outputComplete=false`, and
+`terminationRequested=true`. The workflow retained progress, restored stopped
+state, and exited 1 before SIP mutation. No Aqua retry was exercised.
+
+This is a failed live candidate, not a fix or successful retry demonstration.
+The first-login readiness issue is not confined to the Aqua command: the fixed
+read-only process-list probe can reach the same foreground deadline. The next
+candidate must apply the same verified-cleanup requirement consistently to the
+fixed readiness probes, with regressions for each stage and unchanged console,
+Aqua, desktop, stable-duration, cancellation, and overall-deadline predicates.
+It must not enable retries for arbitrary guest commands or reinterpret timeout
+as successful proof. The retained VM and its pinned agent will not be reset.
