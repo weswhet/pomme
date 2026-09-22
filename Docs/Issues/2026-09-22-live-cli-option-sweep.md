@@ -1264,3 +1264,62 @@ transport outcomes must not be blindly replayed: the next investigation must
 identify the failing exchange and whether an owned job was established before
 changing retry or deadline behavior. Temporary diagnostics remain pending that
 investigation; this is not a claim that the whole issue is fixed.
+
+### Console transport boundary investigation
+
+The tracked tree and installed `f9a3598` were revalidated before continuing;
+all seven VMs were stopped. The failed `...22f` helper log was empty. Read-only
+tracing identified separate five-second normal-agent exchanges for process
+start, stdin EOF, and status, inside the usual 30-second host collector budget
+for a 15-second proof attempt. The approximately six-second console failure
+favors an inner exchange over the outer deadline, but does not identify a
+phase or prove that a job had been established.
+
+Ranked hypotheses are an inner status exchange failure after job establishment,
+an inner start/EOF failure before reliable job ownership, or a host/helper peer,
+deadline, or protocol failure. Closed phase/error-category, timing, poll-count,
+and job-established evidence can distinguish these without logging output,
+arguments, process/job identities, credentials, or arbitrary error messages.
+
+A bounded minimization started the retained `...22f` normally at 12:11:56Z
+on the unchanged installed build. The exact default-identity console probe
+completed immediately with exit 0, complete output, and `pomme:501`. Five
+subsequent serial console/Aqua/process-list sequences passed all 15 probes.
+Results were reduced to closed completion fields; no user/UID override was
+supplied. One earlier successful process-list invocation exceeded the tool's
+output-capture budget, so the complete sequence was rerun with closed JSON
+projection rather than treating that capture limitation as a guest failure.
+These public requests share the helper's authenticated agent path but not the
+security caller's outer collector deadline or fresh-owner timing. They do not
+reproduce or fix the live first-login transport failure.
+
+Graceful stop began at 12:13:47Z and succeeded with `guest-stopped`; public
+status confirmed stopped with no helper. The retained transaction and exact
+creation pin remain unchanged. The next change is diagnostic only, preserving
+all deadlines, thrown errors, signal behavior, cleanup requirements, and proof
+acceptance. It will identify inner foreground phases in the helper's closed
+log and distinguish outer caller error categories without raw error text.
+
+The diagnostic-only candidate now logs `[DEBUG-desktop-transport-20260922]`
+for the exact three desktop-proof payloads. `side` identifies the emitting
+layer, not the origin of the error; boundary and closed error kind distinguish
+validation, cancellation/deadline, and exchange failures. Helper records also
+include elapsed milliseconds, job-established state, and status poll count;
+the outer caller records its elapsed time and budget. No raw error text,
+commands, paths, identities, or guest output enter these new diagnostics.
+The original thrown errors, one-start/single-cleanup behavior, deadlines, and
+retry/acceptance policy are preserved. Frame acceptance includes both validation
+and forwarding; this label does not claim to distinguish those operations.
+
+Tests-first evidence: `5942af2a` failed the missing exact-probe start diagnostic
+while ordinary-command exclusion passed; `27b7cacd` failed the four missing
+outer error-category cases. The final seven-suite XcodeBuildMCP run passed
+103 test functions / 225 executions, zero failures or skips:
+`test_macos_2026-09-22T12-20-12-746Z_pid11259_8a9d1cfd.xcresult`.
+Tests exercise the real foreground executor and console verification catch
+using injected failures, checking preserved original errors and operation
+counts. They do not reproduce a physical VSOCK failure; the existing wire,
+coordinator, foreground-control, and real daemon exchange suites also passed.
+Read-only review found no behavioral or redaction blocker. All seven VMs are
+stopped and internal storage has 191 GiB free before the next signed comparison.
+This candidate is committed before building and is not a transport fix.

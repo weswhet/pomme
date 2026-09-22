@@ -665,6 +665,7 @@ struct PommeSecurityNormalAgent: Sendable {
 
     let response: [String: Any]
     let transportTimeout = min(request.timeout + Self.foregroundTransportGrace, remainingBudget ?? .infinity)
+    let transportStart = ContinuousClock.now
     do {
       if let desktopProofHooks {
         guard let decoded = try desktopProofHooks.execute(
@@ -678,6 +679,14 @@ struct PommeSecurityNormalAgent: Sendable {
           timeout: transportTimeout)
       }
     } catch {
+      if let payload = try? JSONValue(any: request.agentPayload()).objectValue,
+        PommeForegroundExecution.isDesktopProofPayload(payload) {
+        // No associated error text, VM identity, request, or output is logged.
+        PommeCore.log("[DEBUG-desktop-transport-20260922] side=host boundary=control stage=\(proofStage.rawValue) "
+          + "elapsedMs=\(PommeForegroundExecution.desktopElapsedMilliseconds(since: transportStart)) "
+          + "budgetMs=\(Int64(transportTimeout * 1_000)) "
+          + "errorKind=\(PommeForegroundExecution.desktopTransportErrorKind(error))")
+      }
       Self.log(
         .init(stage: proofStage, reason: .transport),
         vmName: reference.displayName)
