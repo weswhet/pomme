@@ -18,7 +18,7 @@ observations are recorded below; historical rows retain their original status.
 | macOS 27 restart after pause/resume | Open; two earlier internal-drive sequences plus ten-cycle runs with both current `a3852a5` and original `ffc41a7` hosts passed without reproducing the missing helper. |
 | Retained SIP private-PTY / pinned-authentication failures | Open historical observations; a fresh original-`ffc41a7` SIP disable/enable cycle passed without producing the failed transaction needed to test that resume sequence. |
 | TUI status projection / boot-mode warning | Fixed in `3fb1ccb`; canonical state/agent regression tests and live running, paused, resumed, and stopped display comparisons passed. Boot-mode warning cancellation preserved both running and paused sessions. |
-| Integrated test-suite concurrency hang | Test-peer thread isolation removes the observed hang in the focused stress run and three full parallel comparisons. All three full runs finish, but each reports one timeout failure; full-suite reliability remains open and no full-suite pass is claimed. |
+| Integrated test-suite concurrency hang | Test-peer thread isolation in `0291f65` removes the observed hang in the focused stress run and three full parallel comparisons. Signed Release and live execution/timeout smoke checks passed. All three full runs finish, but each reports one timeout failure; full-suite reliability remains open and no full-suite pass is claimed. |
 
 This is an observational live test. The CLI and guest images are not being
 modified during the sweep. Every failure, timeout, unexpected state, and
@@ -2261,6 +2261,31 @@ investigation after committing, signed-building, and live-checking this change.
 Read-only review found no descriptor-lifetime or one-shot-proof blocker. The
 reader's cancellation may wait for its five-second deadline; this bounded wait
 does not allow descriptor teardown while its thread can still access them.
+
+The test-harness fix and evidence were committed as `0291f65` before the
+canonical signed Release build at 18:42:48Z. Build, strict signature, exact
+entitlements, designated-requirement compatibility, archive retention, and
+atomic installation checks passed. Fresh login-shell resolution selected
+`/Users/wes/.local/bin/pomme`, reporting `0291f65`. Installed SHA-256:
+`be61ee7ac5aa30d5c22bdb2f6b7ac2cda3f69da3b8b4c8464fafcaaa1644ed4c`.
+All 104 CLI contract checks and 21 local build/install checks passed.
+
+For the required live release smoke check, the explicitly scoped internal-drive
+macOS 27 fixture `pomme-agent-ownerproof-20260922a` was verified stopped, with
+40 GB disk / 4 GB memory, before normal start at 18:43:05Z. The new signed host
+started helper PID 89541 and connected to the unchanged creation-pinned guest
+agent `011eea30…95ce42f2`. A foreground `/bin/echo` returned the expected output
+and exit zero. `/bin/sleep 5` with `--timeout 1` returned host exit 124 and
+`terminationRequested=true`. Inspection of that exact job
+`78e37a7c-6255-4e8c-83ec-80e1347afde2` subsequently returned `exited=true` and an
+exit frame with signal 15; a guest `ps -p 638` returned no matching process.
+The agent remained responsive. Graceful stop at 18:43:53Z returned
+`stopMethod=guest-stopped`; helper PID 89541 was confirmed gone, and final
+inventory showed all twelve VMs stopped without helpers on the internal drive.
+No VM was deleted or moved and no guest agent, journal, credential, or security
+state was changed. This verifies release compatibility and live process
+behavior, not a live reproduction of the host test-pool hang. The two full-suite
+timeout observations above remain open.
 
 ### Live TUI status projection mismatch
 
