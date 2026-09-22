@@ -2,6 +2,22 @@
 
 Status: complete — live macOS 27 then macOS 26 sweep finished 2026-09-22
 
+The sweep is complete, not every reported issue. Follow-up fixes and remaining
+observations are recorded below; historical rows retain their original status.
+
+## Current follow-up status
+
+| Observation | Current evidence |
+|---|---|
+| CLI discovery omissions / `agent-help` output ambiguity | Fixed in `e0f6544`; signed CLI contract and live compatibility checks passed. |
+| macOS 27 inactive Language Chooser / framebuffer replay | Guarded activation and replay-policy fixes validated; complete SIP/AMFI status workflows passed. |
+| Recovery Terminal marker recognition | Bounded prompt-punctuation and word-encoding/output-separation fixes validated; not a claim of universal OCR reliability. |
+| macOS 26 first-owner desktop readiness / cleanup | Same-job cleanup-verified retry and pinned reconnect adapter implemented. Two fresh signed-candidate SIP cycles passed; original intermittent signal delay and earlier console transport failure remain unexplained. |
+| macOS 27 creation `ownerProof` | Open; subsequent internal-drive baseline passed without a targeted fix. |
+| macOS 26 creation `verifyNormalAgent` / slow first boot | Open historical failure; subsequent internal-drive creations passed without establishing its cause. |
+| macOS 27 restart after pause/resume | Open; subsequent internal-drive sequences passed without reproducing the missing helper. |
+| Retained SIP private-PTY / pinned-authentication failures | Open historical observations; later successful security cycles do not establish their cause. |
+
 This is an observational live test. The CLI and guest images are not being
 modified during the sweep. Every failure, timeout, unexpected state, and
 environmental limitation is appended below with its command and timestamp.
@@ -1666,3 +1682,48 @@ first-owner SIP cycle passed without a captured desktop-transport timeout.
 This evidence is committed before further experiments. The original signal
 delay remains unexplained; successful comparisons are not presented as proof
 that the reconnect branch ran.
+
+### Live cleanup-adapter boundary check
+
+Read-only lifecycle tracing rejected pause/resume as reconnect evidence: those
+operations retain the runtime/coordinator and do not deliberately replace the
+authenticated session. Restart or stop/start would discard the guest job
+registry. No incidental lifecycle reconnect is claimed.
+
+A separately scoped adapter check started `...22k` normally at 14:53:01Z
+after confirming its stopped state. The signed installed helper and connected
+normal agent reported the expected creation digest. One detached `/bin/sleep 2`
+job was created and allowed to exit naturally. A same-user request through the
+existing private host-control socket invoked the production reserved cleanup
+adapter with that exact job and expected digest. It returned the canonical
+version-1 `verified-status` receipt, matching job/digest, and a correlated exit
+frame with no output. Separate wrong-digest, unknown-job, and null-marker
+requests returned the closed `rejected` state. The socket remained owner-only;
+no credential, protocol, helper, or agent configuration was changed.
+
+Native `csrutil status` still reported SIP enabled. Graceful stop began at
+14:54:29Z. This validates the actual control routing, live pinned describe/status
+path, canonical receipt, and rejection responses—not transport loss/reconnect.
+The next offline regression composes the real daemon, wire timeout, coordinator
+replacement, and cleanup adapter to close the gap between the existing separate
+daemon and mocked-coordinator tests. Test builds wait until this VM is stopped.
+
+Graceful stop completed with `guest-stopped`; public inventory confirmed all
+twelve VMs stopped with no helpers before test compilation began. The new
+tests-only integration uses two socketpairs as a relay between the production
+wire and real daemon. It delivers one signal, observes the actual successful
+daemon reply, withholds that reply, and verifies the wire's real timeout and
+coordinator connection closure. A newly authenticated connection against the
+same agent registry then runs the production pinned cleanup adapter and obtains
+the original job's exit proof. A fresh-registry variant returns `not-found` and
+is rejected. Neither replacement connection starts nor signals a process;
+all tasks and sockets are joined/closed and the bounded child is reaped.
+
+The full nine-suite XcodeBuildMCP run passed 104 test functions / 262 executions,
+zero failures or skips:
+`test_macos_2026-09-22T14-55-45-864Z_pid40021_4b8e36aa.xcresult`.
+This composes the formerly separate regression seams without a synthetic thrown
+timeout or production fault hook. It is socketpair evidence, not physical VSOCK
+fault injection or an explanation of the original live delay. Production source
+is unchanged from `e38d50a`; the new test and live protocol evidence are committed
+before refreshing the signed Release and verifying retained-pin compatibility.
