@@ -11,7 +11,7 @@ private enum PommeLogContext {
 /// Closed diagnostics deliberately cannot accept any bootstrap data or errors.
 struct PommeBootstrapDiagnostics {
     enum Operation: String, CaseIterable {
-        case hostKeyScan, sshUIDVerification, stagingDirectoryPreparation
+        case hostKeyScan, sshAuthenticationAndUIDVerification, stagingDirectoryPreparation
         case stagedAgentVerification, stagedManifestVerification
         case agentArtifactTransfer, requestManifestTransfer, installerInvocation
     }
@@ -36,6 +36,14 @@ struct PommeBootstrapDiagnostics {
 
     private(set) var stage: Stage = .started
     private var hostKeyScanReported = false
+    private var discoveryCandidateReported = false
+
+    mutating func discoveryCandidateCheckpoint() -> String? {
+        let message = checkpoint(.discoveryCandidateSelected)
+        guard !discoveryCandidateReported else { return nil }
+        discoveryCandidateReported = true
+        return message
+    }
 
     /// Discovery retries can run for minutes; report subprocess detail only
     /// for the first attempt while discovery checkpoints record eventual success.
@@ -2725,7 +2733,8 @@ struct PommeCore {
                     return String(decoding: output, as: UTF8.self)
                 }, onEvent: { event in
                     switch event {
-                    case .candidateSelected: log(diagnostics.checkpoint(.discoveryCandidateSelected))
+                    case .candidateSelected:
+                        if let message = diagnostics.discoveryCandidateCheckpoint() { log(message) }
                     case .keyscanSucceeded: log(diagnostics.checkpoint(.discoveryKeyscanSucceeded))
                     case .leaseVerified: log(diagnostics.checkpoint(.discoveryLeaseVerified))
                     }
@@ -2756,8 +2765,9 @@ struct PommeCore {
                 input: stdin, timeout: timeout, operation: operation,
                 diagnostic: bootstrapProcessDiagnostic(vmName: plan.vm.name))
         }
-        let uidBytes = try authenticatedProcess("/usr/bin/ssh", operation: .sshUIDVerification, arguments: PommeSSHBootstrap.arguments(
-            address: address, knownHosts: knownHosts, command: "/usr/bin/id -u"))
+        let uidBytes = try authenticatedProcess("/usr/bin/ssh", operation: .sshAuthenticationAndUIDVerification, arguments: PommeSSHBootstrap.arguments(
+            address: address, knownHosts: knownHosts, command: "/usr/bin/id -u"),
+            timeout: PommeSSHBootstrap.firstAuthenticationTimeout)
         guard let uid = UInt32(String(decoding: uidBytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)),
               uid >= 501 else { throw PommeSSHBootstrapError.invalid }
         log(diagnostics.checkpoint(.sshUIDVerified))
