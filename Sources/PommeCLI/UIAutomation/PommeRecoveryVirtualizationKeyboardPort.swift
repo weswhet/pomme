@@ -446,12 +446,7 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
         try await self.reproveNavigationEvent(event)
       },
       deliver: { [backend, input, timeout] in
-        switch input {
-        case .key(let key):
-          _ = try await backend.sendKey(name: Self.backendKeyName(for: key), timeout: timeout)
-        case .activateLanguageChooser:
-          _ = try await backend.click(x: 1006, y: 671, timeout: timeout)
-        }
+        try await Self.dispatchNavigationInput(input, using: backend, timeout: timeout)
       }
     )
     let coarseFrameBeforeDelivery = Self.coarseFrame(for: event.preEventFrame)
@@ -466,6 +461,25 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
       try await sleep(settleNanoseconds)
     }
     return .init(input: input, deliveredEventCount: 1)
+  }
+
+  /// The production dispatch boundary accepts only the closed navigation input.
+  /// Its backend seam permits verification of the actual guest target without
+  /// constructing a VM or introducing caller-supplied pointer coordinates.
+  static func dispatchNavigationInput(
+    _ input: PommeRecoveryNavigationInput,
+    using backend: any PommeDirectUIBackend,
+    timeout: TimeInterval
+  ) async throws {
+    switch input {
+    case .key(let key):
+      _ = try await backend.sendKey(name: backendKeyName(for: key), timeout: timeout)
+    case .activateLanguageChooser:
+      // Activate the already-selected row without pressing Continue, whose
+      // delayed navigation can outlive the post-click stable frame pair.
+      // Keep the pointer left of English so it cannot obscure the OCR proof.
+      _ = try await backend.click(x: 550, y: 343, timeout: timeout)
+    }
   }
 
   func clearRecoveryObservations() async {
