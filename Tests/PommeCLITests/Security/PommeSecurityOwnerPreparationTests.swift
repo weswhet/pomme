@@ -8,6 +8,7 @@ struct PommeSecurityOwnerPreparationTests {
     "valid", "off", "shape", "empty", "lines", "otherOwner", "nativeCommand", "nativeEvidence",
     "missingPreference", "preferenceShape", "preferenceMismatch", "missingArtifact",
     "metadataCommand", "metadataInvalid",
+    "expectedUppercase", "setupOwner", "setupOwnerUppercase", "offOwner", "offOwnerUppercase", "rootOwner",
   ])
   func autoLoginReadbackTraceBranches(mode: String) async throws {
     let fixture = OwnerPreparationFixture(existingOwner: true)
@@ -24,6 +25,12 @@ struct PommeSecurityOwnerPreparationTests {
           case "empty": output = "\n  \n"
           case "lines": output = "Automatic login user: pomme\nprivate-native-diagnostic\n"
           case "otherOwner": output = "Automatic login user: private-other-owner\n"
+          case "expectedUppercase": output = "Automatic login user: POMME\n"
+          case "setupOwner": output = "Automatic login user: _mbsetupuser\n"
+          case "setupOwnerUppercase": output = "Automatic login user: _MBSETUPUSER\n"
+          case "offOwner": output = "Automatic login user: off\n"
+          case "offOwnerUppercase": output = "Automatic login user: OFF\n"
+          case "rootOwner": output = "Automatic login user: root\n"
           case "nativeCommand": output = "private-native-diagnostic"; exitCode = 1
           case "nativeEvidence": output = "private-native-diagnostic"; truncated = true
           default: break
@@ -64,6 +71,9 @@ struct PommeSecurityOwnerPreparationTests {
     case "empty": expected = prefix + [.nativeEmptyRejected, .reconcileRejected]
     case "lines": expected = prefix + [.nativeMultipleLinesRejected, .reconcileRejected]
     case "otherOwner": expected = prefix + [.nativeOtherOwner, .reconcileRejected]
+    case "setupOwner", "setupOwnerUppercase": expected = prefix + [.nativeSetupAssistantOwner, .reconcileRejected]
+    case "offOwner", "offOwnerUppercase": expected = prefix + [.nativeOffAsOwner, .reconcileRejected]
+    case "rootOwner": expected = prefix + [.nativeRootOwner, .reconcileRejected]
     case "nativeCommand": expected = prefix + [.nativeCommandFailed, .reconcileRejected]
     case "nativeEvidence": expected = prefix + [.nativeEvidenceFailed, .reconcileRejected]
     default:
@@ -79,7 +89,7 @@ struct PommeSecurityOwnerPreparationTests {
       }
     }
     #expect(trace.withLock { $0 } == expected)
-    if mode == "valid" { #expect(failure == nil) }
+    if mode == "valid" || mode == "expectedUppercase" { #expect(failure == nil) }
     else if mode == "off" { #expect(failure == .credentialRequired) }
     else if mode == "nativeCommand" { #expect(failure == .commandFailed(.autoLogin, exitCode: 1)) }
     else if mode == "missingPreference" || mode == "metadataCommand" {
@@ -93,8 +103,10 @@ struct PommeSecurityOwnerPreparationTests {
     }
   }
 
-  @Test("Real preference recovery rejects changed post-restart native status before completion")
-  func autoLoginReadbackTraceAfterPreferenceRecovery() async throws {
+  @Test("Real preference recovery rejects changed post-restart native status before completion", arguments: [
+    "malformed", "otherOwner", "setupOwner", "offOwner", "rootOwner",
+  ])
+  func autoLoginReadbackTraceAfterPreferenceRecovery(mode: String) async throws {
     let fixture = OwnerPreparationFixture(existingOwner: true)
     fixture.autoLoginStatusOutput = "Automatic login is OFF.\n"
     fixture.miniBuddyLaunchWriteExit = 1
@@ -111,7 +123,13 @@ struct PommeSecurityOwnerPreparationTests {
       restartAndAuthenticate: {
         restartCount.withLock { $0 += 1 }
         fixture.miniBuddyLaunchWriteExit = 0
-        fixture.autoLoginStatusOutput = "private-post-restart-malformed-status\n"
+        switch mode {
+        case "otherOwner": fixture.autoLoginStatusOutput = "Automatic login user: private-other-owner\n"
+        case "setupOwner": fixture.autoLoginStatusOutput = "Automatic login user: _MBSETUPUSER\n"
+        case "offOwner": fixture.autoLoginStatusOutput = "Automatic login user: OFF\n"
+        case "rootOwner": fixture.autoLoginStatusOutput = "Automatic login user: root\n"
+        default: fixture.autoLoginStatusOutput = "private-post-restart-malformed-status\n"
+        }
       },
       verifyOwner: { try await preparation.verifyOwner(password: "opaque-owner-secret") },
       recordVerification: { _ in },
@@ -121,14 +139,23 @@ struct PommeSecurityOwnerPreparationTests {
       try await recovery.run(initialVerification: initial)
     }
     #expect(restartCount.withLock { $0 } == 1)
+    let rejection: PommeAutoLoginReadbackTrace
+    switch mode {
+    case "otherOwner": rejection = .nativeOtherOwner
+    case "setupOwner": rejection = .nativeSetupAssistantOwner
+    case "offOwner": rejection = .nativeOffAsOwner
+    case "rootOwner": rejection = .nativeRootOwner
+    default: rejection = .nativeShapeRejected
+    }
     #expect(trace.withLock { $0 } == [
       .reconcileEntered, .nativeEntered, .nativeOff, .reconcileOff,
       .nativeEntered, .nativeExpectedOwner, .preferenceEntered, .preferenceMatch,
       .artifactEntered, .artifactMetadataEntered, .artifactValid,
-      .reconcileEntered, .nativeEntered, .nativeShapeRejected, .reconcileRejected,
+      .reconcileEntered, .nativeEntered, rejection, .reconcileRejected,
     ])
     #expect(fixture.setupDone == false)
     #expect(fixture.miniBuddyLaunchPreference == nil)
+    #expect(fixture.ptyCommands.filter { $0.arguments.contains("-autologin") }.count == 1)
   }
 
   @Test("Owner evidence commands allow bounded first-boot initialization")

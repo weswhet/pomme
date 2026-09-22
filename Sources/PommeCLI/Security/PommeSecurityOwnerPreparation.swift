@@ -6,6 +6,7 @@ enum PommeAutoLoginReadbackTrace: String, CaseIterable, Sendable {
   case nativeEntered, nativeCommandFailed, nativeEvidenceFailed
   case nativeEmptyRejected, nativeMultipleLinesRejected, nativeShapeRejected
   case nativeOff, nativeExpectedOwner, nativeOtherOwner
+  case nativeSetupAssistantOwner, nativeOffAsOwner, nativeRootOwner
   case preferenceEntered, preferenceCommandFailed, preferenceEvidenceFailed
   case preferenceShapeRejected, preferenceMatch, preferenceMismatch
   case artifactEntered, artifactProbeCommandFailed, artifactProbeEvidenceFailed, artifactAbsent
@@ -2176,7 +2177,16 @@ struct PommeSecurityOwnerPreparation: Sendable {
       throw PommeSecurityOwnerPreparationError.autoLoginVerificationFailed
     }
     let username = String(lowercased[range])
-    autoLoginTrace(username.caseInsensitiveCompare(identity.username) == .orderedSame ? .nativeExpectedOwner : .nativeOtherOwner)
+    if username.caseInsensitiveCompare(identity.username) == .orderedSame {
+      autoLoginTrace(.nativeExpectedOwner)
+    } else {
+      switch username {
+      case "_mbsetupuser": autoLoginTrace(.nativeSetupAssistantOwner)
+      case "off": autoLoginTrace(.nativeOffAsOwner)
+      case "root": autoLoginTrace(.nativeRootOwner)
+      default: autoLoginTrace(.nativeOtherOwner)
+      }
+    }
     return .enabled(username: username)
   }
 

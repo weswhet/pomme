@@ -2355,6 +2355,38 @@ boot boundary; no allowance for an arbitrary other owner or speculative retry
 is justified. The original cleanup-signal delay remains open, and both temporary
 diagnostic families remain until their investigations can be closed safely.
 
+The next host-only diagnostic refinement separates three fixed account-like
+values from generic `nativeOtherOwner`: the stock Setup Assistant record,
+literal `off`, and `root`. Expected identity is compared first; this changes
+only the enum label, not parsing, the returned enabled/disabled state, owner
+validation, retries, deadlines, or mutation policy. All three remain rejected
+when they are not the expected owner. This distinguishes temporary Setup
+Assistant ownership from an account-shaped OFF status or another account,
+without logging arbitrary account values. Uppercase/case-folding tests and
+five real preference-recovery-adapter rejection cases require the original
+failure, exactly one restart, no completion, and no second native setter.
+
+Before the next fresh comparison, internal space was 42 GiB. The completed
+`pomme-agent-childreap-20260922a` validation fixture was revalidated stopped with
+no helper, original UUID `96164ee2-e102-4220-9c5c-f56e951c2a32`, final-state
+receipt in its framework provisioning journal, and no security workflow.
+Its successful foreground/detached reaping results are recorded below.
+Public deletion at 23:43:26Z removed that exact 31 GiB disk permanently; it is
+not recoverable through this operation. The signed archive remains present
+with verified digest `34d6d84f0f0a7b1ca9e5b9fa4afe71a115ad1366f2d27620ea235eaca30403e9`.
+Eleven remaining VMs are stopped/internal and 73 GiB is free. Both recent
+readback/signal failure fixtures and original comparison baselines remain intact.
+
+Read-only review found no behavior/security change in the classification
+refinement. All 21 installer regressions passed. The focused owner/workflow
+suites passed 105 functions / 1,500 invocations over ten repetitions:
+`test_macos_2026-09-22T23-44-11-118Z_pid82456_cea65d5e.xcresult`.
+The full isolated suite passed 1,194 functions / 1,671 invocations, with no
+failures or skips:
+`test_macos_2026-09-22T23-45-35-442Z_pid83674_5f56d4a5.xcresult`.
+The four pre-existing PommeCore warnings are unchanged. Source, tests, and
+evidence are committed before the next canonical signed Release build.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
