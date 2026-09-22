@@ -351,14 +351,14 @@ struct PommeProvisioningV2CoreIntegrationTests {
             do {
                 _ = try PommeCore.runBootstrapProcess(executable, arguments: arguments,
                     environment: ["PRIVATE": "environment-canary"], timeout: timeout,
-                    operation: .sshUIDVerification, diagnostic: { messages.append($0) })
+                    operation: .sshAuthenticationAndUIDVerification, diagnostic: { messages.append($0) })
                 Issue.record("Expected subprocess failure")
             } catch {
                 #expect(error is PommeSSHBootstrapError)
             }
             #expect(messages == [
-                "bootstrap process operation=sshUIDVerification outcome=started timeoutSeconds=\(timeout)",
-                "bootstrap process operation=sshUIDVerification outcome=\(outcome) timeoutSeconds=\(timeout)",
+                "bootstrap process operation=sshAuthenticationAndUIDVerification outcome=started timeoutSeconds=\(timeout)",
+                "bootstrap process operation=sshAuthenticationAndUIDVerification outcome=\(outcome) timeoutSeconds=\(timeout)",
             ])
             #expect(!messages.joined().contains("canary"))
         }
@@ -366,7 +366,7 @@ struct PommeProvisioningV2CoreIntegrationTests {
 
     @Test func bootstrapDiagnosticVocabularyIsClosed() {
         #expect(Set(PommeBootstrapDiagnostics.Operation.allCases.map(\.rawValue)) == [
-            "hostKeyScan", "sshUIDVerification", "stagingDirectoryPreparation",
+            "hostKeyScan", "sshAuthenticationAndUIDVerification", "stagingDirectoryPreparation",
             "stagedAgentVerification", "stagedManifestVerification",
             "agentArtifactTransfer", "requestManifestTransfer", "installerInvocation",
         ])

@@ -3,6 +3,29 @@ import Testing
 
 @Suite("Bootstrap diagnostic redaction")
 struct PommeBootstrapDiagnosticsTests {
+    @Test func candidateCheckpointIsRenderedOncePerAttemptButAlwaysUpdatesFailureStage() {
+        for _ in 0..<2 {
+            var diagnostics = PommeBootstrapDiagnostics()
+            #expect(diagnostics.discoveryCandidateCheckpoint() == "bootstrap checkpoint stage=discoveryCandidateSelected")
+            #expect(diagnostics.checkpoint(.discoveryKeyscanSucceeded) == "bootstrap checkpoint stage=discoveryKeyscanSucceeded")
+            #expect(diagnostics.discoveryCandidateCheckpoint() == nil)
+            #expect(diagnostics.failure() == "bootstrap failed stage=discoveryCandidateSelected")
+            #expect(diagnostics.checkpoint(.discoveryLeaseVerified) == "bootstrap checkpoint stage=discoveryLeaseVerified")
+        }
+    }
+
+    @Test func firstAuthenticationHasExtendedBoundedDeadline() throws {
+        #expect(PommeSSHBootstrap.firstAuthenticationTimeout == 180)
+        var messages: [String] = []
+        _ = try PommeCore.runBootstrapProcess("/usr/bin/true", arguments: [],
+            timeout: PommeSSHBootstrap.firstAuthenticationTimeout,
+            operation: .sshAuthenticationAndUIDVerification, diagnostic: { messages.append($0) })
+        #expect(messages == [
+            "bootstrap process operation=sshAuthenticationAndUIDVerification outcome=started timeoutSeconds=180.0",
+            "bootstrap process operation=sshAuthenticationAndUIDVerification outcome=succeeded timeoutSeconds=180.0",
+        ])
+    }
+
     @Test func everyDiagnosticUsesOnlyClosedVocabulary() {
         let allowed = Set([
             "started", "journalValidated", "ownerReferenceVerified", "dispatchMarkerVerified",

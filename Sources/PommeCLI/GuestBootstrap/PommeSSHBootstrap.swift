@@ -19,6 +19,10 @@ enum PommeSSHBootstrap {
     /// Framework account provisioning and the first desktop boot can precede SSH readiness.
     static let firstBootReadinessTimeout: TimeInterval = 600
 
+    /// The first authenticated session can wait for first-boot account services.
+    /// Allow one longer attempt without repeating password authentication.
+    static let firstAuthenticationTimeout: TimeInterval = 180
+
     enum DiscoveryEvent: CaseIterable {
         case candidateSelected, keyscanSucceeded, leaseVerified
     }
