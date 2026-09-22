@@ -62,13 +62,75 @@ struct PommeSecurityDesktopCleanupTests {
     }
   }
 
-  private static func awaitPin(_ coordinator: PommeAgentVSOCKCoordinator) async throws -> PommeAuthenticatedAgentSession {
-    let deadline = ContinuousClock.now.advanced(by: .seconds(2))
-    while ContinuousClock.now < deadline {
-      if let pin = try? coordinator.captureAuthenticatedSession(as: .normal) { return pin }
-      try await Task.sleep(for: .milliseconds(1))
+  @Test("Final delayed pin poll observes a concretely authenticated session")
+  func delayedFinalPinPoll() async throws {
+    let transport = Transport()
+    let coordinator = PommeAgentVSOCKCoordinator(transport: transport, secretProvider: { _ in Self.digest })
+    defer { coordinator.teardown() }
+    try coordinator.attachNormal()
+    let connection = Connection()
+    let instant = Mutex(ContinuousClock.now)
+    let sleeps = Mutex(0)
+    let pin = try await Self.awaitPin(coordinator, now: { instant.withLock { $0 } }, sleep: {
+      sleeps.withLock { $0 += 1 }
+      transport.connect(connection)
+      // Wait for actual coordinator publication, not merely the fake peer's
+      // authenticate response. The virtual polling time stays frozen here.
+      let admissionDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+      while (try? coordinator.captureAuthenticatedSession(as: .normal)) == nil,
+            ContinuousClock.now < admissionDeadline {
+        try Task.checkCancellation()
+        await Task.yield()
+      }
+      _ = try #require(try? coordinator.captureAuthenticatedSession(as: .normal))
+      instant.withLock { $0 = $0.advanced(by: .seconds(3)) }
+    })
+    let response = await PommeSecurityDesktopCleanup.perform(operation: "process.status", payload: Self.payload) { pin }
+    #expect(PommeSecurityDesktopCleanup.completion(response, jobID: Self.job, digest: Self.digest) == true)
+    #expect(sleeps.withLock { $0 } == 1)
+    #expect(connection.operations.withLock { $0 } == ["authenticate", "agent.describe", "process.status"])
+  }
+
+  @Test("Pin polling remains bounded and preserves sleep cancellation", arguments: [false, true])
+  func unavailableFinalPinPoll(cancelSleep: Bool) async throws {
+    let coordinator = PommeAgentVSOCKCoordinator(transport: Transport(), secretProvider: { _ in Self.digest })
+    defer { coordinator.teardown() }
+    try coordinator.attachNormal()
+    let instant = Mutex(ContinuousClock.now)
+    let sleeps = Mutex(0)
+    let polling = Task {
+      try await Self.awaitPin(coordinator, now: { instant.withLock { $0 } }, sleep: {
+        sleeps.withLock { $0 += 1 }
+        if cancelSleep { withUnsafeCurrentTask { $0?.cancel() } }
+        instant.withLock { $0 = $0.advanced(by: .seconds(3)) }
+      })
     }
-    throw RunnerError.guestAgentUnavailable
+    do {
+      _ = try await polling.value
+      Issue.record("An unauthenticated coordinator must not supply a pin")
+    } catch is CancellationError {
+      #expect(cancelSleep)
+    } catch RunnerError.guestAgentUnavailable {
+      #expect(!cancelSleep)
+    }
+    #expect(sleeps.withLock { $0 } == 1)
+    #expect(!coordinator.isAuthenticated(as: .normal))
+  }
+
+  private static func awaitPin(
+    _ coordinator: PommeAgentVSOCKCoordinator,
+    now: @Sendable () -> ContinuousClock.Instant = { .now },
+    sleep: @Sendable () async throws -> Void = { try await Task.sleep(for: .milliseconds(1)) }
+  ) async throws -> PommeAuthenticatedAgentSession {
+    let deadline = now().advanced(by: .seconds(2))
+    while true {
+      try Task.checkCancellation()
+      // This is a fixture polling guard, not a production security deadline.
+      // After a delayed resume, observe readiness once before timing out.
+      if let pin = try? coordinator.captureAuthenticatedSession(as: .normal) { return pin }
+      guard now() < deadline else { throw RunnerError.guestAgentUnavailable }
+      try await sleep()
+    }
   }
 
   private final class Transport: PommeAgentVSOCKTransport, Sendable {
