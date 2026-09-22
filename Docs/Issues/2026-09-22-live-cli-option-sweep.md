@@ -447,161 +447,6 @@ add captures, record Terminal screenshots or OCR text, print markers or image
 digests, or alter configured input delays, attempt limits, and strict proof
 acceptance.
 
-The temporary diagnostic regressions first failed twice on the unchanged
-implementation (35 tests passed). The final focused foreground-execution and
-normal-agent suites passed all 38 functions, 44 executions, without failures
-or skips: `test_macos_2026-09-22T10-39-33-531Z_pid91073_63183827.xcresult`.
-Coverage uses the actual generated Aqua payload, rejects opt-in mismatches and
-private/malformed logging values, and proves that a signal-response exit frame
-does not convert a timeout into success. Total monotonic elapsed time includes
-unmeasured polling sleeps and processing; separate start, EOF, status, and
-signal timings measure the exchanges. Thrown transport failures can still
-return no timing envelope. This diagnostic candidate is committed before its
-signed Release build and fresh-owner live test; it is not a fix.
-
-Diagnostic commit `227b0d1` passed read-only review, then the canonical signed
-Release build and install completed successfully. Signature, exact entitlement,
-designated-requirement compatibility, and signed-artifact archive checks passed.
-The installed SHA-256 is
-`5d1a82a0b7719183c6e6f6d761f7e8088780ef4817ea6b99c1202e8092edfcd5`.
-A fresh login shell resolves `/Users/wes/.local/bin/pomme`, reporting that
-commit, and all 104 CLI contract checks passed. Existing PommeCore warnings
-remain unrelated to this diagnostic. Dry-run preflight at 10:42:24Z confirmed
-the same internal macOS 26.6.2/25G83 restore image and 4 GB/40 GB resources for
-new disposable `pomme-agent-owner26-20260922c`; no retained VM is reset or
-repinned to obtain another fresh-owner run.
-
-Fresh creation began at 10:42:42Z and passed restore (100% at 10:46:24Z),
-Recovery navigation, marker proof on attempt 2 at 10:47:54Z, installation,
-and normal-agent verification. It exited 0 and returned stopped state,
-independently confirmed by public status. The new internal-drive VM UUID is
-`eef17d8a-3cc8-4462-ac9b-88f18aff7795`, startup-volume group
-`a32f15b1-d2f2-47bd-a8f0-78dbe2a5dbbd`, and plan digest
-`cef6ce048104936b1c276665a23cbf5251617ea8907e2c8a6b7200aacd3fa4f1`.
-It pins the diagnostic build's `5d1a82a0…2edfcd5` agent and retains the
-comparison's exact 4 GB/40 GB resources. The first-owner SIP-disable run follows
-without intervening guest probes or account changes.
-
-The first-owner SIP-disable diagnostic run began at 10:49:02Z. Fresh owner
-creation/verification and native Setup Assistant handoff passed. Initial owner
-completion returned status 1 at 10:50:24Z, invoking the unchanged single boot
-retry; owner completion then passed at 10:51:18Z and Setup Assistant completion
-at 10:51:22Z. Post-reboot desktop verification began at 10:51:39Z.
-
-Seven Aqua requests completed successfully (approximately 1.785 s, 0.073 s,
-0.039 s, 0.030 s, 0.056 s, 0.032 s, and 2.653 s), but the eighth reproduced
-`normal-agent-aqua-timedOut` at 10:52:24Z. Its closed diagnostics were:
-
-| Measurement | Value |
-|---|---:|
-| Total foreground duration, including signal exchange | 16,410,068 µs |
-| Start exchange | 709,345 µs |
-| Stdin EOF exchange | 162,246 µs |
-| Status exchanges | 72 |
-| Total status-exchange duration | 12,926,756 µs |
-| Maximum status-exchange duration | 1,523,248 µs |
-| Signal exchange | 548,735 µs |
-| Positive spawn PID | true |
-| Last status exited | false |
-| Exit frame before signal / in signal response | false / false |
-
-The workflow exited 1 before SIP mutation, retained its transaction, and
-restored stopped state confirmed by public status. This repeats the exact
-fresh-owner Aqua failure on the signed diagnostic build. It rules out a single
-stuck transport exchange or spending the entire deadline before process start;
-it does not yet distinguish a genuinely running child from the guest's hidden
-wait-status errors. The normal desktop was not verified, and no fix is claimed.
-
-The next bounded diagnostic adds exact-Aqua-only closed guest wait outcomes
-and records the host's existing console/Aqua/desktop observation after each
-completed loop. It preserves the current waitpid calls, EINTR retry, signal
-calls, deadlines, and proof acceptance. This is needed because the existing
-signal receipt reports group-or-process success, which does not prove the
-exact child PID was still alive. No extra signal, sample, guest command, or
-credential access is part of this candidate. The four retained test VMs are
-all stopped, and internal storage has about 272 GiB available before another
-fresh diagnostic comparison.
-
-The additive wait-diagnostic snapshot test failed before implementation. The
-final four focused suites (foreground execution, normal-agent decoding,
-persistent agent, and real daemon process exchange) passed all 63 functions,
-82 executions, with no failures or skips:
-`test_macos_2026-09-22T10-59-00-870Z_pid94554_cc6382d3.xcresult`.
-Tests cover all wait classifications, exact-payload exclusions, malformed and
-missing old-agent fields, and a real harmless `/usr/bin/true` process that
-receives no diagnostic metadata. They do not execute an Aqua probe on the host.
-The closed outcome codes are 0 running, 1 reaped, 2 interrupted, 3 no-child,
-and 4 other-error; counters accumulate per guest job and the host copies the
-latest snapshot without summing it. All temporary instrumentation remains
-explicitly diagnostic, pending signed-build live reproduction.
-
-Candidate `b35bbdc` was committed, then built and installed through the
-canonical signed Release workflow. All signature/entitlement/requirement and
-artifact-archive checks passed; the installed digest is
-`0dd4236141483d68f6b63fe39cfdf27a2a5b1b7074d0bc19fc756d9ad21fa127`.
-Fresh login-shell resolution and version matched, and all 104 CLI contract
-checks passed. The build reports existing PommeCore and guest MDM Keychain
-deprecation warnings, not changes to those paths. Read-only review confirmed
-unchanged wait/signal/proof behavior. Per-loop closed proof observations are
-intentionally retained to identify why successful Aqua probes did not yield
-stable desktop proof. Counters are the last completed status-response snapshot:
-the daemon can perform another wait during stream-event collection after
-encoding that response, so they are not a complete final syscall census.
-Preflight at 11:01:51Z confirmed the same internal restore image, experimental
-profile, and explicit 4 GB/40 GB resources for `pomme-agent-owner26-20260922d`.
-
-Fresh creation began at 11:02:11Z and completed successfully: restore reached
-100% at 11:05:52Z, marker proof passed on attempt 2 at 11:07:23Z, and normal
-agent verification passed before return to stopped. Public status independently
-confirmed stopped with no helper. The new internal VM UUID is
-`5f07b9ad-41c7-4be7-8a9e-97dc644db000`, startup-volume group
-`d2b1f757-1938-4b1f-b437-2b166ab459e5`, and immutable plan digest
-`1b4a96afed065f5d372a3ee567f30cfb5d729b2383fc89da0b6e14b72a6aa8bd`.
-Its pinned agent is the signed `0dd42361…1fa127` diagnostic build. The original
-first-owner SIP-disable command follows without additional guest probes.
-
-The first-owner run began at 11:08:30Z. Initial owner completion status 1
-triggered the unchanged boot retry at 11:09:53Z; completion then passed at
-11:10:53Z and Setup Assistant completion at 11:10:56Z. Desktop verification
-began at 11:11:12Z. Early completed Aqua probes took approximately 31–161 ms;
-the first did not satisfy Aqua proof, then subsequent Aqua proofs passed while
-the existing desktop-process predicate remained false. A later probe took
-4.154 s. At 11:12:00Z a probe completed in 14.141 s, just below the 15-second
-limit: start 2.112 s, EOF 0.278 s, 31 status exchanges totaling 10.830 s,
-maximum 1.440 s. Its last guest snapshot showed 62 running waits, one reap,
-zero EINTR/ECHILD/other-error waits, and last outcome reaped. Desktop proof
-then matched at 11:12:05Z. The next Aqua request completed in 7.386 s with
-102 running waits, one reap, and no wait errors. The combined desktop proof
-passed at 11:12:18Z and the workflow entered Recovery.
-
-This fresh run did not reproduce the timeout. It proves that a nearly
-deadline-length successful probe can involve a genuinely running child, not
-a hidden wait error. It does not classify the earlier failing probe on the
-other VM or establish a fix. The temporary per-loop observation reuses the
-existing formatter's phrase `deadline expired`; those tagged lines above are
-observations, not additional failures. The actual 120-second desktop deadline
-did not expire. SIP restoration will follow the pending transaction.
-
-SIP disable completed successfully after normal-boot verification at 11:15:31Z,
-returning all normal-boot/runtime/enforcement/final-state verification fields
-true and `configuredDisabled=true`. Public status confirmed stopped with no
-helper before the matching SIP-enable restoration was started. Recovery marker
-proof in the successful disable workflow passed on attempt 2 at 11:14:21Z.
-This is diagnostic-build live compatibility and a slow successful first-owner
-run, not closure of the intermittent Aqua defect.
-
-SIP enable started at 11:15:50Z and completed successfully after normal-boot
-verification at 11:19:38Z. Recovery marker proof passed on attempt 1 at
-11:18:36Z. The final result reported `configuredDisabled=false` and all
-normal-boot/runtime/enforcement/final-state verification fields true, restoring
-the original SIP-enabled/stopped state. A separate inventory confirmed all
-five internal-drive test VMs stopped with no helper. The failing `...22c` VM
-retains its unmodified pre-mutation SIP transaction; the successful `...22d`
-comparison retains its own exact agent pin. No guest credentials, immutable
-journals, or pinned agents were manually replaced, and no external drive was
-used. Temporary closed diagnostics remain for the unresolved Aqua investigation;
-the next step must preserve fail-closed behavior when process cleanup is not
-proven, rather than treating a signal acknowledgement as termination proof.
 Consecutive-frame equality can suggest an unchanged observation, not prove that
 the capture is stale. Diagnostic regression coverage and signed live validation
 will be recorded before claiming that this instrumentation is useful.
@@ -1074,3 +919,215 @@ wait error. Read-only review found no broad competing reaper in this repository;
 inherited SIGCHLD disposition remains an untested external possibility. This
 is a diagnostic limitation, not a diagnosed cause or reason to change proof
 acceptance.
+
+The temporary diagnostic regressions first failed twice on the unchanged
+implementation (35 tests passed). The final focused foreground-execution and
+normal-agent suites passed all 38 functions, 44 executions, without failures
+or skips: `test_macos_2026-09-22T10-39-33-531Z_pid91073_63183827.xcresult`.
+Coverage uses the actual generated Aqua payload, rejects opt-in mismatches and
+private/malformed logging values, and proves that a signal-response exit frame
+does not convert a timeout into success. Total monotonic elapsed time includes
+unmeasured polling sleeps and processing; separate start, EOF, status, and
+signal timings measure the exchanges. Thrown transport failures can still
+return no timing envelope. This diagnostic candidate is committed before its
+signed Release build and fresh-owner live test; it is not a fix.
+
+Diagnostic commit `227b0d1` passed read-only review, then the canonical signed
+Release build and install completed successfully. Signature, exact entitlement,
+designated-requirement compatibility, and signed-artifact archive checks passed.
+The installed SHA-256 is
+`5d1a82a0b7719183c6e6f6d761f7e8088780ef4817ea6b99c1202e8092edfcd5`.
+A fresh login shell resolves `/Users/wes/.local/bin/pomme`, reporting that
+commit, and all 104 CLI contract checks passed. Existing PommeCore warnings
+remain unrelated to this diagnostic. Dry-run preflight at 10:42:24Z confirmed
+the same internal macOS 26.6.2/25G83 restore image and 4 GB/40 GB resources for
+new disposable `pomme-agent-owner26-20260922c`; no retained VM is reset or
+repinned to obtain another fresh-owner run.
+
+Fresh creation began at 10:42:42Z and passed restore (100% at 10:46:24Z),
+Recovery navigation, marker proof on attempt 2 at 10:47:54Z, installation,
+and normal-agent verification. It exited 0 and returned stopped state,
+independently confirmed by public status. The new internal-drive VM UUID is
+`eef17d8a-3cc8-4462-ac9b-88f18aff7795`, startup-volume group
+`a32f15b1-d2f2-47bd-a8f0-78dbe2a5dbbd`, and plan digest
+`cef6ce048104936b1c276665a23cbf5251617ea8907e2c8a6b7200aacd3fa4f1`.
+It pins the diagnostic build's `5d1a82a0…2edfcd5` agent and retains the
+comparison's exact 4 GB/40 GB resources. The first-owner SIP-disable run follows
+without intervening guest probes or account changes.
+
+The first-owner SIP-disable diagnostic run began at 10:49:02Z. Fresh owner
+creation/verification and native Setup Assistant handoff passed. Initial owner
+completion returned status 1 at 10:50:24Z, invoking the unchanged single boot
+retry; owner completion then passed at 10:51:18Z and Setup Assistant completion
+at 10:51:22Z. Post-reboot desktop verification began at 10:51:39Z.
+
+Seven Aqua requests completed successfully (approximately 1.785 s, 0.073 s,
+0.039 s, 0.030 s, 0.056 s, 0.032 s, and 2.653 s), but the eighth reproduced
+`normal-agent-aqua-timedOut` at 10:52:24Z. Its closed diagnostics were:
+
+| Measurement | Value |
+|---|---:|
+| Total foreground duration, including signal exchange | 16,410,068 µs |
+| Start exchange | 709,345 µs |
+| Stdin EOF exchange | 162,246 µs |
+| Status exchanges | 72 |
+| Total status-exchange duration | 12,926,756 µs |
+| Maximum status-exchange duration | 1,523,248 µs |
+| Signal exchange | 548,735 µs |
+| Positive spawn PID | true |
+| Last status exited | false |
+| Exit frame before signal / in signal response | false / false |
+
+The workflow exited 1 before SIP mutation, retained its transaction, and
+restored stopped state confirmed by public status. This repeats the exact
+fresh-owner Aqua failure on the signed diagnostic build. It rules out a single
+stuck transport exchange or spending the entire deadline before process start;
+it does not yet distinguish a genuinely running child from the guest's hidden
+wait-status errors. The normal desktop was not verified, and no fix is claimed.
+
+The next bounded diagnostic adds exact-Aqua-only closed guest wait outcomes
+and records the host's existing console/Aqua/desktop observation after each
+completed loop. It preserves the current waitpid calls, EINTR retry, signal
+calls, deadlines, and proof acceptance. This is needed because the existing
+signal receipt reports group-or-process success, which does not prove the
+exact child PID was still alive. No extra signal, sample, guest command, or
+credential access is part of this candidate. The four retained test VMs are
+all stopped, and internal storage has about 272 GiB available before another
+fresh diagnostic comparison.
+
+The additive wait-diagnostic snapshot test failed before implementation. The
+final four focused suites (foreground execution, normal-agent decoding,
+persistent agent, and real daemon process exchange) passed all 63 functions,
+82 executions, with no failures or skips:
+`test_macos_2026-09-22T10-59-00-870Z_pid94554_cc6382d3.xcresult`.
+Tests cover all wait classifications, exact-payload exclusions, malformed and
+missing old-agent fields, and a real harmless `/usr/bin/true` process that
+receives no diagnostic metadata. They do not execute an Aqua probe on the host.
+The closed outcome codes are 0 running, 1 reaped, 2 interrupted, 3 no-child,
+and 4 other-error; counters accumulate per guest job and the host copies the
+latest snapshot without summing it. All temporary instrumentation remains
+explicitly diagnostic, pending signed-build live reproduction.
+
+Candidate `b35bbdc` was committed, then built and installed through the
+canonical signed Release workflow. All signature/entitlement/requirement and
+artifact-archive checks passed; the installed digest is
+`0dd4236141483d68f6b63fe39cfdf27a2a5b1b7074d0bc19fc756d9ad21fa127`.
+Fresh login-shell resolution and version matched, and all 104 CLI contract
+checks passed. The build reports existing PommeCore and guest MDM Keychain
+deprecation warnings, not changes to those paths. Read-only review confirmed
+unchanged wait/signal/proof behavior. Per-loop closed proof observations are
+intentionally retained to identify why successful Aqua probes did not yield
+stable desktop proof. Counters are the last completed status-response snapshot:
+the daemon can perform another wait during stream-event collection after
+encoding that response, so they are not a complete final syscall census.
+Preflight at 11:01:51Z confirmed the same internal restore image, experimental
+profile, and explicit 4 GB/40 GB resources for `pomme-agent-owner26-20260922d`.
+
+Fresh creation began at 11:02:11Z and completed successfully: restore reached
+100% at 11:05:52Z, marker proof passed on attempt 2 at 11:07:23Z, and normal
+agent verification passed before return to stopped. Public status independently
+confirmed stopped with no helper. The new internal VM UUID is
+`5f07b9ad-41c7-4be7-8a9e-97dc644db000`, startup-volume group
+`d2b1f757-1938-4b1f-b437-2b166ab459e5`, and immutable plan digest
+`1b4a96afed065f5d372a3ee567f30cfb5d729b2383fc89da0b6e14b72a6aa8bd`.
+Its pinned agent is the signed `0dd42361…1fa127` diagnostic build. The original
+first-owner SIP-disable command follows without additional guest probes.
+
+The first-owner run began at 11:08:30Z. Initial owner completion status 1
+triggered the unchanged boot retry at 11:09:53Z; completion then passed at
+11:10:53Z and Setup Assistant completion at 11:10:56Z. Desktop verification
+began at 11:11:12Z. Early completed Aqua probes took approximately 31–161 ms;
+the first did not satisfy Aqua proof, then subsequent Aqua proofs passed while
+the existing desktop-process predicate remained false. A later probe took
+4.154 s. At 11:12:00Z a probe completed in 14.141 s, just below the 15-second
+limit: start 2.112 s, EOF 0.278 s, 31 status exchanges totaling 10.830 s,
+maximum 1.440 s. Its last guest snapshot showed 62 running waits, one reap,
+zero EINTR/ECHILD/other-error waits, and last outcome reaped. Desktop proof
+then matched at 11:12:05Z. The next Aqua request completed in 7.386 s with
+102 running waits, one reap, and no wait errors. The combined desktop proof
+passed at 11:12:18Z and the workflow entered Recovery.
+
+This fresh run did not reproduce the timeout. It proves that a nearly
+deadline-length successful probe can involve a genuinely running child, not
+a hidden wait error. It does not classify the earlier failing probe on the
+other VM or establish a fix. The temporary per-loop observation reuses the
+existing formatter's phrase `deadline expired`; those tagged lines above are
+observations, not additional failures. The actual 120-second desktop deadline
+did not expire. SIP restoration will follow the pending transaction.
+
+SIP disable completed successfully after normal-boot verification at 11:15:31Z,
+returning all normal-boot/runtime/enforcement/final-state verification fields
+true and `configuredDisabled=true`. Public status confirmed stopped with no
+helper before the matching SIP-enable restoration was started. Recovery marker
+proof in the successful disable workflow passed on attempt 2 at 11:14:21Z.
+This is diagnostic-build live compatibility and a slow successful first-owner
+run, not closure of the intermittent Aqua defect.
+
+SIP enable started at 11:15:50Z and completed successfully after normal-boot
+verification at 11:19:38Z. Recovery marker proof passed on attempt 1 at
+11:18:36Z. The final result reported `configuredDisabled=false` and all
+normal-boot/runtime/enforcement/final-state verification fields true, restoring
+the original SIP-enabled/stopped state. A separate inventory confirmed all
+five internal-drive test VMs stopped with no helper. The failing `...22c` VM
+retains its unmodified pre-mutation SIP transaction; the successful `...22d`
+comparison retains its own exact agent pin. No guest credentials, immutable
+journals, or pinned agents were manually replaced, and no external drive was
+used. Temporary closed diagnostics remain for the unresolved Aqua investigation;
+the next step must preserve fail-closed behavior when process cleanup is not
+proven, rather than treating a signal acknowledgement as termination proof.
+
+### Cleanup-verified Aqua readiness retry candidate
+
+The next candidate targets the readiness-loop failure, not a claimed diagnosis
+of the native child delay. Ranked hypotheses are: first-login load keeps a
+real Aqua probe running past its 15-second attempt deadline; an unreported
+wait-status error prevents completion; or aggregate transport work consumes
+the attempt budget. The slow successful run supports the first hypothesis,
+while the failing run excludes a single stuck exchange but cannot classify
+its child wait outcome. A retry must not conceal unknown process cleanup.
+
+The real `verifyConsoleLogin` loop now has injectable command/status, monotonic
+clock, and sleep boundaries for deterministic tests. Its first new regression
+failed on the old behavior (one failed, 28 passed): a timed-out Aqua attempt
+aborted even when the same job subsequently supplied reaped-and-drained proof
+and the desktop could become stable within the original deadline. This is a
+host readiness-loop regression, not a simulated explanation for guest delay.
+
+The candidate keeps the timed-out attempt failed and preserves the single
+SIGTERM behavior. It permits another readiness iteration only after validating
+a same-job exit frame already received by the foreground host or obtained by
+bounded status reads. Cleanup reads have at most three seconds within the
+original 120-second deadline. Signal acknowledgements, `exited` flags alone,
+foreign/malformed frames, cancellation, transport uncertainty, and insufficient
+remaining time cannot authorize another probe. A retry resets desktop stability
+and rechecks console ownership, Aqua, Dock, and absence of Setup Assistant.
+
+Review identified two important protocol details before validation: a native
+signaled exit frame carries its signal, and the status result can precede the
+reap performed while collecting stream events. A valid same-job exit frame is
+therefore the cleanup evidence even when that preceding result says running.
+No guest protocol, credential, creation pin, journal, or security predicate is
+being changed. Earlier diagnostic paragraphs were moved here from the marker
+section to restore chronological grouping without changing their evidence.
+
+The final combined XcodeBuildMCP run passed 76 test functions, 125 executions,
+with zero failures or skips across foreground execution, normal-agent proof,
+foreground control, persistent agent, and real daemon process exchanges:
+`test_macos_2026-09-22T11-35-23-544Z_pid2493_ac50f82a.xcresult`.
+New cases cover stale status plus exit, signaled exit, consumed host receipts,
+false signal acknowledgement with a valid exit, forged/foreign/malformed
+evidence, actual task cancellation, stability reset, repeated timeout attempts
+under one original deadline, and a late desktop response. A first green run
+exposed an overly strict fake-clock call-count assertion (six probes already
+provide 5.2 seconds of stability); that assertion was corrected without changing
+production behavior. All 21 local installer checks passed again. Temporary
+closed diagnostics remain for the signed live comparison; this candidate is
+not yet a live-validated fix.
+
+Final read-only review found no remaining blocker. The three-second cleanup
+budget bounds the host caller across control negotiation, connect, write, and
+read. A helper-side status exchange can continue to its existing five-second
+VSOCK budget after the caller disconnects; that uncertainty returns failure and
+never starts another probe. The candidate does not claim a three-second bound
+on guest-side request execution. Cancellation and the original deadline are
+rechecked before subsequent requests and before accepting stable proof.

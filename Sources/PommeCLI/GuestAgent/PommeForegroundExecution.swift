@@ -9,6 +9,7 @@ enum PommeForegroundExecution {
     typealias SendStream = @Sendable (UUID, PommeAgentProtocol.Stream, Data?) async throws -> [PommeAgentJobStreamFrame]
     typealias FrameHandler = @Sendable ([PommeAgentJobStreamFrame]) async throws -> Void
     static let maximumBufferedOutputBytes = 64 * 1024 // per output channel
+    static let aquaCleanupReceiptKey = "_pommeAquaCleanupReceipt"
 
     // Temporary, closed diagnostics for the September 22 Aqua timeout investigation.
     static let aquaDebugKey = "_pommeDebugAqua20260922"
@@ -16,6 +17,10 @@ enum PommeForegroundExecution {
     static let aquaDebugBooleans = ["validPositiveStartPID", "lastExited", "exitFrameBeforeSignal", "signalExitFrame"]
 
     static func isAquaDebugPayload(_ payload: [String: JSONValue]) -> Bool {
+        isAquaProofPayload(payload)
+    }
+
+    static func isAquaProofPayload(_ payload: [String: JSONValue]) -> Bool {
         guard Set(payload.keys).isSubset(of: ["path", "arguments", "timeout", "detached"]),
               payload["path"] == .string("/bin/sh"),
               payload["detached"] == nil || payload["detached"] == .bool(false),
@@ -88,6 +93,7 @@ enum PommeForegroundExecution {
         onFrames: FrameHandler? = nil
     ) async throws -> PommeAgentCorrelatedResult {
         guard var startPayload = payload.objectValue else { throw Error.invalidPayload }
+        let isAquaProof = isAquaProofPayload(startPayload)
         var aquaTiming: AquaTiming? = isAquaDebugPayload(startPayload) ? AquaTiming() : nil
         guard startPayload["detached"] != .bool(true) else { throw Error.detachedPayload }
         guard startPayload["pty"] != .bool(true) else { throw Error.unsupportedPTY }
@@ -165,6 +171,7 @@ enum PommeForegroundExecution {
             // No automatic replay, replacement process, or reboot. A failed
             // signal is retained as uncertainty, not treated as cleanup proof.
             let signalled: Bool
+            var reapedAndDrained = state.cleanupFramesValid && state.receivedExit
             aquaTiming?.values["exitFrameBeforeSignal"] = .bool(state.receivedExit)
             do {
                 let start = clock.now
@@ -175,6 +182,13 @@ enum PommeForegroundExecution {
                 aquaTiming?.values["signalExitFrame"] = .bool(signalResponse.streamFrames.contains {
                     $0.jobID == jobID && $0.frame.stream == .exit
                 })
+                if let identity = signalResponse.result.objectValue?["jobID"]?.stringValue,
+                   UUID(uuidString: identity) == jobID,
+                   state.cleanupFramesValid,
+                   Self.validCleanupFrames(signalResponse.streamFrames, jobID: jobID),
+                   signalResponse.streamFrames.filter({ $0.frame.stream == .exit }).count == 1 {
+                    reapedAndDrained = true
+                }
                 signalled = true
             } catch { signalled = false }
             if error is CancellationError || (error as? Error) == .deadlineReached {
@@ -183,7 +197,8 @@ enum PommeForegroundExecution {
                 terminal["terminationRequested"] = .bool(signalled)
                 aquaTiming?.record("totalMicros", since: executionStart)
                 if let aquaTiming { terminal[aquaDebugKey] = .object(aquaTiming.values) }
-                return state.result(requestID: started.requestID, terminal: terminal)
+                return state.result(requestID: started.requestID, terminal: terminal,
+                                    aquaCleanupVerified: isAquaProof && reapedAndDrained)
             }
             throw error
         }
@@ -213,9 +228,22 @@ enum PommeForegroundExecution {
         throw Error.invalidCompletion
     }
 
+    private static func validCleanupFrames(_ frames: [PommeAgentJobStreamFrame], jobID: UUID) -> Bool {
+        frames.allSatisfy {
+            guard $0.jobID == jobID, $0.frame.dimensions == nil else { return false }
+            switch $0.frame.stream {
+            case .stdout, .stderr: return $0.frame.data != nil && $0.frame.signal == nil
+            case .exit:
+                return $0.frame.data == nil && ($0.frame.signal.map { (1...127).contains($0) } ?? true)
+            default: return false
+            }
+        } && frames.filter { $0.frame.stream == .exit }.count <= 1
+    }
+
     private struct OutputState {
         let jobID: UUID
         var receivedExit = false
+        var cleanupFramesValid = true
         var frames: [PommeAgentJobStreamFrame] = []
         var stdoutBytes = 0
         var stderrBytes = 0
@@ -225,6 +253,7 @@ enum PommeForegroundExecution {
         mutating func accept(_ values: [PommeAgentJobStreamFrame], onFrames: FrameHandler?) async throws {
             guard values.allSatisfy({ $0.jobID == jobID }) else { throw Error.unrelatedJobFrame }
             guard values.allSatisfy({ [.stdout, .stderr, .exit].contains($0.frame.stream) }) else { throw Error.invalidCompletion }
+            cleanupFramesValid = cleanupFramesValid && PommeForegroundExecution.validCleanupFrames(values, jobID: jobID)
             if values.contains(where: { $0.frame.stream == .exit }) { receivedExit = true }
             if let onFrames {
                 if !values.isEmpty { try await onFrames(values) }
@@ -251,8 +280,15 @@ enum PommeForegroundExecution {
             }
         }
 
-        func result(requestID: UUID, terminal: [String: JSONValue]) -> PommeAgentCorrelatedResult {
+        func result(requestID: UUID, terminal: [String: JSONValue], aquaCleanupVerified: Bool = false) -> PommeAgentCorrelatedResult {
             var values = terminal
+            // A guest result can never supply this host-generated receipt.
+            values.removeValue(forKey: PommeForegroundExecution.aquaCleanupReceiptKey)
+            if aquaCleanupVerified {
+                values[PommeForegroundExecution.aquaCleanupReceiptKey] = .object([
+                    "jobID": .string(jobID.uuidString.lowercased()), "reapedAndDrained": .bool(true)
+                ])
+            }
             values["outputComplete"] = .bool(receivedExit)
             values["stdoutTruncated"] = .bool(stdoutTruncated)
             values["stderrTruncated"] = .bool(stderrTruncated)

@@ -3,6 +3,144 @@ import Testing
 
 @Suite("Security normal-agent response decoding")
 struct PommeSecurityNormalAgentTests {
+  @Test("Desktop loop retries Aqua only after same-job cleanup proof", arguments: [
+    "verified", "staleStatus", "signalExit", "receipt", "resetStable", "unknown", "exitedOnly",
+    "wrongJob", "wrongResultJob", "malformedExit", "invalidSignal", "missingJob",
+    "cancelled", "deadline", "cleanupDeadline", "transport", "repeatedTimeout", "lateDesktop"
+  ])
+  func aquaReadinessCleanupRetry(mode: String) async throws {
+    let trace = DesktopTrace(mode: mode)
+    let agent = PommeSecurityNormalAgent(
+      reference: .init(name: "test", bundle: .init(rootURL: URL(fileURLWithPath: "/tmp/pomme-test"))),
+      expectedExecutableDigest: String(repeating: "a", count: 64),
+      desktopProofHooks: .init(
+        execute: { try trace.execute($0, transportTimeout: $1) },
+        status: { try trace.status($0, timeout: $1) },
+        now: { trace.now }, sleep: { trace.now = trace.now.advanced(by: .seconds($0)) }
+      )
+    )
+    if ["verified", "staleStatus", "signalExit", "receipt", "resetStable"].contains(mode) {
+      try await agent.verifyConsoleLogin(username: "owner", uniqueID: 501)
+      #expect(trace.aquaCalls >= 6)
+      #expect(trace.consoleCalls == trace.aquaCalls)
+      #expect(trace.desktopCalls == trace.aquaCalls - 1)
+      #expect(trace.statusCalls == (mode == "receipt" ? 0 : 1))
+      let cleanedAt = try #require(trace.cleanedAt)
+      #expect(cleanedAt.duration(to: trace.now) >= .seconds(5))
+      #expect(trace.origin.duration(to: trace.now) < .seconds(120))
+    } else {
+      if mode == "lateDesktop" {
+        await #expect(throws: PommeSecurityWorkflowError.ownerLoginUnverified) {
+          try await agent.verifyConsoleLogin(username: "owner", uniqueID: 501)
+        }
+      } else {
+        await #expect(throws: PommeSecurityNormalAgentDiagnostic(stage: .aqua, reason: .timedOut)) {
+          try await agent.verifyConsoleLogin(username: "owner", uniqueID: 501)
+        }
+      }
+      if mode == "repeatedTimeout" {
+        #expect(trace.aquaCalls > 1 && trace.aquaCalls <= 7)
+        #expect(trace.origin.duration(to: trace.now) < .seconds(120))
+      } else { #expect(trace.aquaCalls == (mode == "lateDesktop" ? 2 : 1)) }
+      #expect(trace.desktopCalls == (mode == "lateDesktop" ? 1 : 0))
+      if ["cancelled", "deadline", "missingJob"].contains(mode) { #expect(trace.statusCalls == 0) }
+    }
+  }
+
+  @Test("Actual task cancellation stops Aqua cleanup and prevents a new probe")
+  func aquaReadinessTaskCancellation() async throws {
+    let trace = DesktopTrace(mode: "taskCancelled")
+    let agent = PommeSecurityNormalAgent(
+      reference: .init(name: "test", bundle: .init(rootURL: URL(fileURLWithPath: "/tmp/pomme-test"))),
+      expectedExecutableDigest: String(repeating: "a", count: 64),
+      desktopProofHooks: .init(
+        execute: { try trace.execute($0, transportTimeout: $1) },
+        status: { try trace.status($0, timeout: $1) },
+        now: { trace.now }, sleep: { trace.now = trace.now.advanced(by: .seconds($0)) }
+      )
+    )
+    let task = Task { try await agent.verifyConsoleLogin(username: "owner", uniqueID: 501) }
+    await #expect(throws: CancellationError.self) { try await task.value }
+    #expect(trace.aquaCalls == 1)
+    #expect(trace.statusCalls == 0)
+    #expect(trace.desktopCalls == 0)
+  }
+
+  private final class DesktopTrace: @unchecked Sendable {
+    let mode: String
+    let origin = ContinuousClock.now
+    var now: ContinuousClock.Instant
+    let jobID = UUID()
+    var aquaCalls = 0
+    var consoleCalls = 0
+    var desktopCalls = 0
+    var statusCalls = 0
+    var cleanedAt: ContinuousClock.Instant?
+    init(mode: String) { self.mode = mode; now = origin }
+
+    func execute(_ request: GuestCommandRequest, transportTimeout: TimeInterval) throws -> JSONValue {
+      #expect(request.timeout <= 15)
+      #expect(transportTimeout <= 120)
+      now = now.advanced(by: .milliseconds(100))
+      var output = ""
+      if request.path == "/usr/bin/stat" { consoleCalls += 1; output = "owner:501\n" }
+      else if request.path == "/bin/ps" {
+        desktopCalls += 1; output = "501 /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock\n"
+        if mode == "lateDesktop" { now = now.advanced(by: .seconds(121)) }
+      }
+      else {
+        aquaCalls += 1
+        if mode == "taskCancelled" { withUnsafeCurrentTask { $0?.cancel() } }
+        if aquaCalls == (mode == "resetStable" ? 4 : 1) || mode == "repeatedTimeout" {
+          now = now.advanced(by: .seconds(mode == "deadline" ? 121 : 15))
+          var terminal: [String: JSONValue] = [
+            "jobID": .string(jobID.uuidString), "timedOut": .bool(true),
+            "cancelled": .bool(mode == "cancelled"), "exited": .bool(false),
+            "outputComplete": .bool(false), "terminationRequested": .bool(true)
+          ]
+          if mode == "missingJob" { terminal.removeValue(forKey: "jobID") }
+          if mode == "receipt" {
+            terminal[PommeForegroundExecution.aquaCleanupReceiptKey] = .object([
+              "jobID": .string(jobID.uuidString), "reapedAndDrained": .bool(true)
+            ])
+            cleanedAt = now
+          }
+          return .object(["ok": .bool(false), "result": .object(terminal), "streamFrames": .array([])])
+        }
+      }
+      return .object(["ok": .bool(true), "result": .object([
+        "exited": .bool(true), "outputComplete": .bool(true), "exitCode": .integer(0),
+        "stdoutTruncated": .bool(false), "stderrTruncated": .bool(false)
+      ]), "streamFrames": .array(output.isEmpty ? [] : [.object([
+        "stream": .string("stdout"), "dataBase64": .string(Data(output.utf8).base64EncodedString())
+      ])])])
+    }
+
+    func status(_ id: UUID, timeout: TimeInterval) throws -> JSONValue {
+      #expect(id == jobID)
+      #expect(timeout > 0 && timeout <= 3)
+      statusCalls += 1
+      now = now.advanced(by: .milliseconds(250))
+      if mode == "cleanupDeadline" { now = now.advanced(by: .seconds(3)) }
+      if mode == "transport" { throw PommeSecurityWorkflowError.agentUnverified }
+      let frameID = mode == "wrongJob" ? UUID() : jobID
+      var terminal: [String: JSONValue] = [
+        "jobID": .string((mode == "wrongResultJob" ? UUID() : jobID).uuidString),
+        "exited": .bool(mode != "unknown" && mode != "staleStatus"), "exitCode": .integer(0)
+      ]
+      if mode == "staleStatus" { terminal.removeValue(forKey: "exitCode") }
+      var frame: [String: JSONValue] = [
+        "jobID": .string(frameID.uuidString), "requestID": .string(UUID().uuidString), "stream": .string("exit")
+      ]
+      if mode == "signalExit" { frame["signal"] = .integer(15) }
+      if mode == "invalidSignal" { frame["signal"] = .integer(128) }
+      if mode == "malformedExit" { frame["dataBase64"] = .string("bad") }
+      cleanedAt = now
+      return .object(["ok": .bool(true), "result": .object(terminal),
+                      "streamFrames": .array(["unknown", "exitedOnly"].contains(mode) ? [] : [.object(frame)])])
+    }
+  }
+
   @Test("Temporary Aqua timing summary emits only allowlisted typed scalars")
   func temporaryAquaTimingIsClosed() throws {
     let secret = "password=private /private/path job-id"
