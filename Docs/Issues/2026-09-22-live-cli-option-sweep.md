@@ -1929,6 +1929,86 @@ first-owner delay. No cleanup-signal timeout or reconnect branch was observed;
 the original signal delay and the separate sweep's private-PTY/pinned-auth
 failures remain unexplained.
 
+### Signal-response boundary diagnostic follow-up
+
+The next investigation isolates the unresolved live cleanup-signal delay.
+Existing socketpair regressions deliberately withhold a response and prove
+fail-closed timeout/reconnect behavior; they do not explain why the real guest
+response was late. Successful retained resumes likewise do not reproduce the
+fresh-owner timing. Temporary closed host/guest timing instrumentation is being
+prepared to distinguish request dispatch, guest operation/output processing,
+and response delivery without changing any deadline, retry, identity, or
+security policy. This is diagnostic work, not a claimed fix.
+
+At 22:18:43Z, capacity preparation deleted only the completed successful
+`pomme-agent-owner26-20260922d` comparison through public `delete --force`.
+Preflight verified stopped/no helper, UUID
+`5f07b9ad-41c7-4be7-8a9e-97dc644db000`, and the completed
+`sipEnable` / `restorationComplete` / `previous` journal with normal-boot proof.
+Its original `0dd4236141483d68f6b63fe39cfdf27a2a5b1b7074d0bc19fc756d9ad21fa127`
+signed agent remains in the append-only archive; the slow successful comparison
+evidence above is retained. The approximately 26 GiB VM bundle was permanently
+removed; this operation does not provide recovery of its disk. Internal free
+space increased from 43 to 69 GiB. Independent inventory confirmed eleven
+remaining VMs, all stopped, and the exact target absent. No failure fixture or
+external-drive VM was deleted.
+
+The diagnostic plan separates three observable boundaries rather than assuming
+one cause: host request written but no authenticated guest admission; guest
+admission without completed operation/output processing; or guest completion
+without host receipt. Each side records only its own monotonic elapsed time;
+cross-machine clocks are not assumed synchronized. The temporary tag is
+`[DEBUG-signal-boundary-20260922]`. Guest messages must survive reboot through
+a fixed unified-log subsystem/category, without changing the launch daemon's
+configuration. No arbitrary errors, request/job IDs, PIDs, commands, output,
+credentials, or request bodies belong in this trace.
+
+At 22:19:30Z, the public dry run for new
+`pomme-agent-signaltrace26-20260922a` resolved the same internal
+`UniversalMac_26.6.2_25G83_Restore.ipsw`, experimental Recovery route, and
+explicit 40 GB disk / 4 GB RAM with requested stopped final state. No VM was
+created by preflight. All 21 offline build/install regression checks passed;
+candidate test, signed Release, and live evidence are still pending.
+
+Read-only review found no protocol, deadline, retry, or error-semantic change.
+The guest trace is admitted only inside the authenticated persistent-normal
+handler. A perform return is not child-exit proof; stream collection is not
+host receipt; and host receipt is not outer-helper completion. Default sinks
+are temporarily enabled, so logging can perturb timing. No cross-exchange
+correlation is logged; interpretation is limited to the isolated workflow.
+The instrumentation must be removed after evidence capture.
+
+The first test invocation was rejected because the parent supplied the wrong
+test target (`pommeTests` instead of the scheme's `PommeCLITests`); no tests
+ran in that attempt. The corrected five-suite ten-repeat run compiled and
+executed 56 functions / 1,130 invocations, with ten failures confined to the
+new trace-success test's cleanup assertion:
+`test_macos_2026-09-22T22-26-14-528Z_pid64816_f63448d1.xcresult`.
+The failure is being checked against the real `process.wait` payload/result
+contract before any diagnostic Release is built. It is not counted as a
+reproduction of the original live delay.
+
+The new cleanup fixture had incorrectly used detached-only `process.wait` for
+a foreground child. It now polls the concrete typed `streamEvents` exit frame
+to establish native reap and output EOF, retaining the agent in uncancelled,
+bounded cleanup. This corrects the test contract without modifying production
+process behavior or relaxing the cleanup assertion.
+
+The corrected ten-repeat run passed all 56 functions / 1,130 invocations,
+with no failures or skips:
+`test_macos_2026-09-22T22-28-58-152Z_pid65439_6803f62b.xcresult`.
+Coverage includes authenticated signal success/failure stage ordering, no guest
+trace for unauthenticated/Recovery/non-signal requests, closed message formatting,
+host response/timeout stage ordering, existing daemon framing, foreground
+execution, and real cleanup-adapter reconnect integration.
+
+The complete isolated XcodeBuildMCP suite then passed 1,191 functions / 1,623
+invocations, zero failures or skips:
+`test_macos_2026-09-22T22-30-13-156Z_pid65807_76d68cc4.xcresult`.
+The temporary diagnostic source, tests, and evidence are committed before the
+signed Release build. These results validate trace behavior and compatibility,
+not the original live timeout's cause.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns

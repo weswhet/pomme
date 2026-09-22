@@ -1,5 +1,43 @@
 import Darwin
 import Foundation
+import OSLog
+
+/// Temporary closed-surface diagnostics. Elapsed times are local to one
+/// exchange, not a cross-host clock or a request identity.
+struct PommeSignalBoundaryTrace: Sendable {
+    enum Event: String, CaseIterable, Sendable {
+        case guestHandlerEntered, guestPerformReturned, guestPerformFailed
+        case guestStreamsEntered, guestStreamsReturned, guestStreamsFailed
+        case guestStreamWriteEntered, guestStreamWritten, guestStreamWriteFailed
+        case guestResponseWriteEntered, guestResponseWritten, guestResponseWriteFailed
+        case hostExchangeAdmitted, hostWriteCompleted, hostResponseReceived
+        case hostWriteFailed, hostResponseFailed
+    }
+
+    typealias Sink = @Sendable (Event, Double) -> Void
+    private static let logger = Logger(subsystem: "com.github.weswhet.pomme", category: "signal-boundary")
+    private let started = ContinuousClock.now
+    let sink: Sink
+
+    init(sink: @escaping Sink) { self.sink = sink }
+
+    func emit(_ event: Event) {
+        let elapsed = started.duration(to: .now).components
+        sink(event, Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15)
+    }
+
+    static func message(_ event: Event, elapsedMilliseconds: Double) -> String {
+        "[DEBUG-signal-boundary-20260922] \(event.rawValue) elapsedMs=\(elapsedMilliseconds)"
+    }
+
+    static func guestLog(_ event: Event, _ elapsed: Double) {
+        logger.notice("\(message(event, elapsedMilliseconds: elapsed), privacy: .public)")
+    }
+
+    static func hostLog(_ event: Event, _ elapsed: Double) {
+        PommeCore.log(message(event, elapsedMilliseconds: elapsed))
+    }
+}
 
 /// Guest-side entrypoint for the launchd daemon.  The host publishes the
 /// VSOCK service; this process uses the same guest-to-host connection shape as
@@ -298,6 +336,7 @@ enum PommeAgentDaemon {
         agent: PommeAgent,
         allowedOperation: String? = nil,
         terminalAuthority: Bool = false,
+        signalTraceSink: PommeSignalBoundaryTrace.Sink? = nil,
         oneShotCleanup: @escaping @Sendable () throws -> Void = {}
     ) async {
         defer { connection.resetForReconnect() }
@@ -362,12 +401,22 @@ enum PommeAgentDaemon {
                         return
                     }
                 }
+                var signalTrace: PommeSignalBoundaryTrace?
                 let response = await connection.receive(line) { request in
+                    // receive invokes this handler only after authentication
+                    // and credential/replay checks. Recovery never opts in.
+                    if request.operation == "process.signal", agent.role == .persistent,
+                       allowedOperation == nil, !terminalAuthority {
+                        signalTrace = PommeSignalBoundaryTrace(sink: signalTraceSink ?? PommeSignalBoundaryTrace.guestLog)
+                        signalTrace?.emit(.guestHandlerEntered)
+                    }
                     do {
                         let result = try await agent.performAsynchronously(request)
+                        signalTrace?.emit(.guestPerformReturned)
                         if allowedOperation != nil && !terminalAuthority { try oneShotCleanup() }
                         return result
                     } catch {
+                        signalTrace?.emit(.guestPerformFailed)
                         if allowedOperation != nil && !terminalAuthority { try? oneShotCleanup() }
                         throw error
                     }
@@ -382,20 +431,32 @@ enum PommeAgentDaemon {
                    let request,
                    let responseEnvelope = try? decodeResponse(response),
                    responseEnvelope.ok == true,
-                   let jobID = processJobID(request: request, response: responseEnvelope),
-                   let events = try? await processEvents(
-                    request: request,
-                    jobID: jobID,
-                    agent: agent
-                   ) {
-                    for event in events {
+                   let jobID = processJobID(request: request, response: responseEnvelope) {
+                    signalTrace?.emit(.guestStreamsEntered)
+                    let events = try? await processEvents(
+                        request: request,
+                        jobID: jobID,
+                        agent: agent
+                    )
+                    signalTrace?.emit(events == nil ? .guestStreamsFailed : .guestStreamsReturned)
+                    for event in events ?? [] {
                         let frame = PommeAgentJobStreamFrame(jobID: jobID, frame: event)
+                        signalTrace?.emit(.guestStreamWriteEntered)
                         guard let encoded = try? PommeAgentProtocol.encode(frame.envelope()),
                               writeAll(descriptor: descriptor, data: encoded)
-                        else { return }
+                        else {
+                            signalTrace?.emit(.guestStreamWriteFailed)
+                            return
+                        }
+                        signalTrace?.emit(.guestStreamWritten)
                     }
                 }
-                guard !response.isEmpty, writeAll(descriptor: descriptor, data: response) else { return }
+                signalTrace?.emit(.guestResponseWriteEntered)
+                guard !response.isEmpty, writeAll(descriptor: descriptor, data: response) else {
+                    signalTrace?.emit(.guestResponseWriteFailed)
+                    return
+                }
+                signalTrace?.emit(.guestResponseWritten)
                 if let request,
                    request.kind == .request,
                    request.operation != "authenticate",

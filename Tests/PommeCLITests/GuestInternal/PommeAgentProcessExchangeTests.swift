@@ -9,6 +9,92 @@ import Synchronization
 /// cross-test concurrency.
 @Suite("Pomme agent process exchanges", .serialized)
 struct PommeAgentProcessExchangeTests: Sendable {
+    @Test("Guest signal trace excludes unauthenticated, Recovery, and other operations", arguments: ["failure", "unauthenticated", "recovery", "health"])
+    func signalTraceAdmission(mode: String) async throws {
+        let trace = Mutex<[(PommeSignalBoundaryTrace.Event, Double)]>([])
+        let agent = try PommeAgent(role: mode == "recovery" ? .recovery : .persistent,
+                                   executableSHA256: String(repeating: "a", count: 64))
+        try await withDaemon(agent: agent, signalTraceSink: { event, elapsed in
+            trace.withLock { $0.append((event, elapsed)) }
+        }) { context in
+            if mode != "unauthenticated" { try await authenticate(using: context.wire) }
+            let response = try await exchange(.request(
+                operation: mode == "health" ? "agent.health" : "process.signal",
+                payload: .object(["jobID": .string(UUID().uuidString.lowercased()), "signal": .integer(15)])
+            ), using: context.wire)
+            #expect(response.response.ok == (mode == "health"))
+        }
+        let recorded = trace.withLock { $0 }
+        let expected: [PommeSignalBoundaryTrace.Event] = mode == "failure"
+            ? [.guestHandlerEntered, .guestPerformFailed, .guestResponseWriteEntered, .guestResponseWritten] : []
+        #expect(recorded.map(\.0) == expected)
+        #expect(recorded.allSatisfy { $0.1.isFinite && $0.1 >= 0 })
+        #expect(recorded.map(\.1) == recorded.map(\.1).sorted())
+    }
+
+    @Test("Successful guest signal trace brackets perform, streams, and response")
+    func signalTraceSuccess() async throws {
+        let trace = Mutex<[PommeSignalBoundaryTrace.Event]>([])
+        let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64))
+        let started = try await agent.performAsynchronously(.request(
+            operation: "process.start",
+            payload: .object(["path": .string("/bin/sleep"), "arguments": .array([.string("60")])])
+        ))
+        let jobID = try #require(started.objectValue?["jobID"]?.stringValue)
+        do {
+            try await withDaemon(agent: agent, signalTraceSink: { event, _ in
+                trace.withLock { $0.append(event) }
+            }) { context in
+                try await authenticate(using: context.wire)
+                let signalled = try await exchange(.request(operation: "process.signal", payload: .object([
+                    "jobID": .string(jobID), "signal": .integer(Int64(SIGTERM))
+                ])), using: context.wire)
+                try #require(signalled.response.ok == true)
+            }
+        } catch {
+            do {
+                let cleaned = try await finishSignalTraceChild(agent: agent, jobID: jobID, terminate: true)
+                #expect(cleaned, "Failed trace exchange must reap and drain its child before releasing the agent")
+            } catch {
+                Issue.record(error, "Trace child cleanup failed")
+            }
+            throw error
+        }
+        let cleaned = try await finishSignalTraceChild(agent: agent, jobID: jobID, terminate: false)
+        try #require(cleaned, "Successful trace exchange must reap and drain its child before releasing the agent")
+        let recorded = trace.withLock { $0 }
+        #expect(Array(recorded.prefix(4)) == [.guestHandlerEntered, .guestPerformReturned, .guestStreamsEntered, .guestStreamsReturned])
+        #expect(Array(recorded.suffix(2)) == [.guestResponseWriteEntered, .guestResponseWritten])
+        let streamWrites = Array(recorded.dropFirst(4).dropLast(2))
+        #expect(streamWrites.count.isMultiple(of: 2))
+        for (index, event) in streamWrites.enumerated() {
+            #expect(event == (index.isMultiple(of: 2) ? .guestStreamWriteEntered : .guestStreamWritten))
+        }
+    }
+
+    private func finishSignalTraceChild(agent: PommeAgent, jobID: String, terminate: Bool) async throws -> Bool {
+        let id = try #require(UUID(uuidString: jobID))
+        // Cleanup does not inherit caller cancellation and retains the actor
+        // until a typed exit frame proves native reaping and output EOF.
+        // process.wait is deliberately not used: it only accepts detached jobs.
+        return try await Task.detached {
+            for attempt in 0..<2 {
+                if terminate || attempt > 0 {
+                    _ = try? await agent.performAsynchronously(.request(operation: "process.signal", payload: .object([
+                        "jobID": .string(jobID), "signal": .integer(Int64(SIGKILL))
+                    ])))
+                }
+                let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+                while ContinuousClock.now < deadline {
+                    let frames = try await agent.streamEvents(jobID: id, requestID: UUID())
+                    if frames.contains(where: { $0.stream == .exit }) { return true }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+            }
+            return false
+        }.value
+    }
+
     @Test("Client exchange budget begins only after delayed daemon admission")
     func delayedDaemonAdmission() async throws {
         let admitted = Mutex(false)
@@ -596,6 +682,7 @@ struct PommeAgentProcessExchangeTests: Sendable {
     private func withDaemon<R: Sendable>(
         agent suppliedAgent: PommeAgent? = nil,
         beforeServing: (@Sendable () async -> Void)? = nil,
+        signalTraceSink: PommeSignalBoundaryTrace.Sink? = nil,
         body: @Sendable (DaemonContext) async throws -> R
     ) async throws -> R {
         var sockets: [Int32] = [-1, -1]
@@ -621,7 +708,8 @@ struct PommeAgentProcessExchangeTests: Sendable {
                 descriptor: server,
                 connection: connection,
                 agent: agent,
-                allowedOperation: nil
+                allowedOperation: nil,
+                signalTraceSink: signalTraceSink
             )
         }
 

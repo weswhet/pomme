@@ -1,11 +1,13 @@
 import Darwin
 import Foundation
 import Testing
+import Synchronization
 
 @Suite("Pomme agent VSOCK wire")
 struct PommeAgentVSOCKWireTests {
     @Test("Signal exchange requires its response even after a correlated exit stream", arguments: ["response", "silent", "exitOnly"])
     func signalResponseDeadlineCharacterization(mode: String) throws {
+        let trace = Mutex<[(PommeSignalBoundaryTrace.Event, Double)]>([])
         let jobID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         let request = PommeAgentProtocol.Envelope.request(
             operation: "process.signal",
@@ -20,7 +22,9 @@ struct PommeAgentVSOCKWireTests {
         )
         let ready = DispatchSemaphore(value: 0)
         let exchangeFinished = DispatchSemaphore(value: 0)
-        try Self.withWire(peer: { fileDescriptor in
+        try Self.withWire(signalTraceSink: { event, elapsed in
+            trace.withLock { $0.append((event, elapsed)) }
+        }, peer: { fileDescriptor in
             // Queue the exit before starting the deadline, so this case does
             // not depend on scheduling the peer within a short timeout.
             if mode == "exitOnly" {
@@ -58,10 +62,27 @@ struct PommeAgentVSOCKWireTests {
                 }
             }
         }
+        let recorded = trace.withLock { $0 }
+        #expect(recorded.map(\.0) == [
+            .hostExchangeAdmitted, .hostWriteCompleted,
+            mode == "response" ? .hostResponseReceived : .hostResponseFailed
+        ])
+        #expect(recorded.allSatisfy { $0.1.isFinite && $0.1 >= 0 })
+        #expect(recorded.map(\.1) == recorded.map(\.1).sorted())
+    }
+
+    @Test("Signal boundary messages have only a closed event and elapsed time")
+    func signalTraceRedactionSurface() {
+        for event in PommeSignalBoundaryTrace.Event.allCases {
+            #expect(PommeSignalBoundaryTrace.message(event, elapsedMilliseconds: 1.25)
+                == "[DEBUG-signal-boundary-20260922] \(event.rawValue) elapsedMs=1.25")
+            #expect(event.rawValue.allSatisfy { $0.isLetter })
+        }
     }
 
     @Test("stream input returns a response without synthetic output")
     func streamInputZeroOutputAck() throws {
+        let trace = Mutex<[PommeSignalBoundaryTrace.Event]>([])
         let request = PommeAgentProtocol.Envelope(
             kind: .stream,
             requestID: try #require(UUID(uuidString: "00000000-0000-0000-0000-000000000051")),
@@ -76,7 +97,9 @@ struct PommeAgentVSOCKWireTests {
             result: .object(["accepted": .bool(true)])
         )
 
-        let delivered = try Self.withWire(peer: { fileDescriptor in
+        let delivered = try Self.withWire(signalTraceSink: { event, _ in
+            trace.withLock { $0.append(event) }
+        }, peer: { fileDescriptor in
             let received = try Self.readEnvelope(from: fileDescriptor)
             guard received == request else { throw WireTestError.unexpectedRequest }
             try Self.writeAll(try PommeAgentProtocol.encode(response), to: fileDescriptor)
@@ -90,6 +113,7 @@ struct PommeAgentVSOCKWireTests {
         let received = try PommeAgentProtocol.decode(Data(line))
         #expect(received == response)
         #expect(received.kind == .response)
+        #expect(trace.withLock { $0.isEmpty })
     }
 
     @Test("a delayed acknowledgement keeps output exchange open until response")
@@ -281,13 +305,14 @@ struct PommeAgentVSOCKWireTests {
     }
 
     private static func withWire<T>(
+        signalTraceSink: PommeSignalBoundaryTrace.Sink? = nil,
         peer operation: @escaping @Sendable (Int32) throws -> Void,
         _ body: (PommeAgentVSOCKWire) throws -> T
     ) throws -> T {
         let sockets = try makeSocketPair()
         let peer = PeerThread(fileDescriptor: sockets.peer)
         peer.start { try operation(sockets.peer) }
-        let wire = PommeAgentVSOCKWire(fileDescriptor: sockets.client)
+        let wire = PommeAgentVSOCKWire(fileDescriptor: sockets.client, signalTraceSink: signalTraceSink)
         do {
             let value = try body(wire)
             try peer.join()
