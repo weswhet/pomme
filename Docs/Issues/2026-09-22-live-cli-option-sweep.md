@@ -18,7 +18,7 @@ observations are recorded below; historical rows retain their original status.
 | macOS 27 restart after pause/resume | Open; two earlier internal-drive sequences plus ten-cycle runs with both current `a3852a5` and original `ffc41a7` hosts passed without reproducing the missing helper. |
 | Retained SIP private-PTY / pinned-authentication failures | Open historical observations; a fresh original-`ffc41a7` SIP disable/enable cycle passed without producing the failed transaction needed to test that resume sequence. |
 | TUI status projection / boot-mode warning | Fixed in `3fb1ccb`; canonical state/agent regression tests and live running, paused, resumed, and stopped display comparisons passed. Boot-mode warning cancellation preserved both running and paused sessions. |
-| Integrated test-suite concurrency hang | Test-peer thread isolation in `0291f65` removes the observed hang in the focused stress run and three full parallel comparisons. Signed Release and live execution/timeout smoke checks passed. All three full runs finish, but each reports one timeout failure; full-suite reliability remains open and no full-suite pass is claimed. |
+| Integrated test-suite concurrency hang | Test-peer thread isolation in `0291f65` removes the observed hang in the focused stress run and subsequent full parallel comparisons. Signed Release and live execution/timeout smoke checks passed. Reconnect fixture admission now has a red/green delayed-start regression, passing repeated parallel comparison, and a 1,166-function full pass; other stress-run timeout failures keep full-suite reliability open. |
 
 This is an observational live test. The CLI and guest images are not being
 modified during the sweep. Every failure, timeout, unexpected state, and
@@ -2286,6 +2286,123 @@ No VM was deleted or moved and no guest agent, journal, credential, or security
 state was changed. This verifies release compatibility and live process
 behavior, not a live reproduction of the host test-pool hang. The two full-suite
 timeout observations above remain open.
+
+### Reconnect exchange timeout under parallel test load
+
+With signed host `0291f65` installed and all twelve internal VMs stopped,
+the next investigation isolates the remaining
+`PommeAgentProcessExchangeTests.reconnectAfterDroppedSignalResponse` failure.
+No production code, timeout, or VM state was changed during these comparisons.
+Debug tests retain the private app-support environment described above.
+
+| Selection | Repetitions | Observed result | Result bundle suffix (2026-09-22) |
+|---|---:|---|---|
+| Reconnect method alone | 30 | All 30 invocations passed | `18-45-27-659Z_pid90125_e1834561` |
+| Prior six stress suites plus reconnect | 10 | All 39 functions passed | `18-45-56-273Z_pid90392_33debf93` |
+| Above plus GuestAgent / VM / Control suites | 3 | Reconnect passed; `RecoveryRuntimeAgentCoordinatorTests.retryAfterFailure` failed once | `18-47-02-183Z_pid90904_159c951c` |
+| Above plus GuestInternal / GuestFiles suites | 3 | Reconnect failed once; 366 other functions passed | `18-47-44-422Z_pid91053_eab379f9` |
+| Added GuestInternal / GuestFiles suites alone | 3 | All 139 functions passed | `18-48-17-455Z_pid91302_3665955a` |
+| Those 139 plus prior six stress suites | 3 | All 177 functions passed | `18-48-49-965Z_pid91481_b2ea1540` |
+| 367-function selection minus prior six stress suites | 3 | All 329 functions passed | `18-49-24-550Z_pid91733_32982d4c` |
+| 329-function selection plus Terminal OCR suite | 3 | All 338 functions passed | `18-49-55-738Z_pid91915_cda4c3e9` |
+
+Result-bundle inspection confirms that the 367-function failure is the same
+`guestAgentTimedOut("Pomme agent exchange")`, not a different assertion. The
+229-function run's separate coordinator failure is an authenticated Recovery
+readiness timeout and remains an additional observation, not a reconnect
+failure. Removing groups changes scheduling; these passes do not establish
+which operation missed its deadline or that the underlying failure is fixed.
+
+The test currently loses operation/connection phase in its generic wire error.
+The next diagnostic step adds temporary, redacted test-local phase and
+monotonic timing: initial connection, reconnected original registry, and fresh
+registry; exchange queued/start/end and daemon task start/return. It does not
+record IDs, tokens, frames, command paths, or process output, and preserves
+existing protocol checks and deadlines. Ranked hypotheses are cooperative
+scheduling delay, a particular authentication/start/status phase exceeding its
+budget, and a connection/framing failure. No candidate fix is established yet.
+
+The initial diagnostic full run reproduced the reconnect timeout, result
+`test_macos_2026-09-22T18-52-04-244Z_pid92378_52351d57.xcresult`, but Xcode did
+not retain the test's printed trace in a console log. Diagnostics were then
+attached to the already-failing owning test rather than printed. With that
+reporting-only adjustment, one full run hit the separate private-PTY process
+timeout (`test_macos_2026-09-22T18-53-48-311Z_pid92913_62e588b4.xcresult`),
+and the next passed all 1,165 functions in 12.2 seconds
+(`test_macos_2026-09-22T18-54-28-142Z_pid93147_01d9f49f.xcresult`). This is a
+full pass for that diagnostic build/run, not evidence that the intermittent
+timeouts are fixed. No deadline or functional fix has been applied.
+
+An unchanged three-iteration full run captured the failing initial connection
+in `test_macos_2026-09-22T18-54-57-844Z_pid93297_b65ef279.xcresult`:
+
+| Event | Milliseconds after fixture start |
+|---|---:|
+| Daemon task created | 0.041 |
+| Initial authentication exchange queued | 0.218 |
+| Exchange worker started; one-second wire budget begins | 0.331 |
+| Exchange returned an error | 1,001.737 |
+| Daemon task actually started | 2,821.517 |
+| Failure cleanup shut down the client socket | 2,835.628 |
+| Daemon returned | 2,835.652 |
+
+No job had been created or signalled, and reconnection had not begun. This
+failure is attributable to starting the client deadline before the fixture's
+daemon task was scheduled, not evidence of a production reconnect defect.
+That stress run also recorded separate private-PTY, daemon admission/one-shot,
+and desktop coordinator timeouts; those are not explained or closed by this
+trace.
+
+A deterministic regression delays the actual serving task by 1.2 seconds
+while retaining the one-second wire deadline. Before an admission barrier,
+`delayedDaemonAdmission` failed both its admitted-state assertion and initial
+authentication with `guestAgentTimedOut`, result
+`test_macos_2026-09-22T18-57-43-537Z_pid93950_2ac30681.xcresult`.
+The bounded candidate awaits task entry after fixture setup and immediately
+before real daemon serving, then invoke the client body. This synchronizes
+test setup; it does not assert that the daemon has read bytes, extend protocol
+deadlines, or alter production scheduling. Temporary trace instrumentation is
+removed before committing the candidate.
+
+With the barrier and no temporary tracing, the complete process-exchange suite
+passed all ten functions / 100 invocations across ten repetitions (63.3 seconds
+including build), result
+`test_macos_2026-09-22T19-02-40-195Z_pid94638_f1542b0d.xcresult`.
+The barrier uses a mutex-protected single checked continuation and resumes it
+outside the lock; both enter-before-wait and wait-before-enter are safe.
+Cancellation is checked after admission and enters existing shutdown/join/close
+cleanup. Like the pre-existing daemon join, admission depends on serving-task
+scheduling; this is not a general cancellation or pool-starvation solution.
+The injected setup hook is bounded to 1.2 seconds.
+
+The original failing parallel selection, now including the added regression,
+passed all 368 functions / 1,341 invocations across three repetitions in
+22.4 seconds, result
+`test_macos_2026-09-22T19-04-16-626Z_pid95085_bf4ff9c4.xcresult`.
+
+The unrestricted three-iteration comparison finished in 28.9 seconds with
+all three reconnect and all three delayed-admission invocations passing,
+result `test_macos_2026-09-22T19-04-59-161Z_pid95292_6f8282c5.xcresult`.
+The first delayed-admission invocation took 7.346 seconds under parallel load,
+but its subsequent authentication still met the unchanged wire budget.
+The full run is a failure overall: 1,162 passing / four failing functions,
+4,758 passing / six failing invocations. Remaining failures were
+`PommeSecurityDesktopCleanupTests.coordinatorPinIntegration`
+(`guestAgentUnavailable`), `PommePrivatePTYRunnerTests.initialPromptGatesPrivateInput`
+(`processTimedOut`), `PommeRecoveryRuntimeSessionTests.launchPrecedesAuthentication`
+(`listenerAuthenticationTimedOut`), and
+`PommeForegroundExecutionTests.delayedOutputAndCompletion` (`exited=false`).
+These are retained observations, not silently retried or counted as passes.
+
+An unchanged unrestricted single-iteration comparison subsequently passed all
+1,166 functions in 12.4 seconds, result
+`test_macos_2026-09-22T19-05-50-474Z_pid95683_d2fd1189.xcresult`.
+Read-only review found no new continuation, descriptor-lifetime, or deadlock
+blocker. The pre-existing unbounded serving-task join already depended on
+eventual task scheduling; the new barrier moves that wait before issuing a
+timed client request without blocking another worker. The change fixes the
+captured fixture admission race, not all possible cooperative-pool starvation
+or the separate stress failures. Production daemon and transport are unchanged.
 
 ### Live TUI status projection mismatch
 
