@@ -566,8 +566,12 @@ final class PommeAgentVSOCKWire: @unchecked Sendable {
     private let fileDescriptor: Int32
     private let lock = NSLock()
     private var buffered = Data()
+    private let signalTraceSink: PommeSignalBoundaryTrace.Sink
 
-    init(fileDescriptor: Int32) { self.fileDescriptor = fileDescriptor }
+    init(fileDescriptor: Int32, signalTraceSink: PommeSignalBoundaryTrace.Sink? = nil) {
+        self.fileDescriptor = fileDescriptor
+        self.signalTraceSink = signalTraceSink ?? PommeSignalBoundaryTrace.hostLog
+    }
 
     func exchange(_ request: Data, timeout: TimeInterval) throws -> Data {
         try lock.withLock {
@@ -576,34 +580,46 @@ final class PommeAgentVSOCKWire: @unchecked Sendable {
             let requestEnvelope = try PommeAgentProtocol.decode(Data(request.dropLast()))
             guard requestEnvelope.kind == .request || requestEnvelope.kind == .stream else { throw PommeAgentProtocol.Error.invalidRequest }
             let deadline = Date().addingTimeInterval(timeout)
-            var noSigPipe: Int32 = 1
-            guard Darwin.setsockopt(fileDescriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe,
-                                    socklen_t(MemoryLayout<Int32>.size)) == 0 else { try throwPOSIX("vsock setsockopt") }
-            try writeAll(request, deadline: deadline)
-            var delivered = Data()
-            var receivedTerminalFrame = false
-            while !receivedTerminalFrame {
-                let line = try readLine(deadline: deadline)
-                let envelope = try PommeAgentProtocol.decode(line)
-                guard envelope.requestID == requestEnvelope.requestID else {
-                    throw PommeAgentProtocol.Error.invalidResponse
-                }
-                switch envelope.kind {
-                case .stream:
-                    try append(line, to: &delivered)
-                case .response:
-                    guard envelope.operation == requestEnvelope.operation else {
+            let trace = requestEnvelope.kind == .request && requestEnvelope.operation == "process.signal"
+                ? PommeSignalBoundaryTrace(sink: signalTraceSink) : nil
+            trace?.emit(.hostExchangeAdmitted)
+            var failureEvent = PommeSignalBoundaryTrace.Event.hostWriteFailed
+            do {
+                var noSigPipe: Int32 = 1
+                guard Darwin.setsockopt(fileDescriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe,
+                                        socklen_t(MemoryLayout<Int32>.size)) == 0 else { try throwPOSIX("vsock setsockopt") }
+                try writeAll(request, deadline: deadline)
+                trace?.emit(.hostWriteCompleted)
+                failureEvent = .hostResponseFailed
+                var delivered = Data()
+                var receivedTerminalFrame = false
+                while !receivedTerminalFrame {
+                    let line = try readLine(deadline: deadline)
+                    let envelope = try PommeAgentProtocol.decode(line)
+                    guard envelope.requestID == requestEnvelope.requestID else {
                         throw PommeAgentProtocol.Error.invalidResponse
                     }
-                    try append(line, to: &delivered)
-                    receivedTerminalFrame = true
-                case .request: throw PommeAgentProtocol.Error.invalidResponse
+                    switch envelope.kind {
+                    case .stream:
+                        try append(line, to: &delivered)
+                    case .response:
+                        guard envelope.operation == requestEnvelope.operation else {
+                            throw PommeAgentProtocol.Error.invalidResponse
+                        }
+                        try append(line, to: &delivered)
+                        trace?.emit(.hostResponseReceived)
+                        receivedTerminalFrame = true
+                    case .request: throw PommeAgentProtocol.Error.invalidResponse
+                    }
                 }
+                // A response is the delimiter for both ordinary requests and
+                // input-stream mutations, even when there is no output. Never
+                // guess completion from socket readiness or a scheduling delay.
+                return delivered
+            } catch {
+                trace?.emit(failureEvent)
+                throw error
             }
-            // A response is the delimiter for both ordinary requests and
-            // input-stream mutations, even when there is no output. Never
-            // guess completion from socket readiness or a scheduling delay.
-            return delivered
         }
     }
 
