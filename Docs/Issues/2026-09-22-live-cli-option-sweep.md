@@ -1435,3 +1435,21 @@ nor resolve `...22f`'s later console transport error. The old Aqua timing/wait
 instrumentation is now being removed, preserving the newer closed transport
 diagnostics for that distinct unresolved boundary. Regression testing was
 deferred until all VMs were stopped to avoid altering measured guest load.
+
+### Aqua instrumentation cleanup
+
+Removed the obsolete Aqua elapsed-time metadata, per-job wait counters, and
+per-iteration observation logging from the foreground executor, guest agent,
+and private security caller. Seven instrumentation-only tests were removed;
+the permanent payload gates, same-job cleanup receipts, timeout summaries,
+retry/deadline/stability checks, and native `waitpid`/`EINTR` behavior remain.
+The newer `[DEBUG-desktop-transport-20260922]` diagnostics and their tests
+remain temporary evidence for the unresolved console transport failure.
+
+Main and read-only review found no behavior or validation blocker; repository
+search found no old Aqua diagnostic tags/types in Sources or Tests. The final
+seven-suite XcodeBuildMCP run passed 96 functions / 199 executions with zero
+failures or skips:
+`test_macos_2026-09-22T13-02-56-186Z_pid19434_e01c9770.xcresult`.
+The cleanup is committed before building another signed Release. Its new guest
+binary still requires live validation; earlier pinned guests are not replaced.

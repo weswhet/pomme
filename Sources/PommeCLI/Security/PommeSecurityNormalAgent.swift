@@ -10,8 +10,6 @@ struct PommeSecurityDesktopProofObservation: Equatable, Sendable {
     "Normal desktop proof deadline expired: " + labels
   }
 
-  var observationDiagnostic: String { "Normal desktop proof observation: " + labels }
-
   private var labels: String {
     func label(_ matched: Bool?) -> String {
       guard let matched else { return "not-checked" }
@@ -694,9 +692,6 @@ struct PommeSecurityNormalAgent: Sendable {
     }
 
     if remainingBudget != nil { try Task.checkCancellation() }
-    if proofStage == .aqua, let summary = Self.temporaryAquaTimingSummary(response) {
-      PommeCore.log(summary, vmName: reference.displayName)
-    }
     switch Self.decodeProofResponse(response, stage: proofStage) {
     case .success(let result):
       return result
@@ -789,27 +784,6 @@ struct PommeSecurityNormalAgent: Sendable {
     .init(stage: stage, reason: .transport)
   }
 
-  /// Temporary scalar-only timing report; never interpolate untrusted keys,
-  /// strings, paths, process identities, or command output.
-  static func temporaryAquaTimingSummary(_ response: [String: Any]) -> String? {
-    guard let terminal = response["result"] as? [String: Any],
-      let fields = terminal[PommeForegroundExecution.aquaDebugKey] as? [String: Any]
-    else { return nil }
-    let numbers = PommeForegroundExecution.aquaDebugNumbers.map { key in
-      guard let raw = fields[key], let decoded = try? JSONValue(any: raw),
-        case .integer(let number) = decoded, number >= 0,
-        key != "waitLastOutcome" || PommeAquaWaitDebug.Outcome(rawValue: number) != nil
-      else { return "\(key)=unknown" }
-      return "\(key)=\(number)"
-    }
-    let booleans = PommeForegroundExecution.aquaDebugBooleans.map { key in
-      guard let raw = fields[key], let decoded = try? JSONValue(any: raw),
-        case .bool(let flag) = decoded
-      else { return "\(key)=unknown" }
-      return "\(key)=\(flag)"
-    }
-    return "[DEBUG-aqua-20260922] " + (numbers + booleans).joined(separator: " ")
-  }
 
   /// Summarizes closed process-state booleans; missing or malformed values
   /// remain unknown without exposing guest identities or output.
@@ -1038,7 +1012,6 @@ struct PommeSecurityNormalAgent: Sendable {
           let now = proofNow()
           try Task.checkCancellation()
           guard now < deadline else { throw PommeSecurityWorkflowError.ownerLoginUnverified }
-          PommeCore.log("[DEBUG-aqua-20260922] " + observation.observationDiagnostic, vmName: reference.displayName)
           if aquaSessionMatches && desktopMatches {
             if desktopStableSince == nil { desktopStableSince = now }
             if let stableSince = desktopStableSince,
@@ -1053,7 +1026,6 @@ struct PommeSecurityNormalAgent: Sendable {
           }
         } else {
           desktopStableSince = nil
-          PommeCore.log("[DEBUG-aqua-20260922] " + observation.observationDiagnostic, vmName: reference.displayName)
         }
         guard proofNow() < deadline else {
           try Task.checkCancellation()

@@ -91,66 +91,6 @@ struct PommeForegroundExecutionTests {
         #expect(calls.filter { $0 == "process.signal" }.count == (phase == "startValidation" ? 0 : 1))
     }
 
-    @Test("Temporary Aqua timing records success only for the exact probe", arguments: ["exact", "user", "environment", "stdinDataBase64", "pty", "arguments", "path"])
-    func temporaryAquaTimingOptIn(variant: String) async throws {
-        var payload = try #require(aquaPayload().objectValue)
-        if variant != "exact" { payload[variant] = variant == "pty" ? .bool(false) : .string("private-mismatch") }
-        if variant == "stdinDataBase64" { payload[variant] = .string("") }
-        let transport = ForegroundTransport(
-            start: correlated(requestID: startRequestID, result: started(), frames: []),
-            statuses: [correlated(requestID: UUID(), result: status(exited: true, exitCode: 0),
-                                 frames: [frame(jobID: jobID, stream: .exit)])]
-        )
-        let result = try await run(payload: .object(payload), transport: transport)
-        let diagnostic = result.result.objectValue?["_pommeDebugAqua20260922"]?.objectValue
-        if variant == "exact" {
-            let diagnostic = try #require(diagnostic)
-            #expect(diagnostic["statusCount"] == .integer(1))
-            #expect(diagnostic["lastExited"] == .bool(true))
-            #expect(diagnostic["exitFrameBeforeSignal"] == .bool(true))
-            #expect(diagnostic["validPositiveStartPID"] == .bool(true))
-            assertTotalTiming(diagnostic)
-            #expect(diagnostic.values.allSatisfy { value in
-                if case .integer(let count) = value { return count >= 0 }
-                if case .bool = value { return true }
-                return false
-            })
-        } else { #expect(diagnostic == nil) }
-        #expect(await transport.operationNames == ["process.start", "process.status"])
-    }
-
-    @Test("Temporary Aqua signal exit evidence never turns a timeout into success")
-    func temporaryAquaSignalExitStaysFailure() async throws {
-        let transport = ForegroundTransport(
-            start: correlated(requestID: startRequestID, result: started(), frames: []), statuses: [],
-            signalFrames: [frame(jobID: jobID, stream: .exit)]
-        )
-        let result = try await run(payload: aquaPayload(), transport: transport, timeout: 0.03)
-        let values = try #require(result.result.objectValue)
-        let diagnostic = try #require(values["_pommeDebugAqua20260922"]?.objectValue)
-        #expect(diagnostic["lastExited"] == .bool(false))
-        #expect(diagnostic["exitFrameBeforeSignal"] == .bool(false))
-        #expect(diagnostic["signalExitFrame"] == .bool(true))
-        assertTotalTiming(diagnostic)
-        #expect(values["timedOut"] == .bool(true))
-        #expect(values["outputComplete"] == .bool(false))
-        #expect(values["exited"] == .bool(false))
-        #expect(await transport.signalCalls == 1)
-        #expect(await transport.operationNames.filter { $0 == "process.start" }.count == 1)
-    }
-
-    private func assertTotalTiming(_ diagnostic: [String: JSONValue]) {
-        guard case .integer(let total)? = diagnostic["totalMicros"] else {
-            Issue.record("Expected total elapsed microseconds")
-            return
-        }
-        let measured = ["startMicros", "eofMicros", "statusTotalMicros", "signalMicros"].reduce(Int64(0)) {
-            if case .integer(let value)? = diagnostic[$1] { return $0 + value }
-            return $0
-        }
-        #expect(total >= measured)
-        #expect(total >= 0)
-    }
 
     @Test("Cleanup receipts are limited to the three exact desktop probes", arguments: ["console", "aqua", "ps"], ["exact", "user", "uid", "environment", "stdinDataBase64", "attachStdin", "pty", "cwd", "arguments", "path", "unknown"])
     func desktopCleanupGate(stage: String, variant: String) async throws {
@@ -207,35 +147,6 @@ struct PommeForegroundExecutionTests {
         #expect(await transport.signalCalls == 1)
     }
 
-    @Test("Temporary Aqua wait snapshot is closed and optional for old guests", arguments: ["valid", "absent", "malformed"])
-    func temporaryAquaWaitSnapshot(variant: String) async throws {
-        var completed = try #require(status(exited: true, exitCode: 0).objectValue)
-        if variant != "absent" {
-            completed["_pommeDebugAquaWait20260922"] = .object([
-                "waitRunningCount": variant == "valid" ? .integer(2) : .string("private-path"),
-                "waitReapedCount": .integer(1), "waitInterruptedCount": .integer(3),
-                "waitNoChildCount": .integer(0), "waitOtherErrorCount": .integer(0),
-                "waitLastOutcome": variant == "valid" ? .integer(1) : .integer(99),
-                "secret": .string("private-path")
-            ])
-        }
-        let transport = ForegroundTransport(
-            start: correlated(requestID: startRequestID, result: started(), frames: []),
-            statuses: [correlated(requestID: UUID(), result: .object(completed), frames: [frame(jobID: jobID, stream: .exit)])]
-        )
-        let result = try await run(payload: aquaPayload(), transport: transport)
-        let diagnostic = try #require(result.result.objectValue?["_pommeDebugAqua20260922"]?.objectValue)
-        #expect(result.result.objectValue?["outputComplete"] == .bool(true))
-        #expect(diagnostic["secret"] == nil)
-        if variant == "valid" {
-            #expect(diagnostic["waitRunningCount"] == .integer(2))
-            #expect(diagnostic["waitInterruptedCount"] == .integer(3))
-            #expect(diagnostic["waitLastOutcome"] == .integer(1))
-        } else {
-            #expect(diagnostic["waitRunningCount"] == nil)
-            #expect(diagnostic["waitLastOutcome"] == nil)
-        }
-    }
 
     @Test("polls until output is complete and retains stderr and exit status")
     func delayedOutputAndCompletion() async throws {
