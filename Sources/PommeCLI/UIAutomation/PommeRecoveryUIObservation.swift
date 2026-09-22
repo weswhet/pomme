@@ -25,8 +25,40 @@ struct RecoveryTerminalMarkerProofDiagnostic: Equatable, Sendable {
   }
 }
 
+/// Observation-only debug hints. Neither value is part of Terminal proof.
+struct RecoveryTerminalMarkerEvidenceDiagnostic: Equatable, Sendable {
+  let commandEcho: Bool
+  let nearMarker: Bool
+
+  func debugLine(frameChangedSincePreviousAttempt: RecoveryTerminalMarkerFrameChange) -> String {
+    "[DEBUG-marker-20260922] commandEcho=\(commandEcho), nearMarker=\(nearMarker), "
+      + "frameChangedSincePreviousAttempt=\(frameChangedSincePreviousAttempt.rawValue)"
+  }
+}
+
+enum RecoveryTerminalMarkerFrameChange: String, Equatable, Sendable {
+  case unknown
+  case changed = "true"
+  case unchanged = "false"
+}
+
 struct RecoveryUIObservation: Sendable {
   let lines: [SettingsAIOCRLine]
+
+  func terminalMarkerEvidenceDiagnostic(_ marker: String) -> RecoveryTerminalMarkerEvidenceDiagnostic {
+    // OCR may split a wrapped command or insert spaces within shell tokens.
+    // Only this fixed, non-secret capability-probe witness is recognized.
+    let compactLines = lines.map { Self.normalize($0.text).filter { !$0.isWhitespace } }
+    let commandEcho = compactLines.joined().contains("p=/sbin;u=/usr/bin;test-x$p/mount_virtiofs")
+    let compactExpected = Self.normalize(marker).filter { !$0.isWhitespace }
+    // This means only marker-shaped *nonexact* output, not an OCR diagnosis.
+    // Whole-line anchoring rejects echoed commands, quotes and substrings.
+    let nearMarker = compactLines.contains { line in
+      line != compactExpected
+        && line.range(of: "^pomme[a-z0-9]{8,12}ok$", options: .regularExpression) != nil
+    }
+    return .init(commandEcho: commandEcho, nearMarker: nearMarker)
+  }
 
   /// Requires the Options/disk captions and a picker action. Once a tile is
   /// selected, Vision can omit the low-contrast bottom power actions. Its

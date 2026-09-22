@@ -4,6 +4,56 @@ import Testing
 
 @Suite("Pomme Recovery Terminal OCR")
 struct PommeRecoveryTerminalRecognitionTests {
+    @Test("capability command echo is a whitespace-tolerant diagnostic, never proof")
+    func capabilityEchoDoesNotAuthorize() {
+        let observation = diagnosticObservation([
+            "-bash-3.2# p = /sbin ; u = /usr/bin ; test -x $p /mount_virtiofs &&",
+            "case $( $u/printf abc | $p/sha256 -q ) in ba7816bf8f01cfea*)printf 'POMME ACDEHJKMNP OK\\n';;esac",
+        ])
+        let evidence = observation.terminalMarkerEvidenceDiagnostic("POMME ACDEHJKMNP OK")
+        #expect(evidence.commandEcho)
+        #expect(evidence.nearMarker == false)
+        #expect(observation.terminalMarkerProofDiagnostic("POMME ACDEHJKMNP OK").isVerified == false)
+    }
+
+    @Test("only standalone nonexact marker-shaped output sets nearMarker")
+    func nearMarkerIsDiagnosticOnly() {
+        let expected = "POMME ACDEHJKMNP OK"
+        let wrong = diagnosticObservation(["POMME ACDEHJKMNQ OK"])
+        #expect(wrong.terminalMarkerEvidenceDiagnostic(expected).nearMarker)
+        #expect(wrong.terminalMarkerProofDiagnostic(expected).exactMarker == false)
+        #expect(wrong.terminalMarkerProofDiagnostic(expected).isVerified == false)
+        for text in [expected, "prefix POMME ACDEHJKMNQ OK", "POMME ACDEHJKMNQ OK suffix",
+                     "printf 'POMME ACDEHJKMNQ OK'", "-bash-3.2# POMME ACDEHJKMNQ OK"] {
+            #expect(diagnosticObservation([text]).terminalMarkerEvidenceDiagnostic(expected).nearMarker == false)
+        }
+        #expect(diagnosticObservation([expected]).terminalMarkerProofDiagnostic(expected).isVerified)
+    }
+
+    @Test("rendered marker diagnostics contain only fixed labels and closed values")
+    func markerDiagnosticRenderingIsClosed() {
+        let expected = "POMME ACDEHJKMNP OK"
+        let observation = diagnosticObservation([
+            "p=/sbin;u=/usr/bin;test -x $p/mount_virtiofs&&PRIVATE_SENTINEL",
+            "POMME ACDEHJKMNQ OK",
+        ])
+        let line = observation.terminalMarkerEvidenceDiagnostic(expected)
+            .debugLine(frameChangedSincePreviousAttempt: .unknown)
+        #expect(line == "[DEBUG-marker-20260922] commandEcho=true, nearMarker=true, frameChangedSincePreviousAttempt=unknown")
+        for forbidden in [expected, "ACDEHJKMNQ", "PRIVATE_SENTINEL", "/sbin", "/usr/bin", "printf"] {
+            #expect(line.contains(forbidden) == false)
+        }
+    }
+
+    private func diagnosticObservation(_ output: [String]) -> RecoveryUIObservation {
+        var text = ["Terminal", "-bash-3.2#"]
+        text += output
+        text.append("-bash-3.2#")
+        return .init(lines: text.enumerated().map { index, value in
+            .init(text: value, confidence: 1, rect: .init(x: 24, y: 18 + index * 25, width: 400, height: 18))
+        })
+    }
+
     private let displaySize = CGSize(
         width: VirtualizationPrivateHeadlessBackend.displayWidth,
         height: VirtualizationPrivateHeadlessBackend.displayHeight

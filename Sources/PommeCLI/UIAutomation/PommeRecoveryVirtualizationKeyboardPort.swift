@@ -1,6 +1,30 @@
 import CoreGraphics
 import Foundation
 
+/// Scoped to one marker verification call; no image, OCR text, or digest is
+/// rendered. An unknown comparison is not evidence of a stale or fresh frame.
+struct RecoveryTerminalMarkerFrameComparison {
+  private var previousDigest: String?
+
+  mutating func observe(digest: String?) -> RecoveryTerminalMarkerFrameChange {
+    defer { previousDigest = digest }
+    guard let previousDigest, let digest else { return .unknown }
+    return digest == previousDigest ? .unchanged : .changed
+  }
+}
+
+struct RecoveryTerminalMarkerAttempt {
+  let proof: RecoveryTerminalMarkerProofDiagnostic
+  let evidence: RecoveryTerminalMarkerEvidenceDiagnostic
+  let frameDigest: String?
+
+  init(observation: RecoveryUIObservation, marker: String, digest: () throws -> String) {
+    proof = observation.terminalMarkerProofDiagnostic(marker)
+    evidence = observation.terminalMarkerEvidenceDiagnostic(marker)
+    frameDigest = try? digest()
+  }
+}
+
 /// A framebuffer capture retains only the image long enough for one
 /// classification. The digest is used as an in-memory cache key so OCR is not
 /// repeated for identical frames; no image or OCR text leaves this module.
@@ -522,14 +546,20 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     guard PommeRecoveryTerminalCommand.isSafeMarker(marker) else {
       throw PommeRecoveryVirtualizationPortError.unsafeMarker
     }
+    // Comparison is limited to adjacent captures in this call. It does not
+    // establish freshness relative to command submission and cannot authorize.
+    var frameComparison = RecoveryTerminalMarkerFrameComparison()
     for attempt in 0..<Timing.markerAttempts {
-      let proof = try await recognizesTerminalMarker(marker)
+      let observation = try await recognizesTerminalMarker(marker)
+      let proof = observation.proof
+      let frameChange = frameComparison.observe(digest: observation.frameDigest)
       log(
         "Recovery Terminal marker proof "
           + "[attempt=\(attempt + 1), terminalWindow=\(proof.terminalWindow), "
           + "exactMarker=\(proof.exactMarker), "
           + "freshPromptAfterMarker=\(proof.freshPromptAfterMarker)]."
       )
+      log(observation.evidence.debugLine(frameChangedSincePreviousAttempt: frameChange))
       if proof.isVerified { return true }
       if attempt + 1 < Timing.markerAttempts {
         try await sleep(Timing.markerRetryNanoseconds)
@@ -546,7 +576,7 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
 
   private func recognizesTerminalMarker(
     _ marker: String
-  ) async throws -> RecoveryTerminalMarkerProofDiagnostic {
+  ) async throws -> RecoveryTerminalMarkerAttempt {
     let captureStart = PommeRecoveryPerformanceMetrics.now()
     let image: CGImage
     do {
@@ -562,7 +592,11 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
       marker: marker
     )
     let observation = RecoveryUIObservation(lines: lines)
-    return observation.terminalMarkerProofDiagnostic(marker)
+    // Hash the existing capture only. Diagnostic hashing is best effort and
+    // cannot reject a valid strict proof or request an additional capture.
+    return RecoveryTerminalMarkerAttempt(observation: observation, marker: marker) {
+      try PommeRecoveryFrameCapture(image: image).digest
+    }
   }
 
   private func sleep(_ nanoseconds: UInt64) async throws {
