@@ -407,3 +407,21 @@ root commands and aliases against both inventories, verify session/template
 leaf discovery, compare structured payloads, and exercise invalid/conflicting
 format options. All 21 local build/install regression checks also passed.
 Signed Release and live verification follow the candidate commit.
+
+Candidate `e0f6544` was committed before building and installed through
+`Scripts/build-local.sh`. XcodeBuildMCP Release/arm64 build and all exact
+signature, entitlement, designated-requirement, and archive checks passed.
+A fresh login shell resolved `/Users/wes/.local/bin/pomme`, reporting
+`pomme 0.1.0 (e0f6544)`. All 104 CLI contract checks passed against that signed
+installed binary, including the nine baseline failures.
+
+For the requested live check, the same internal-drive macOS 26 VM was started
+normally at 08:04:07Z with unchanged 4 GB/40 GB resources and its original
+creation-pinned guest agent. `sessions list --format json --debug` succeeded
+with a connected agent and an empty session list at 08:05:00Z. Host-side
+`template list --format json --debug` returned an empty inventory, and
+`agent-help --format json --debug` included both newly discoverable families.
+Guest `/usr/bin/true` completed and native `csrutil status` still reported
+SIP enabled. Graceful stop restored the VM to stopped. This validates the
+discovery fix and basic live compatibility; it does not claim to retest
+template creation or resolve the unrelated intermittent Recovery/Aqua issues.
