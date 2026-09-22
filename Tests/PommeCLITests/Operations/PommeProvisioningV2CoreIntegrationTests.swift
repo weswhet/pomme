@@ -325,6 +325,107 @@ struct PommeProvisioningV2CoreIntegrationTests {
         }
     }
 
+    @Test func bootstrapProcessDiagnosticsIdentifyOperationsWithoutPrivateData() throws {
+        for operation in PommeBootstrapDiagnostics.Operation.allCases {
+            var messages: [String] = []
+            let output = try PommeCore.runBootstrapProcess("/bin/cat",
+                arguments: [], environment: ["PRIVATE": "environment-canary"],
+                input: Data("credential-canary".utf8), operation: operation,
+                diagnostic: { messages.append($0) })
+            #expect(output == Data("credential-canary".utf8))
+            #expect(messages == [
+                "bootstrap process operation=\(operation.rawValue) outcome=started timeoutSeconds=30.0",
+                "bootstrap process operation=\(operation.rawValue) outcome=succeeded timeoutSeconds=30.0",
+            ])
+        }
+    }
+
+    @Test func bootstrapProcessDiagnosticsClassifyFailures() {
+        let cases: [(String, [String], TimeInterval, String)] = [
+            ("/nonexistent/private-path-canary", ["argument-canary"], 30, "launchFailed"),
+            ("/bin/sh", ["-c", "printf stdout-canary; printf stderr-canary >&2; exit 17"], 30, "exited"),
+            ("/bin/sleep", ["1"], 0.01, "timedOut"),
+        ]
+        for (executable, arguments, timeout, outcome) in cases {
+            var messages: [String] = []
+            do {
+                _ = try PommeCore.runBootstrapProcess(executable, arguments: arguments,
+                    environment: ["PRIVATE": "environment-canary"], timeout: timeout,
+                    operation: .sshUIDVerification, diagnostic: { messages.append($0) })
+                Issue.record("Expected subprocess failure")
+            } catch {
+                #expect(error is PommeSSHBootstrapError)
+            }
+            #expect(messages == [
+                "bootstrap process operation=sshUIDVerification outcome=started timeoutSeconds=\(timeout)",
+                "bootstrap process operation=sshUIDVerification outcome=\(outcome) timeoutSeconds=\(timeout)",
+            ])
+            #expect(!messages.joined().contains("canary"))
+        }
+    }
+
+    @Test func bootstrapDiagnosticVocabularyIsClosed() {
+        #expect(Set(PommeBootstrapDiagnostics.Operation.allCases.map(\.rawValue)) == [
+            "hostKeyScan", "sshUIDVerification", "stagingDirectoryPreparation",
+            "stagedAgentVerification", "stagedManifestVerification",
+            "agentArtifactTransfer", "requestManifestTransfer", "installerInvocation",
+        ])
+        #expect(Set(PommeBootstrapDiagnostics.Outcome.allCases.map(\.rawValue)) == [
+            "started", "succeeded", "launchFailed", "timedOut", "exited", "channelFailed",
+        ])
+    }
+
+    @Test(arguments: [false, true])
+    func bootstrapProcessLoggingRequiresDebug(enabled: Bool) async throws {
+        let capture = PommeVMLogCapture()
+        try await PommeCore.withLogSink(capture.append) {
+            try PommeRecoveryDebugContext.$screenshotsEnabled.withValue(enabled) {
+                _ = try PommeCore.runBootstrapProcess("/usr/bin/printf", arguments: ["private-canary"],
+                    operation: .hostKeyScan,
+                    diagnostic: PommeCore.bootstrapProcessDiagnostic(vmName: "pomme-test-vm"))
+            }
+        }
+        #expect(capture.values == (enabled ? [
+            "pomme-test-vm bootstrap process operation=hostKeyScan outcome=started timeoutSeconds=30.0",
+            "pomme-test-vm bootstrap process operation=hostKeyScan outcome=succeeded timeoutSeconds=30.0",
+        ] : []))
+    }
+
+    @Test func bootstrapHostKeyScanReportsOnlyFirstAttempt() throws {
+        for _ in 0..<2 {
+            var diagnostics = PommeBootstrapDiagnostics()
+            var messages: [String] = []
+            for _ in 0..<3 {
+                _ = try PommeCore.runBootstrapProcess("/usr/bin/true", arguments: [],
+                    operation: diagnostics.nextHostKeyScanOperation(), diagnostic: { messages.append($0) })
+            }
+            #expect(messages == [
+                "bootstrap process operation=hostKeyScan outcome=started timeoutSeconds=30.0",
+                "bootstrap process operation=hostKeyScan outcome=succeeded timeoutSeconds=30.0",
+            ])
+        }
+    }
+
+    @Test func bootstrapTimeoutReapsChildBeforeReturning() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pidFile = root.appendingPathComponent("child.pid")
+        // exec retains the shell PID; no grandchild is created or left running.
+        do {
+            _ = try PommeCore.runBootstrapProcess("/bin/sh",
+                arguments: ["-c", "printf '%s' \"$$\" > \"$1\"; exec /bin/sleep 60", "bootstrap-test", pidFile.path],
+                timeout: 1, operation: .installerInvocation, diagnostic: { _ in })
+            Issue.record("Expected timeout")
+        } catch PommeSSHBootstrapError.processTimedOut {
+            // Expected; the runner must reap this child before throwing.
+        } catch {
+            throw error
+        }
+        let pid = try #require(Int32(String(contentsOf: pidFile, encoding: .utf8)))
+        #expect(kill(pid, 0) == -1)
+        #expect(errno == ESRCH)
+    }
+
     private func deletionPlan(bundle: BundleLayout) throws -> PommeProvisioningPlan {
         let digest = String(repeating: "a", count: 64)
         return try .init(vm: .init(name: "pomme-delete-test", uuid: UUID(), bundlePath: bundle.rootURL.standardizedFileURL.path),
