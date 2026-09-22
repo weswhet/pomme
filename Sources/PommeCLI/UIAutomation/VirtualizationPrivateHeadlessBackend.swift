@@ -784,9 +784,9 @@ final class HeadlessFramebufferCaptureState: @unchecked Sendable {
     private var sourceGeneration: UInt64 = 0
     private var requestCompletionSuppressed = false
 
-    /// Initial registration can synchronously replay an obsolete boot frame.
+    /// Any registration can synchronously replay an obsolete frame.
     /// Keep its surface for later damage callbacks, but await the asynchronous
-    /// messenger publication before completing the first capture.
+    /// messenger publication before completing the pending capture.
     func suppressRequestCompletion<T>(_ operation: () throws -> T) rethrows -> T {
         let previous = lock.withLock {
             let previous = requestCompletionSuppressed
@@ -975,6 +975,18 @@ final class HeadlessFramebufferCaptureState: @unchecked Sendable {
     }
 }
 
+enum HeadlessFramebufferPresenterRegistration {
+    /// Each actual native association can replay cached scanout synchronously,
+    /// including the re-registration used to request a fresh static screen.
+    static func associate(
+        source: AnyObject, state: HeadlessFramebufferCaptureState,
+        operation: () -> Void
+    ) {
+        state.associateSource(source)
+        state.suppressRequestCompletion(operation)
+    }
+}
+
 private enum HeadlessFramebufferObserverRuntime {
     private typealias FrameUpdateIMP = @convention(c) (
         AnyObject, Selector, AnyObject, UnsafeRawPointer
@@ -987,7 +999,6 @@ private enum HeadlessFramebufferObserverRuntime {
     ) -> Void
 
     private static nonisolated(unsafe) var stateAssociationKey: UInt8 = 0
-    private static nonisolated(unsafe) var completedInitialAssociationKey: UInt8 = 0
     /// Named by the host's resolved frame-observation variant, so the subclass
     /// overrides the callback this host actually publishes to.
     private static let frameUpdateSelector: Selector? =
@@ -1163,17 +1174,10 @@ private enum HeadlessFramebufferObserverRuntime {
               String(cString: encoding) == "v32@0:8@16@24",
               superclassFrameUpdate != nil
         else { throw abiError() }
-        state.associateSource(presenter)
         let associate = unsafeBitCast(method_getImplementation(method), to: AssociatePresenterIMP.self)
-        if objc_getAssociatedObject(observer, &completedInitialAssociationKey) == nil {
-            state.suppressRequestCompletion {
-                associate(observer, selector, accessor, presenter)
-            }
-            objc_setAssociatedObject(
-                observer, &completedInitialAssociationKey, NSNumber(value: true),
-                .OBJC_ASSOCIATION_RETAIN_NONATOMIC
-            )
-        } else {
+        HeadlessFramebufferPresenterRegistration.associate(
+            source: presenter, state: state
+        ) {
             associate(observer, selector, accessor, presenter)
         }
         return true
