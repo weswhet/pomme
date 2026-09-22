@@ -20,6 +20,7 @@ observations are recorded below; historical rows retain their original status.
 | TUI status projection / boot-mode warning | Fixed in `3fb1ccb`; canonical state/agent regression tests and live running, paused, resumed, and stopped display comparisons passed. Boot-mode warning cancellation preserved both running and paused sessions. |
 | Integrated test-suite concurrency hang | Test-peer thread isolation in `0291f65` removes the observed hang in the focused stress run and subsequent full parallel comparisons. Signed Release and live execution/timeout smoke checks passed. Reconnect fixture admission now has a red/green delayed-start regression, passing repeated parallel comparison, and a 1,166-function full pass; other stress-run timeout failures keep full-suite reliability open. |
 | Private-PTY logical test timing | Fixed in `f7a6139`: injected-clock regressions verify prompt/process deadlines and cleanup without parallel scheduling determining logical test time; production retains `ContinuousClock`. Focused/repeated checks and a 1,168-function full run passed. Signed Release live owner authentication and a complete SIP disable/enable cycle passed, restoring SIP enabled and the stopped VM state. |
+| Coordinator-pin fixture polling | Corrected the missed readiness check after delayed sleep; deterministic red/green and ten-pass full-workload coordinator checks passed. Production pin/authentication behavior is unchanged; signed Release/live compatibility verification follows the code commit. |
 
 This is an observational live test. The CLI and guest images are not being
 modified during the sweep. Every failure, timeout, unexpected state, and
@@ -2592,6 +2593,104 @@ authentications and the completed security/restoration workflows with the
 unchanged production clock. It does not reproduce or close the historical
 private-PTY/pinned-authentication failure, nor the separate full-suite stress
 failures retained above.
+
+### Coordinator-pin fixture readiness under parallel test load
+
+After committing the `f7a6139` live verification as `b8a5e65`, current-tree
+inspection confirms only unrelated untracked artifacts remain, the installed
+signed CLI still reports `f7a6139`, and all twelve internal VMs are stopped.
+The next isolated failure is
+`PommeSecurityDesktopCleanupTests.coordinatorPinIntegration(replaceDuring:)`
+returning `guestAgentUnavailable` during repeated full-suite runs.
+
+Unchanged comparisons in the isolated Debug environment:
+
+| Selection | Repetitions | Result | Result bundle suffix (2026-09-22) |
+|---|---:|---|---|
+| Coordinator-pin method alone | 10 | All 30 parameter invocations passed | `19-34-13-396Z_pid6096_56920b28` |
+| Entire five-function cleanup suite | 10 | All 490 parameter invocations passed | `19-34-38-407Z_pid6188_136685db` |
+| Earlier complementary 799-function selection | 3 | All passed | `19-35-09-713Z_pid6306_07543eb4` |
+| Above plus daemon suite, 811 functions | 3 | All passed | `19-35-49-461Z_pid6600_f917d94a` |
+| Unrestricted full suite | 3 | Coordinator pin failed; daemon admission/one-shot and Recovery listener deadlines also failed | `19-36-19-052Z_pid6812_9d9ddd90` |
+
+The in-process fixture creates independent coordinators/connections per case.
+Its two-second `awaitPin` polling helper discards readiness error distinctions
+and throws `guestAgentUnavailable` when the loop deadline passes. The test
+then verifies the concrete coordinator's before/after-await pin checks while
+replacing a session during describe or status. No real VM or credential is
+used by this fixture. The smallest current red selection remains the full
+parallel workload; phase timing is needed to minimize further without guessing
+which scheduling interaction matters.
+
+Ranked diagnostic hypotheses are late authentication admission, authentication
+completed but a late-resumed poll omits a final ready-state check, and an actual
+unavailable/replacement transition. Temporary bounded phase/readiness timing
+will distinguish them without logging tokens, digests, IDs, payloads, or
+frames. No deadline, pin assertion, fixture behavior, or production code has
+been changed.
+
+The first instrumented full three-pass run passed all 1,168 functions / 4,770
+invocations (`19-39-27-425Z_pid7680_33e1cae7`). The subsequent full ten-pass
+run reproduced the coordinator failure in four parameter invocations, alongside
+five other failing functions: daemon admission/one-shot, foreground completion,
+Recovery listener authentication, and Recovery coordinator retry. Overall it
+finished with 1,162 passing / six failing functions and 15,889 passing / eleven
+failing invocations (`19-43-54-186Z_pid8565_30b596e2`).
+
+All four coordinator traces show the same initial-readiness boundary: the first
+probe reports connecting, the requested 1 ms sleep resumes after 6.43–9.28
+seconds, and the loop exits without another readiness probe. Authentication
+exchange itself starts late (6.23–9.13 seconds), but has completed before the
+poll resumes; both diagnostic-only final reads report an authenticated session.
+Thus this evidence shows delayed admission AND a missed final ready-state
+check, not authentication completing within the original two-second interval.
+None of these failures reached the replacement/adapter assertions.
+
+The next regression will exercise that delayed-poll ordering against the real
+coordinator with controlled test time, including a still-unavailable negative
+case. The proposed test-helper correction checks readiness after resumption
+before declaring its polling budget exhausted; it does not extend production
+authentication deadlines or relax concrete session-pin validation. No live VM
+was operated for these isolated tests, and no product fix is claimed yet.
+
+The minimized regression uses the existing concrete coordinator and its real
+authentication/pin capture, with injected `now`/`sleep` closures confined to the
+test helper. Its first poll is unavailable; the controlled sleep connects the
+test peer, waits for actual authenticated publication, then advances test time
+three seconds before returning. The old loop reproduced `guestAgentUnavailable`
+despite the ready session. A separate actual child-task cancellation case also
+failed because the old loop returned unavailable after the cancelled sleep
+resumed. The never-ready negative case passed. The focused red run finished
+with two failing / five passing functions and two failing / fifty passing
+invocations (`19-48-46-166Z_pid10138_f72192a7`). Temporary phase tracing was
+removed before this regression run; no production file changed.
+
+The candidate checks task cancellation, then captures readiness, then applies
+the unchanged two-second polling guard before another one-millisecond sleep.
+The entire cleanup suite passed all seven functions / 520 invocations over
+ten repetitions (`19-50-02-609Z_pid10379_36d721dc`). Read-only review found no
+weakened replacement assertion or production change. The positive regression
+also sends describe/status through the captured concrete pin and verifies its
+cleanup receipt; the unavailable/cancelled cases each stop after one sleep.
+This correction tests readiness and pin identity, not an authentication latency
+SLA.
+
+The original full ten-pass workload passed all 30 coordinator replacement
+invocations, ten delayed-final-poll regressions, and twenty unavailable/cancelled
+invocations (`19-50-29-008Z_pid10489_9ff66000`). The full run still failed five
+other functions: daemon admission/one-shot (`deadline`), foreground completion,
+Recovery listener authentication, and MDM shared-file lease (`leaseBusy`).
+Overall 1,165 functions / 15,925 invocations passed and five functions / five
+invocations failed. Those independent stress observations remain open; this
+fixture correction does not claim full-suite reliability or a live guest
+authentication fix.
+
+The subsequent unrestricted single run passed all 1,170 functions / 1,593
+invocations (`19-52-01-075Z_pid11520_d43b6cc7`). No temporary coordinator trace
+remains, `git diff --check` is clean, and review found no blocker. The code and
+evidence are being committed before the canonical signed Release build; live
+verification will exercise normal authentication, guest execution, restart,
+reauthentication, and restoration on the existing internal macOS 27 fixture.
 
 ### Live TUI status projection mismatch
 
