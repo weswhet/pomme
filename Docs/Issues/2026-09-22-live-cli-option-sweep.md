@@ -2051,3 +2051,72 @@ no artificial failure or journal state was introduced to manufacture one.
 It supplies another bounded non-reproduction result, not a root-cause finding
 or a justification for credential/PTY changes. The current signed host remains
 installed, and the original failures remain open pending a matching failure.
+
+### Integrated verification: parallel test-run hang
+
+The installed signed `a3852a5` host again passed all 104 CLI contract checks,
+all 21 local installer checks, strict code-signature verification, and fresh
+login-shell command resolution. Its SHA-256 remains
+`55142e268e4402985cb6012326df6450687fca094888ffad3937bc1701887b5a`.
+All twelve VMs were confirmed stopped, with no helpers and all bundles on the
+internal drive. No VM deletion or mutation was needed for these checks.
+
+An unrestricted Debug `PommeCLITests` run through XcodeBuildMCP began at
+17:35:44Z, discovering 1,156 test functions. The runner used a fresh private
+`POMME_APP_SUPPORT_DIR`, with target and owner-authorization environment values
+cleared; temporary-Keychain tests did not target the login Keychain. Progress
+stopped after reporting 919 completed tests and no failures. Two live process
+samples minutes apart showed the main thread blocked in
+`CreateVMTUIPTYTests.cancellationRestoresTerminal` → `TUITerminal.readKey` →
+`read`, alongside cooperative workers blocked in socket reads and Vision OCR.
+The isolated runner was cancelled through its exact `xcodebuild` parent after
+preserving diagnostics; the reported 937 passes and 44 cancellation failures
+are not a completed or successful full-suite result. Result bundle:
+`test_macos_2026-09-22T17-35-44-560Z_pid70082_9d85d319.xcresult`.
+
+Without source changes, the two `CreateVMTUIPTYTests` passed alone (5.4 seconds),
+and a group with `PommeAgentDaemonTests`, `ControlWireTests`,
+`PommeSecurityHelperShutdownTests`, and `PommeRecoveryTerminalRecognitionTests`
+passed all 34 test functions (5.8 seconds). An unchanged full-suite retry at
+17:47:28Z reproduced the same blocked TUI cancellation stack and blocked
+cooperative workers. It too was cancelled after sampling, not counted as a
+test pass. Result bundle:
+`test_macos_2026-09-22T17-47-28-787Z_pid72086_0b79c43e.xcresult`.
+
+The baseline cancellation test sends input from a detached async task and
+returns from a failed transcript wait without unblocking the TUI's read.
+Cooperative-worker starvation and that failure-cleanup gap are the next
+bounded test-harness investigation. The smaller passing group has not isolated
+a deterministic minimal combination. This validation hang is not evidence of
+the cause of the historical live VM failures, and no production fix is claimed.
+
+A test-only dedicated-thread PTY driver candidate passed the create and
+snapshot PTY suites (six functions / seven invocations), including injected
+driver failure and missing-transcript timeout at the actual restore-source
+menu. The full-suite candidate run at 17:53:37Z still stalled. Its live sample
+showed an idle main thread rather than the previous TUI read, with cooperative
+workers blocked in socket/OCR operations and the desktop-cleanup integration
+test's relay read. This does not establish that the candidate resolves the
+integrated hang. The run was cancelled after sampling; result bundle:
+`test_macos_2026-09-22T17-53-37-527Z_pid73435_b34bc320.xcresult`.
+Review also identified timeout-fallthrough weaknesses in the candidate's own
+join/cancellation cleanup, which must be corrected before it is committed.
+No full-suite pass, production change, release replacement, or live VM fix is
+claimed from this test-harness work.
+
+The corrected PTY harness uses a dedicated OS thread for transcript-driven
+input, propagates driver errors back to the owning test, and closes the master
+only in the output-drain cancellation handler. Broadcast completion joins
+prevent teardown while a driver or drain callback can still use its descriptors.
+Transcript waits have finite deadlines; completion joins deliberately do not
+claim an absolute deadline under stalled OS/GCD scheduling. Initialization
+failure before source registration also completes teardown without waiting for
+a callback that cannot exist. Production TUI and VM code are unchanged.
+
+Final create/snapshot PTY verification passed six test functions / seven
+invocations, including injected error and missing-transcript failure after
+reaching the real restore-source menu. Normal cancellation still verifies no
+creation and restored terminal modes. Result bundle:
+`test_macos_2026-09-22T17-57-42-219Z_pid74243_9d29bf3b.xcresult`.
+This fixes the test input driver's dependency and failure-cleanup gap; the
+separate full-suite socket/OCR stall remains under investigation.

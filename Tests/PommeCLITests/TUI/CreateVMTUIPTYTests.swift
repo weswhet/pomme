@@ -38,27 +38,45 @@ struct CreateVMTUIPTYTests {
         defer { session.close() }
 
         try session.write("ccancel-vm\n")
-        let quit = Task.detached { () -> Bool in
-            guard await session.waitForTranscript("Restore source") else {
-                return false
-            }
-            do {
-                try session.write("\u{1B}")
-                guard await session.waitForTranscript("pomme VM dashboard", occurrences: 2) else {
-                    return false
-                }
-                try session.write("q")
-                return true
-            } catch {
-                return false
-            }
+        let quit = TUITestPTYDriver(session: session) {
+            try session.waitForTranscript("Restore source")
+            try session.write("\u{1B}")
+            try session.waitForTranscript("pomme VM dashboard", occurrences: 2)
+            try session.write("q")
         }
-        try await run(session: session, recorder: recorder)
-        #expect(await quit.value)
+        do { try await run(session: session, recorder: recorder) }
+        catch {
+            session.abortInput()
+            try quit.join()
+            throw error
+        }
+        try quit.join()
 
         #expect(await recorder.requests.isEmpty)
         #expect(session.readTranscript().contains("Restore source"))
         #expect(session.termiosMatchesOriginal)
+    }
+
+    @Test("Driver failure unblocks a live create menu and is reported", arguments: [false, true])
+    func driverFailureUnblocksRead(timeout: Bool) async throws {
+        let recorder = CreateActionRecorder()
+        let session = try TUITestPTYSession()
+        defer { session.close() }
+        try session.write("ccancel-vm\n")
+        let driver = TUITestPTYDriver(session: session) {
+            try session.waitForTranscript("Restore source")
+            if timeout { try session.waitForTranscript("never-rendered-driver-sentinel", timeout: 0) }
+            throw TUITestPTYDriver.Failure.injected
+        }
+        // Closing the master can make terminal output fail as well as returning
+        // EOF to input. The driver error, not that secondary hangup, is asserted.
+        do { try await run(session: session, recorder: recorder) }
+        catch { session.abortInput() }
+        #expect(throws: timeout ? TUITestPTYDriver.Failure.transcriptTimeout("never-rendered-driver-sentinel") : .injected) {
+            try driver.join()
+        }
+        #expect(await recorder.requests.isEmpty)
+        #expect(session.readTranscript().contains("Restore source"))
     }
 
     private func run(session: TUITestPTYSession, recorder: CreateActionRecorder) async throws {
@@ -76,6 +94,53 @@ struct CreateVMTUIPTYTests {
             }
         )
         try await tui.run()
+    }
+}
+
+/// The TUI intentionally performs blocking reads on MainActor. Its input
+/// driver must therefore not depend on a spare Swift cooperative worker.
+private final class TUITestPTYDriver: @unchecked Sendable {
+    enum Failure: Error, Equatable {
+        case transcriptTimeout(String), injected, missingResult
+    }
+    private let finished = TUITestCompletion()
+    private let lock = NSLock()
+    private var result: Result<Void, any Error>?
+
+    init(session: TUITestPTYSession, operation: @escaping @Sendable () throws -> Void) {
+        Thread.detachNewThread { [self] in
+            let outcome = Result { try operation() }
+            if case .failure = outcome { session.abortInput() }
+            lock.withLock { result = outcome }
+            finished.complete()
+        }
+    }
+
+    func join() throws {
+        // Transcript waits have finite deadlines, but joining is ownership
+        // synchronization, not an absolute OS scheduling deadline. Never let a
+        // timeout release descriptors while this thread can still use them.
+        finished.wait()
+        guard let outcome = lock.withLock({ result }) else { throw Failure.missingResult }
+        try outcome.get()
+    }
+}
+
+private final class TUITestCompletion: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var completed = false
+
+    func complete() {
+        condition.lock()
+        completed = true
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func wait() {
+        condition.lock()
+        while !completed { condition.wait() }
+        condition.unlock()
     }
 }
 
@@ -123,6 +188,7 @@ final class TUITestPTYSession: @unchecked Sendable {
     private var transcriptBytes: [UInt8] = []
     private let drainQueue = DispatchQueue(label: "pomme.tests.tui-pty-drain")
     private var drainSource: DispatchSourceRead?
+    private let drainCancelled = TUITestCompletion()
     let terminal: TUITerminal
 
     init() throws {
@@ -150,12 +216,27 @@ final class TUITestPTYSession: @unchecked Sendable {
 
         let flags = fcntl(master, F_GETFL, 0)
         guard flags >= 0, fcntl(master, F_SETFL, flags | O_NONBLOCK) == 0 else {
+            let failure = errno
             Darwin.close(master)
             Darwin.close(slave)
-            try throwPOSIX("fcntl")
+            self.master = -1
+            self.slave = -1
+            // Initialization completed before this failure, but no drain
+            // source exists to deliver a cancellation callback during deinit.
+            drainCancelled.complete()
+            throw POSIXError(POSIXErrorCode(rawValue: failure) ?? .EIO)
         }
         let source = DispatchSource.makeReadSource(fileDescriptor: master, queue: drainQueue)
         source.setEventHandler { [weak self] in self?.drainAvailableBytes() }
+        let descriptor = master
+        let cancelled = drainCancelled
+        source.setCancelHandler { [weak self] in
+            // Runs after the source's final drain event on this same queue.
+            // No pending handler can read a descriptor reused by another test.
+            Darwin.close(descriptor)
+            self?.master = -1
+            cancelled.complete()
+        }
         drainSource = source
         source.resume()
     }
@@ -178,12 +259,12 @@ final class TUITestPTYSession: @unchecked Sendable {
     }
 
     func write(_ text: String) throws {
-        let bytes = Array(text.utf8)
-        let written = bytes.withUnsafeBytes { buffer in
-            Darwin.write(master, buffer.baseAddress, buffer.count)
-        }
-        guard written == bytes.count else {
-            try throwPOSIX("write")
+        try drainQueue.sync {
+            let bytes = Array(text.utf8)
+            let written = bytes.withUnsafeBytes { buffer in
+                Darwin.write(master, buffer.baseAddress, buffer.count)
+            }
+            guard written == bytes.count else { try throwPOSIX("write") }
         }
     }
 
@@ -194,15 +275,16 @@ final class TUITestPTYSession: @unchecked Sendable {
         return String(decoding: transcriptBytes, as: UTF8.self)
     }
 
-    func waitForTranscript(_ text: String, occurrences: Int = 1) async -> Bool {
-        for _ in 0..<200 {
+    func waitForTranscript(_ text: String, occurrences: Int = 1, timeout: TimeInterval = 2) throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
+        repeat {
             let transcript = readTranscript()
             if transcript.components(separatedBy: text).count - 1 >= occurrences {
-                return true
+                return
             }
-            try? await Task.sleep(nanoseconds: 10_000_000)
-        }
-        return false
+            Thread.sleep(forTimeInterval: 0.01)
+        } while ContinuousClock.now < deadline
+        throw TUITestPTYDriver.Failure.transcriptTimeout(text)
     }
 
     private func drainAvailableBytes() {
@@ -223,13 +305,19 @@ final class TUITestPTYSession: @unchecked Sendable {
         }
     }
 
-    func close() {
-        drainSource?.cancel()
-        drainSource = nil
-        if master >= 0 {
-            Darwin.close(master)
-            master = -1
+    func abortInput() {
+        drainQueue.sync {
+            guard let source = drainSource else { return }
+            source.cancel()
+            drainSource = nil
         }
+        // Every caller joins the same cancellation, including a parent racing
+        // the failing input driver. Only the handler owns the master close.
+        drainCancelled.wait()
+    }
+
+    func close() {
+        abortInput()
         if slave >= 0 {
             Darwin.close(slave)
             slave = -1
