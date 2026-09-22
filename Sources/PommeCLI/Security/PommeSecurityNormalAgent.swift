@@ -140,7 +140,7 @@ struct PommeSecurityDesktopProofHooks: Sendable {
   var sleep: @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }
 }
 
-private struct PommeAquaProofTimeout: Error {
+private struct PommeDesktopProofTimeout: Error {
   let response: JSONValue
   let diagnostic: PommeSecurityNormalAgentDiagnostic
 }
@@ -653,7 +653,7 @@ struct PommeSecurityNormalAgent: Sendable {
     _ request: GuestCommandRequest,
     proofStage: PommeSecurityNormalAgentProofStage,
     remainingBudget: TimeInterval? = nil,
-    retainAquaTimeout: Bool = false
+    retainDesktopTimeout: Bool = false
   ) throws -> GuestCommandResult {
     if remainingBudget != nil { try Task.checkCancellation() }
     guard !request.pty, request.inputData == nil, request.environment.isEmpty else {
@@ -697,8 +697,10 @@ struct PommeSecurityNormalAgent: Sendable {
         PommeCore.log(
           Self.timeoutStateSummary(for: response, stage: proofStage),
           vmName: reference.displayName)
-        if retainAquaTimeout, proofStage == .aqua {
-          throw PommeAquaProofTimeout(response: try JSONValue(any: response), diagnostic: diagnostic)
+        if retainDesktopTimeout,
+          let payload = try JSONValue(any: request.agentPayload()).objectValue,
+          PommeForegroundExecution.isDesktopProofPayload(payload) {
+          throw PommeDesktopProofTimeout(response: try JSONValue(any: response), diagnostic: diagnostic)
         }
       }
       throw diagnostic
@@ -992,76 +994,75 @@ struct PommeSecurityNormalAgent: Sendable {
       guard Self.remaining(until: deadline, now: proofNow()) >= 15 else {
         throw PommeSecurityWorkflowError.ownerLoginUnverified
       }
-      let user = try execute(
-        .init(path: "/usr/bin/stat", arguments: ["-f", "%Su:%u", "/dev/console"], timeout: 15),
-        proofStage: .console, remainingBudget: Self.remaining(until: deadline, now: proofNow()))
-      guard proofNow() < deadline else { throw PommeSecurityWorkflowError.ownerLoginUnverified }
-      let observed = String(data: user.stdout, encoding: .utf8)?.trimmingCharacters(
-        in: .whitespacesAndNewlines)
-      let consoleMatches = !user.detached && user.exited && !user.timedOut && user.signal == nil
-        && user.exitCode == 0 && !user.stdoutTruncated && !user.stderrTruncated
-        && observed == "\(username):\(uniqueID)"
-      var observation = PommeSecurityDesktopProofObservation(
-        consoleMatches: consoleMatches, aquaMatches: nil, desktopMatches: nil)
-      if consoleMatches {
-        try Task.checkCancellation()
-        guard Self.remaining(until: deadline, now: proofNow()) >= 15 else {
-          throw PommeSecurityWorkflowError.ownerLoginUnverified
-        }
-        let session: GuestCommandResult
-        do {
-          session = try execute(aquaRequest, proofStage: .aqua,
-            remainingBudget: Self.remaining(until: deadline, now: proofNow()), retainAquaTimeout: true)
-        } catch let timeout as PommeAquaProofTimeout {
+      do {
+        let user = try execute(
+          .init(path: "/usr/bin/stat", arguments: ["-f", "%Su:%u", "/dev/console"], timeout: 15),
+          proofStage: .console, remainingBudget: Self.remaining(until: deadline, now: proofNow()), retainDesktopTimeout: true)
+        guard proofNow() < deadline else { throw PommeSecurityWorkflowError.ownerLoginUnverified }
+        let observed = String(data: user.stdout, encoding: .utf8)?.trimmingCharacters(
+          in: .whitespacesAndNewlines)
+        let consoleMatches = !user.detached && user.exited && !user.timedOut && user.signal == nil
+          && user.exitCode == 0 && !user.stdoutTruncated && !user.stderrTruncated
+          && observed == "\(username):\(uniqueID)"
+        var observation = PommeSecurityDesktopProofObservation(
+          consoleMatches: consoleMatches, aquaMatches: nil, desktopMatches: nil)
+        if consoleMatches {
           try Task.checkCancellation()
-          guard try await verifyAquaCleanup(timeout.response, deadline: deadline,
-                                           now: proofNow, sleep: proofSleep) else { throw timeout.diagnostic }
-          desktopStableSince = nil
+          guard Self.remaining(until: deadline, now: proofNow()) >= 15 else {
+            throw PommeSecurityWorkflowError.ownerLoginUnverified
+          }
+          let session = try execute(aquaRequest, proofStage: .aqua,
+            remainingBudget: Self.remaining(until: deadline, now: proofNow()), retainDesktopTimeout: true)
+          let aquaSessionMatches = Self.isCompletedAquaSessionProof(session)
           try Task.checkCancellation()
-          guard Self.remaining(until: deadline, now: proofNow()) >= 16 else { throw timeout.diagnostic }
-          try await proofSleep(1)
-          continue
-        }
-        let aquaSessionMatches = Self.isCompletedAquaSessionProof(session)
-        try Task.checkCancellation()
-        guard Self.remaining(until: deadline, now: proofNow()) >= 15 else {
-          throw PommeSecurityWorkflowError.ownerLoginUnverified
-        }
-        let desktop = try execute(
-          .init(path: "/bin/ps", arguments: ["-axo", "uid=,comm="], timeout: 15),
-          proofStage: .processList, remainingBudget: Self.remaining(until: deadline, now: proofNow()))
-        let desktopMatches = !desktop.detached && desktop.exited && !desktop.timedOut && desktop.signal == nil
-          && desktop.exitCode == 0 && !desktop.stdoutTruncated && !desktop.stderrTruncated
-          && Self.parseDesktopProcessList(desktop.stdout, expectedUID: uniqueID)
-        observation = .init(
-          consoleMatches: true, aquaMatches: aquaSessionMatches, desktopMatches: desktopMatches)
-        let now = proofNow()
-        try Task.checkCancellation()
-        guard now < deadline else { throw PommeSecurityWorkflowError.ownerLoginUnverified }
-        PommeCore.log("[DEBUG-aqua-20260922] " + observation.observationDiagnostic, vmName: reference.displayName)
-        if aquaSessionMatches && desktopMatches {
-          if desktopStableSince == nil { desktopStableSince = now }
-          if let stableSince = desktopStableSince,
-             now < deadline,
-             stableSince.duration(to: now) >= .seconds(5) {
-            try Task.checkCancellation()
-            guard proofNow() < deadline else { throw PommeSecurityWorkflowError.ownerLoginUnverified }
-            return
+          guard Self.remaining(until: deadline, now: proofNow()) >= 15 else {
+            throw PommeSecurityWorkflowError.ownerLoginUnverified
+          }
+          let desktop = try execute(
+            .init(path: "/bin/ps", arguments: ["-axo", "uid=,comm="], timeout: 15),
+            proofStage: .processList, remainingBudget: Self.remaining(until: deadline, now: proofNow()), retainDesktopTimeout: true)
+          let desktopMatches = !desktop.detached && desktop.exited && !desktop.timedOut && desktop.signal == nil
+            && desktop.exitCode == 0 && !desktop.stdoutTruncated && !desktop.stderrTruncated
+            && Self.parseDesktopProcessList(desktop.stdout, expectedUID: uniqueID)
+          observation = .init(
+            consoleMatches: true, aquaMatches: aquaSessionMatches, desktopMatches: desktopMatches)
+          let now = proofNow()
+          try Task.checkCancellation()
+          guard now < deadline else { throw PommeSecurityWorkflowError.ownerLoginUnverified }
+          PommeCore.log("[DEBUG-aqua-20260922] " + observation.observationDiagnostic, vmName: reference.displayName)
+          if aquaSessionMatches && desktopMatches {
+            if desktopStableSince == nil { desktopStableSince = now }
+            if let stableSince = desktopStableSince,
+               now < deadline,
+               stableSince.duration(to: now) >= .seconds(5) {
+              try Task.checkCancellation()
+              guard proofNow() < deadline else { throw PommeSecurityWorkflowError.ownerLoginUnverified }
+              return
+            }
+          } else {
+            desktopStableSince = nil
           }
         } else {
           desktopStableSince = nil
+          PommeCore.log("[DEBUG-aqua-20260922] " + observation.observationDiagnostic, vmName: reference.displayName)
         }
-      } else {
-        desktopStableSince = nil
-        PommeCore.log("[DEBUG-aqua-20260922] " + observation.observationDiagnostic, vmName: reference.displayName)
-      }
-      guard proofNow() < deadline else {
+        guard proofNow() < deadline else {
+          try Task.checkCancellation()
+          PommeCore.log(observation.timeoutDiagnostic, vmName: reference.displayName)
+          throw PommeSecurityWorkflowError.ownerLoginUnverified
+        }
         try Task.checkCancellation()
-        PommeCore.log(observation.timeoutDiagnostic, vmName: reference.displayName)
-        throw PommeSecurityWorkflowError.ownerLoginUnverified
+        try await proofSleep(1)
+      } catch let timeout as PommeDesktopProofTimeout {
+        try Task.checkCancellation()
+        guard try await verifyDesktopCleanup(timeout.response, deadline: deadline,
+          now: proofNow, sleep: proofSleep) else { throw timeout.diagnostic }
+        desktopStableSince = nil
+        try Task.checkCancellation()
+        guard Self.remaining(until: deadline, now: proofNow()) >= 16 else { throw timeout.diagnostic }
+        try await proofSleep(1)
+        continue
       }
-      try Task.checkCancellation()
-      try await proofSleep(1)
     }
   }
 
@@ -1072,7 +1073,7 @@ struct PommeSecurityNormalAgent: Sendable {
 
   /// A timeout is still a failed proof. Only a separately proven reap and
   /// output drain permits the outer readiness loop to start another probe.
-  private func verifyAquaCleanup(
+  private func verifyDesktopCleanup(
     _ response: JSONValue, deadline: ContinuousClock.Instant,
     now: @Sendable () -> ContinuousClock.Instant,
     sleep: @Sendable (TimeInterval) async throws -> Void
@@ -1082,7 +1083,7 @@ struct PommeSecurityNormalAgent: Sendable {
       let identity = terminal["jobID"]?.stringValue, let jobID = UUID(uuidString: identity),
       now() < deadline
     else { return false }
-    if let rawReceipt = terminal[PommeForegroundExecution.aquaCleanupReceiptKey] {
+    if let rawReceipt = terminal[PommeForegroundExecution.desktopCleanupReceiptKey] {
       guard let receipt = rawReceipt.objectValue,
         Set(receipt.keys) == ["jobID", "reapedAndDrained"],
         let identity = receipt["jobID"]?.stringValue, UUID(uuidString: identity) == jobID,
@@ -1112,7 +1113,7 @@ struct PommeSecurityNormalAgent: Sendable {
       }
       try Task.checkCancellation()
       guard now() < cleanupDeadline,
-        let complete = Self.aquaCleanupStatus(status, jobID: jobID)
+        let complete = Self.desktopCleanupStatus(status, jobID: jobID)
       else { return false }
       if complete { return true }
       try await sleep(min(0.1, Self.remaining(until: cleanupDeadline, now: now())))
@@ -1121,7 +1122,7 @@ struct PommeSecurityNormalAgent: Sendable {
   }
 
   /// nil is malformed and terminal; false is a valid same-job pending status.
-  private static func aquaCleanupStatus(_ response: JSONValue, jobID: UUID) -> Bool? {
+  private static func desktopCleanupStatus(_ response: JSONValue, jobID: UUID) -> Bool? {
     guard let envelope = response.objectValue, envelope["ok"] == .bool(true),
       let terminal = envelope["result"]?.objectValue,
       let identity = terminal["jobID"]?.stringValue, UUID(uuidString: identity) == jobID,

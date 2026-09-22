@@ -1178,3 +1178,35 @@ fixed readiness probes, with regressions for each stage and unchanged console,
 Aqua, desktop, stable-duration, cancellation, and overall-deadline predicates.
 It must not enable retries for arbitrary guest commands or reinterpret timeout
 as successful proof. The retained VM and its pinned agent will not be reset.
+
+### All fixed readiness probes: revised candidate
+
+The next revision keeps the cleanup mechanism and moves the typed-timeout
+handler around the complete readiness iteration. Only the exact console
+`stat`, Aqua `launchctl`, and process-list `ps` payloads qualify. The foreground
+host and security caller both validate that closed payload set; identity,
+working-directory, environment, input, PTY, extra-option, and altered-command
+variants do not qualify. A failed retry retains its original console/Aqua/ps
+diagnostic. Generic command execution and all owner/security mutations retain
+their existing no-retry behavior.
+
+The permanent receipt is renamed for desktop proof rather than Aqua alone.
+The temporary Aqua timing gate stays Aqua-only. New tests cover console and
+process-list timeout recovery and exact-payload exclusions alongside the
+existing Aqua negatives, and the security workflow guide records the full
+retry contract. Six internal-drive VMs are stopped with no helpers; 219 GiB
+is available before any further fresh-owner comparison. No retained journal,
+owner, credential, or pinned executable is changed for this revision.
+
+The tests-first run `0b5b50c2` executed 77 functions / 134 cases. Only the new
+`allDesktopStagesRetry` console/verified and process-list/verified cases failed,
+each with its original stage's timeout diagnostic; the other cases passed.
+After implementation, the final five-suite XcodeBuildMCP run passed all 78
+functions / 190 executions, with zero failures or skips:
+`test_macos_2026-09-22T11-55-17-742Z_pid6490_03f44743.xcresult`.
+Coverage now includes exact-payload negatives and all-stage cleanup uncertainty,
+wrong-job/malformed evidence, cancellation, original-deadline exhaustion, and
+stability reset. Parent review confirmed the classifier is checked at both the
+foreground receipt and private readiness-caller boundaries. No generic guest
+executor gained automatic retries. This revision is committed before its
+signed build and new fresh-owner live comparison.

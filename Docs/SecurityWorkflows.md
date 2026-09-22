@@ -181,6 +181,21 @@ revalidating that desktop before security mutation and recording the normal-
 boot receipts. Existing-owner security branches do not require this owner
 autologin or desktop-completion proof.
 
+Desktop readiness uses fixed read-only console, Aqua, and process-list probes
+with 15-second attempt deadlines inside one 120-second readiness deadline.
+A timed-out probe remains failed. The loop may try again only after the exact
+job has supplied an authenticated exit frame proving that it was reaped and
+its output drained. It preserves the foreground runner's single SIGTERM and
+uses an already-received host receipt or at most three seconds of host-side
+status waiting within the original deadline. A signal acknowledgement or an
+`exited` flag alone is insufficient. Cancellation, malformed or foreign-job
+evidence, uncertain transport/cleanup, or insufficient remaining time stops
+the workflow. A retry starts the full console/Aqua/desktop check again and
+resets the five-second stability interval; it never extends the overall
+deadline or retries arbitrary guest commands. A helper-side status request
+may finish after the caller's wait expires, but that timeout cannot authorize
+another probe.
+
 Native automatic-login refusals are classified as closed login restrictions,
 including protections associated with Touch ID, Apple Pay, App Store, and
 related native services. Pomme has no native-force override: `--force` cannot

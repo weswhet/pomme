@@ -72,11 +72,37 @@ struct PommeForegroundExecutionTests {
         #expect(total >= 0)
     }
 
+    @Test("Cleanup receipts are limited to the three exact desktop probes", arguments: ["console", "aqua", "ps"], ["exact", "user", "uid", "environment", "stdinDataBase64", "attachStdin", "pty", "cwd", "arguments", "path", "unknown"])
+    func desktopCleanupGate(stage: String, variant: String) async throws {
+        let request: GuestCommandRequest
+        switch stage {
+        case "console": request = .init(path: "/usr/bin/stat", arguments: ["-f", "%Su:%u", "/dev/console"], timeout: 15)
+        case "ps": request = .init(path: "/bin/ps", arguments: ["-axo", "uid=,comm="], timeout: 15)
+        default: request = try #require(PommeSecurityNormalAgent.aquaSessionProofRequest(uniqueID: 501))
+        }
+        var payload = try #require(JSONValue(any: request.agentPayload()).objectValue)
+        if variant != "exact" {
+            payload[variant] = .string("mismatch")
+            if variant == "stdinDataBase64" { payload[variant] = .string("") }
+            if variant == "pty" || variant == "attachStdin" { payload[variant] = .bool(false) }
+        }
+        let transport = ForegroundTransport(
+            start: correlated(requestID: startRequestID, result: started(), frames: []), statuses: [],
+            signalFrames: [frame(jobID: jobID, stream: .exit, signal: 15)]
+        )
+        let result = try await run(payload: .object(payload), transport: transport, timeout: 0.03)
+        #expect((result.result.objectValue?[PommeForegroundExecution.desktopCleanupReceiptKey] != nil) == (variant == "exact"))
+        #expect(result.result.objectValue?["timedOut"] == .bool(true))
+        #expect(result.result.objectValue?["outputComplete"] == .bool(false))
+        #expect(await transport.signalCalls == 1)
+        #expect(await transport.operationNames.filter { $0 == "process.start" }.count == 1)
+    }
+
     @Test("Aqua cleanup receipt requires validated host-observed same-job exit", arguments: ["valid", "falseAckExit", "signalExit", "badSignal", "priorExit", "ackOnly", "wrongJob", "malformedExit", "foreignOutput", "forged", "ordinary"])
     func aquaCleanupReceiptBoundary(mode: String) async throws {
         var start = try #require(started().objectValue)
         if mode == "forged" {
-            start[PommeForegroundExecution.aquaCleanupReceiptKey] = .object([
+            start[PommeForegroundExecution.desktopCleanupReceiptKey] = .object([
                 "jobID": .string(jobID.uuidString), "reapedAndDrained": .bool(true)
             ])
         }
@@ -97,7 +123,7 @@ struct PommeForegroundExecutionTests {
         let values = try #require(result.result.objectValue)
         #expect(values["timedOut"] == .bool(true))
         #expect(values["outputComplete"] == .bool(mode == "priorExit"))
-        #expect((values[PommeForegroundExecution.aquaCleanupReceiptKey] != nil) == ["valid", "falseAckExit", "signalExit", "priorExit"].contains(mode))
+        #expect((values[PommeForegroundExecution.desktopCleanupReceiptKey] != nil) == ["valid", "falseAckExit", "signalExit", "priorExit"].contains(mode))
         #expect(await transport.signalCalls == 1)
     }
 
