@@ -7,11 +7,17 @@ struct PommeSecurityDesktopProofObservation: Equatable, Sendable {
   let desktopMatches: Bool?
 
   var timeoutDiagnostic: String {
+    "Normal desktop proof deadline expired: " + labels
+  }
+
+  var observationDiagnostic: String { "Normal desktop proof observation: " + labels }
+
+  private var labels: String {
     func label(_ matched: Bool?) -> String {
       guard let matched else { return "not-checked" }
       return matched ? "matched" : "not-matched"
     }
-    return "Normal desktop proof deadline expired: console=\(label(consoleMatches)) "
+    return "console=\(label(consoleMatches)) "
       + "aqua=\(label(aquaMatches)) desktop=\(label(desktopMatches))."
   }
 }
@@ -125,6 +131,20 @@ struct PommeSecurityNormalAgentRebootHooks: Sendable {
   }
 }
 
+/// Injectable host effects for the real desktop-readiness loop; no VM or
+/// credential operation is needed to exercise its deadline and cleanup paths.
+struct PommeSecurityDesktopProofHooks: Sendable {
+  let execute: @Sendable (GuestCommandRequest, TimeInterval) throws -> JSONValue
+  let status: @Sendable (UUID, TimeInterval) throws -> JSONValue
+  var now: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
+  var sleep: @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }
+}
+
+private struct PommeAquaProofTimeout: Error {
+  let response: JSONValue
+  let diagnostic: PommeSecurityNormalAgentDiagnostic
+}
+
 /// Security preparation talks to the existing authenticated persistent agent.
 /// No installation, update, credential replacement, or creation-record rewrite
 /// is reachable from this adapter.
@@ -132,15 +152,18 @@ struct PommeSecurityNormalAgent: Sendable {
   let reference: VMReference
   let expectedExecutableDigest: String
   private let rebootHooks: PommeSecurityNormalAgentRebootHooks?
+  private let desktopProofHooks: PommeSecurityDesktopProofHooks?
 
   init(
     reference: VMReference,
     expectedExecutableDigest: String,
-    rebootHooks: PommeSecurityNormalAgentRebootHooks? = nil
+    rebootHooks: PommeSecurityNormalAgentRebootHooks? = nil,
+    desktopProofHooks: PommeSecurityDesktopProofHooks? = nil
   ) {
     self.reference = reference
     self.expectedExecutableDigest = expectedExecutableDigest
     self.rebootHooks = rebootHooks
+    self.desktopProofHooks = desktopProofHooks
   }
 
   /// Native reboot is intentionally bounded even when a caller supplies a
@@ -628,8 +651,11 @@ struct PommeSecurityNormalAgent: Sendable {
   /// closed diagnostic when its response envelope is rejected.
   private func execute(
     _ request: GuestCommandRequest,
-    proofStage: PommeSecurityNormalAgentProofStage
+    proofStage: PommeSecurityNormalAgentProofStage,
+    remainingBudget: TimeInterval? = nil,
+    retainAquaTimeout: Bool = false
   ) throws -> GuestCommandResult {
+    if remainingBudget != nil { try Task.checkCancellation() }
     guard !request.pty, request.inputData == nil, request.environment.isEmpty else {
       Self.log(
         .init(stage: proofStage, reason: .invalidEnvelope),
@@ -638,11 +664,19 @@ struct PommeSecurityNormalAgent: Sendable {
     }
 
     let response: [String: Any]
+    let transportTimeout = min(request.timeout + Self.foregroundTransportGrace, remainingBudget ?? .infinity)
     do {
-      response = try PommeCore.sendForegroundControlObject(
-        request.controlPayload,
-        bundle: reference.bundle,
-        timeout: request.timeout + Self.foregroundTransportGrace)
+      if let desktopProofHooks {
+        guard let decoded = try desktopProofHooks.execute(
+          request, transportTimeout).publicValue as? [String: Any]
+        else { throw PommeSecurityWorkflowError.agentUnverified }
+        response = decoded
+      } else {
+        response = try PommeCore.sendForegroundControlObject(
+          request.controlPayload,
+          bundle: reference.bundle,
+          timeout: transportTimeout)
+      }
     } catch {
       Self.log(
         .init(stage: proofStage, reason: .transport),
@@ -650,6 +684,7 @@ struct PommeSecurityNormalAgent: Sendable {
       throw error
     }
 
+    if remainingBudget != nil { try Task.checkCancellation() }
     if proofStage == .aqua, let summary = Self.temporaryAquaTimingSummary(response) {
       PommeCore.log(summary, vmName: reference.displayName)
     }
@@ -662,6 +697,9 @@ struct PommeSecurityNormalAgent: Sendable {
         PommeCore.log(
           Self.timeoutStateSummary(for: response, stage: proofStage),
           vmName: reference.displayName)
+        if retainAquaTimeout, proofStage == .aqua {
+          throw PommeAquaProofTimeout(response: try JSONValue(any: response), diagnostic: diagnostic)
+        }
       }
       throw diagnostic
     }
@@ -938,13 +976,26 @@ struct PommeSecurityNormalAgent: Sendable {
     else {
       throw PommeSecurityWorkflowError.ownerLoginUnverified
     }
-    let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
+    let proofNow: @Sendable () -> ContinuousClock.Instant
+    let proofSleep: @Sendable (TimeInterval) async throws -> Void
+    if let desktopProofHooks {
+      proofNow = desktopProofHooks.now
+      proofSleep = desktopProofHooks.sleep
+    } else {
+      proofNow = { ContinuousClock.now }
+      proofSleep = { try await Task.sleep(for: .seconds($0)) }
+    }
+    let deadline = proofNow().advanced(by: .seconds(min(timeout, 120)))
     var desktopStableSince: ContinuousClock.Instant?
     while true {
       try Task.checkCancellation()
+      guard Self.remaining(until: deadline, now: proofNow()) >= 15 else {
+        throw PommeSecurityWorkflowError.ownerLoginUnverified
+      }
       let user = try execute(
         .init(path: "/usr/bin/stat", arguments: ["-f", "%Su:%u", "/dev/console"], timeout: 15),
-        proofStage: .console)
+        proofStage: .console, remainingBudget: Self.remaining(until: deadline, now: proofNow()))
+      guard proofNow() < deadline else { throw PommeSecurityWorkflowError.ownerLoginUnverified }
       let observed = String(data: user.stdout, encoding: .utf8)?.trimmingCharacters(
         in: .whitespacesAndNewlines)
       let consoleMatches = !user.detached && user.exited && !user.timedOut && user.signal == nil
@@ -953,23 +1004,48 @@ struct PommeSecurityNormalAgent: Sendable {
       var observation = PommeSecurityDesktopProofObservation(
         consoleMatches: consoleMatches, aquaMatches: nil, desktopMatches: nil)
       if consoleMatches {
-        let session = try execute(aquaRequest, proofStage: .aqua)
+        try Task.checkCancellation()
+        guard Self.remaining(until: deadline, now: proofNow()) >= 15 else {
+          throw PommeSecurityWorkflowError.ownerLoginUnverified
+        }
+        let session: GuestCommandResult
+        do {
+          session = try execute(aquaRequest, proofStage: .aqua,
+            remainingBudget: Self.remaining(until: deadline, now: proofNow()), retainAquaTimeout: true)
+        } catch let timeout as PommeAquaProofTimeout {
+          try Task.checkCancellation()
+          guard try await verifyAquaCleanup(timeout.response, deadline: deadline,
+                                           now: proofNow, sleep: proofSleep) else { throw timeout.diagnostic }
+          desktopStableSince = nil
+          try Task.checkCancellation()
+          guard Self.remaining(until: deadline, now: proofNow()) >= 16 else { throw timeout.diagnostic }
+          try await proofSleep(1)
+          continue
+        }
         let aquaSessionMatches = Self.isCompletedAquaSessionProof(session)
+        try Task.checkCancellation()
+        guard Self.remaining(until: deadline, now: proofNow()) >= 15 else {
+          throw PommeSecurityWorkflowError.ownerLoginUnverified
+        }
         let desktop = try execute(
           .init(path: "/bin/ps", arguments: ["-axo", "uid=,comm="], timeout: 15),
-          proofStage: .processList)
+          proofStage: .processList, remainingBudget: Self.remaining(until: deadline, now: proofNow()))
         let desktopMatches = !desktop.detached && desktop.exited && !desktop.timedOut && desktop.signal == nil
           && desktop.exitCode == 0 && !desktop.stdoutTruncated && !desktop.stderrTruncated
           && Self.parseDesktopProcessList(desktop.stdout, expectedUID: uniqueID)
         observation = .init(
           consoleMatches: true, aquaMatches: aquaSessionMatches, desktopMatches: desktopMatches)
-        let now = ContinuousClock.now
-        PommeCore.log("[DEBUG-aqua-20260922] " + observation.timeoutDiagnostic, vmName: reference.displayName)
+        let now = proofNow()
+        try Task.checkCancellation()
+        guard now < deadline else { throw PommeSecurityWorkflowError.ownerLoginUnverified }
+        PommeCore.log("[DEBUG-aqua-20260922] " + observation.observationDiagnostic, vmName: reference.displayName)
         if aquaSessionMatches && desktopMatches {
           if desktopStableSince == nil { desktopStableSince = now }
           if let stableSince = desktopStableSince,
              now < deadline,
              stableSince.duration(to: now) >= .seconds(5) {
+            try Task.checkCancellation()
+            guard proofNow() < deadline else { throw PommeSecurityWorkflowError.ownerLoginUnverified }
             return
           }
         } else {
@@ -977,16 +1053,108 @@ struct PommeSecurityNormalAgent: Sendable {
         }
       } else {
         desktopStableSince = nil
-        PommeCore.log("[DEBUG-aqua-20260922] " + observation.timeoutDiagnostic, vmName: reference.displayName)
+        PommeCore.log("[DEBUG-aqua-20260922] " + observation.observationDiagnostic, vmName: reference.displayName)
       }
-      guard ContinuousClock.now < deadline else {
+      guard proofNow() < deadline else {
         try Task.checkCancellation()
         PommeCore.log(observation.timeoutDiagnostic, vmName: reference.displayName)
         throw PommeSecurityWorkflowError.ownerLoginUnverified
       }
       try Task.checkCancellation()
-      try await Task.sleep(for: .seconds(1))
+      try await proofSleep(1)
     }
+  }
+
+  private static func remaining(until deadline: ContinuousClock.Instant, now: ContinuousClock.Instant) -> TimeInterval {
+    let duration = now.duration(to: deadline).components
+    return max(0, Double(duration.seconds) + Double(duration.attoseconds) / 1e18)
+  }
+
+  /// A timeout is still a failed proof. Only a separately proven reap and
+  /// output drain permits the outer readiness loop to start another probe.
+  private func verifyAquaCleanup(
+    _ response: JSONValue, deadline: ContinuousClock.Instant,
+    now: @Sendable () -> ContinuousClock.Instant,
+    sleep: @Sendable (TimeInterval) async throws -> Void
+  ) async throws -> Bool {
+    guard let terminal = response.objectValue?["result"]?.objectValue,
+      terminal["timedOut"] == .bool(true), terminal["cancelled"] == .bool(false),
+      let identity = terminal["jobID"]?.stringValue, let jobID = UUID(uuidString: identity),
+      now() < deadline
+    else { return false }
+    if let rawReceipt = terminal[PommeForegroundExecution.aquaCleanupReceiptKey] {
+      guard let receipt = rawReceipt.objectValue,
+        Set(receipt.keys) == ["jobID", "reapedAndDrained"],
+        let identity = receipt["jobID"]?.stringValue, UUID(uuidString: identity) == jobID,
+        receipt["reapedAndDrained"] == .bool(true)
+      else { return false }
+      return true
+    }
+    let cleanupDeadline = min(deadline, now().advanced(by: .seconds(3)))
+    while now() < cleanupDeadline {
+      try Task.checkCancellation()
+      let budget = Self.remaining(until: cleanupDeadline, now: now())
+      guard budget > 0 else { return false }
+      let status: JSONValue
+      do {
+        if let desktopProofHooks {
+          status = try desktopProofHooks.status(jobID, budget)
+        } else {
+          status = try JSONValue(any: PommeCore.sendControlObject([
+            "command": "agent.perform", "operation": "process.status",
+            "payload": ["jobID": jobID.uuidString.lowercased()]
+          ], bundle: reference.bundle, timeout: budget))
+        }
+      } catch {
+        try Task.checkCancellation()
+        if error is CancellationError { throw error }
+        return false
+      }
+      try Task.checkCancellation()
+      guard now() < cleanupDeadline,
+        let complete = Self.aquaCleanupStatus(status, jobID: jobID)
+      else { return false }
+      if complete { return true }
+      try await sleep(min(0.1, Self.remaining(until: cleanupDeadline, now: now())))
+    }
+    return false
+  }
+
+  /// nil is malformed and terminal; false is a valid same-job pending status.
+  private static func aquaCleanupStatus(_ response: JSONValue, jobID: UUID) -> Bool? {
+    guard let envelope = response.objectValue, envelope["ok"] == .bool(true),
+      let terminal = envelope["result"]?.objectValue,
+      let identity = terminal["jobID"]?.stringValue, UUID(uuidString: identity) == jobID,
+      case .bool? = terminal["exited"],
+      case .array(let frames)? = envelope["streamFrames"]
+    else { return nil }
+    var receivedExit = false
+    for raw in frames {
+      guard let frame = raw.objectValue,
+        let identity = frame["jobID"]?.stringValue, UUID(uuidString: identity) == jobID,
+        let request = frame["requestID"]?.stringValue, UUID(uuidString: request) != nil,
+        let stream = frame["stream"]?.stringValue
+      else { return nil }
+      switch stream {
+      case "stdout", "stderr":
+        guard Set(frame.keys) == ["jobID", "requestID", "stream", "dataBase64"],
+          let text = frame["dataBase64"]?.stringValue, let bytes = Data(base64Encoded: text),
+          bytes.count <= PommeAgentProtocol.maximumStreamChunkBytes
+        else { return nil }
+      case "exit":
+        guard Set(frame.keys).isSubset(of: ["jobID", "requestID", "stream", "signal"]),
+          !receivedExit else { return nil }
+        if let rawSignal = frame["signal"] {
+          guard case .integer(let signal) = rawSignal, (1...127).contains(signal) else { return nil }
+        }
+        receivedExit = true
+      default: return nil
+      }
+    }
+    // The daemon serializes status before streamEvents may reap and drain.
+    // Its same-job exit frame is the later authoritative cleanup evidence.
+    // A normal exit frame has no code; signalled exits carry only `signal`.
+    return receivedExit
   }
 
   /// Keeps the large `launchctl print` body out of the bounded foreground

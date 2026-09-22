@@ -72,6 +72,35 @@ struct PommeForegroundExecutionTests {
         #expect(total >= 0)
     }
 
+    @Test("Aqua cleanup receipt requires validated host-observed same-job exit", arguments: ["valid", "falseAckExit", "signalExit", "badSignal", "priorExit", "ackOnly", "wrongJob", "malformedExit", "foreignOutput", "forged", "ordinary"])
+    func aquaCleanupReceiptBoundary(mode: String) async throws {
+        var start = try #require(started().objectValue)
+        if mode == "forged" {
+            start[PommeForegroundExecution.aquaCleanupReceiptKey] = .object([
+                "jobID": .string(jobID.uuidString), "reapedAndDrained": .bool(true)
+            ])
+        }
+        var frames: [PommeAgentJobStreamFrame] = []
+        if mode != "ackOnly" && mode != "forged" && mode != "priorExit" {
+            frames = [frame(jobID: mode == "wrongJob" ? UUID() : jobID, stream: .exit,
+                            data: mode == "malformedExit" ? Data("invalid".utf8) : nil,
+                            signal: mode == "signalExit" ? 15 : (mode == "badSignal" ? 128 : nil))]
+            if mode == "foreignOutput" { frames.append(frame(jobID: UUID(), stream: .stdout, data: Data())) }
+        }
+        let transport = ForegroundTransport(
+            start: correlated(requestID: startRequestID, result: .object(start),
+                              frames: mode == "priorExit" ? [frame(jobID: jobID, stream: .exit)] : []),
+            statuses: [], signalFrames: frames, signalAcknowledged: mode != "falseAckExit"
+        )
+        let payload: JSONValue = mode == "ordinary" ? .object(["path": .string("/usr/bin/true")]) : try aquaPayload()
+        let result = try await run(payload: payload, transport: transport, timeout: 0.03)
+        let values = try #require(result.result.objectValue)
+        #expect(values["timedOut"] == .bool(true))
+        #expect(values["outputComplete"] == .bool(mode == "priorExit"))
+        #expect((values[PommeForegroundExecution.aquaCleanupReceiptKey] != nil) == ["valid", "falseAckExit", "signalExit", "priorExit"].contains(mode))
+        #expect(await transport.signalCalls == 1)
+    }
+
     @Test("Temporary Aqua wait snapshot is closed and optional for old guests", arguments: ["valid", "absent", "malformed"])
     func temporaryAquaWaitSnapshot(variant: String) async throws {
         var completed = try #require(status(exited: true, exitCode: 0).objectValue)
@@ -378,9 +407,10 @@ struct PommeForegroundExecutionTests {
     private func frame(
         jobID: UUID,
         stream: PommeAgentProtocol.Stream,
-        data: Data? = nil
+        data: Data? = nil,
+        signal: Int32? = nil
     ) -> PommeAgentJobStreamFrame {
-        try! .init(jobID: jobID, frame: .init(requestID: UUID(), stream: stream, data: data))
+        try! .init(jobID: jobID, frame: .init(requestID: UUID(), stream: stream, data: data, signal: signal))
     }
 
     private func correlated(
@@ -408,15 +438,17 @@ private actor ForegroundTransport {
     let start: PommeAgentCorrelatedResult
     let statuses: [PommeAgentCorrelatedResult]
     let signalFrames: [PommeAgentJobStreamFrame]
+    let signalAcknowledged: Bool
     private var statusIndex = 0
     private(set) var operationNames: [String] = []
     private(set) var streamCalls: [StreamCall] = []
     private(set) var signalCalls = 0
 
-    init(start: PommeAgentCorrelatedResult, statuses: [PommeAgentCorrelatedResult], signalFrames: [PommeAgentJobStreamFrame] = []) {
+    init(start: PommeAgentCorrelatedResult, statuses: [PommeAgentCorrelatedResult], signalFrames: [PommeAgentJobStreamFrame] = [], signalAcknowledged: Bool = true) {
         self.start = start
         self.statuses = statuses
         self.signalFrames = signalFrames
+        self.signalAcknowledged = signalAcknowledged
     }
 
     func perform(operation: String, payload: JSONValue) -> PommeAgentCorrelatedResult {
@@ -440,7 +472,9 @@ private actor ForegroundTransport {
             )
         case "process.signal":
             signalCalls += 1
-            return .init(requestID: UUID(), result: .object([:]), streamFrames: signalFrames)
+            return .init(requestID: UUID(), result: .object([
+                "jobID": .string("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), "signalled": .bool(signalAcknowledged)
+            ]), streamFrames: signalFrames)
         default:
             return .init(requestID: UUID(), result: .object([:]), streamFrames: [])
         }
