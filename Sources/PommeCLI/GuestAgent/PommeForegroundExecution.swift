@@ -9,7 +9,7 @@ enum PommeForegroundExecution {
     typealias SendStream = @Sendable (UUID, PommeAgentProtocol.Stream, Data?) async throws -> [PommeAgentJobStreamFrame]
     typealias FrameHandler = @Sendable ([PommeAgentJobStreamFrame]) async throws -> Void
     static let maximumBufferedOutputBytes = 64 * 1024 // per output channel
-    static let aquaCleanupReceiptKey = "_pommeAquaCleanupReceipt"
+    static let desktopCleanupReceiptKey = "_pommeDesktopProofCleanupReceipt"
 
     // Temporary, closed diagnostics for the September 22 Aqua timeout investigation.
     static let aquaDebugKey = "_pommeDebugAqua20260922"
@@ -33,6 +33,17 @@ enum PommeForegroundExecution {
               let number = UInt32(uid), number > 0, String(number) == uid
         else { return false }
         return true
+    }
+
+    static func isDesktopProofPayload(_ payload: [String: JSONValue]) -> Bool {
+        if isAquaProofPayload(payload) { return true }
+        guard Set(payload.keys).isSubset(of: ["path", "arguments", "timeout", "detached"]),
+              payload["detached"] == nil || payload["detached"] == .bool(false)
+        else { return false }
+        return (payload["path"] == .string("/usr/bin/stat")
+            && payload["arguments"] == .array(["-f", "%Su:%u", "/dev/console"].map(JSONValue.string)))
+            || (payload["path"] == .string("/bin/ps")
+            && payload["arguments"] == .array(["-axo", "uid=,comm="].map(JSONValue.string)))
     }
 
     private struct AquaTiming {
@@ -93,7 +104,7 @@ enum PommeForegroundExecution {
         onFrames: FrameHandler? = nil
     ) async throws -> PommeAgentCorrelatedResult {
         guard var startPayload = payload.objectValue else { throw Error.invalidPayload }
-        let isAquaProof = isAquaProofPayload(startPayload)
+        let isDesktopProof = isDesktopProofPayload(startPayload)
         var aquaTiming: AquaTiming? = isAquaDebugPayload(startPayload) ? AquaTiming() : nil
         guard startPayload["detached"] != .bool(true) else { throw Error.detachedPayload }
         guard startPayload["pty"] != .bool(true) else { throw Error.unsupportedPTY }
@@ -198,7 +209,7 @@ enum PommeForegroundExecution {
                 aquaTiming?.record("totalMicros", since: executionStart)
                 if let aquaTiming { terminal[aquaDebugKey] = .object(aquaTiming.values) }
                 return state.result(requestID: started.requestID, terminal: terminal,
-                                    aquaCleanupVerified: isAquaProof && reapedAndDrained)
+                                    desktopCleanupVerified: isDesktopProof && reapedAndDrained)
             }
             throw error
         }
@@ -280,12 +291,12 @@ enum PommeForegroundExecution {
             }
         }
 
-        func result(requestID: UUID, terminal: [String: JSONValue], aquaCleanupVerified: Bool = false) -> PommeAgentCorrelatedResult {
+        func result(requestID: UUID, terminal: [String: JSONValue], desktopCleanupVerified: Bool = false) -> PommeAgentCorrelatedResult {
             var values = terminal
             // A guest result can never supply this host-generated receipt.
-            values.removeValue(forKey: PommeForegroundExecution.aquaCleanupReceiptKey)
-            if aquaCleanupVerified {
-                values[PommeForegroundExecution.aquaCleanupReceiptKey] = .object([
+            values.removeValue(forKey: PommeForegroundExecution.desktopCleanupReceiptKey)
+            if desktopCleanupVerified {
+                values[PommeForegroundExecution.desktopCleanupReceiptKey] = .object([
                     "jobID": .string(jobID.uuidString.lowercased()), "reapedAndDrained": .bool(true)
                 ])
             }
