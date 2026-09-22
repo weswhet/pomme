@@ -9,30 +9,163 @@ import Synchronization
 /// cross-test concurrency.
 @Suite("Pomme agent process exchanges", .serialized)
 struct PommeAgentProcessExchangeTests: Sendable {
-    @Test("Guest signal trace excludes unauthenticated, Recovery, and other operations", arguments: ["failure", "unauthenticated", "recovery", "health"])
+    @Test("Real daemon foreground timeout signal integration characterization", .serialized, arguments: 0..<20)
+    func foregroundTimeoutSignalCharacterization(iteration: Int) async throws {
+        _ = iteration
+        let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64))
+        let trace = Mutex<[PommeSignalBoundaryTrace.Event]>([])
+        let job = Mutex<String?>(nil)
+        let startID = Mutex<UUID?>(nil)
+        let operations = Mutex<[String]>([])
+        let observed = Mutex<(stdout: Bool, stderr: Bool)>((false, false))
+        let clock = Mutex(ContinuousClock.now)
+        let observationDeadline = ContinuousClock.now.advanced(by: .seconds(30))
+        do {
+            let result = try await withDaemon(agent: agent, signalTraceSink: { event, _ in
+                trace.withLock { $0.append(event) }
+            }) { context in
+                try await authenticate(using: context.wire)
+                return try await PommeForegroundExecution.run(
+                    payload: .object([
+                        "path": .string("/bin/sh"),
+                        "arguments": .array([.string("-c"), .string("printf ready-out; printf ready-err >&2; exec /bin/sleep 60")])
+                    ]), timeout: 1,
+                    perform: { operation, payload in
+                        operations.withLock { $0.append(operation) }
+                        let request = PommeAgentProtocol.Envelope.request(operation: operation, payload: payload)
+                        let reply = try await exchange(request, using: context.wire, timeout: 5)
+                        let value = try #require(reply.response.result)
+                        if operation == "process.start" {
+                            job.withLock { $0 = value.objectValue?["jobID"]?.stringValue }
+                            startID.withLock { $0 = request.requestID }
+                        } else {
+                            let matches = payload.objectValue?["jobID"]?.stringValue == job.withLock { $0 }
+                            try #require(matches)
+                        }
+                        try #require(reply.response.ok == true)
+                        if operation == "process.status" {
+                            try #require(value.objectValue?["exited"] == .bool(false))
+                        }
+                        if operation == "process.signal" {
+                            #expect(payload.objectValue?["signal"] == .integer(Int64(SIGTERM)))
+                        }
+                        return PommeAgentCorrelatedResult(requestID: request.requestID, result: value, streamFrames: reply.streams)
+                    },
+                    sendStream: { id, stream, data in
+                        operations.withLock { $0.append(stream == .eof ? "eof" : "unexpectedStream") }
+                        let matches = id.uuidString.lowercased() == job.withLock { $0 }
+                        try #require(matches)
+                        let request = try PommeAgentJobStreamFrame(
+                            jobID: id, frame: .init(requestID: UUID(), stream: stream, data: data)
+                        ).envelope()
+                        let reply = try await exchange(request, using: context.wire, timeout: 5)
+                        try #require(reply.response.ok == true)
+                        return reply.streams
+                    },
+                    pollTiming: .init(now: { clock.withLock { $0 } }, sleep: { _ in
+                        // Freeze the logical deadline until a real status has
+                        // delivered both channels. No response is delayed or
+                        // withheld; this does not reproduce the live timeout.
+                        let ready = observed.withLock { $0.stdout && $0.stderr }
+                        if ready { clock.withLock { $0 = $0.advanced(by: .seconds(2)) } }
+                        else {
+                            try #require(ContinuousClock.now < observationDeadline)
+                            try await Task.sleep(for: .milliseconds(25))
+                        }
+                    }),
+                    onFrames: { frames in
+                        let matches = frames.allSatisfy { $0.jobID.uuidString.lowercased() == job.withLock { $0 } }
+                        try #require(matches)
+                        observed.withLock { value in
+                            value.stdout = value.stdout || frames.contains { $0.frame.stream == .stdout && $0.frame.data?.isEmpty == false }
+                            value.stderr = value.stderr || frames.contains { $0.frame.stream == .stderr && $0.frame.data?.isEmpty == false }
+                        }
+                    }
+                )
+            }
+            let values = try #require(result.result.objectValue)
+            #expect(values["timedOut"] == .bool(true))
+            #expect(values["cancelled"] == .bool(false))
+            #expect(values["terminationRequested"] == .bool(true))
+            let correlated = result.requestID == startID.withLock { $0 }
+            #expect(correlated)
+            let calls = operations.withLock { $0 }
+            #expect(calls.filter { $0 == "process.start" }.count == 1)
+            #expect(calls.filter { $0 == "process.signal" }.count == 1)
+            #expect(calls.filter { $0 == "eof" }.count == 1)
+            #expect(calls.contains("process.status"))
+            #expect(calls.last == "process.signal")
+            #expect(observed.withLock { $0.stdout && $0.stderr })
+            let allEvents = trace.withLock { $0 }
+            let statusEvents = allEvents.filter { $0.rawValue.hasPrefix("guestStatus") }
+            #expect(statusEvents.filter { $0 == .guestStatusHandlerEntered }.count == calls.filter { $0 == "process.status" }.count)
+            #expect(statusEvents.filter { $0 == .guestStatusResponseWritten }.count == calls.filter { $0 == "process.status" }.count)
+            #expect(Array(allEvents.prefix(statusEvents.count)) == statusEvents)
+            let recorded = Array(allEvents.dropFirst(statusEvents.count))
+            #expect(Array(recorded.prefix(5)) == [.guestSignalDecoded, .guestHandlerEntered, .guestPerformReturned, .guestStreamsEntered, .guestStreamsReturned])
+            #expect(Array(recorded.suffix(2)) == [.guestResponseWriteEntered, .guestResponseWritten])
+            let writes = Array(recorded.dropFirst(5).dropLast(2))
+            #expect(writes.count.isMultiple(of: 2))
+            for (index, event) in writes.enumerated() {
+                #expect(event == (index.isMultiple(of: 2) ? .guestStreamWriteEntered : .guestStreamWritten))
+            }
+            let id = try #require(job.withLock { $0 })
+            let cleaned = try await finishSignalTraceChild(agent: agent, jobID: id, terminate: false)
+            try #require(cleaned)
+        } catch {
+            if let id = job.withLock({ $0 }) {
+                do {
+                    let cleaned = try await finishSignalTraceChild(agent: agent, jobID: id, terminate: true)
+                    #expect(cleaned, "Characterization failure must reap and drain its exact child")
+                } catch { Issue.record(error, "Characterization child cleanup failed") }
+            }
+            throw error
+        }
+    }
+
+    @Test("Guest trace classifies signal admission and excludes Recovery and unauthenticated status", arguments: ["failure", "replay", "unauthenticated", "unauthenticatedStatus", "recovery", "recoveryStatus", "health"])
     func signalTraceAdmission(mode: String) async throws {
         let trace = Mutex<[(PommeSignalBoundaryTrace.Event, Double)]>([])
-        let agent = try PommeAgent(role: mode == "recovery" ? .recovery : .persistent,
+        let agent = try PommeAgent(role: mode.hasPrefix("recovery") ? .recovery : .persistent,
                                    executableSHA256: String(repeating: "a", count: 64))
         try await withDaemon(agent: agent, signalTraceSink: { event, elapsed in
             trace.withLock { $0.append((event, elapsed)) }
         }) { context in
-            if mode != "unauthenticated" { try await authenticate(using: context.wire) }
-            let response = try await exchange(.request(
-                operation: mode == "health" ? "agent.health" : "process.signal",
+            if !mode.hasPrefix("unauthenticated") { try await authenticate(using: context.wire) }
+            let request = PommeAgentProtocol.Envelope.request(
+                operation: mode == "health" ? "agent.health" : mode.hasSuffix("Status") ? "process.status" : "process.signal",
                 payload: .object(["jobID": .string(UUID().uuidString.lowercased()), "signal": .integer(15)])
-            ), using: context.wire)
+            )
+            let response = try await exchange(request, using: context.wire)
             #expect(response.response.ok == (mode == "health"))
+            if mode == "replay" {
+                let replay = try await exchange(request, using: context.wire)
+                #expect(replay.response.ok == false)
+                #expect(replay.response.error?.code == "replayed-request")
+            }
         }
         let recorded = trace.withLock { $0 }
-        let expected: [PommeSignalBoundaryTrace.Event] = mode == "failure"
-            ? [.guestHandlerEntered, .guestPerformFailed, .guestResponseWriteEntered, .guestResponseWritten] : []
+        var expected: [PommeSignalBoundaryTrace.Event] = []
+        if mode == "failure" || mode == "replay" {
+            expected = [.guestSignalDecoded, .guestHandlerEntered, .guestPerformFailed, .guestResponseWriteEntered, .guestResponseWritten]
+        }
+        if mode == "replay" {
+            expected += [.guestSignalDecoded, .guestSignalRejectedReplay, .guestResponseWriteEntered, .guestResponseWritten]
+        } else if mode == "unauthenticated" {
+            expected = [.guestSignalDecoded, .guestSignalRejectedAuthenticationRequired, .guestResponseWriteEntered, .guestResponseWritten]
+        }
         #expect(recorded.map(\.0) == expected)
         #expect(recorded.allSatisfy { $0.1.isFinite && $0.1 >= 0 })
-        #expect(recorded.map(\.1) == recorded.map(\.1).sorted())
+        // Each decoded signal starts a fresh local elapsed clock.
+        let starts = recorded.indices.filter { recorded[$0].0 == .guestSignalDecoded }
+        for (index, start) in starts.enumerated() {
+            let end = index + 1 < starts.count ? starts[index + 1] : recorded.endIndex
+            let elapsed = recorded[start..<end].map(\.1)
+            #expect(elapsed == elapsed.sorted())
+        }
     }
 
-    @Test("Successful guest signal trace brackets perform, streams, and response")
+    @Test("Authenticated status and signal traces bracket perform, streams, and response")
     func signalTraceSuccess() async throws {
         let trace = Mutex<[PommeSignalBoundaryTrace.Event]>([])
         let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64))
@@ -46,6 +179,10 @@ struct PommeAgentProcessExchangeTests: Sendable {
                 trace.withLock { $0.append(event) }
             }) { context in
                 try await authenticate(using: context.wire)
+                let status = try await exchange(.request(operation: "process.status", payload: .object([
+                    "jobID": .string(jobID)
+                ])), using: context.wire)
+                try #require(status.response.ok == true)
                 let signalled = try await exchange(.request(operation: "process.signal", payload: .object([
                     "jobID": .string(jobID), "signal": .integer(Int64(SIGTERM))
                 ])), using: context.wire)
@@ -62,10 +199,15 @@ struct PommeAgentProcessExchangeTests: Sendable {
         }
         let cleaned = try await finishSignalTraceChild(agent: agent, jobID: jobID, terminate: false)
         try #require(cleaned, "Successful trace exchange must reap and drain its child before releasing the agent")
-        let recorded = trace.withLock { $0 }
-        #expect(Array(recorded.prefix(4)) == [.guestHandlerEntered, .guestPerformReturned, .guestStreamsEntered, .guestStreamsReturned])
+        let allEvents = trace.withLock { $0 }
+        let statusEvents = allEvents.filter { $0.rawValue.hasPrefix("guestStatus") }
+        #expect(Array(statusEvents.prefix(4)) == [.guestStatusHandlerEntered, .guestStatusPerformReturned, .guestStatusStreamsEntered, .guestStatusStreamsReturned])
+        #expect(Array(statusEvents.suffix(2)) == [.guestStatusResponseWriteEntered, .guestStatusResponseWritten])
+        #expect(Array(allEvents.prefix(statusEvents.count)) == statusEvents)
+        let recorded = Array(allEvents.dropFirst(statusEvents.count))
+        #expect(Array(recorded.prefix(5)) == [.guestSignalDecoded, .guestHandlerEntered, .guestPerformReturned, .guestStreamsEntered, .guestStreamsReturned])
         #expect(Array(recorded.suffix(2)) == [.guestResponseWriteEntered, .guestResponseWritten])
-        let streamWrites = Array(recorded.dropFirst(4).dropLast(2))
+        let streamWrites = Array(recorded.dropFirst(5).dropLast(2))
         #expect(streamWrites.count.isMultiple(of: 2))
         for (index, event) in streamWrites.enumerated() {
             #expect(event == (index.isMultiple(of: 2) ? .guestStreamWriteEntered : .guestStreamWritten))
