@@ -3039,6 +3039,90 @@ screenshots remain outside source control. This verifies the signed production
 clock path remains compatible; deterministic regressions establish the fixture
 timing fix, not a claim that historical live timeouts have been explained.
 
+### Foreground completion under parallel test load
+
+After committing the listener release/live evidence as `f349e79`, the next
+isolated investigation is
+`PommeForegroundExecutionTests.delayedOutputAndCompletion()`. The full
+ten-pass run `20-43-41-704Z_pid35061_ed28ac57` returned `exited=false`
+instead of the expected completed output; it was the only failing function /
+invocation among 1,181 functions / 16,060 invocations. Installed signed
+Release is `cf7a22e`. The unchanged test passed 100 isolated repetitions
+(`20-50-11-601Z_pid38715_bbca4dcc`), so removing parallel workload does not
+retain the failure.
+
+Ranked hypotheses are a polling continuation resuming after the fixture's
+five-second deadline, delayed transport work before status is observed, and
+completion frames lost by output-state processing. Bounded failure-only
+timing probes will distinguish those boundaries without changing production
+deadline, signal, or completion behavior.
+
+The first instrumented ten-pass workload
+(`20-52-16-740Z_pid39220_e57784c9`) passed all 1,181 functions / 16,060
+invocations. No failure trace was emitted, so this run does not establish a
+cause. The unchanged instrumented workload is being expanded to twenty
+repetitions before choosing a correction.
+
+The twenty-pass run (`20-54-12-407Z_pid40267_23d83f66`) reproduced only
+this failure: 1,180 functions / 32,119 invocations passed, one function /
+invocation failed. Its trace shows start, EOF, and first status completed
+within 0.019 ms, returning one early-output frame. The next recorded call was
+`process.signal` at 17,130.006 ms; status index remained one and signal count
+became one. The result retained that one frame with `timedOut=true`,
+`cancelled=false`, `exited=false`, and `outputComplete=false`. The second
+status was never requested. This is a delayed polling continuation exhausting
+the fixture budget, not evidence that delivered final frames were lost.
+Production timeout handling was correct. The correction will separate logical
+test time from scheduler delay and retain strict partial-output timeout cleanup.
+
+The first minimized-test build (`20-59-02-977Z_pid42587_0cecd0fa.log`)
+failed before test execution: adding a defaulted sleep closure caused an
+existing trailing frame callback to bind to that new closure. This is an
+introduced source-compatibility issue, not the intended behavioral red. The
+injection shape is being corrected before rerunning the regression.
+
+A non-closure `PollTiming` parameter preserved existing frame-callback
+binding. The minimized behavioral red then reproduced successfully
+(`21-00-33-058Z_pid42819_15fbbaed`): an injected 120 ms polling delay against
+a 50 ms real-clock budget returned incomplete early output, no exit code,
+no final stderr, and no second status poll. Twelve other functions passed.
+This matches all five assertions from the original failure. The candidate
+will add a monotonic `now` dependency to the same internal timing value,
+retain live defaults, and freeze time only for the ordering fixture. Explicit
+partial-output deadline and actual-task cancellation cases will retain
+single-job/single-signal cleanup and cancellation precedence.
+
+The candidate passed fourteen focused functions / 640 invocations over ten
+repetitions (`21-03-19-062Z_pid43298_635ef3e2`). Production defaults remain
+`ContinuousClock.now` and cancellable `Task.sleep(for:)`; deadline creation,
+checkpoint locations, cancellation-first checks, and signal behavior are
+unchanged. New deadline/cancellation cases retain only early output, preserve
+the request/job identity, verify exact same-job SIGTERM payload and one
+start/EOF/status/signal sequence, and prove cancellation wins when both it and
+the logical deadline occur at the checkpoint. Other fixtures use live timing.
+
+A deterministic one-poll guard was added to the frozen-clock ordering helper
+before the full comparison, so a missing completion regression cannot loop
+indefinitely. The final twenty-pass workload follows. Temporary diagnostics
+are absent. Compiler warnings reported in untouched Core and private-PTY
+test files remain outside this correction.
+
+The final twenty-pass workload (`21-04-48-437Z_pid43625_d992d7fe`)
+passed all twenty invocations each of the original and delayed foreground
+ordering tests, plus all forty parameterized partial-output deadline/cancellation
+invocations. Overall 1,181 functions / 32,177 invocations passed; two
+functions / three invocations failed: Recovery coordinator retry authentication
+and framebuffer registration live-callback completion (two invocations).
+Those separate observations remain open. Final review confirmed the guarded
+ordering fixture and unchanged production timing/cleanup behavior; no blocker
+remains for this correction.
+
+The unrestricted single run (`21-08-01-318Z_pid45613_440da75d`) passed all
+1,183 functions / 1,609 invocations with no failures or skips. The candidate
+is being committed before its canonical signed Release build and live
+foreground output/timeout comparison. The scheduling defect is in the ordering
+fixture; no production execution deadline or output-completion policy is relaxed.
+
 ### Live TUI status projection mismatch
 
 The same signed `052f05d` PTY smoke check exposed a separate reproducible
