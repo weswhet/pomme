@@ -21,7 +21,7 @@ observations are recorded below; historical rows retain their original status.
 | Integrated test-suite concurrency hang | Test-peer thread isolation in `0291f65` removes the observed hang in the focused stress run and subsequent full parallel comparisons. Signed Release and live execution/timeout smoke checks passed. Reconnect fixture admission now has a red/green delayed-start regression, passing repeated parallel comparison, and a 1,166-function full pass; other stress-run timeout failures keep full-suite reliability open. |
 | Private-PTY logical test timing | Fixed in `f7a6139`: injected-clock regressions verify prompt/process deadlines and cleanup without parallel scheduling determining logical test time; production retains `ContinuousClock`. Focused/repeated checks and a 1,168-function full run passed. Signed Release live owner authentication and a complete SIP disable/enable cycle passed, restoring SIP enabled and the stopped VM state. |
 | Coordinator-pin fixture polling | Fixed in `f3dfff6`: checks readiness after delayed sleep with cancellation precedence and bounded unavailability. Deterministic red/green, ten-pass full-workload coordinator checks, and a 1,170-function full pass succeeded. Signed Release/live start, execution, restart, reauthentication, and stopped-state restoration passed. Production pin/authentication behavior is unchanged; other stress failures remain open. |
-| Daemon socket-admission fixture timing | Awaiting actual serving-task entry removes queued setup from the response-read budget. Delayed-start red/green, timeout/cancellation safeguards, full ten-pass socket checks, and a 1,175-function full pass succeeded. Signed Release/live compatibility verification follows the code commit; production daemon and Recovery one-shot test are unchanged. |
+| Daemon socket-admission fixture timing | Fixed in `ca45976`: waits for actual serving-task entry before starting the response-read budget, with separate bounded/cancellable setup. Delayed-start red/green, timeout/cancellation safeguards, full ten-pass socket checks, and a 1,175-function full pass succeeded. Signed Release/live agent status, execution, and stopped-state restoration passed; production daemon and Recovery one-shot test are unchanged. |
 
 This is an observational live test. The CLI and guest images are not being
 modified during the sweep. Every failure, timeout, unexpected state, and
@@ -2816,6 +2816,28 @@ The unrestricted single run passed all 1,175 functions / 1,599 invocations
 temporary diagnostics are absent, and only the assigned test file plus this
 evidence document changed. The fix is being committed before the canonical
 signed Release build and a scoped internal-VM live compatibility check.
+
+Candidate `ca45976` was committed before the canonical signed Release build at
+20:12:50Z. Build/signature/entitlement/designated-requirement/archive/atomic
+installation checks passed. Fresh login-shell resolution is
+`/Users/wes/.local/bin/pomme`, version `ca45976`, SHA-256
+`6f1facffae2ca8e47ed47340c553843c69134b137bdf9c204011577d16ba7cc3`.
+All 104 CLI contract and 21 local installer checks passed.
+
+Live preflight confirmed internal `pomme-agent-ownerproof-20260922a` stopped
+with no helper and unchanged 40 GB / 4 GB resources. Public normal start began
+at 20:13:13Z and succeeded with helper PID 23182 and the original normal agent
+pin. `agent status --debug` passed at 20:14:00Z without leaving normal macOS,
+reporting connected/protocol 1 and the same agent digest. Authenticated guest
+`/bin/echo daemon-admission-live` passed at 20:14:01Z with exact stdout, exit
+zero, and complete output. Graceful stop began at 20:14:20Z and completed with
+`guest-stopped`. Final public inventory confirmed all twelve VMs stopped with
+no helpers and internal bundle paths. Target UUID, startup volume, immutable
+plan, original agent pin, disk size, and memory remain unchanged. No VM was
+deleted or moved; no guest agent, credential, security setting, or journal was
+changed. The live result verifies release compatibility; the scheduling defect
+is proven by the isolated red/green fixture and full-workload comparison, not
+by a claim that a unit-only timing seam executes in the live CLI.
 
 ### Live TUI status projection mismatch
 
