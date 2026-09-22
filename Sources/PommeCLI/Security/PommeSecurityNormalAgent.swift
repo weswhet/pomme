@@ -1084,7 +1084,8 @@ struct PommeSecurityNormalAgent: Sendable {
         } else {
           status = try JSONValue(any: PommeCore.sendControlObject([
             "command": "agent.perform", "operation": "process.status",
-            "payload": ["jobID": jobID.uuidString.lowercased()]
+            "payload": ["jobID": jobID.uuidString.lowercased(),
+                        PommeSecurityDesktopCleanup.digestMarker: expectedExecutableDigest]
           ], bundle: reference.bundle, timeout: budget))
         }
       } catch {
@@ -1094,7 +1095,8 @@ struct PommeSecurityNormalAgent: Sendable {
       }
       try Task.checkCancellation()
       guard now() < cleanupDeadline,
-        let complete = Self.desktopCleanupStatus(status, jobID: jobID)
+        let complete = PommeSecurityDesktopCleanup.completion(
+          status, jobID: jobID, digest: expectedExecutableDigest)
       else { return false }
       if complete { return true }
       try await sleep(min(0.1, Self.remaining(until: cleanupDeadline, now: now())))
@@ -1103,7 +1105,7 @@ struct PommeSecurityNormalAgent: Sendable {
   }
 
   /// nil is malformed and terminal; false is a valid same-job pending status.
-  private static func desktopCleanupStatus(_ response: JSONValue, jobID: UUID) -> Bool? {
+  static func desktopCleanupStatus(_ response: JSONValue, jobID: UUID) -> Bool? {
     guard let envelope = response.objectValue, envelope["ok"] == .bool(true),
       let terminal = envelope["result"]?.objectValue,
       let identity = terminal["jobID"]?.stringValue, UUID(uuidString: identity) == jobID,

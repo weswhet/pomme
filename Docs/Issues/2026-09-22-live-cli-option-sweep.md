@@ -1518,3 +1518,58 @@ coordinator suites passed 35 functions / 86 executions, zero failures/skips:
 This characterizes existing fail-closed behavior, not the cause of the live
 delay or a transport fix. Any subsequent retry must obtain new authenticated
 same-job cleanup proof rather than inferring success from a missing response.
+
+Read-only reconnect tracing confirmed that the persistent daemon retains one
+`PommeAgent` and its job registry across socket reconnects; the next connection
+authenticates again. There is no guaranteed reconnect duration. If the daemon
+restarts instead, the original in-memory job is absent and must be rejected.
+The normal agent emits another correlated exit frame on a later status request
+once that job is reaped and output is drained. A preceding status result may
+still say running when the subsequent stream collection performs the reap.
+
+The next candidate keeps the existing three-second cleanup window and original
+120-second readiness deadline. A closed host-only cleanup adapter will capture
+one authenticated normal session, verify its describe receipt against the
+creation-pinned digest, persistent role, protocol/version, and status capability,
+then query only the original job on that same pinned session. Only a closed
+temporarily-unavailable connection state may be polled within the existing
+window. Wrong identity, missing job, malformed evidence, cancellation, or budget
+exhaustion remains failure; the uncertain signal is never repeated. This does
+not claim daemon-instance continuity from a digest: it requires the original
+guest-generated job ID to exist and supply fresh authenticated reap/drain proof.
+No guest protocol, agent pin, credential, journal, or ordinary-command retry
+behavior changes are intended. Tests must establish the reconnect and fresh-
+registry rejection paths before signed live validation.
+
+The candidate implements that host-only adapter and routes the reserved marker
+before ordinary guest forwarding. The marker is stripped only after identity
+proof. It does not replay the signal or change guest code, protocol, credentials,
+pins, or journals. The three-second bound is the caller's cleanup deadline:
+helper-side describe/status retain their ordinary exchange limits and may
+outlive it, but late results cannot authorize another readiness probe.
+
+Tests-first evidence: the real desktop-readiness loop failed only the new
+unavailable-then-verified reconnect case before implementation (83 executions,
+one failure, `test_macos_2026-09-22T13-29-00-323Z_pid24443_1f5aa90f.xcresult`).
+Real authenticated two-connection daemon tests establish that the original
+job survives a socket reconnect after an unread signal response, supplies a
+later correlated exit frame without another start/signal, and is absent from
+a fresh daemon registry. Concrete coordinator tests reject replacement during
+describe or status; a subsequent attempt must describe the new session again.
+
+Integration review caught a separate candidate defect before installation:
+the control bridge adds `ok` and `hostExitCode`, which the initial closed
+receipt parser rejected. Two tests through the actual response-normalization
+function reproduced that mismatch (49 executions, two failures,
+`test_macos_2026-09-22T13-36-48-656Z_pid26911_6a7c51e0.xcresult`). The canonical
+host receipt now includes and strictly checks those fields. Unknown extras,
+wrong field types, old-helper responses, wrong identity/job, cancellation, and
+expired cleanup/readiness budgets remain failures.
+
+Final XcodeBuildMCP verification across eight foreground, normal-security,
+cleanup-adapter, daemon, wire, and coordinator suites passed 103 test functions /
+260 executions, zero failures or skips:
+`test_macos_2026-09-22T13-38-41-073Z_pid27301_735e3234.xcresult`.
+All 21 offline installer checks also passed. These results do not establish
+the cause of the live signal delay or a successful live reconnect. The change
+and documentation are committed before signed Release and fresh-VM validation.

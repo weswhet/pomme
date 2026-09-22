@@ -187,14 +187,23 @@ A timed-out probe remains failed. The loop may try again only after the exact
 job has supplied an authenticated exit frame proving that it was reaped and
 its output drained. It preserves the foreground runner's single SIGTERM and
 uses an already-received host receipt or at most three seconds of host-side
-status waiting within the original deadline. A signal acknowledgement or an
-`exited` flag alone is insufficient. Cancellation, malformed or foreign-job
-evidence, uncertain transport/cleanup, or insufficient remaining time stops
-the workflow. A retry starts the full console/Aqua/desktop check again and
+status waiting within the original deadline. During that window, closed
+temporarily unavailable connection states may be polled without replaying the
+signal. Each status attempt captures one authenticated normal session, checks
+its persistent role, protocol/version, creation-pinned executable digest, and
+status capability, then queries the original job on that same pinned session.
+The private host receipt is not accepted from an older helper or raw guest
+response. A restarted daemon with no original job cannot supply cleanup proof.
+A signal acknowledgement or an `exited` flag alone is insufficient; a running
+status snapshot may precede the daemon's later valid reap/drain exit frame.
+Cancellation, malformed or foreign-job evidence, wrong agent identity, missing
+job, unresolved transport/cleanup, or insufficient remaining time stops the
+workflow. A retry starts the full console/Aqua/desktop check again and
 resets the five-second stability interval; it never extends the overall
-deadline or retries arbitrary guest commands. A helper-side status request
-may finish after the caller's wait expires, but that timeout cannot authorize
-another probe.
+deadline or retries arbitrary guest commands. Helper-side describe/status
+exchanges retain their ordinary per-exchange limits and may finish after the
+caller's three-second wait expires; late completion cannot authorize another
+probe.
 
 Native automatic-login refusals are classified as closed login restrictions,
 including protections associated with Touch ID, Apple Pay, App Store, and

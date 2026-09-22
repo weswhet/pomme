@@ -58,7 +58,7 @@ struct PommeSecurityNormalAgentTests {
       expectedExecutableDigest: String(repeating: "a", count: 64),
       desktopProofHooks: .init(
         execute: { try trace.execute($0, transportTimeout: $1) },
-        status: { try trace.status($0, timeout: $1) },
+        status: { try JSONValue(any: PommeCore.normalizedControlObject(trace.status($0, timeout: $1))) },
         now: { trace.now }, sleep: { trace.now = trace.now.advanced(by: .seconds($0)) }
       )
     )
@@ -89,7 +89,8 @@ struct PommeSecurityNormalAgentTests {
   @Test("Desktop loop retries Aqua only after same-job cleanup proof", arguments: [
     "verified", "staleStatus", "signalExit", "receipt", "resetStable", "unknown", "exitedOnly",
     "wrongJob", "wrongResultJob", "malformedExit", "invalidSignal", "missingJob",
-    "cancelled", "deadline", "cleanupDeadline", "transport", "repeatedTimeout", "lateDesktop"
+    "cancelled", "deadline", "cleanupDeadline", "transport", "repeatedTimeout", "lateDesktop", "reconnected",
+    "oldHelper", "wrongDigest", "rejected", "malformedHost", "unavailableDeadline", "unavailableOuterDeadline", "cleanupCancelled"
   ])
   func aquaReadinessCleanupRetry(mode: String) async throws {
     let trace = DesktopTrace(mode: mode)
@@ -98,21 +99,25 @@ struct PommeSecurityNormalAgentTests {
       expectedExecutableDigest: String(repeating: "a", count: 64),
       desktopProofHooks: .init(
         execute: { try trace.execute($0, transportTimeout: $1) },
-        status: { try trace.status($0, timeout: $1) },
+        status: { try JSONValue(any: PommeCore.normalizedControlObject(trace.status($0, timeout: $1))) },
         now: { trace.now }, sleep: { trace.now = trace.now.advanced(by: .seconds($0)) }
       )
     )
-    if ["verified", "staleStatus", "signalExit", "receipt", "resetStable"].contains(mode) {
+    if ["verified", "staleStatus", "signalExit", "receipt", "resetStable", "reconnected"].contains(mode) {
       try await agent.verifyConsoleLogin(username: "owner", uniqueID: 501)
       #expect(trace.aquaCalls >= 6)
       #expect(trace.consoleCalls == trace.aquaCalls)
       #expect(trace.desktopCalls == trace.aquaCalls - 1)
-      #expect(trace.statusCalls == (mode == "receipt" ? 0 : 1))
+      #expect(trace.statusCalls == (mode == "receipt" ? 0 : mode == "reconnected" ? 2 : 1))
       let cleanedAt = try #require(trace.cleanedAt)
       #expect(cleanedAt.duration(to: trace.now) >= .seconds(5))
       #expect(trace.origin.duration(to: trace.now) < .seconds(120))
     } else {
-      if mode == "lateDesktop" {
+      if mode == "cleanupCancelled" {
+        await #expect(throws: CancellationError.self) {
+          try await agent.verifyConsoleLogin(username: "owner", uniqueID: 501)
+        }
+      } else if mode == "lateDesktop" {
         await #expect(throws: PommeSecurityWorkflowError.ownerLoginUnverified) {
           try await agent.verifyConsoleLogin(username: "owner", uniqueID: 501)
         }
@@ -138,7 +143,7 @@ struct PommeSecurityNormalAgentTests {
       expectedExecutableDigest: String(repeating: "a", count: 64),
       desktopProofHooks: .init(
         execute: { try trace.execute($0, transportTimeout: $1) },
-        status: { try trace.status($0, timeout: $1) },
+        status: { try JSONValue(any: PommeCore.normalizedControlObject(trace.status($0, timeout: $1))) },
         now: { trace.now }, sleep: { trace.now = trace.now.advanced(by: .seconds($0)) }
       )
     )
@@ -229,6 +234,16 @@ struct PommeSecurityNormalAgentTests {
       #expect(timeout > 0 && timeout <= 3)
       statusCalls += 1
       now = now.advanced(by: .milliseconds(250))
+      if mode == "cleanupCancelled" { throw CancellationError() }
+      if mode == "rejected" { return .object(["desktopCleanupVersion": .integer(1), "state": .string("rejected")]) }
+      if mode == "malformedHost" { return .object(["desktopCleanupVersion": .bool(true), "state": .string("temporarily-unavailable")]) }
+      if mode == "unavailableOuterDeadline" { now = origin.advanced(by: .seconds(120)) }
+      if mode == "unavailableDeadline" || mode == "unavailableOuterDeadline" {
+        return .object(["desktopCleanupVersion": .integer(1), "state": .string("temporarily-unavailable")])
+      }
+      if mode == "reconnected" && statusCalls == 1 {
+        return .object(["desktopCleanupVersion": .integer(1), "state": .string("temporarily-unavailable")])
+      }
       if mode == "cleanupDeadline" { now = now.advanced(by: .seconds(3)) }
       if mode == "transport" { throw PommeSecurityWorkflowError.agentUnverified }
       let frameID = mode == "wrongJob" ? UUID() : jobID
@@ -244,8 +259,14 @@ struct PommeSecurityNormalAgentTests {
       if mode == "invalidSignal" { frame["signal"] = .integer(128) }
       if mode == "malformedExit" { frame["dataBase64"] = .string("bad") }
       cleanedAt = now
-      return .object(["ok": .bool(true), "result": .object(terminal),
-                      "streamFrames": .array(["unknown", "exitedOnly"].contains(mode) ? [] : [.object(frame)])])
+      let rawStatus = JSONValue.object(["ok": .bool(true), "result": .object(terminal),
+                                       "streamFrames": .array(["unknown", "exitedOnly"].contains(mode) ? [] : [.object(frame)])])
+      if mode == "oldHelper" { return rawStatus }
+      return .object([
+        "desktopCleanupVersion": .integer(1), "state": .string("verified-status"),
+        "jobID": .string(jobID.uuidString.lowercased()), "executableSHA256": .string(String(repeating: mode == "wrongDigest" ? "b" : "a", count: 64)),
+        "status": rawStatus
+      ])
     }
   }
 
