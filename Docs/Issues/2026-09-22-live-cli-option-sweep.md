@@ -12,7 +12,7 @@ observations are recorded below; historical rows retain their original status.
 | CLI discovery omissions / `agent-help` output ambiguity | Fixed in `e0f6544`; signed CLI contract and live compatibility checks passed. |
 | macOS 27 inactive Language Chooser / framebuffer replay | Guarded activation and replay-policy fixes validated; complete SIP/AMFI status workflows passed. |
 | Recovery Terminal marker recognition | Bounded prompt-punctuation and word-encoding/output-separation fixes validated; not a claim of universal OCR reliability. |
-| macOS 26 first-owner desktop readiness / cleanup | Same-job cleanup-verified retry and pinned reconnect adapter implemented. Three fresh signed-candidate SIP cycles passed, including a live Aqua timeout recovered after instrumentation cleanup; original intermittent signal delay and earlier console transport failure remain unexplained. |
+| macOS 26 first-owner desktop readiness / cleanup | Same-job cleanup-verified retry and pinned reconnect adapter implemented. Three fresh signed-candidate SIP cycles passed, including a live Aqua timeout recovered after instrumentation cleanup; original intermittent signal delay and earlier console transport failure remain unexplained. A fresh diagnostic run at 22:40:58Z failed earlier, at automatic-login readback after the first-owner reboot retry; that stopped fixture is retained. |
 | macOS 27 creation `ownerProof` | Open; subsequent internal-drive baselines passed, including fresh creation with the exact original `ffc41a7` host, without a targeted fix. |
 | macOS 26 creation `verifyNormalAgent` / slow first boot | Open historical failure; subsequent internal-drive creations passed, including a fresh original-`ffc41a7` run with first-attempt verification receipts, without establishing its cause. |
 | macOS 27 restart after pause/resume | Open; two earlier internal-drive sequences plus ten-cycle runs with both current `a3852a5` and original `ffc41a7` hosts passed without reproducing the missing helper. |
@@ -2051,6 +2051,18 @@ signal-boundary events and was stopped. All twelve VMs are stopped on internal
 storage. No resume, security restoration mutation, guest probe, or credential
 read was performed after failure; the fresh failure fixture is preserved for
 the exact automatic-login readback investigation.
+
+Read-only branch mapping places the new failure inside
+`reconcileConfiguredAutoLogin()` before its readback receipt. A recognized
+OFF status is not itself an error; malformed status, an unexpected enabled
+account, mismatched preference, and missing/bad credential-file metadata have
+distinct validation branches. The public wording matches automatic-login
+verification failure, but the retained phase alone does not identify the
+failed predicate. Existing offline owner-preparation tests cover these branches.
+The next discriminating live check requires normal boot and closed
+classifications of native automatic-login status, the owner preference, and
+credential-file existence/metadata only—never credential-file contents.
+No such probe or resume has yet been run on this fixture.
 
 ### macOS 27 pause/resume/restart repetition
 
