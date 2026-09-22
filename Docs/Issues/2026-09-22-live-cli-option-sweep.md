@@ -1210,3 +1210,57 @@ stability reset. Parent review confirmed the classifier is checked at both the
 foreground receipt and private readiness-caller boundaries. No generic guest
 executor gained automatic retries. This revision is committed before its
 signed build and new fresh-owner live comparison.
+
+Revision `f9a3598` was committed and built through the canonical signed
+Release workflow. Signature, exact entitlements, designated requirements,
+archive preservation, and install checks passed. The installed digest is
+`990bf1bc07b4e766cd2bb04c4d1b335e3779e7cffd07b2e8baf0be54b7df69f6`.
+A fresh login shell resolves the installed CLI and its expected commit;
+all 104 CLI contract checks passed. Fresh comparison VM
+`pomme-agent-owner26-20260922f` began creation at 11:56:56Z after dry-run
+preflight, using the same internal 26.6.2/25G83 restore image, explicit
+40 GB/4 GB resources, and `--boot none`. Existing VMs remain stopped.
+
+The new restore reached 100% at 12:00:37Z. Recovery navigation reached Terminal
+at 12:02:04Z and passed marker proof on attempt 2 at 12:02:07Z. Creation
+completed normal-agent verification and returned stopped state, confirmed by
+public status. The VM UUID is `2ac870e3-e53f-4505-abad-abacd9e333c1`, startup-
+volume group `905e9c8a-994c-47d8-8b81-bb7835ba2588`, and plan digest
+`1ffdace9a50c6dc11e02ec1cc8492661dc89fed6c80b712b886f03c1df5ad3b7`.
+It pins `990bf1bc…7df69f6`. The first-owner SIP-disable command began at
+12:03:09Z with `--force --final-state previous`, without intervening guest
+probes or account changes.
+
+The `...22f` run exercised the new retry but did not complete the workflow.
+Owner-completion status 1 invoked the existing boot retry at 12:04:24Z;
+completion passed at 12:05:23Z and Setup Assistant at 12:05:26Z. Desktop
+verification began at 12:05:42Z. Initial Aqua probes completed, with a
+5.418-second probe at 12:05:59Z; the desktop predicate was still false.
+
+At 12:06:21Z an Aqua probe reached its attempt deadline. Total foreground
+duration including signal exchange was 15.800 seconds: start 0.522 s, EOF
+0.244 s, 31 status exchanges totaling 13.643 s (maximum 1.547 s), and signal
+0.484 s. The last guest snapshot showed 63 running waits, zero reaps, zero
+EINTR/ECHILD/other errors, and last outcome running. No exit frame was present
+before or in the signal response. This failing probe supplies the missing
+evidence of a genuinely running child at its last observed wait, rather than
+an ignored wait error; it does not identify why native execution was slow.
+
+The loop subsequently obtained same-job cleanup proof and retried without
+restarting the overall deadline. A fresh Aqua probe completed in 0.116 seconds
+at 12:06:24Z; console, Aqua, and desktop matched at 12:06:30Z. The next console
+probe instead failed with `normal-agent-console-transport` at 12:06:37Z, before
+the full stable-desktop proof could complete. The closed error does not yet
+distinguish an inner agent exchange failure from another transport boundary.
+The workflow retained progress, restored stopped state, and exited 1 before
+SIP mutation. Public inventory confirmed all seven internal-drive VMs stopped
+with no helpers. No credential, owner, creation record, or agent pin was reset.
+
+This validates the live cleanup-verified Aqua retry path, but the complete
+fresh-owner workflow still fails and the issue remains open. The earlier
+process-list timeout and this subsequent console transport failure show that
+first-login readiness can encounter more than one failure boundary. Unknown
+transport outcomes must not be blindly replayed: the next investigation must
+identify the failing exchange and whether an owned job was established before
+changing retry or deadline behavior. Temporary diagnostics remain pending that
+investigation; this is not a claim that the whole issue is fixed.
