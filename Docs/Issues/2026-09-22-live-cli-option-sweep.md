@@ -226,6 +226,35 @@ original stopped state was restored. This candidate is therefore not a complete
 fix; the asynchronous Continue transition needs to be addressed before another
 signed build and live retest.
 
+A subsequent single-event manual probe selected the already-highlighted English
+row at `(640,343)` instead of Continue. It activated the chooser and remained
+there across repeated identical screenshots; a second, separately observed
+click on the active row did not advance it. One Return then reached Utilities.
+However, the production OCR rehearsal classified the active screenshot as
+unknown with the cursor over the English label. The next bounded probe moves
+the activation point to the blank left side of the same proved row, avoiding
+the text. No security state was changed in these navigation probes.
+
+The next boot reached an already-active chooser, exercising the other observed
+entry state. One click at `(550,343)` on the blank left side of the selected
+English row left the chooser active with identical post-event screenshots and
+the English text unobscured. This run does not by itself prove the inactive
+entry branch for that exact point; the subsequent full automated retest must
+cover that branch.
+
+The production regional OCR rehearsal recognized the left-side-pointer image
+as active English (one test passed); its temporary image-backed test was then
+removed. The production dispatcher now uses `(550,343)`. A recording-backend
+regression exercises that actual dispatcher and rejects the old Continue
+coordinates (one expected failure, 15 other port tests passed). It verifies one
+click and no keyboard event. This changes only the fixed activation target;
+the exact build scope and frame/receipt guards remain in place.
+
+All 69 permanent tests across the same five focused XcodeBuildMCP suites passed
+after the target change, with no failures. Signed build and full live retest
+follow this commit; manual navigation is not a substitute for SIP-status
+completion.
+
 For compatibility, `pomme-agent-recovery26-20260922a` was created on internal
 storage from macOS `26.6.2 (25G83)` with a 40 GB disk and 4 GB RAM, using
 signed build `ef37f16`. Restore began at 06:32:22Z; the existing five-input

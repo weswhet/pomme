@@ -5,6 +5,19 @@ import Testing
 
 @Suite("Pomme Recovery framebuffer observation readiness")
 struct PommeRecoveryVirtualizationKeyboardPortTests {
+    @Test("LanguageChooser activation dispatch clicks the selected English row without advancing")
+    func activationTargetsSelectedEnglishRow() async throws {
+        let backend = RecoveryActivationRecordingBackend()
+        let event = try #require(PommeRecoveryNavigationRoute.experimentalLanguageActivation.eventTrace.first {
+            $0.input == .activateLanguageChooser
+        })
+        try await PommeRecoveryVirtualizationKeyboardPort.dispatchNavigationInput(
+            event.input, using: backend, timeout: 3
+        )
+        #expect(await backend.clicks == [.init(x: 550, y: 343, timeout: 3)])
+        #expect(await backend.keys.isEmpty)
+    }
+
     @Test("frame stability digest includes pixel bytes, not just geometry")
     func frameDigestIncludesPixels() throws {
         let context = try #require(CGContext(
@@ -696,4 +709,36 @@ private func recoveryScreenshotTestImage() throws -> CGImage {
 private func recoveryPOSIXMode(at url: URL, fileManager: FileManager) throws -> Int {
     let attributes = try fileManager.attributesOfItem(atPath: url.path)
     return try #require(attributes[.posixPermissions] as? NSNumber).intValue
+}
+
+private actor RecoveryActivationRecordingBackend: PommeDirectUIBackend {
+    struct Click: Equatable {
+        let x: Double
+        let y: Double
+        let timeout: TimeInterval
+    }
+    private(set) var clicks: [Click] = []
+    private(set) var keys: [String] = []
+
+    func click(x: Double, y: Double, timeout: TimeInterval) -> [String: JSONValue] {
+        clicks.append(.init(x: x, y: y, timeout: timeout))
+        return [:]
+    }
+
+    func sendKey(name: String, timeout: TimeInterval) -> [String: JSONValue] {
+        keys.append(name)
+        return [:]
+    }
+
+    func screenshot(to outputURL: URL, timeout: TimeInterval) throws -> [String: JSONValue] {
+        throw PommeRecoveryVirtualizationPortError.unprovenFrame
+    }
+
+    func sendKeySequence(names: [String], timeout: TimeInterval) throws -> [String: JSONValue] {
+        throw PommeRecoveryVirtualizationPortError.unexpectedKey
+    }
+
+    func typeText(_ text: String, replace: Bool, timeout: TimeInterval) throws -> [String: JSONValue] {
+        throw PommeRecoveryVirtualizationPortError.unexpectedKey
+    }
 }
