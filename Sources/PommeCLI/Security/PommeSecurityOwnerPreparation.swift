@@ -1,5 +1,21 @@
 import Foundation
 
+/// TEMPORARY readback diagnostics: no data-bearing values can enter the sink.
+enum PommeAutoLoginReadbackTrace: String, CaseIterable, Sendable {
+  case reconcileEntered, reconcileConfigured, reconcileOff, reconcileRejected
+  case nativeEntered, nativeCommandFailed, nativeEvidenceFailed
+  case nativeEmptyRejected, nativeMultipleLinesRejected, nativeShapeRejected
+  case nativeOff, nativeExpectedOwner, nativeOtherOwner
+  case preferenceEntered, preferenceCommandFailed, preferenceEvidenceFailed
+  case preferenceShapeRejected, preferenceMatch, preferenceMismatch
+  case artifactEntered, artifactProbeCommandFailed, artifactProbeEvidenceFailed, artifactAbsent
+  case artifactMetadataEntered, artifactMetadataCommandFailed, artifactMetadataEvidenceFailed
+  case artifactValid, artifactInvalid
+
+  var message: String { "[DEBUG-autologin-readback-20260922] \(rawValue)" }
+  static func log(_ event: Self) { PommeCore.log(event.message) }
+}
+
 /// Stable, redacted operation names used by the normal-guest owner boundary.
 /// These values are safe to retain in the parent's durable phase journal.
 enum PommeSecurityOwnerPreparationPhase: String, CaseIterable, Codable, Equatable, Sendable {
@@ -547,6 +563,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
   private let reportPhase: PhaseReporter
   private let waitForFreshOwnerAPFS: @Sendable (TimeInterval) async throws -> Void
   private let now: @Sendable () -> TimeInterval
+  private let autoLoginTrace: @Sendable (PommeAutoLoginReadbackTrace) -> Void
 
   init(
     identity: PommeSecurityOwnerIdentity = .pomme,
@@ -561,7 +578,8 @@ struct PommeSecurityOwnerPreparation: Sendable {
     },
     now: @escaping @Sendable () -> TimeInterval = {
       ProcessInfo.processInfo.systemUptime
-    }
+    },
+    autoLoginTrace: @escaping @Sendable (PommeAutoLoginReadbackTrace) -> Void = PommeAutoLoginReadbackTrace.log
   ) {
     self.identity = identity
     self.freshnessRequirements = freshnessRequirements
@@ -570,6 +588,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
     self.reportPhase = reportPhase
     self.waitForFreshOwnerAPFS = waitForFreshOwnerAPFS
     self.now = now
+    self.autoLoginTrace = autoLoginTrace
   }
 
   /// Convenience initializer for callers that want to expose an unavailable
@@ -1031,15 +1050,23 @@ struct PommeSecurityOwnerPreparation: Sendable {
   /// preference, and root-owned 0600 artifact metadata to agree exactly.
   /// `OFF` is the only state that permits the fresh Setup Assistant path.
   private func reconcileConfiguredAutoLogin() throws -> Bool {
-    switch try readAutoLoginStatus() {
-    case .enabled(let username):
-      guard username.caseInsensitiveCompare(identity.username) == .orderedSame,
-        try autoLoginUser() == identity.username
-      else { throw PommeSecurityOwnerPreparationError.autoLoginVerificationFailed }
-      try verifyAutoLoginArtifact()
-      return true
-    case .disabled:
-      return false
+    autoLoginTrace(.reconcileEntered)
+    do {
+      switch try readAutoLoginStatus() {
+      case .enabled(let username):
+        guard username.caseInsensitiveCompare(identity.username) == .orderedSame,
+          try autoLoginUser() == identity.username
+        else { throw PommeSecurityOwnerPreparationError.autoLoginVerificationFailed }
+        try verifyAutoLoginArtifact()
+        autoLoginTrace(.reconcileConfigured)
+        return true
+      case .disabled:
+        autoLoginTrace(.reconcileOff)
+        return false
+      }
+    } catch {
+      autoLoginTrace(.reconcileRejected)
+      throw error
     }
   }
 
@@ -2101,18 +2128,30 @@ struct PommeSecurityOwnerPreparation: Sendable {
   }
 
   private func readAutoLoginStatus() throws -> AutoLoginStatus {
-    let output = try runCombinedOutput(
-      .init(
-        executable: "/usr/sbin/sysadminctl",
-        arguments: ["-autologin", "status"]
-      ),
-      kind: .autoLogin,
-      acceptedExitCodes: [0]
-    )
+    autoLoginTrace(.nativeEntered)
+    let output: String
+    do {
+      output = try runCombinedOutput(
+        .init(
+          executable: "/usr/sbin/sysadminctl",
+          arguments: ["-autologin", "status"]
+        ),
+        kind: .autoLogin,
+        acceptedExitCodes: [0]
+      )
+    } catch {
+      if case PommeSecurityOwnerPreparationError.commandFailed = error {
+        autoLoginTrace(.nativeCommandFailed)
+      } else {
+        autoLoginTrace(.nativeEvidenceFailed)
+      }
+      throw error
+    }
     let lines = output.split(whereSeparator: \.isNewline).map {
       String($0).trimmingCharacters(in: .whitespacesAndNewlines)
     }.filter { !$0.isEmpty }
     guard lines.count == 1, let line = lines.first else {
+      autoLoginTrace(lines.isEmpty ? .nativeEmptyRejected : .nativeMultipleLinesRejected)
       throw PommeSecurityOwnerPreparationError.autoLoginVerificationFailed
     }
 
@@ -2120,6 +2159,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
     let offPattern =
       #"^(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ sysadminctl\[\d+:\d+\] )?automatic login is off\.$"#
     if lowercased.range(of: offPattern, options: .regularExpression) != nil {
+      autoLoginTrace(.nativeOff)
       return .disabled
     }
 
@@ -2131,23 +2171,41 @@ struct PommeSecurityOwnerPreparation: Sendable {
         range: NSRange(lowercased.startIndex..<lowercased.endIndex, in: lowercased)
       ),
       let range = Range(match.range(at: 1), in: lowercased)
-    else { throw PommeSecurityOwnerPreparationError.autoLoginVerificationFailed }
-    return .enabled(username: String(lowercased[range]))
+    else {
+      autoLoginTrace(.nativeShapeRejected)
+      throw PommeSecurityOwnerPreparationError.autoLoginVerificationFailed
+    }
+    let username = String(lowercased[range])
+    autoLoginTrace(username.caseInsensitiveCompare(identity.username) == .orderedSame ? .nativeExpectedOwner : .nativeOtherOwner)
+    return .enabled(username: username)
   }
 
   private func autoLoginUser() throws -> String {
-    let output = try run(
-      .init(
-        executable: "/usr/bin/defaults",
-        arguments: ["read", "/Library/Preferences/com.apple.loginwindow", "autoLoginUser"]
-      ),
-      kind: .loginWindow,
-      acceptedExitCodes: [0]
-    )
+    autoLoginTrace(.preferenceEntered)
+    let output: String
+    do {
+      output = try run(
+        .init(
+          executable: "/usr/bin/defaults",
+          arguments: ["read", "/Library/Preferences/com.apple.loginwindow", "autoLoginUser"]
+        ),
+        kind: .loginWindow,
+        acceptedExitCodes: [0]
+      )
+    } catch {
+      if case PommeSecurityOwnerPreparationError.commandFailed = error {
+        autoLoginTrace(.preferenceCommandFailed)
+      } else {
+        autoLoginTrace(.preferenceEvidenceFailed)
+      }
+      throw error
+    }
     let value = output.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !value.isEmpty, !value.contains("\n") else {
+      autoLoginTrace(.preferenceShapeRejected)
       throw PommeSecurityOwnerPreparationError.autoLoginVerificationFailed
     }
+    autoLoginTrace(value == identity.username ? .preferenceMatch : .preferenceMismatch)
     return value
   }
 
@@ -2192,27 +2250,52 @@ struct PommeSecurityOwnerPreparation: Sendable {
   /// systems. Inspect metadata only; the secret-derived contents never
   /// enter a command result, error, or phase journal.
   private func verifyAutoLoginArtifact() throws {
-    let exists = try runStatus(
-      .init(executable: "/bin/test", arguments: ["-f", "/etc/kcpassword"]),
-      kind: .loginWindow,
-      acceptedExitCodes: [0, 1]
-    )
+    autoLoginTrace(.artifactEntered)
+    let exists: Int32
+    do {
+      exists = try runStatus(
+        .init(executable: "/bin/test", arguments: ["-f", "/etc/kcpassword"]),
+        kind: .loginWindow,
+        acceptedExitCodes: [0, 1]
+      )
+    } catch {
+      if case PommeSecurityOwnerPreparationError.commandFailed = error {
+        autoLoginTrace(.artifactProbeCommandFailed)
+      } else {
+        autoLoginTrace(.artifactProbeEvidenceFailed)
+      }
+      throw error
+    }
     guard exists == 0 else {
+      autoLoginTrace(.artifactAbsent)
       throw PommeSecurityOwnerPreparationError.autoLoginVerificationFailed
     }
 
-    let metadata = try run(
-      .init(
-        executable: "/usr/bin/stat",
-        arguments: [
-          "-f", "%u:%g:%Lp", "/etc/kcpassword",
-        ]),
-      kind: .loginWindow,
-      acceptedExitCodes: [0]
-    )
+    autoLoginTrace(.artifactMetadataEntered)
+    let metadata: String
+    do {
+      metadata = try run(
+        .init(
+          executable: "/usr/bin/stat",
+          arguments: [
+            "-f", "%u:%g:%Lp", "/etc/kcpassword",
+          ]),
+        kind: .loginWindow,
+        acceptedExitCodes: [0]
+      )
+    } catch {
+      if case PommeSecurityOwnerPreparationError.commandFailed = error {
+        autoLoginTrace(.artifactMetadataCommandFailed)
+      } else {
+        autoLoginTrace(.artifactMetadataEvidenceFailed)
+      }
+      throw error
+    }
     guard normalized(metadata) == "0:0:600" else {
+      autoLoginTrace(.artifactInvalid)
       throw PommeSecurityOwnerPreparationError.autoLoginVerificationFailed
     }
+    autoLoginTrace(.artifactValid)
   }
 
   private static func containsTrueLoginWindowValue(in text: String, keys: [String]) -> Bool {
