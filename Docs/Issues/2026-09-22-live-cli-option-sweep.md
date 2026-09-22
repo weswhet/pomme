@@ -618,3 +618,55 @@ with no helper. The narrow em-dash correction therefore has deterministic
 red/green regression evidence and signed live compatibility on both OS versions.
 Exact-marker OCR reliability remains open; temporary closed marker diagnostics
 remain for that investigation, with no additional Terminal screenshot logging.
+
+### Exact-marker spelling investigation
+
+With the prompt correction installed, ten serial production-OCR replays each
+of the retained repeated-`H` and alternating-`EH` real Terminal captures still
+missed the exact marker; the baseline passed ten of ten. Geometric inspection
+found a separate output line in the marker region with the expected compact
+character count, but different recognized spelling. An earlier text-filter
+heuristic had incorrectly classified those lines as missing. No fuzzy marker
+acceptance or character substitution was added.
+
+Two deterministic 64-case synthetic comparisons produced identical strict-proof
+miss counts: ungrouped 7, groups of four 4, groups of three 3, individual
+characters 2, and pairs 0. Every layout preserved the same ten suffix characters
+and used the production OCR and unchanged exact-marker proof. Grouping into
+pairs is a candidate only, pending a broader corpus and real Terminal comparison.
+
+The expanded ungrouped corpus completed 1,000 cases with 53 exact-marker
+misses and no Terminal-recognition misses. The following grouped run encountered
+a Vision `unknownError`, so it did not provide a valid grouped result. The
+temporary harness is being isolated into bounded runs with per-iteration
+autorelease pools; this test-process failure is not claimed as a product bug.
+Real comparison frames were captured on the same internal-drive macOS 27 VM
+using benign fixed `printf` commands, clearing the viewport between formats
+to prevent equivalent compact markers in scrollback from masking a failure.
+
+The real comparison rejected grouping: all 40 serial proofs failed exact-marker
+recognition (ten each for original and paired `H` and `EH` output). Bounded
+inspection of these fixed, benign output lines found Cyrillic substitutions
+across the marker, including the `POMME` prefix, and some additional glyph
+substitutions. The live result does not support a spacing fix despite its
+synthetic improvement. The repeat 1,000-pair experiment was cancelled without
+claiming a result, and the VM was stopped again.
+
+The next test-only comparison isolates Vision language detection, explicit
+English selection, and language correction. Apple's
+[customWords documentation](https://developer.apple.com/documentation/vision/vnrecognizetextrequest/customwords)
+states that custom words are ignored when language correction is disabled.
+Consequently, enabling correction would also activate the existing expected-
+marker hints. Any candidate must be checked without expected-nonce hints and
+against wrong-marker images; making OCR correct an incorrect marker into the
+requested value would undermine the proof. No production behavior has changed
+in this investigation.
+
+The real-image language matrix found runtime defaults of detection disabled,
+revision 3, and `en_US`. Explicit detection-off and `en-US` selection did not
+recover any of the four failing original/grouped `H`/`EH` cases; the baseline
+passed. Language correction recovered only grouped `H`. Empty and fixed-only
+custom-word lists produced that same partial result, and all 15 sampled
+one-character-wrong expected-marker checks rejected proof. These results do
+not support a complete correction-mode fix. The next isolated comparison varies
+letter case, leaving nonce characters, spacing, and proof rules unchanged.
