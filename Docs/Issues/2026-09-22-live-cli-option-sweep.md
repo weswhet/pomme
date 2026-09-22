@@ -383,3 +383,27 @@ verification fields true, and verified restoration to stopped. Its Recovery
 marker proof passed on attempt 1. Both directions therefore completed on the
 unchanged signed build; the intermittent failure remains open without a
 speculative timeout increase or relaxed desktop proof.
+
+### CLI command discovery consistency
+
+The next isolated issue is the missing `sessions` and `template` command
+families in `tools` and compact `agent-help`. The signed `e9076c6` baseline
+still exposes both families in root help but omits both from discovery.
+`agent-help --format json` exits 64 because the command has no shared output
+options, even though its default text advertises those options for the broader
+CLI. This is a help-contract ambiguity, not evidence that its old parser
+implemented structured output.
+
+The candidate adds both families to the shared catalog, derives compact
+top-level inventory text from that catalog, and gives `agent-help` the existing
+shared output options. Its default remains compact text. JSON uses the same
+schema-version-2 discovery payload as `tools`; JSONL emits one group per line.
+The README documents these representations. No VM or security behavior changes.
+
+Before implementation, the expanded CLI contract suite ran against the old
+installed binary: 104 checks, with exactly nine expected discovery/format
+failures and all prior 88 checks passing. The new checks compare registered
+root commands and aliases against both inventories, verify session/template
+leaf discovery, compare structured payloads, and exercise invalid/conflicting
+format options. All 21 local build/install regression checks also passed.
+Signed Release and live verification follow the candidate commit.

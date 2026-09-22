@@ -127,6 +127,73 @@ else
 fi
 
 expect_success "agent help" "$runner" agent --help
+expect_success "compact agent inventory" "$runner" agent-help
+cp "$work/stdout" "$work/agent-help"
+expect_success "discovery root help" "$runner" --help
+cp "$work/stdout" "$work/root-help"
+expect_success "discovery JSON inventory" "$runner" tools --format json
+cp "$work/stdout" "$work/tools-json"
+if python3 - "$work/root-help" "$work/tools-json" "$work/agent-help" <<'PY'
+import json, re, sys
+help_text, catalog, compact = (open(p).read() for p in sys.argv[1:])
+registered = set()
+for line in help_text.split('SUBCOMMANDS:', 1)[1].splitlines():
+    match = re.match(r'^  ([a-z][a-z-]*(?:, [a-z][a-z-]*)?)\s{2,}', line)
+    if match:
+        registered.update(match[1].split(', '))
+groups = {g['name']: g['commands'] for g in json.loads(catalog)['groups']}
+discovered = {alias for commands in groups.values() for command in commands
+              for alias in command.split()[0].split('|')}
+assert discovered == registered | {'tools', 'agent-help'}, (registered - discovered, discovered - registered)
+compact_tokens = set(re.findall(r'[a-z][a-z-]*', compact))
+assert discovered <= compact_tokens, discovered - compact_tokens
+assert 'sessions' in groups['guest'] and 'template' in groups['vm']
+assert compact.startswith('pomme-agent-help v1;')
+assert 'sessions=list|ls|inspect|attach|logs|terminate|delete' in compact
+assert 'template=create|list|delete' in compact
+PY
+then
+  pass "discovery matches registered commands, aliases, groups, and new leaves"
+else
+  fail "discovery matches registered commands, aliases, groups, and new leaves"
+fi
+for representation in json jsonl; do
+  expect_success "tools $representation inventory" "$runner" tools --format "$representation"
+  cp "$work/stdout" "$work/tools-$representation"
+  expect_success "agent-help $representation inventory" "$runner" agent-help --format "$representation"
+  if python3 - "$work/tools-$representation" "$work/stdout" "$representation" <<'PY'
+import json, sys
+def read(path):
+    with open(path) as source:
+        return [json.loads(line) for line in source] if sys.argv[3] == 'jsonl' else json.load(source)
+expected, actual = read(sys.argv[1]), read(sys.argv[2])
+assert actual == expected
+assert actual  # An unsupported command must not pass as two empty streams.
+PY
+  then
+    pass "agent-help $representation matches tools payload"
+  else
+    fail "agent-help $representation matches tools payload"
+  fi
+done
+expect_success "agent-help JSON shorthand" "$runner" agent-help --json
+if python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2]))' "$work/tools-json" "$work/stdout"; then
+  pass "agent-help JSON shorthand matches tools"
+else
+  fail "agent-help JSON shorthand matches tools"
+fi
+expect_failure "agent-help rejects conflicting formats" "$runner" agent-help --json --format jsonl
+if grep -q -- '--json conflicts with --format jsonl' "$work/stderr"; then
+  pass "agent-help uses common format conflict diagnostic"
+else
+  fail "agent-help uses common format conflict diagnostic"
+fi
+expect_failure "agent-help rejects bogus format" "$runner" agent-help --format bogus
+if grep -q "'table', 'json' or 'jsonl'" "$work/stderr"; then
+  pass "agent-help names supported formats"
+else
+  fail "agent-help names supported formats"
+fi
 expect_failure "agent status requires target" "$runner" agent status
 expect_failure "agent repair requires target" "$runner" agent repair
 expect_failure "agent repair rejects unsupported final state" \

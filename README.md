@@ -45,6 +45,11 @@ status, inspect, exec, shell, sessions, jobs, cp, cat, agent, sip, amfi,
 mdm, remote-login, screen-sharing, snapshot, template, config, ipsw, ui, tui
 ```
 
+`pomme tools` lists command groups and `pomme agent-help` prints a compact
+inventory for coding agents. Both accept `--format table|json|jsonl` and
+`--json`; their JSON discovery payloads are the same, while JSONL emits one
+command group per line. Neither command needs a VM.
+
 `stop` asks the guest to shut itself down when the agent is connected, resuming
 a paused VM so it can, and waits before powering the VM off; if it has to power
 off, it says so. `stop --force` powers the VM off immediately.

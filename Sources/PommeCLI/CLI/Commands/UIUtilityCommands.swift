@@ -379,13 +379,7 @@ struct ToolsCommand: ParsableCommand {
     mutating func run() throws {
         let groups = CommandCatalog.groups
         try CLIOutputWriter.write(
-            payload: [
-                "ok": true,
-                "schemaVersion": 2,
-                "groups": groups.map(\.publicPayload),
-                "uiCapabilities": PommeUICapabilities.publicPayload,
-                "hostExitCode": 0
-            ],
+            payload: CommandCatalog.publicPayload,
             text: groups.map { "\($0.name): \($0.commands.joined(separator: ", "))" }.joined(separator: "\n"),
             options: output,
             jsonlCollection: "groups"
@@ -395,7 +389,15 @@ struct ToolsCommand: ParsableCommand {
 
 struct AgentHelpCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "agent-help", abstract: "Print a compact command inventory for coding agents.", shouldDisplay: false)
-    mutating func run() throws { print(CommandCatalog.agentHelp) }
+    @OptionGroup var output: GlobalOptions
+    mutating func run() throws {
+        try CLIOutputWriter.write(
+            payload: CommandCatalog.publicPayload,
+            text: CommandCatalog.agentHelp,
+            options: output,
+            jsonlCollection: "groups"
+        )
+    }
 }
 
 enum CommandCatalog {
@@ -406,22 +408,52 @@ enum CommandCatalog {
     }
 
     static let groups: [Group] = [
-        Group(name: "vm", commands: ["create", "list|ls", "start", "stop", "restart", "pause", "resume", "delete|rm", "status", "inspect", "snapshot"]),
+        Group(name: "vm", commands: ["create", "list|ls", "start", "stop", "restart", "pause", "resume", "delete|rm", "status", "inspect", "snapshot", "template"]),
         Group(name: "agent", commands: ["agent status", "agent repair"]),
-        Group(name: "guest", commands: ["exec", "shell", "jobs", "cp", "cat"]),
+        Group(name: "guest", commands: ["exec", "shell", "jobs", "sessions", "cp", "cat"]),
         Group(name: "security", commands: ["sip", "amfi", "mdm"]),
         Group(name: "access", commands: ["remote-login", "screen-sharing", "ui click|key|key-sequence|keys|type|screenshot|ai settings"]),
         Group(name: "config", commands: ["config init", "config validate", "config render", "ipsw"]),
         Group(name: "utility", commands: ["tui", "tools", "agent-help"])
     ]
 
-    static let agentHelp = """
+    static var publicPayload: [String: Any] {
+        [
+            "ok": true,
+            "schemaVersion": 2,
+            "groups": groups.map(\.publicPayload),
+            "uiCapabilities": PommeUICapabilities.publicPayload,
+            "hostExitCode": 0
+        ]
+    }
+
+    /// Preserve the compact v1 layout while taking group membership and aliases
+    /// from the same catalog as machine-readable discovery.
+    private static func compactGroup(_ name: String, excluding: Set<String> = [], removingPrefix: String = "") -> String {
+        groups.filter { $0.name == name }.flatMap(\.commands)
+            .filter { !excluding.contains($0.components(separatedBy: " ")[0]) }
+            .map { command in
+                command.hasPrefix(removingPrefix) ? String(command.dropFirst(removingPrefix.count)) : command
+            }
+            .joined(separator: "|")
+    }
+
+    private static var compactUI: String {
+        groups.filter { $0.name == "access" }.flatMap(\.commands)
+            .filter { $0.hasPrefix("ui ") }
+            .map { String($0.dropFirst(3)) }
+            .joined(separator: "|")
+    }
+
+    static var agentHelp: String { """
     pomme-agent-help v1; target=<vm>|POMME_VM_NAME; output=--format table|json|jsonl|--json; common=--debug|--help|-h
-    vm=create|list|ls|start|stop|restart|pause|resume|delete|rm|status|inspect|snapshot; agent=status|repair
+    vm=\(compactGroup("vm")); agent=\(compactGroup("agent", removingPrefix: "agent "))
     snapshot=create|list|restore|delete
-    guest=exec|shell|jobs|cp|cat; security=sip|amfi|mdm; access=remote-login|screen-sharing
-    ui=click|key|key-sequence|keys|type|screenshot|ai settings
+    template=create|list|delete
+    guest=\(compactGroup("guest")); security=\(compactGroup("security")); access=\(compactGroup("access", excluding: ["ui"]))
+    sessions=list|ls|inspect|attach|logs|terminate|delete
+    ui=\(compactUI)
     ui-unavailable=ai settings
-    config=config init|validate|render; ipsw=list|download; utility=tui|tools|agent-help
-    """
+    config=config \(compactGroup("config", excluding: ["ipsw"], removingPrefix: "config ")); ipsw=list|download; utility=\(compactGroup("utility"))
+    """ }
 }
