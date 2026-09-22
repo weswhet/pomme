@@ -807,3 +807,78 @@ benign screenshots from this comparison and their empty private directory were
 deleted after validation; no raw images entered source control. Earlier
 investigation artifacts and production navigation-only debug directories were
 not removed by this cleanup.
+
+### Fresh macOS 26 owner-session reproduction
+
+After committing the marker fix and its live validation, the next isolated
+investigation returns to the intermittent macOS 26 owner-preparation and
+post-reboot Aqua timeout. The prior macOS 26 test VM already completed owner
+preparation, so it cannot repeat the fresh-owner branch without changing its
+established state. It and the macOS 27 compatibility VM remain stopped.
+
+Signed `1f8c47e` began creation of `pomme-agent-owner26-20260922b` at 10:08:44Z,
+using the internal cached `UniversalMac_26.6.2_25G83_Restore.ipsw`, explicitly
+`--disk-size 40GB --memory 4GB --boot none`. Dry-run preflight confirmed the
+exact experimental 26.6.2/25G83 identity and existing Recovery provisioning
+route. The new bundle is under the default internal Pomme state directory;
+327 GiB was available before creation. No external-drive resource is used.
+The new VM UUID is `d114a794-b34c-40b1-83fe-4d4d05de9b8a`, and its immutable
+agent digest is the installed candidate's `d640a76a…ca2597d`. No timeout,
+owner policy, credential, or journal change is being tested at this baseline.
+
+Restore reached 100% at 10:12:28Z. The unchanged Recovery route reached
+Terminal at 10:13:56Z and the word marker passed on attempt 1 at 10:13:58Z.
+Creation completed successfully, including normal-agent verification, and
+returned the requested stopped state. Public inspection confirmed the internal
+bundle, original 4 GB/40 GB settings, and the expected pinned agent. The
+earlier macOS 26 creation failure did not reproduce in this prerequisite run.
+
+Read-only tracing distinguishes three separate boundaries before further
+diagnosis: preference writes use the buffered owner-completion executor;
+private owner input uses the bounded private-PTY runner; post-reboot Aqua
+verification runs `launchctl print gui/<uid>` through the default-identity
+normal-agent foreground path. The historical typed Aqua result indicates the
+guest's 15-second process deadline, not the additional 30-second host collector
+deadline. A public probe with explicit UID 0 takes a different identity path
+and is not an equivalent reproduction. No timeout or retry behavior changed.
+
+The fresh `sip disable --force --final-state previous` baseline began at
+10:15:12Z and reproduced the target failure. Owner creation and verification
+passed. Owner completion returned status 1 at 10:16:25Z and triggered the
+existing single normal-boot retry; that retry passed owner completion and
+configure-login receipts at 10:17:22Z, then Setup Assistant completion at
+10:17:25Z. After normal reboot, desktop verification began at 10:17:41Z and
+failed at 10:18:25Z with `normal-agent-aqua-timedOut`, `stage=aqua`,
+`exited=false`, `outputComplete=false`, and `terminationRequested=true`.
+The command exited 1 before SIP mutation, retained its security progress, and
+restored stopped state confirmed by public status. This is a new live failing
+reproduction of the later Aqua issue, not a private-PTY timeout.
+
+The existing normal-agent verification, foreground execution, and foreground
+control suites passed all 45 test functions (48 executions) unchanged:
+`test_macos_2026-09-22T10-15-51-642Z_pid85918_552f8420.xcresult`.
+These cover closed timeout decoding and separate inner/outer deadline behavior,
+but not the live failure timing. The next minimization compares the exact
+default-identity Aqua command with a simple foreground control on the retained
+VM; no retry, deadline, or owner/security policy is being changed.
+
+The standalone minimization did not reproduce the timeout. A normal diagnostic
+boot followed by the exact default-identity request (`/bin/sh -c 'exec
+/bin/launchctl print "gui/$1" >/dev/null' pomme-aqua-proof 501`, timeout 15)
+returned exit 0 with complete output. Console ownership was `pomme:501`, and
+the `/usr/bin/true` control passed. A second stop/start followed immediately
+by the same Aqua request also passed: start took about 9.2 seconds and the
+request about 4.4 seconds. Ten subsequent console/Aqua/true sequences completed
+all 30 requests successfully in about 5.2 seconds. No request supplied an
+explicit user or UID override. These public probes share the guest request but
+not the security caller's outer transport deadline; they do not establish a
+fix or reproduce the fresh-owner workflow context.
+
+Read-only tracing also found that foreground timeout results retain their last
+pre-signal process status. The signal response is discarded, so
+`exited=false, outputComplete=false, terminationRequested=true` is not proof
+that the child remained alive after SIGTERM. This is an evidence limitation,
+not an explanation of why the Aqua command reached its deadline. No process
+completion or timeout behavior has been changed. The diagnostic VM was
+gracefully stopped again and public status confirmed no helper before the
+unchanged supported SIP-disable resume began at 10:29:55Z.
