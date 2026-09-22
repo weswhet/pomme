@@ -25,7 +25,7 @@ observations are recorded below; historical rows retain their original status.
 | Recovery one-shot daemon fixture timing | Fixed in `fc4e4bf`: separates serving-task admission from the response budget without weakening natural one-shot completion or replay assertions. Delayed-start red/green, setup timeout/cancellation checks, ten-pass one-shot checks, and a 1,178-function full pass succeeded. Signed Release/live authenticated SIP status and stopped-state restoration passed; production daemon behavior is unchanged and other stress failures remain open. |
 | Recovery listener ordering fixture timing | Fixed in `cf7a22e`: controlled test time separates launch/authentication ordering from scheduler delay; production retains the existing clock, polling interval, and strict deadline. Delayed-ordering red/green, late-authentication rejection and teardown checks, ten-pass comparison, and a 1,181-function full pass succeeded. Signed Release/live authenticated SIP status restored the stopped state; other stress and historical live failures remain open. |
 | Foreground completion ordering fixture timing | Fixed in `97d26b9`: monotonic timing injection isolates ordering assertions from delayed polling without changing production defaults. Delayed-poll red/green, strict partial-output deadline/cancellation checks, twenty-pass foreground comparison, and a 1,183-function full pass succeeded. Signed Release/live delayed stdout/stderr/exit and timeout reporting passed; the separate post-timeout defunct PID observation remains open. |
-| Foreground timeout child reaping | Confirmed request-driven reaping: a timed-out child remained defunct until a later job-list request. The autonomous, output-writer-aware candidate passes focused and full ten-pass tests, including retained descendant cleanup and lost-ownership safeguards. Signed Release and a fresh creation-pinned guest comparison remain pending. |
+| Foreground timeout child reaping | Fixed in `e853df1`: actor-owned exit observation reaps independently of later requests while retaining cleanup authority for descendants holding tracked output. Focused and full ten-pass tests passed. A fresh signed macOS 27 guest passed four timeout/reap checks, exited-leader group cleanup, normal output, and detached-log replay; stopped state was restored. Older pinned guests were not updated. |
 
 This is an observational live test. The CLI and guest images are not being
 modified during the sweep. Every failure, timeout, unexpected state, and
@@ -3294,6 +3294,83 @@ failures were not reproduced; this does not establish their causes or close
 those separate issues. The candidate will be committed before the canonical
 signed Release build, then verified in a fresh internal-drive 40 GB / 4 GB
 macOS 27 guest without changing any existing VM's agent pin.
+
+Source candidate `e853df1` was committed before the canonical signed Release
+build at 21:46:13Z. Build/signature/exact-entitlement/designated-requirement/
+archive/atomic-install checks passed. A fresh login shell resolves
+`/Users/wes/.local/bin/pomme`, version `e853df1`, SHA-256
+`34d6d84f0f0a7b1ca9e5b9fa4afe71a115ad1366f2d27620ea235eaca30403e9`.
+All 104 CLI contract checks passed; the earlier 21 installer checks also
+passed. Release warnings were confined to unchanged Core and MDM sources.
+
+At 21:47:14Z, authorized capacity recovery deleted only the stopped, successful
+`pomme-agent-owner26-20260922g` fixture (UUID
+`d3636887-e18e-4fcc-857a-2d3dc4e36a3a`). Its journal had completed SIP-enable
+restoration with normal-boot verification; the retained failure fixtures were
+not selected. Public inventory confirms eleven remaining internal VMs, all
+stopped. Free internal space increased from 49 to 74 GiB. The deleted VM disk
+is not recoverable through this operation; recorded evidence and append-only
+signed agent archives remain intact.
+
+Fresh `pomme-agent-childreap-20260922a` creation follows the successful
+21:47:30Z dry run, using the regular-file internal 27.0/26A428 restore image,
+explicit 40 GB disk / 4 GB RAM, and `--boot none`. The experimental Recovery
+qualification warning is retained. No existing credential, journal, startup
+volume, or agent pin is being rewritten.
+
+Creation began at 21:47:51Z, reached install completion at 21:52:10Z,
+connected the installed agent at 21:53:04Z, and passed owner/desktop proof
+between 21:54:29Z and 21:54:46Z. Creation returned success with stopped final
+state, independently confirmed by public status. The new VM UUID is
+`96164ee2-e102-4220-9c5c-f56e951c2a32`, startup volume
+`268bd1f5-f395-4a32-9c50-28f39fad8d93`, plan digest
+`50b6a3aa0de3948996008fc04843f6fc65612c26cac682fae61097ef937cd611`,
+and creation-pinned agent digest is exactly the installed `34d6d84f…30403e9`.
+The measured comparison keeps macOS 27.0/26A428 and 40 GB / 4 GB resources
+identical to the earlier failing guest. Normal start and scoped execution
+checks follow; unrelated historical creation failures are not closed by this
+successful creation.
+
+Normal start at 21:55:30Z succeeded with helper PID 58460 and authenticated
+agent digest `34d6d84f…30403e9`. Live execution then verified:
+
+- At 21:56:20Z, `exec --timeout 1 -- /bin/sleep 10` returned expected host
+  exit 124, `terminationRequested=true`, and PID 670. At 21:56:30Z, exact-PID
+  guest `ps` returned no rows and exit 1. Unlike the baseline, there was no
+  later job-list request to trigger reaping.
+- Three sequential repetitions at 21:56:57Z, 21:57:00Z, and 21:57:04Z
+  produced PIDs 720, 725, and 730. Each timed out and was signalled; after a
+  two-second host delay, each exact-PID `ps` completed with no rows and exit 1.
+  No status/list request for those jobs was issued between timeout and `ps`.
+- At 21:57:18Z, a shell spawned `/bin/sleep 30`, printed its child's PID,
+  and exited 7 while the child retained the output pipes. The one-second
+  foreground timeout retained leader PID 746, child PID 747, and exit code 7,
+  and reported `terminationRequested=true`. Exact-PID `ps` for both at
+  21:57:33Z returned no rows. Cleanup remained effective after leader exit.
+- At 21:57:19Z, delayed stdout `early`/`late`, stderr `warning`, and exit 7
+  returned intact with `outputComplete=true` and no truncation.
+- A detached shell at 21:57:50Z printed `retained` and exited 7 (PID 767,
+  job `51523439-4d61-4d82-b684-dd5689d00d2a`). Exact-PID `ps` at 21:58:01Z
+  found no process **before any job query**. Two subsequent `jobs logs` reads
+  both returned eight stdout bytes, the original exit code, complete output,
+  and the terminal frame. A later same-job TERM request correctly rejected
+  with `invalid-operation`, rather than claiming to signal a released PID.
+
+Public status still reported the expected connected normal agent before
+graceful stop began at 21:58:21Z. These are concrete live checks of the new
+creation-pinned guest; old pinned guests were neither updated nor represented
+as fixed by installing the host CLI alone.
+
+Graceful stop completed with `stopMethod=guest-stopped`. Independent status at
+21:59:02Z confirmed no helper and unchanged VM UUID, startup volume, plan,
+agent pin, and 40 GB / 4 GB resources. Inventory confirms all twelve remaining
+VMs stopped and internal; the installed executable digest is unchanged.
+This correction is live-verified for `PommeAgent` foreground/detached child
+ownership, including descendants holding tracked output. It does not claim
+arbitrary descendant supervision, a change to the separate terminal-service
+lifecycle, or a fix for the historical creation/security/restart and intermittent
+stress failures. The release/live evidence is committed before selecting the
+next issue.
 
 ### Live TUI status projection mismatch
 
