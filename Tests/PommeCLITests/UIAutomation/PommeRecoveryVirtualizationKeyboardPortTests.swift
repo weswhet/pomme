@@ -5,6 +5,35 @@ import Testing
 
 @Suite("Pomme Recovery framebuffer observation readiness")
 struct PommeRecoveryVirtualizationKeyboardPortTests {
+    @Test("marker frame comparison starts unknown and compares only adjacent attempts")
+    func markerFrameComparisonIsLocal() {
+        var comparison = RecoveryTerminalMarkerFrameComparison()
+        #expect(comparison.observe(digest: "private-a") == .unknown)
+        #expect(comparison.observe(digest: "private-a") == .unchanged)
+        #expect(comparison.observe(digest: "private-b") == .changed)
+        #expect(comparison.observe(digest: nil) == .unknown)
+        #expect(comparison.observe(digest: "private-b") == .unknown)
+        var independent = RecoveryTerminalMarkerFrameComparison()
+        #expect(independent.observe(digest: "private-b") == .unknown)
+    }
+
+    @Test("a failed diagnostic hash leaves valid marker proof intact")
+    func diagnosticHashFailureDoesNotRejectProof() {
+        let marker = "POMME ACDEHJKMNP OK"
+        let observation = RecoveryUIObservation(lines: ["Terminal", marker, "-bash-3.2#"].enumerated().map {
+            .init(text: $0.element, confidence: 1, rect: .init(x: 24, y: 18 + $0.offset * 25, width: 300, height: 18))
+        })
+        let attempt = RecoveryTerminalMarkerAttempt(observation: observation, marker: marker, digest: {
+            throw PommeRecoveryVirtualizationPortError.unprovenFrame
+        })
+        #expect(attempt.proof.isVerified)
+        #expect(attempt.frameDigest == nil)
+        var comparison = RecoveryTerminalMarkerFrameComparison()
+        #expect(comparison.observe(digest: attempt.frameDigest) == .unknown)
+        #expect(attempt.evidence.debugLine(frameChangedSincePreviousAttempt: .unknown)
+                == "[DEBUG-marker-20260922] commandEcho=false, nearMarker=false, frameChangedSincePreviousAttempt=unknown")
+    }
+
     @Test("LanguageChooser activation dispatch clicks the selected English row without advancing")
     func activationTargetsSelectedEnglishRow() async throws {
         let backend = RecoveryActivationRecordingBackend()

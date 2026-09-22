@@ -425,3 +425,45 @@ Guest `/usr/bin/true` completed and native `csrutil status` still reported
 SIP enabled. Graceful stop restored the VM to stopped. This validates the
 discovery fix and basic live compatibility; it does not claim to retest
 template creation or resolve the unrelated intermittent Recovery/Aqua issues.
+
+### Terminal marker repeatability and diagnostic gap
+
+Three unchanged macOS 27 SIP-status runs on signed `e0f6544` began at
+08:06:57Z, 08:09:38Z, and 08:12:14Z. Each used the same internal-drive
+`pomme-agent-ownerproof-20260922a` with 4 GB RAM and a 40 GB disk. Marker
+verification passed on attempt 1 at 08:08:36Z, 08:11:17Z, and 08:13:51Z,
+respectively. All three finalized authenticated, request-bound sessions,
+reported SIP enabled, proved cleanup, and restored the previous stopped state.
+The third run entered an already-active Language Chooser, while the first two
+exercised the inactive activation branch. None reproduced the earlier marker
+failure, and none is evidence of a marker fix.
+
+The existing failed-run diagnostics show Terminal recognized but no exact
+standalone marker or fresh prompt below it. They cannot distinguish a missing
+command echo, a misrecognized marker-shaped output line, or unchanged captures.
+The next diagnostic-only change will expose closed command-echo/near-marker
+booleans and whether existing consecutive marker captures differ. It will not
+add captures, record Terminal screenshots or OCR text, print markers or image
+digests, or alter configured input delays, attempt limits, and strict proof
+acceptance.
+Consecutive-frame equality can suggest an unchanged observation, not prove that
+the capture is stale. Diagnostic regression coverage and signed live validation
+will be recorded before claiming that this instrumentation is useful.
+
+The diagnostic candidate uses a fixed non-secret command-prefix witness and
+whole-line marker shape; neither diagnostic participates in `isVerified`.
+`frameChangedSincePreviousAttempt` is `unknown` for the first capture or a
+failed best-effort hash, and otherwise compares only adjacent captures within
+one verification call. It performs no extra capture, stores no image, and
+discards comparison state on return or failure. The temporary closed log line
+is tagged `[DEBUG-marker-20260922]` for removal after the investigation.
+
+The focused Terminal-recognition and virtualization-port suites demonstrated
+four expected diagnostic failures with inert false/unknown implementations
+(21 other cases passed), then all 25 cases passed with the implementation.
+Coverage includes echo/near-marker rejection by strict proof, exact redacted
+rendering, independent frame-comparison calls, and a diagnostic hash failure
+that leaves a valid proof intact. These tests validate instrumentation, not
+reproduction or resolution of the intermittent marker failure. The green
+XcodeBuildMCP result is
+`test_macos_2026-09-22T08-18-38-433Z_pid60265_d337737e.xcresult`.
