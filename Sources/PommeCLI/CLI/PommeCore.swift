@@ -10,6 +10,22 @@ private enum PommeLogContext {
 
 /// Closed diagnostics deliberately cannot accept any bootstrap data or errors.
 struct PommeBootstrapDiagnostics {
+    enum Operation: String, CaseIterable {
+        case hostKeyScan, sshUIDVerification, stagingDirectoryPreparation
+        case stagedAgentVerification, stagedManifestVerification
+        case agentArtifactTransfer, requestManifestTransfer, installerInvocation
+    }
+
+    enum Outcome: String, CaseIterable {
+        case started, succeeded, launchFailed, timedOut, exited, channelFailed
+    }
+
+    /// Only closed labels and the configured deadline are accepted here. In
+    /// particular, subprocess errors and output must never reach this formatter.
+    static func process(_ operation: Operation, outcome: Outcome, timeout: TimeInterval) -> String {
+        "bootstrap process operation=\(operation.rawValue) outcome=\(outcome.rawValue) timeoutSeconds=\(timeout)"
+    }
+
     enum Stage: String, CaseIterable {
         case started, journalValidated, ownerReferenceVerified, dispatchMarkerVerified
         case agentCredentialAvailable, runtimeRecordAbsent, runtimeStartAttempted, runtimeStartSucceeded
@@ -19,6 +35,15 @@ struct PommeBootstrapDiagnostics {
     }
 
     private(set) var stage: Stage = .started
+    private var hostKeyScanReported = false
+
+    /// Discovery retries can run for minutes; report subprocess detail only
+    /// for the first attempt while discovery checkpoints record eventual success.
+    mutating func nextHostKeyScanOperation() -> Operation? {
+        guard !hostKeyScanReported else { return nil }
+        hostKeyScanReported = true
+        return .hostKeyScan
+    }
 
     mutating func checkpoint(_ stage: Stage) -> String {
         self.stage = stage
@@ -2547,11 +2572,28 @@ struct PommeCore {
         }
     }
 
-    /// A bounded private subprocess channel. Neither subprocess diagnostics nor
-    /// input bytes are propagated to logs or errors, including launch failures.
+    static func bootstrapProcessDiagnostic(vmName: String) -> (String) -> Void {
+        { message in
+            if PommeRecoveryDebugContext.screenshotsEnabled { log(message, vmName: vmName) }
+        }
+    }
+
+    /// A bounded private subprocess channel. Raw subprocess diagnostics and
+    /// input bytes never enter logs or errors, including launch failures. Debug
+    /// output accepts only a closed operation and outcome plus the deadline.
     static func runBootstrapProcess(_ executable: String, arguments: [String],
         environment: [String: String] = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"],
-        input: Data? = nil, timeout: TimeInterval = 30) throws -> Data {
+        input: Data? = nil, timeout: TimeInterval = 30,
+        operation: PommeBootstrapDiagnostics.Operation? = nil,
+        diagnostic: (String) -> Void = { message in
+            if PommeRecoveryDebugContext.screenshotsEnabled { log(message) }
+        }) throws -> Data {
+        func report(_ outcome: PommeBootstrapDiagnostics.Outcome) {
+            guard let operation else { return }
+            diagnostic(PommeBootstrapDiagnostics.process(operation, outcome: outcome, timeout: timeout))
+        }
+        report(.started)
+        do {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -2585,7 +2627,17 @@ struct PommeCore {
             if count <= 0 { Thread.sleep(forTimeInterval: 0.01) }
         }
         guard process.terminationStatus == 0 else { throw PommeSSHBootstrapError.processExited(process.terminationStatus) }
+        report(.succeeded)
         return bytes
+        } catch {
+            switch error as? PommeSSHBootstrapError {
+            case .processLaunchFailed: report(.launchFailed)
+            case .processTimedOut: report(.timedOut)
+            case .processExited: report(.exited)
+            default: report(.channelFailed)
+            }
+            throw error
+        }
     }
 
     private static func bootstrapAgentMatches(_ status: GuestAgentStatusV1,
@@ -2667,7 +2719,9 @@ struct PommeCore {
                 discovered = try PommeSSHBootstrap.discoverHostKey(stableMAC: mac, readLeases: {
                     try PommeSSHBootstrap.readLeases()
                 }, scan: { ip in
-                    let output = try runBootstrapProcess("/usr/bin/ssh-keyscan", arguments: ["-T", "5", "-t", "ed25519", ip])
+                    let output = try runBootstrapProcess("/usr/bin/ssh-keyscan", arguments: ["-T", "5", "-t", "ed25519", ip],
+                        operation: diagnostics.nextHostKeyScanOperation(),
+                        diagnostic: bootstrapProcessDiagnostic(vmName: plan.vm.name))
                     return String(decoding: output, as: UTF8.self)
                 }, onEvent: { event in
                     switch event {
@@ -2685,7 +2739,8 @@ struct PommeCore {
         let address = discovered.address
         try PommeSSHBootstrap.pinHostKey(discovered.key, at: knownHosts)
         log(diagnostics.checkpoint(.keyPinned))
-        func authenticatedProcess(_ executable: String, arguments: [String], sudoSuffix: Data? = nil, timeout: TimeInterval = 30) throws -> Data {
+        func authenticatedProcess(_ executable: String, operation: PommeBootstrapDiagnostics.Operation,
+            arguments: [String], sudoSuffix: Data? = nil, timeout: TimeInterval = 30) throws -> Data {
             // Recheck the DHCP target immediately before every credential-bearing
             // operation, including retries and the first connection after keyscan.
             let current = try PommeSSHBootstrap.address(leases: PommeSSHBootstrap.readLeases(), stableMAC: mac)
@@ -2698,9 +2753,10 @@ struct PommeCore {
             }
             return try runBootstrapProcess(executable, arguments: arguments,
                 environment: PommeBootstrapAskpass.environment(executable: identity.url, ownerReference: ownerFile),
-                input: stdin, timeout: timeout)
+                input: stdin, timeout: timeout, operation: operation,
+                diagnostic: bootstrapProcessDiagnostic(vmName: plan.vm.name))
         }
-        let uidBytes = try authenticatedProcess("/usr/bin/ssh", arguments: PommeSSHBootstrap.arguments(
+        let uidBytes = try authenticatedProcess("/usr/bin/ssh", operation: .sshUIDVerification, arguments: PommeSSHBootstrap.arguments(
             address: address, knownHosts: knownHosts, command: "/usr/bin/id -u"))
         guard let uid = UInt32(String(decoding: uidBytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)),
               uid >= 501 else { throw PommeSSHBootstrapError.invalid }
@@ -2734,7 +2790,7 @@ struct PommeCore {
         try persistExactBootstrapFile(executable, at: workspace.appendingPathComponent("pomme"), mode: 0o700)
         let remote = "/private/var/tmp/pomme-bootstrap-\(request.requestID.uuidString.lowercased())"
         let mkdir = "umask 077; if [ -e '\(remote)' ] || [ -L '\(remote)' ]; then [ ! -L '\(remote)' ] && [ -d '\(remote)' ] && [ \"$(/usr/bin/stat -f '%u:%Lp' '\(remote)')\" = '\(uid):700' ] && [ \"$(/bin/ls -A '\(remote)')\" = \"$(/usr/bin/printf 'pomme\\nrequest.json')\" ] && /usr/bin/printf existing; else /bin/mkdir '\(remote)' && /usr/bin/printf new; fi"
-        let stagingState = try authenticatedProcess("/usr/bin/ssh", arguments: PommeSSHBootstrap.arguments(
+        let stagingState = try authenticatedProcess("/usr/bin/ssh", operation: .stagingDirectoryPreparation, arguments: PommeSSHBootstrap.arguments(
             address: address, knownHosts: knownHosts, command: mkdir))
         guard stagingState == Data("new".utf8) || stagingState == Data("existing".utf8) else { throw PommeSSHBootstrapError.invalid }
         for name in ["pomme", "request.json"] {
@@ -2746,10 +2802,14 @@ struct PommeCore {
             let path = remote + "/" + name
             if stagingState == Data("existing".utf8) {
                 let check = "[ ! -L '\(path)' ] && [ -f '\(path)' ] && [ \"$(/usr/bin/stat -f '%u:%Lp:%l' '\(path)')\" = '\(uid):\(String(mode, radix: 8)):1' ] && [ \"$(/usr/bin/shasum -a 256 '\(path)' | /usr/bin/cut -d ' ' -f 1)\" = '\(hash)' ]"
-                _ = try authenticatedProcess("/usr/bin/ssh", arguments: PommeSSHBootstrap.arguments(
+                _ = try authenticatedProcess("/usr/bin/ssh",
+                    operation: name == "pomme" ? .stagedAgentVerification : .stagedManifestVerification,
+                    arguments: PommeSSHBootstrap.arguments(
                     address: address, knownHosts: knownHosts, command: check))
             } else {
-                _ = try authenticatedProcess("/usr/bin/scp", arguments: PommeSSHBootstrap.scpArguments(
+                _ = try authenticatedProcess("/usr/bin/scp",
+                    operation: name == "pomme" ? .agentArtifactTransfer : .requestManifestTransfer,
+                    arguments: PommeSSHBootstrap.scpArguments(
                     address: address, knownHosts: knownHosts, source: local, requestID: request.requestID),
                     timeout: 120)
             }
@@ -2764,7 +2824,7 @@ struct PommeCore {
         try renewed.verify(token: token, now: Date(), vmUUID: plan.vm.uuid, planSHA256: plan.digest, executableSHA256: plan.normalAgent.executableDigest)
         log(diagnostics.checkpoint(.stagingVerified))
         log(diagnostics.checkpoint(.installerInvoked))
-        _ = try authenticatedProcess("/usr/bin/ssh", arguments: PommeSSHBootstrap.arguments(
+        _ = try authenticatedProcess("/usr/bin/ssh", operation: .installerInvocation, arguments: PommeSSHBootstrap.arguments(
             address: address, knownHosts: knownHosts, command: PommeSSHBootstrap.installerCommand(request: renewed, stagedRequestSHA256: stagedRequestHash)),
             sudoSuffix: Data((String(decoding: token, as: UTF8.self) + "\n" + renewedLine + "\n").utf8), timeout: 120)
         let agentDeadline = ProcessInfo.processInfo.systemUptime + 120
