@@ -157,3 +157,23 @@ capture tests passed via XcodeBuildMCP. The test also checks old-source callback
 rejection and both full-frame and damage-only publication. This establishes
 the replay-policy change, not yet the cause or resolution of the live Recovery
 timeout. Signed Release and live validation follow the candidate commit.
+
+Candidate `ef37f16` was signed and installed successfully. A fresh helper on
+the same VM passed repeated static Recovery captures and a changed-screen
+capture after one Right key; the changed image matched the baseline's known
+selected-disk image. Each repeated capture completed in about 20–25 ms, with
+no static-screen timeout. All 88 CLI contract checks passed. Cold initial
+capture can still show the boot-time black/cursor frame; the change does not
+claim to establish visual readiness by itself.
+
+### Language Chooser activation evidence
+
+A manual baseline probe with the prior helper isolated the navigation defect:
+two stable Language Chooser images showed English highlighted gray. Return did
+not advance this inactive window. One click on the visible Continue arrow
+activated the window (English became blue) without advancing it. After two
+stable active-window images, one Return opened Recovery Utilities immediately.
+All inputs were single events bounded by observed screens; no security change
+was performed. The next change must prove window activation before language
+confirmation, rather than treating the inactive chooser as ready for Return.
+Both manual probes ended with the disposable VM stopped.
