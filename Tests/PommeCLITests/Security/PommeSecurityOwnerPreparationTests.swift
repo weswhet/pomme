@@ -3,6 +3,11 @@ import Testing
 
 @Suite("Pomme normal guest owner preparation")
 struct PommeSecurityOwnerPreparationTests {
+  @Test("Owner evidence commands allow bounded first-boot initialization")
+  func evidenceCommandTimeout() {
+    #expect(PommeSecurityOwnerPreparation.commandTimeout == 120)
+  }
+
   @Test("Framework owner verification returns identity and login proofs without mutation", arguments: [
     "", "artifactReadOnly",
   ])
