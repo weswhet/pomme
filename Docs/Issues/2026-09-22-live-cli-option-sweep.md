@@ -2269,6 +2269,92 @@ These source/test/evidence changes are committed before the signed Release
 build. A fresh guest must pin that release to exercise these new guest-side
 checkpoints; existing guest pins will not be rewritten.
 
+Diagnostic commit `ec46469` built and installed through the canonical signed
+Release workflow at 23:24Z. Signature, exact entitlements, designated-requirement
+compatibility, archive, and atomic-install checks passed. Fresh-login resolution
+reports `/Users/wes/.local/bin/pomme`, version `ec46469`, with installed SHA-256
+`b0690df4f7ab355ed38251b4ff6bb2859f2cb5a5128d98f17851d11d8dea46aa`.
+All 104 CLI contract checks passed. Inventory confirmed eleven stopped/internal
+VMs and no target-name collision. After dry-run preflight, fresh internal
+`pomme-agent-receivetrace26-20260922a` creation began at 23:26:03Z using the same
+local macOS 26.6.2/25G83 image, explicit 40 GB / 4 GB resources, and `--boot none`.
+No existing guest pin, credential, journal, or security setting was changed.
+Independent read-only review found no blocking behavior/security issue in the
+trace extension, while retaining the explicit timing-perturbation caveat.
+
+Fresh restore reached 100% at 23:29:50Z, Terminal at 23:31:18Z, and exact marker
+proof on attempt two at 23:31:22Z. Creation completed successfully by 23:32:30Z
+and returned stopped state, independently confirmed. The new VM UUID is
+`1c90e39b-de69-43f5-9220-d8a6072bd23a`, startup volume
+`ef903fc4-020b-4dc9-aede-64aa3aac33a1`, and immutable plan
+`34b8f6e2d619e7dfe6ce29215b89cf50cd6a79af568b96d1aba1e8cce7f1a013`.
+Its guest pin matches the installed `b0690df4…dea46aa` exactly. No security
+journal existed before the first-owner SIP-disable command at 23:32:53Z.
+The same `--force --final-state previous` workflow follows immediately, without
+standalone guest probes or account edits. A fixed-tag-only helper-log follower
+was started before its normal boot; guest status/admission events remain in
+the guest's bounded unified-log query, not the helper log.
+
+This fresh first-owner run stopped before Aqua with the separate automatic-login
+readback failure. At 23:34:18–19Z the post-setter proof emitted
+`nativeExpectedOwner`, `preferenceMatch`, and `artifactValid`. Owner completion
+status 1 invoked the existing single normal-boot retry at 23:34:20Z. After
+post-reboot owner verification, the 23:34:40Z readback emitted
+`nativeOtherOwner`, then `reconcileRejected`. Thus the failing predicate is a
+successfully parsed account-bearing native status for a different owner, not
+missing preference, invalid artifact metadata, or malformed/native-command
+failure. Its account value was not logged. This does not yet identify why the
+native state changed or establish the earlier fixture's failing predicate.
+
+The command exited 1 before Recovery/security mutation and restored stopped
+state with `sipDisable` / `autologinIntent` / `previous` retained. All twelve
+VMs were independently confirmed stopped/internal; the fixed-tag helper
+follower was stopped and had no signal events. A bounded read-only inspection
+boot will query only classified native-status evidence; no account/preference
+mutation, credential access, pin rewrite, or blind security resume is planned.
+
+The bounded inspection boot authenticated the unchanged new guest pin. Its
+native historical log contains OFF at 23:33:18.662Z and account-bearing status
+entries at 23:34:18.890Z and 23:34:40.820Z, but both account values are explicitly
+`<private>` redactions. The in-guest classifier emitted only `redacted`; no raw
+account value or credential was exposed. These logs cannot identify the earlier
+different account. A later live read at 23:37:46Z returned canonical OFF,
+missing `autoLoginUser` preference (exit 1), valid root:root/0600 artifact
+metadata, present setup marker, and Setup Assistant console. All probe output
+was complete and untruncated. This later state is not substituted for the
+failure-time native status.
+
+A separate bounded `/bin/sleep 10` with public `--timeout 1` calibrated the new
+guest trace at 23:38:32Z. It returned expected host exit 124 with
+`terminationRequested=true`. Host write completed at 0.448 ms and the correlated
+signal response arrived at 2.456667 ms. Guest events show signal decoded,
+handler entry, perform return, stream collection entry/return, and response
+write entry/completion at 0.814042 ms. No stream frame was emitted during this
+signal exchange, which is permitted; the calibration does not claim an exit
+frame was received. The closed log query also recovered normal status-stage
+events and counted 6,677 fixed-tag events in its 30-minute window, retaining
+only the final 128. This verifies the guest-side diagnostic boundary live,
+not the natural first-login delay. No security operation was resumed or replayed
+during inspection.
+
+Graceful stop began at 23:39:55Z and completed with `stopMethod=guest-stopped`.
+Independent inventory at 23:40:15Z confirmed all twelve VMs stopped/internal
+with no helpers. The new fixture retains its original UUID, startup volume,
+plan, guest pin, resources, and `autologinIntent` journal. No SIP-enable
+restoration is required because the failed run never reached Recovery mutation.
+
+Read-only mapping confirms that owner-completion status 1 precedes its receipt.
+The single existing preference-recovery retry restarts/authenticates, verifies
+the same owner/generated UID, and re-enters `configureLogin`; this failure is
+at that retry's initial native-state reconciliation, before any second setter
+or owner-completion attempt. Current tests characterize post-restart rejection
+through the real recovery adapter with supplied state, but do not reproduce
+the native first-login state transition. The next evidence question is the
+failure-time account classification and why that state changes across this
+boot boundary; no allowance for an arbitrary other owner or speculative retry
+is justified. The original cleanup-signal delay remains open, and both temporary
+diagnostic families remain until their investigations can be closed safely.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
