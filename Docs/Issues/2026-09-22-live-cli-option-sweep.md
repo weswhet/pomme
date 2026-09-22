@@ -319,3 +319,21 @@ signed build `ef37f16`. Restore began at 06:32:22Z; the existing five-input
 Recovery route reached Terminal at 06:38:00Z and passed marker proof on attempt
 1. Creation then completed successfully and restored the requested stopped
 state. The sweep's macOS 26 bootstrap failure did not reproduce in this run.
+
+### macOS 26 SIP-disable baseline
+
+With the Recovery activation change validated and documented, the next
+sequential baseline used `e9076c6` on the same internal-drive 4 GB/40 GB macOS
+26 VM: `sip disable --force --final-state previous --format json --debug`.
+It began at 07:27:42Z, created and verified `pomme`, passed login restrictions,
+and completed the native Setup Assistant handoff at 07:29:01Z. This run did
+not reproduce the sweep's initial Aqua-session rejection.
+
+Automatic-login configuration reached its readback receipt at 07:29:12Z.
+Owner completion returned status 1, triggering the existing single normal-boot
+retry at 07:29:13Z. Owner verification passed again at 07:29:33Z, but the next
+global automatic-login readback failed with the closed native-state error.
+The operation retained `phase=autologinIntent`, `operation=sipDisable`,
+`requestedFinalState=previous`, and original state stopped; the VM was verified
+stopped after failure. No SIP mutation stage was reached. This new red is being
+investigated before any credential, journal, or automatic-login policy change.
