@@ -1872,6 +1872,63 @@ desktop timeout or transport failure recurred. It does not resolve the
 historical console-transport cause, reproduce the original fresh-login timing,
 or establish live reconnect recovery. Those observations remain open.
 
+### Retained signal-timeout fixture resume
+
+After committing the child-reaping release/live evidence as `7eae813`, the
+next investigation returns to the retained macOS 26 signal-timeout fixture
+`pomme-agent-owner26-20260922i`. At 22:01Z, all twelve VMs were stopped on
+internal storage. Signed host `e853df1` / `34d6d84f…30403e9` was revalidated.
+The target still has UUID `4c39e416-4ab5-48b9-aaf4-fef22d553158`, startup
+volume `60a52b9b-12d7-4940-b0d3-f4c9bf0f03d9`, plan
+`d11ba48042b48e3e2a798138a2a52fb96a14e1fbd41ee576c789d11fe465fa82`,
+its original `d64e754e…52e274a` guest pin, and 40 GB / 4 GB resources.
+Its journal remains `sipDisable` / `autologinIntent` / `previous`, with
+original state stopped and no normal-boot verification receipt.
+
+Before any boot could replace the helper log, the two original closed
+diagnostics were re-read: at 13:15:55Z, `boundary=checkpoint`,
+`elapsedMs=15457`, `jobEstablished=true`, `pollCount=19`,
+`errorKind=foregroundDeadline`; at 13:16:00Z, `boundary=signal`,
+`elapsedMs=20459`, the same job/poll fields, and `errorKind=agentTimeout`.
+No credential, request body, or raw guest output was read for this preflight.
+
+The exact public `sip disable --force --final-state previous` request will
+resume the retained transaction. Ranked possibilities are a transient
+first-login delay, reconnect/authentication failure, and persistent identity
+mismatch. A successful resume can verify recovery compatibility but cannot
+recreate first-owner timing or establish the original delay's cause. Success
+will be followed by SIP enable and independent stopped-state proof. No pin,
+credential, journal phase, owner account, or startup volume is manually changed;
+the normal public workflow may advance its retained journal.
+
+Resume began at 22:01:58Z. Creation-pinned normal-agent authentication passed
+at 22:02:10Z, followed by owner evidence, automatic-login readback, and
+Setup Assistant completion. Desktop verification advanced to authenticated
+Recovery at 22:03:32Z without a reported timeout. Recovery marker proof passed
+on attempt 2 at 22:05:34Z. Normal-boot verification and stopped-state
+restoration completed at 22:06:38Z: `configuredDisabled=true`, with all
+verification fields true. Independent public status confirmed stopped with no
+helper, unchanged VM/plan identity, and the original guest pin. The journal
+reached `sipDisable` / `restorationComplete` / `previous`, with
+`normalBootVerified=true`. Matching SIP enable began at 22:09:40Z to restore
+the original enabled security state.
+
+SIP enable passed first-attempt Recovery marker proof at 22:12:16Z, then
+normal-boot verification and stopped-state restoration at 22:13:18Z. The
+successful result reports `configuredDisabled=false` and all verification
+fields true. Independent inventory confirmed all twelve VMs stopped with no
+helpers and all bundles on internal storage. The target journal is now
+`sipEnable` / `restorationComplete` / `previous`, with
+`normalBootVerified=true`. The original VM UUID, startup volume, immutable
+plan, resources, and guest digest remain unchanged. No VM deletion, source
+change, agent update, credential replacement, or new build was needed.
+
+This establishes successful resume of this retained transaction with the
+current host and original pinned guest, not a reproduction of the initial
+first-owner delay. No cleanup-signal timeout or reconnect branch was observed;
+the original signal delay and the separate sweep's private-PTY/pinned-auth
+failures remain unexplained.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
