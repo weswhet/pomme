@@ -2009,6 +2009,49 @@ The temporary diagnostic source, tests, and evidence are committed before the
 signed Release build. These results validate trace behavior and compatibility,
 not the original live timeout's cause.
 
+Diagnostic commit `49c2a64` built through the canonical signed Release workflow
+at 22:31Z and was atomically installed to `~/.local/bin/pomme`. Signature,
+entitlement, designated-requirement compatibility, and archive checks passed.
+Installed SHA-256:
+`c1960d43210acc3b9c0c600abd93476f362b6e9eee57859fbd0eb32bf890acab`.
+Fresh login-shell resolution and version matched; all 104 CLI contract checks
+passed. Inventory independently confirmed eleven stopped internal VMs and the
+new target absent. The installed candidate's dry run passed at 22:32:36Z,
+then fresh creation began with the same internal image, 40 GB / 4 GB resources,
+and `--boot none`. Existing pinned guests are not updated.
+
+Creation began at 22:32:49Z, reached install 100% at 22:36:32Z, passed
+first-attempt Recovery marker proof at 22:38:03Z, and completed normal-agent
+verification by 22:39:01Z. The successful result restored stopped state;
+independent public status confirmed no helper. New VM UUID:
+`45271f24-cb3e-4c72-9ca0-4d7f7741d127`; startup volume:
+`698f2a20-1e66-4aa6-9e39-6d49811449a7`; immutable plan:
+`04f470db735c8642f0ad1a9b8e8312eafc8ca59c1c6132faf77c76225c739a91`.
+Its guest digest is the exact installed `c1960d43…890acab` diagnostic artifact.
+First-owner `sip disable --force --final-state previous` began at 22:39:14Z
+without intervening guest probes. A read-only helper-log follower emits only
+the fixed signal-boundary tag across helper-log replacement. Matching SIP
+enable will restore the initial security state if disable completes.
+
+This fresh run failed at an earlier owner boundary, before desktop/Aqua
+verification or Recovery security mutation. Owner creation and verification
+passed, and Setup Assistant handoff completed at 22:40:20Z. Owner completion
+status 1 triggered the existing single normal-boot retry at 22:40:38Z. After
+reboot, owner verification passed at 22:40:58Z; the next
+`globalAutoLoginReadback` intent had no receipt. The command exited 1 with
+`The native normal guest automatic-login state could not be verified; Setup
+Assistant completion was not recorded.` Progress was retained and the stopped
+run state restored. This is not a reproduction of the later signal delay.
+
+Independent status confirmed stopped/no helper and unchanged VM identity,
+plan, resources, and pinned diagnostic guest. The journal remains
+`sipDisable` / `autologinIntent` / `previous`, original run state stopped,
+`normalBootVerified=false`. The filtered helper-log follower emitted no
+signal-boundary events and was stopped. All twelve VMs are stopped on internal
+storage. No resume, security restoration mutation, guest probe, or credential
+read was performed after failure; the fresh failure fixture is preserved for
+the exact automatic-login readback investigation.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
