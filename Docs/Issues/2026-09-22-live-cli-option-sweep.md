@@ -15,7 +15,7 @@ observations are recorded below; historical rows retain their original status.
 | macOS 26 first-owner desktop readiness / cleanup | Same-job cleanup-verified retry and pinned reconnect adapter implemented. Three fresh signed-candidate SIP cycles passed, including a live Aqua timeout recovered after instrumentation cleanup; original intermittent signal delay and earlier console transport failure remain unexplained. |
 | macOS 27 creation `ownerProof` | Open; subsequent internal-drive baseline passed without a targeted fix. |
 | macOS 26 creation `verifyNormalAgent` / slow first boot | Open historical failure; subsequent internal-drive creations passed without establishing its cause. |
-| macOS 27 restart after pause/resume | Open; subsequent internal-drive sequences passed without reproducing the missing helper. |
+| macOS 27 restart after pause/resume | Open; two earlier internal-drive sequences and a later ten-cycle repetition passed without reproducing the missing helper. |
 | Retained SIP private-PTY / pinned-authentication failures | Open historical observations; later successful security cycles do not establish their cause. |
 
 This is an observational live test. The CLI and guest images are not being
@@ -1862,3 +1862,41 @@ older-pinned-agent resume compatibility through the complete SIP cycle. No
 desktop timeout or transport failure recurred. It does not resolve the
 historical console-transport cause, reproduce the original fresh-login timing,
 or establish live reconnect recovery. Those observations remain open.
+
+### macOS 27 pause/resume/restart repetition
+
+After committing the retained-console fixture outcome, investigation returns
+to the historical missing-helper failure after pause/resume/restart. No
+production change is proposed without a failing reproduction. The same
+internal `pomme-agent-ownerproof-20260922a` remains macOS 27.0/26A428 with an
+explicit 40 GB disk / 4 GB RAM, original UUID
+`30d2a972-988e-4c69-9015-6bb5f1df2baf`, and agent pin
+`011eea30cd2a4f48164332e062f05ecd8dd70417b30ad05603befa3495ce42f2`.
+All thirteen VMs were stopped before this scoped run. Installed signed host
+`a3852a5` is unchanged; normal start began at 15:37:24Z and passed with a
+connected, correctly pinned agent.
+
+A ten-cycle sequential loop began at 15:38:18Z. Each cycle runs public `pause`,
+checks paused state with a live helper, runs `resume`, and immediately runs
+`restart --mode normal` with the unchanged default 300-second readiness bound.
+It then requires public status to report running/normal, helper present, and a
+connected normal agent with the exact original digest. The shell uses
+`set -euo pipefail` and `jq -e` checks, so the first command or postcondition
+failure terminates the loop without another mutation or automatic retry.
+Commands use `--format json --debug`; no artificial wait or guest load is
+inserted. No VM is created or moved and no credential, journal, or pin is reset.
+
+All ten cycles passed, ending at 15:45:37Z. Completion timestamps were
+15:38:57, 15:39:40, 15:40:18, 15:41:21, 15:42:03, 15:42:43, 15:43:09,
+15:44:14, 15:44:54, and 15:45:37Z. Each restart returned a different helper PID
+and the required running/normal/connected status with the unchanged agent pin.
+No missing-helper error or failed postcondition occurred. The ten cycles are
+correlated observations on one initialized VM, not ten independent fresh VM
+creations. There is no post-resume agent-readiness wait or assertion; the final
+check proves eventual readiness after restart, not uninterrupted connectivity
+across resume. This run supplies stronger non-reproduction evidence but no
+root-cause finding or justified lifecycle source change.
+
+Graceful stop began at 15:45:50Z and completed with `guest-stopped`. Public
+inventory confirmed all thirteen internal VMs stopped with no helpers. The
+current signed Release remains installed; only this evidence document changed.
