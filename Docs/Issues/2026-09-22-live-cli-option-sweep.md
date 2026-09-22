@@ -2120,3 +2120,39 @@ creation and restored terminal modes. Result bundle:
 `test_macos_2026-09-22T17-57-42-219Z_pid74243_9d29bf3b.xcresult`.
 This fixes the test input driver's dependency and failure-cleanup gap; the
 separate full-suite socket/OCR stall remains under investigation.
+
+Test-harness commit `052f05d` was built and installed using the canonical signed
+Release workflow at 17:58:43Z. Signature, exact entitlements, designated-
+requirement compatibility, and archive/install checks passed. Installed digest:
+`4b0d2e777be8abb3c57f72fe7c44d7b44af0a3c7521ea0072ae8d0911ed62d06`.
+Fresh login-shell resolution selected `/Users/wes/.local/bin/pomme`, reporting
+`052f05d`. All 104 CLI contract and 21 installer regression checks passed.
+
+The existing internal-drive 40 GB / 4 GB macOS 27 fixture
+`pomme-agent-ownerproof-20260922a` was explicitly confirmed stopped before
+normal start at 17:59:01Z. Start succeeded with a connected normal agent and
+unchanged creation pin `011eea30…95ce42f2`. The signed CLI then ran interactively
+under a host PTY: dashboard → create form → proposed name
+`pomme-agent-pty-cancel-20260922a` → restore-source menu → Escape → dashboard →
+`q`. It exited zero with cursor/alternate-screen restoration sequences; the
+inventory remained twelve VMs and the proposed name did not exist. This is a
+live cancellation smoke check, not an exact termios measurement or a full-suite
+pass. Direct invocation through the command proxy rejected its noninteractive
+stdin/stdout; `script -q /dev/null` supplied the real PTY without a transcript
+file. Graceful stop at 18:00:14Z succeeded with `stopMethod=guest-stopped`;
+the final inventory confirmed all twelve VMs stopped with no helpers.
+
+### Live TUI status projection mismatch
+
+The same signed `052f05d` PTY smoke check exposed a separate reproducible
+display mismatch. While `pomme-agent-ownerproof-20260922a` was running normally,
+the dashboard counted `running=0 stopped=12` and displayed `[STOP]` for that
+row, even though its adjacent VM-state column said `running` and agent column
+said connected. The selected agent detail also rendered `protocol=- digest=-`.
+Independent public JSON status at that point reported `vmState=running`,
+`helperRunning=true`, agent `connection=connected`, numeric protocol version 1,
+and the exact creation-pinned executable digest. Returning from the cancelled
+create form reproduced the same dashboard mismatch. No VM lifecycle failure
+occurred. This is an open TUI projection/formatting observation, not a fix or
+evidence that the underlying VM stopped; the fixture was subsequently stopped
+explicitly as recorded above.
