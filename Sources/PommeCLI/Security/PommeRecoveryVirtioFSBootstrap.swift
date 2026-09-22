@@ -121,7 +121,8 @@ struct PommeRecoveryVirtioFSTerminalPlan: Equatable, Sendable {
         // sha256 command produces the known vector (a 16-hex prefix is ample
         // to detect a wrong or missing tool). umount and codesign are
         // verified by the launcher script, which fails closed on its own.
-        let probe = "p=/sbin;u=/usr/bin;test -x $p/mount_virtiofs&&case $($u/printf abc|$p/sha256 -q) in ba7816bf8f01cfea*)printf 'POMME \(Self.ocrSafeMarkerSuffix(requestID: request.requestID)) OK\\n';;esac"
+        // A blank line separates the proof from the next shell prompt for OCR.
+        let probe = "p=/sbin;u=/usr/bin;test -x $p/mount_virtiofs&&case $($u/printf abc|$p/sha256 -q) in ba7816bf8f01cfea*)printf '\(marker)\\n\\n';;esac"
         // The mount point is intentionally nested below a new directory. A
         // pre-existing directory or symlink makes this command fail closed.
         // Enter only the newly created private workspace before shortening
@@ -327,13 +328,17 @@ test ! -e "$d" && test ! -L "$d"
     }
 
     private static func ocrSafeMarkerSuffix(requestID: UUID) -> String {
-        let alphabet = Array("ACDEHJKMNPQRTUXY")
-        return String(requestID.uuidString
+        // One distinct three-letter word per nibble preserves the existing
+        // 40-bit request suffix while giving OCR stable word boundaries.
+        let words = ["ash", "bay", "cow", "dry", "elm", "fox", "gum", "hen",
+                     "ink", "joy", "key", "log", "mud", "new", "oak", "pig"]
+        return requestID.uuidString
             .filter { $0 != "-" }
             .prefix(10)
             .compactMap { nibble in
-                Int(String(nibble), radix: 16).map { alphabet[$0] }
-            })
+                Int(String(nibble), radix: 16).map { words[$0] }
+            }
+            .joined(separator: " ")
     }
 
     private static func keyboardSafe(_ value: String) -> Bool {
