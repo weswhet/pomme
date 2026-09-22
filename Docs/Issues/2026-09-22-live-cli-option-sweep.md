@@ -1374,3 +1374,64 @@ disable/enable cycle, but the intermittent first-login transport failure remains
 open and the temporary diagnostics remain. The next evidence step is another
 fresh, sequential comparison on this unchanged binary and resource settings,
 not a reset of any retained failing VM or a speculative transport retry.
+
+The next sequential comparison revalidated clean tracked state at `6cd841b`,
+the installed `051bd6c` digest, all eight VMs stopped, and 166 GiB internal
+free space. Fresh `pomme-agent-owner26-20260922h` creation began at 12:44:36Z
+after dry-run preflight using the same internal 26.6.2/25G83 image, explicit
+40 GB disk / 4 GB RAM, and `--boot none`. No source, timeout, workload,
+credential, owner, or retry-policy change separates this run from `...22g`.
+
+Restore reached 100% at 12:48:24Z, Terminal at 12:49:51Z, and exact marker
+proof on attempt 2 at 12:49:54Z. Creation passed normal-agent verification
+and returned stopped state, separately confirmed by public status. VM UUID:
+`bd4acfad-f091-4248-878b-002459d0ff23`; startup-volume group:
+`2e6e4129-dd83-4bf4-ac06-de8e5ebeb4e6`; immutable plan digest:
+`9858c2678125cd90afae2427b07d630823f3c7bb1e504a787243f61706290234`.
+The VM pins the unchanged `0297d320…a29af24` agent. The first-owner SIP-disable
+workflow follows immediately, without standalone guest probes or account edits.
+
+The first-owner command began at 12:51:01Z. Owner-completion status 1 invoked
+the existing single boot retry at 12:52:25Z; owner completion passed at
+12:53:21Z and Setup Assistant at 12:53:24Z. Desktop verification began at
+12:53:40Z. Initial Aqua probes passed; the 12:54:00Z probe took 7.537 seconds
+with a reap and no wait errors, while the desktop remained not matched.
+
+At 12:54:28Z the next Aqua probe timed out after 15.159 seconds including
+signal: start 3.264 s, EOF 0.488 s, 37 status exchanges totaling 10.246 s
+(maximum 0.888 s), signal 0.079 s. The final guest snapshot recorded 75
+running waits, zero reaps or wait errors, and no exit frame before/in signal.
+The new helper diagnostic was captured before another helper could replace
+its log: `boundary=checkpoint`, `elapsedMs=15079`, `jobEstablished=true`,
+`pollCount=37`, `errorKind=foregroundDeadline`. This identifies the attempt
+deadline, not an inner transport error.
+
+The loop subsequently proved same-job cleanup and retried within its original
+deadline. Aqua completed in 3.299 seconds at 12:54:34Z; the desktop matched
+at 12:54:35Z. Another Aqua probe completed in 1.430 seconds at 12:54:40Z,
+and stable proof passed at 12:54:41Z. The command advanced to authenticated
+Recovery. This is the first complete live desktop-proof success after exercising
+the cleanup-verified retry; the earlier `...22f` retry was followed by a console
+transport failure. No transport failure occurred in this run so far.
+
+SIP disable then completed successfully after second-attempt Recovery marker
+proof at 12:56:43Z and fresh normal-boot verification. The result reported
+`configuredDisabled=true` and all normal-boot, runtime, enforcement, and
+final-state verification fields true. Public status confirmed stopped with no
+helper before matching SIP-enable restoration. This supplies the first full
+successful SIP-disable workflow that actually exercised the verified retry.
+
+Matching SIP enable began at 12:58:10Z, passed second-attempt marker proof at
+13:00:51Z, and completed after fresh normal-boot verification and restoration
+at 13:01:49Z. The result reported `configuredDisabled=false` and all normal-
+boot, runtime, enforcement, and final-state verification fields true. Public
+inventory confirmed all nine internal VMs stopped with no helpers; the `...22h`
+journal projection is `restorationComplete`, `sipEnable`, `previous`. Internal
+storage has 139 GiB free. No retained failing VM or immutable identity was reset.
+
+This validates the bounded cleanup-verified readiness retry in a complete live
+SIP cycle. It does not establish why native first-login probes become slow,
+nor resolve `...22f`'s later console transport error. The old Aqua timing/wait
+instrumentation is now being removed, preserving the newer closed transport
+diagnostics for that distinct unresolved boundary. Regression testing was
+deferred until all VMs were stopped to avoid altering measured guest load.
