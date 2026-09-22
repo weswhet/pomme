@@ -21,6 +21,7 @@ observations are recorded below; historical rows retain their original status.
 | Integrated test-suite concurrency hang | Test-peer thread isolation in `0291f65` removes the observed hang in the focused stress run and subsequent full parallel comparisons. Signed Release and live execution/timeout smoke checks passed. Reconnect fixture admission now has a red/green delayed-start regression, passing repeated parallel comparison, and a 1,166-function full pass; other stress-run timeout failures keep full-suite reliability open. |
 | Private-PTY logical test timing | Fixed in `f7a6139`: injected-clock regressions verify prompt/process deadlines and cleanup without parallel scheduling determining logical test time; production retains `ContinuousClock`. Focused/repeated checks and a 1,168-function full run passed. Signed Release live owner authentication and a complete SIP disable/enable cycle passed, restoring SIP enabled and the stopped VM state. |
 | Coordinator-pin fixture polling | Fixed in `f3dfff6`: checks readiness after delayed sleep with cancellation precedence and bounded unavailability. Deterministic red/green, ten-pass full-workload coordinator checks, and a 1,170-function full pass succeeded. Signed Release/live start, execution, restart, reauthentication, and stopped-state restoration passed. Production pin/authentication behavior is unchanged; other stress failures remain open. |
+| Daemon socket-admission fixture timing | Awaiting actual serving-task entry removes queued setup from the response-read budget. Delayed-start red/green, timeout/cancellation safeguards, full ten-pass socket checks, and a 1,175-function full pass succeeded. Signed Release/live compatibility verification follows the code commit; production daemon and Recovery one-shot test are unchanged. |
 
 This is an observational live test. The CLI and guest images are not being
 modified during the sweep. Every failure, timeout, unexpected state, and
@@ -2718,6 +2719,103 @@ paths. The target's UUID, startup volume, immutable plan, original agent digest,
 agent update, security change, credential replacement, or journal edit occurred.
 This live cycle qualifies host compatibility, not reproduction of the unit
 fixture's scheduling race or closure of the separate historical VM failures.
+
+### Daemon socket-admission deadline under parallel test load
+
+After the coordinator polling fix and signed/live verification were committed,
+the next isolated failure is `PommeAgentDaemonTests.socketpairAdmission()`
+throwing `DaemonPeerReader.Failure.deadline` under the full ten-pass workload
+(`19-50-29-008Z_pid10489_9ff66000`). The working tree began clean except for
+unrelated untracked artifacts; installed signed Release is `f3dfff6`.
+
+Unchanged narrowing comparisons all passed:
+
+| Selection | Repetitions | Actual invocations | Result bundle suffix (2026-09-22) |
+|---|---:|---:|---|
+| Socket-admission method | 100 | 100 | `19-56-23-729Z_pid15308_01f02eae` |
+| Entire daemon suite (12 functions) | 100 | 1,200 | `19-56-45-777Z_pid15410_eb208b2d` |
+| Existing socket/OCR/PTY/reconnect selection (39 functions) | 10 | 420 | `19-57-02-767Z_pid15545_9cf8ee50` |
+
+The reader already runs blocking socket work on a dedicated thread, but its
+five-second deadline is created before that thread starts and independently
+of the daemon's serving task admission. Ranked hypotheses are late serving
+task admission, late reader-thread admission, and a stall after both start.
+A bounded failure-only timing trace will distinguish those boundaries while
+preserving framing assertions, both five-second guards, natural server
+completion proof, and descriptor cleanup. No production fix or timeout change
+has been made, and no VM is needed for this isolated diagnostic.
+
+The first instrumented full ten-pass run did not reproduce the daemon failure;
+all daemon invocations passed. It finished with 1,168 passing / two failing
+functions (15,928 passing / two failing invocations), with only the independent
+foreground-completion and Recovery-listener failures remaining in that run
+(`19-59-13-487Z_pid15921_2fefd9b5`). The same workload is being repeated without
+changing instrumentation or behavior; a passing diagnostic run does not identify
+the earlier timeout's cause.
+
+The second identical full ten-pass run reproduced socket admission and one-shot
+daemon deadlines alongside the two previously observed failures: 1,166 passing /
+four failing functions and 15,926 passing / four failing invocations
+(`20-01-21-261Z_pid16993_2fdd6245`). Socket-admission timing isolated the boundary:
+the reader thread entered at 0.139 ms, polled for the original five-second budget,
+and timed out at 5,001 ms with zero bytes. The daemon serving task did not enter
+until 14,451.816 ms and returned at 14,452.156 ms. The test resumed at 14,464 ms,
+then shut down and joined before closing descriptors. This is late serving-task
+admission, not delayed native reader startup or observed slow daemon processing.
+
+The next minimized regression will deliberately delay serving admission beyond
+a shorter test-specific reader budget while using the real daemon and actual
+authentication/health frames. The proposed fixture correction awaits admission
+after writing/half-closing requests but before starting the response-read clock.
+It retains the default five-second read/finish guards, natural-completion proof,
+and shutdown/join/close order. Production behavior and the separate one-shot
+test are not being changed without evidence for their own boundary.
+
+The minimized delayed-admission test reproduced `.deadline` with a 1.2-second
+pre-serving delay and a one-second response-read budget, while all twelve
+existing daemon tests passed (`20-05-39-771Z_pid19190_53dab79e`). It shares the
+same real socketpair/authentication/health fixture as the original test, without
+an admission gate yet. Temporary diagnostics were removed before the red run.
+
+The candidate will keep the five-second response and natural-completion guards,
+but separate task setup from those measured operations. Admission gets a
+distinct 30-second setup watchdog plus cancellation handling; setup failure
+must shut down sockets, cancel and join the serving task, and only then allow
+descriptor closure. This is a bounded fixture-setup policy, not a longer guest
+response deadline or a change to production authentication.
+
+The initial gated fixture passed all fifteen daemon functions / 150 invocations
+over ten repetitions (`20-08-00-538Z_pid19608_b38a19a5`), including the delayed
+admission regression, explicit setup timeout, and caller cancellation. Both
+failure tests verify that the cooperative setup hook has returned before the
+fixture throws. The setup watchdog is cancelled and joined on either result;
+only the admission gate is touched by that watchdog. The reader and natural
+completion watchdog remain unchanged, as does the Recovery one-shot test.
+
+Added admission-before-wait and sticky timeout/cancellation cases, and aligned
+the caller-cancellation test's hook-entry guard with the 30-second setup bound.
+The final focused run passed all seventeen functions / 180 invocations over
+ten repetitions (`20-09-21-462Z_pid20029_987d7709`). Review found no blocker:
+the gate has a single terminal winner, resumes outside its mutex, and every
+setup failure joins the serving task before descriptor closure. The known
+limitation is cooperative teardown: a deliberately non-cooperative injected
+hook could still prevent its serving task from joining; all actual hooks are
+cancellable sleeps. No temporary trace remains.
+
+The original full ten-pass workload passed socket admission, delayed admission,
+setup timeout, and caller cancellation in all ten repetitions each, together
+with the helper-order regressions (`20-10-13-072Z_pid20205_85c47d29`). The two
+remaining failing functions were the unchanged Recovery one-shot operation
+(`deadline`) and Recovery listener authentication (`listenerAuthenticationTimedOut`).
+Overall 1,173 functions / 15,988 invocations passed, and two functions / two
+invocations failed. This qualifies the observed socket-admission boundary only;
+the other stress failures and historical live failures are not closed.
+
+The unrestricted single run passed all 1,175 functions / 1,599 invocations
+(`20-12-13-143Z_pid21290_60f0f4e0`). Final review and `git diff --check` passed,
+temporary diagnostics are absent, and only the assigned test file plus this
+evidence document changed. The fix is being committed before the canonical
+signed Release build and a scoped internal-VM live compatibility check.
 
 ### Live TUI status projection mismatch
 
