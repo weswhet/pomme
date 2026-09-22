@@ -1621,3 +1621,48 @@ timeout did not have an observed recurrence, so live reconnect recovery is not
 yet established; deterministic reconnect and rejection coverage passed. The
 temporary closed transport diagnostics remain for that open investigation.
 No other issue is being declared fixed by this successful comparison.
+
+The next sequential comparison revalidated clean tracked state at `e4358f3`,
+the installed `e38d50a` digest, all eleven VMs stopped, and 87 GiB internal free
+space. Fresh `pomme-agent-owner26-20260922k` uses the same internal 26.6.2/25G83
+IPSW, explicit 40 GB disk / 4 GB RAM, and `--boot none` after dry-run preflight.
+No implementation, deadline, or guest-load change separates this comparison
+from `...22j`; no retained VM is reset.
+
+Creation began at 14:31:04Z, restore reached 100% at 14:34:51Z, Terminal was
+verified at 14:36:18Z, and marker proof passed on attempt 2 at 14:36:22Z.
+Normal-agent verification passed and public status independently confirmed
+stopped with no helper. VM UUID: `4cab2038-c0f4-4712-bc72-19adc7eabaf0`;
+startup-volume group: `e91ed476-f537-4cb3-a77e-55f09f817c23`; plan digest:
+`1c1943fd6898e1efca7f819536de6745416f565a2a58758d44c8644bda2fdea7`.
+The installed `2728f132…0e36d7e` digest remains the new VM's creation pin.
+First-owner SIP disable began at 14:37:25Z. A read-only host log follower
+was attached beforehand, emitting only the existing closed desktop-transport
+diagnostic tag, to retain any timeout evidence before helper-log replacement.
+No raw helper output is stored and no guest probe or implementation changed.
+
+The existing owner-completion reboot retry began at 14:38:42Z. Owner completion
+passed at 14:39:38Z and Setup Assistant at 14:39:41Z. Desktop verification began
+at 14:39:58Z and advanced to Recovery at 14:41:05Z. The continuous filtered
+helper-log follower emitted no desktop-transport tags through that transition.
+This is a second successful fresh-owner desktop comparison on the unchanged
+candidate, not a live signal-timeout/reconnect reproduction.
+
+SIP disable passed first-attempt marker proof at 14:43:07Z, then normal-boot
+verification and stopped-state restoration after 14:44:06Z. All normal-boot,
+runtime, enforcement, and final-state verification fields were true, with
+`configuredDisabled=true`. The filtered log follower emitted no matching tags
+through command completion and was stopped; no raw log artifact was created.
+Public status confirmed stopped with no helper before matching SIP enable
+began at 14:44:33Z.
+
+SIP enable passed first-attempt marker proof at 14:47:06Z and completed
+normal-boot verification and stopped-state restoration after 14:48:06Z.
+`configuredDisabled=false` and all verification fields were true. Public
+inventory confirmed all twelve internal VMs stopped with no helpers; the
+`...22k` journal projection is `restorationComplete`, `sipEnable`, `previous`.
+Internal free space is 63 GiB. The second unchanged fresh creation and full
+first-owner SIP cycle passed without a captured desktop-transport timeout.
+This evidence is committed before further experiments. The original signal
+delay remains unexplained; successful comparisons are not presented as proof
+that the reconnect branch ran.
