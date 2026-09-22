@@ -9,6 +9,19 @@ import Synchronization
 /// cross-test concurrency.
 @Suite("Pomme agent process exchanges", .serialized)
 struct PommeAgentProcessExchangeTests: Sendable {
+    @Test("Client exchange budget begins only after delayed daemon admission")
+    func delayedDaemonAdmission() async throws {
+        let admitted = Mutex(false)
+        try await withDaemon(beforeServing: {
+            // Deliberately longer than the unchanged one-second wire budget.
+            try? await Task.sleep(for: .milliseconds(1_200))
+            admitted.withLock { $0 = true }
+        }) { context in
+            #expect(admitted.withLock { $0 })
+            try await authenticate(using: context.wire)
+        }
+    }
+
     @Test("Authenticated reconnect retains the original job after a dropped signal response")
     func reconnectAfterDroppedSignalResponse() async throws {
         let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64))
@@ -582,6 +595,7 @@ struct PommeAgentProcessExchangeTests: Sendable {
 
     private func withDaemon<R: Sendable>(
         agent suppliedAgent: PommeAgent? = nil,
+        beforeServing: (@Sendable () async -> Void)? = nil,
         body: @Sendable (DaemonContext) async throws -> R
     ) async throws -> R {
         var sockets: [Int32] = [-1, -1]
@@ -598,7 +612,11 @@ struct PommeAgentProcessExchangeTests: Sendable {
             connection: connection,
             clientDescriptor: client
         )
+        let admission = DaemonTaskAdmission()
         let serving = Task {
+            await beforeServing?()
+            // Task-start admission only: this does not claim bytes were read.
+            admission.enter()
             await PommeAgentDaemon.serve(
                 descriptor: server,
                 connection: connection,
@@ -607,7 +625,9 @@ struct PommeAgentProcessExchangeTests: Sendable {
             )
         }
 
+        await admission.wait()
         do {
+            try Task.checkCancellation()
             let result = try await body(context)
             _ = shutdown(client, SHUT_WR)
             _ = await serving.value
@@ -622,6 +642,31 @@ struct PommeAgentProcessExchangeTests: Sendable {
             _ = Darwin.close(server)
             throw error
         }
+    }
+}
+
+private final class DaemonTaskAdmission: Sendable {
+    private let state = Mutex<(entered: Bool, waiter: CheckedContinuation<Void, Never>?)>((false, nil))
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let entered = state.withLock { value in
+                if value.entered { return true }
+                value.waiter = continuation
+                return false
+            }
+            if entered { continuation.resume() }
+        }
+    }
+
+    func enter() {
+        let waiter = state.withLock { value in
+            value.entered = true
+            let waiter = value.waiter
+            value.waiter = nil
+            return waiter
+        }
+        waiter?.resume()
     }
 }
 
