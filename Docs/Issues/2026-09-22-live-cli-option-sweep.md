@@ -20,7 +20,7 @@ observations are recorded below; historical rows retain their original status.
 | TUI status projection / boot-mode warning | Fixed in `3fb1ccb`; canonical state/agent regression tests and live running, paused, resumed, and stopped display comparisons passed. Boot-mode warning cancellation preserved both running and paused sessions. |
 | Integrated test-suite concurrency hang | Test-peer thread isolation in `0291f65` removes the observed hang in the focused stress run and subsequent full parallel comparisons. Signed Release and live execution/timeout smoke checks passed. Reconnect fixture admission now has a red/green delayed-start regression, passing repeated parallel comparison, and a 1,166-function full pass; other stress-run timeout failures keep full-suite reliability open. |
 | Private-PTY logical test timing | Fixed in `f7a6139`: injected-clock regressions verify prompt/process deadlines and cleanup without parallel scheduling determining logical test time; production retains `ContinuousClock`. Focused/repeated checks and a 1,168-function full run passed. Signed Release live owner authentication and a complete SIP disable/enable cycle passed, restoring SIP enabled and the stopped VM state. |
-| Coordinator-pin fixture polling | Corrected the missed readiness check after delayed sleep; deterministic red/green and ten-pass full-workload coordinator checks passed. Production pin/authentication behavior is unchanged; signed Release/live compatibility verification follows the code commit. |
+| Coordinator-pin fixture polling | Fixed in `f3dfff6`: checks readiness after delayed sleep with cancellation precedence and bounded unavailability. Deterministic red/green, ten-pass full-workload coordinator checks, and a 1,170-function full pass succeeded. Signed Release/live start, execution, restart, reauthentication, and stopped-state restoration passed. Production pin/authentication behavior is unchanged; other stress failures remain open. |
 
 This is an observational live test. The CLI and guest images are not being
 modified during the sweep. Every failure, timeout, unexpected state, and
@@ -2691,6 +2691,33 @@ remains, `git diff --check` is clean, and review found no blocker. The code and
 evidence are being committed before the canonical signed Release build; live
 verification will exercise normal authentication, guest execution, restart,
 reauthentication, and restoration on the existing internal macOS 27 fixture.
+
+Candidate `f3dfff6` was committed before the canonical signed Release build at
+19:52:51Z. Build, signature, exact entitlements, designated-requirement
+compatibility, append-only archive, and atomic installation checks passed.
+Fresh login-shell resolution is `/Users/wes/.local/bin/pomme`; its version is
+`f3dfff6`, SHA-256
+`657354e68167f8537631f8ca84f00f81e93559bce5db89981f4bf98b4df1ed17`.
+All 104 CLI contract and 21 installer regression checks passed.
+
+Live preflight confirmed `pomme-agent-ownerproof-20260922a` stopped with no
+helper, internal bundle storage, and unchanged 40 GB / 4 GB resources. The
+public normal start began at 19:53:12Z using the newly installed signed CLI.
+Start succeeded with helper PID 13413 and the original authenticated normal
+agent pin. Guest `/bin/echo coordinator-pin-before-restart` passed at 19:54:05Z,
+with exact stdout, exit zero, and complete output. Public normal restart began
+at 19:54:08Z, gracefully stopped the guest, and returned helper PID 13638 with
+the same authenticated pin. Guest `/bin/echo coordinator-pin-after-restart`
+passed at 19:55:09Z with exact stdout, exit zero, and complete output; independent
+status confirmed running/normal, connected agent, and protocol 1.
+
+Graceful stop began at 19:55:09Z and completed with `guest-stopped`. Final public
+inventory confirmed all twelve VMs stopped, no helpers, and internal bundle
+paths. The target's UUID, startup volume, immutable plan, original agent digest,
+40 GB disk, and 4 GB memory are unchanged. No VM was deleted or moved; no guest
+agent update, security change, credential replacement, or journal edit occurred.
+This live cycle qualifies host compatibility, not reproduction of the unit
+fixture's scheduling race or closure of the separate historical VM failures.
 
 ### Live TUI status projection mismatch
 
