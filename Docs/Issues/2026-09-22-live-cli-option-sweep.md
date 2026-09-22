@@ -2404,6 +2404,30 @@ timed client request without blocking another worker. The change fixes the
 captured fixture admission race, not all possible cooperative-pool starvation
 or the separate stress failures. Production daemon and transport are unchanged.
 
+The fixture fix and evidence were committed as `db8b69a` before the canonical
+signed Release build at 19:06:49Z. Build, strict signature, exact entitlements,
+designated-requirement compatibility, archive retention, and atomic install
+checks passed. Fresh login-shell resolution selected
+`/Users/wes/.local/bin/pomme`, reporting `db8b69a`. Installed SHA-256:
+`950a21bf8aa80873a66336848a6924380b29e7ced41350f278e9b9faefaed9b3`.
+All 104 CLI contract checks and 21 local build/install checks passed.
+
+Live release verification reused the explicitly scoped internal-drive
+`pomme-agent-ownerproof-20260922a`, confirmed stopped with its unchanged
+40 GB disk / 4 GB memory, UUID, plan, and agent pin beforehand. Normal start
+at 19:07:06Z created helper PID 97254 and connected to the original
+`011eea30…95ce42f2` guest agent. Foreground `/bin/echo` returned the expected
+output and exit zero. `/bin/sleep 5 --timeout 1` returned host exit 124 with
+`terminationRequested=true`; a subsequent connection inspecting exact job
+`3509cd79-0f95-4a46-a681-b18f25febb91` reported `exited=true` and signal 15.
+Guest `ps -p 688` found no remaining process. Graceful stop at 19:08:04Z
+returned `stopMethod=guest-stopped`, and helper PID 97254 exited. Final
+inventory confirmed all twelve VMs stopped, with no helpers, on the internal
+drive. No VM was deleted or moved; no guest agent, pin, credential, journal,
+or security configuration was changed. This is release compatibility and
+live execution/cleanup verification, not a live reproduction of the host
+test-fixture admission race.
+
 ### Live TUI status projection mismatch
 
 The same signed `052f05d` PTY smoke check exposed a separate reproducible
