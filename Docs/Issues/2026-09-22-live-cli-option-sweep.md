@@ -13,7 +13,7 @@ observations are recorded below; historical rows retain their original status.
 | macOS 27 inactive Language Chooser / framebuffer replay | Guarded activation and replay-policy fixes validated; complete SIP/AMFI status workflows passed. |
 | Recovery Terminal marker recognition | Bounded prompt-punctuation and word-encoding/output-separation fixes validated; not a claim of universal OCR reliability. |
 | macOS 26 first-owner desktop readiness / cleanup | Same-job cleanup-verified retry and pinned reconnect adapter implemented. Three fresh signed-candidate SIP cycles passed, including a live Aqua timeout recovered after instrumentation cleanup; original intermittent signal delay and earlier console transport failure remain unexplained. |
-| macOS 27 creation `ownerProof` | Open; subsequent internal-drive baseline passed without a targeted fix. |
+| macOS 27 creation `ownerProof` | Open; subsequent internal-drive baselines passed, including fresh creation with the exact original `ffc41a7` host, without a targeted fix. |
 | macOS 26 creation `verifyNormalAgent` / slow first boot | Open historical failure; subsequent internal-drive creations passed without establishing its cause. |
 | macOS 27 restart after pause/resume | Open; two earlier internal-drive sequences plus ten-cycle runs with both current `a3852a5` and original `ffc41a7` hosts passed without reproducing the missing helper. |
 | Retained SIP private-PTY / pinned-authentication failures | Open historical observations; later successful security cycles do not establish their cause. |
@@ -1940,3 +1940,34 @@ the three targets absent and all ten remaining VMs stopped. Free internal
 space increased from 35 GiB to 113 GiB. These three VM states were permanently
 removed; the retained failure fixtures, restore images, and signed-agent
 archives were preserved. No external storage was used.
+
+### Fresh original-host macOS 27 creation comparison
+
+With capacity recovered, original signed host `ffc41a7` passed a local-image
+dry run for fresh `pomme-agent-ownerproof-20260922b`. The resolved identity is
+macOS 27.0.0/26A428 with virtualization provisioning and SSH bootstrap, matching
+the route that reported the original `ownerProof` failure. Creation began at
+16:16:52Z using internal `UniversalMac_27.0_26A428_Restore.ipsw`, explicit
+40 GB disk / 4 GB RAM, and requested stopped final state (`--boot none`).
+The archived host is invoked directly; installed `a3852a5` is unchanged.
+No older VM is reset or cloned. This is a fresh internal-drive reproduction
+attempt with the original host bytes, not a replay of the deleted external-
+drive sweep fixture. No owner-proof source change is proposed without a
+failing case.
+
+Restore reached 100% at 16:21:39Z. SSH authentication/UID verification,
+artifact/manifest staging, and installer invocation passed; the agent
+connected at 16:22:35Z. After normal reboot, authentication and owner proof
+began at 16:23:43Z. Owner proof passed by the desktop-proof checkpoint at
+16:23:58Z, followed by volume-identity persistence at 16:24:04Z and complete
+verification at 16:24:05Z. Creation succeeded and restored stopped state with
+automatic login enabled and Remote Login off. Public status independently
+confirmed stopped with no helper.
+
+New VM UUID: `3537678d-d4a8-4272-b8df-c1952f3f6aac`; startup-volume group:
+`582fb9d1-d8b5-420c-a479-9066c6fb5b0a`; immutable plan digest:
+`ce709acef2d958e5e202988c14351874f906bfbb1254004da645bdadee71ab2b`.
+Its persistent agent pins the original `2e0a2f49…47aaeff` executable. This
+fresh original-host run did not reproduce the reported owner-proof failure;
+it is not evidence that later changes fixed that historical observation.
+No owner-proof source change or installed-host replacement occurred.
