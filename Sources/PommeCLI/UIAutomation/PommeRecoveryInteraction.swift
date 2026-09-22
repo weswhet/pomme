@@ -1,9 +1,9 @@
 import Foundation
 
 /// The only effectful boundary required by Tahoe Recovery navigation.  The
-/// implementation behind this port is responsible for a direct keyboard HID
-/// delivery and must return one receipt for that one requested key.  It has no
-/// pointer, focus, display-wake, or host-window capability.
+/// implementation returns one receipt for one closed guest HID effect. The
+/// sole pointer effect is an exact experimental LanguageChooser activation;
+/// callers cannot supply coordinates or affect host focus/display state.
 protocol PommeRecoveryKeyboardPort: Sendable {
   func prepareRecoveryNavigation(route: PommeRecoveryNavigationRoute) async throws
   func nextRecoveryFrame() async throws -> PommeRecoveryFrame
@@ -17,9 +17,21 @@ protocol PommeRecoveryKeyboardPort: Sendable {
   func deliverRecoveryKey(
     _ key: PommeRecoveryVirtualKey
   ) async throws -> PommeRecoveryDurableInputReceipt
+  func deliverRecoveryInput(
+    _ input: PommeRecoveryNavigationInput
+  ) async throws -> PommeRecoveryDurableInputReceipt
 }
 
 extension PommeRecoveryKeyboardPort {
+  /// Existing key-only adapters fail closed for the new bounded pointer effect.
+  func deliverRecoveryInput(
+    _ input: PommeRecoveryNavigationInput
+  ) async throws -> PommeRecoveryDurableInputReceipt {
+    guard case .key(let key) = input else {
+      throw PommeRecoveryVirtualizationPortError.unexpectedKey
+    }
+    return try await deliverRecoveryKey(key)
+  }
   func prepareRecoveryNavigation(route: PommeRecoveryNavigationRoute) async throws {}
 
   func nextRecoveryFramePair() async throws -> [PommeRecoveryFrame] {
@@ -32,8 +44,8 @@ extension PommeRecoveryKeyboardPort {
   }
 }
 
-/// Extends the keyboard-only port only after Terminal has been proven by the
-/// reviewed Tahoe trace.  The launcher text and marker are caller-supplied;
+/// Extends the bounded navigation port only after Terminal has been proven by
+/// the selected trace. The launcher text and marker are caller-supplied;
 /// neither is returned or recorded by this UI layer.
 protocol PommeRecoveryTerminalPort: PommeRecoveryKeyboardPort {
   func submitTerminalLine(_ command: String) async throws
@@ -113,7 +125,7 @@ struct PommeTahoeRecoveryInteraction: Sendable {
 
   var isComplete: Bool { input.isComplete }
 
-  /// Advances one and only one keyboard receipt.  A caller repeats this
+  /// Advances one and only one navigation receipt. A caller repeats this
   /// until `isComplete` is true.  Errors always carry a closed cleanup
   /// disposition and never expose frame contents or input details.
   @discardableResult
@@ -127,7 +139,7 @@ struct PommeTahoeRecoveryInteraction: Sendable {
       throw PommeRecoveryInteractionError.alreadyComplete
     }
 
-    let key: PommeRecoveryVirtualKey
+    let navigationInput: PommeRecoveryNavigationInput
     do {
       try Task.checkCancellation()
       if !navigationPrepared {
@@ -137,7 +149,7 @@ struct PommeTahoeRecoveryInteraction: Sendable {
       try Task.checkCancellation()
       let preEventFrames = try await port.nextRecoveryFramePair()
       try Task.checkCancellation()
-      key = try input.authorize(preEventFrames: preEventFrames)
+      navigationInput = try input.authorizeInput(preEventFrames: preEventFrames)
     } catch {
       if Self.isObservationTimeout(error) {
         throw PommeRecoveryInteractionError.observationTimedOut(.noInputDelivered)
@@ -145,12 +157,12 @@ struct PommeTahoeRecoveryInteraction: Sendable {
       throw PommeRecoveryInteractionError.noInputDelivered(.noInputDelivered)
     }
 
-    // `authorize` leaves a key outstanding. From this point onward no
+    // `authorizeInput` leaves an input outstanding. From this point onward no
     // retry is safe: a failed send may still have reached the guest.
     let receipt: PommeRecoveryDurableInputReceipt
     do {
       try Task.checkCancellation()
-      receipt = try await port.deliverRecoveryKey(key)
+      receipt = try await port.deliverRecoveryInput(navigationInput)
     } catch {
       cleanupRequired = true
       if Self.isObservationTimeout(error) {

@@ -232,6 +232,7 @@ private extension PommeRecoveryFrameClassificationContext {
     switch self {
     case .unproven: "unproven"
     case .optionsActivated: "options-activated"
+    case .experimental27LanguageChooser: "experimental-27-language-chooser"
     }
   }
 }
@@ -417,10 +418,16 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
   func deliverRecoveryKey(
     _ key: PommeRecoveryVirtualKey
   ) async throws -> PommeRecoveryDurableInputReceipt {
+    try await deliverRecoveryInput(.key(key))
+  }
+
+  func deliverRecoveryInput(
+    _ input: PommeRecoveryNavigationInput
+  ) async throws -> PommeRecoveryDurableInputReceipt {
     hasObservedOrDelivered = true
     guard pendingPostEvent == nil,
           let event = currentNavigationEvent,
-          key == event.key
+          input == event.input
     else {
       throw PommeRecoveryVirtualizationPortError.unexpectedKey
     }
@@ -429,7 +436,7 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     try await PommeRecoveryNavigationScreenshotRecorder.captureBeforeNavigationInput(
       recorder: screenshotRecorder,
       from: event.preEventFrame,
-      key: event.key,
+      input: event.input,
       expectedDestinations: event.acceptedPostEventFrames,
       awaitInputReadiness: { [backend, timeout] in
         _ = try await backend.awaitInputReadiness(timeout: timeout)
@@ -438,8 +445,13 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
         guard let self else { throw PommeRecoveryVirtualizationPortError.unprovenFrame }
         try await self.reproveNavigationEvent(event)
       },
-      deliver: { [backend, key, timeout] in
-        _ = try await backend.sendKey(name: Self.backendKeyName(for: key), timeout: timeout)
+      deliver: { [backend, input, timeout] in
+        switch input {
+        case .key(let key):
+          _ = try await backend.sendKey(name: Self.backendKeyName(for: key), timeout: timeout)
+        case .activateLanguageChooser:
+          _ = try await backend.click(x: 1006, y: 671, timeout: timeout)
+        }
       }
     )
     let coarseFrameBeforeDelivery = Self.coarseFrame(for: event.preEventFrame)
@@ -453,7 +465,7 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     if settleNanoseconds > 0 {
       try await sleep(settleNanoseconds)
     }
-    return .init(key: key, deliveredEventCount: 1)
+    return .init(input: input, deliveredEventCount: 1)
   }
 
   func clearRecoveryObservations() async {
@@ -557,9 +569,7 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     guard let expected = Self.coarseFrame(for: event.preEventFrame) else {
       throw PommeRecoveryVirtualizationPortError.unprovenFrame
     }
-    let context: PommeRecoveryFrameClassificationContext = event.preEventFrame == .languageEnglish
-      ? .optionsActivated
-      : .unproven
+    let context = Self.classificationContext(for: [event.preEventFrame])
     let frames: [PommeRecoveryFrame]
     do {
       frames = try await readiness.waitForExpectedStablePair(
@@ -595,7 +605,7 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     return .init(
       logicalFrames: logicalFrames,
       coarseFrames: coarseFrames,
-      context: logicalFrames.contains(.languageEnglish) ? .optionsActivated : .unproven
+      context: Self.classificationContext(for: logicalFrames)
     )
   }
 
@@ -603,8 +613,8 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     switch logicalFrame {
     case .startupOptions, .startupIntermediate, .startupOptionsActivated:
       .startupOptions
-    case .languageEnglish:
-      .languageEnglish
+    case .languageEnglish, .languageEnglishInactive, .languageEnglishActive:
+      logicalFrame
     case .recoveryUtilities, .applicationMenu, .recoveryMenu, .fileMenu, .editMenu,
       .utilitiesMenu, .terminalMenuItem:
       .recoveryUtilities
@@ -625,6 +635,13 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     }
   }
 
+  private static func classificationContext(for frames: [PommeRecoveryFrame]) -> PommeRecoveryFrameClassificationContext {
+    if frames.contains(.languageEnglishInactive) || frames.contains(.languageEnglishActive) {
+      return .experimental27LanguageChooser
+    }
+    return frames.contains(.languageEnglish) ? .optionsActivated : .unproven
+  }
+
   private static func uniqueFrames(_ frames: [PommeRecoveryFrame]) -> [PommeRecoveryFrame] {
     frames.reduce(into: []) { unique, frame in
       if !unique.contains(frame) { unique.append(frame) }
@@ -641,6 +658,8 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
     case .startupIntermediate: "startupIntermediate"
     case .startupOptionsActivated: "startupOptionsActivated"
     case .languageEnglish: "languageEnglish"
+    case .languageEnglishInactive: "languageEnglishInactive"
+    case .languageEnglishActive: "languageEnglishActive"
     case .recoveryUtilities: "recoveryUtilities"
     case .applicationMenu: "applicationMenu"
     case .recoveryMenu: "recoveryMenu"

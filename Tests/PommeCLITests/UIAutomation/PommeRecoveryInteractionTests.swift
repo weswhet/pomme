@@ -1,5 +1,184 @@
 import CoreGraphics
+import Foundation
 import Testing
+
+@Suite("Recovery 27 LanguageChooser activation")
+struct PommeRecoveryLanguageActivationTests {
+  @Test("inactive English needs activation and two active observations before Return")
+  func inactiveChooserDoesNotAcceptReturn() async throws {
+    let inactive = try classifiedSelection(red: 70, green: 70, blue: 70)
+    let active = try classifiedSelection(red: 0, green: 89, blue: 209)
+    #expect(inactive == .languageEnglishInactive)
+    #expect(active == .languageEnglishActive)
+    let port = LanguageActivationPort(frames: [
+      .startupOptions, .startupOptions, .startupIntermediate, .startupIntermediate,
+      .startupIntermediate, .startupIntermediate, .startupOptionsActivated, .startupOptionsActivated,
+      .startupOptionsActivated, .startupOptionsActivated, inactive, inactive,
+      inactive, inactive, active, active,
+      active, active, .recoveryUtilities, .recoveryUtilities,
+    ])
+    var interaction = try PommeTahoeRecoveryInteraction(evidence: evidence())
+    for _ in 0..<5 { try await interaction.advance(using: port) }
+    #expect(await port.inputs == [.key(.right), .key(.right), .key(.return), .activateLanguageChooser, .key(.return)])
+    #expect(await port.frameCount == 0)
+  }
+
+  @Test("already active chooser skips activation")
+  func alreadyActiveSkipsClick() async throws {
+    let port = LanguageActivationPort(frames: prefixFrames(post: .languageEnglishActive) + [
+      .languageEnglishActive, .languageEnglishActive, .recoveryUtilities, .recoveryUtilities,
+    ])
+    var interaction = try PommeTahoeRecoveryInteraction(evidence: evidence())
+    for _ in 0..<4 { try await interaction.advance(using: port) }
+    #expect(await port.inputs == [.key(.right), .key(.right), .key(.return), .key(.return)])
+  }
+
+  @Test("lost focus or unknown selection immediately before Return emits no Return")
+  func staleActiveProofCannotAuthorizeReturn() async throws {
+    for frame in [PommeRecoveryFrame.languageEnglishInactive, .languageEnglish, .unknown] {
+      let port = LanguageActivationPort(frames: prefixFrames(post: .languageEnglishActive) + [frame, frame])
+      var interaction = try PommeTahoeRecoveryInteraction(evidence: evidence())
+      for _ in 0..<3 { try await interaction.advance(using: port) }
+      await #expect(throws: PommeRecoveryInteractionError.noInputDelivered(.noInputDelivered)) {
+        try await interaction.advance(using: port)
+      }
+      #expect(await port.inputs == [.key(.right), .key(.right), .key(.return)])
+    }
+  }
+
+  @Test("a key receipt cannot acknowledge a click")
+  func activationRequiresMatchingReceipt() throws {
+    var input = try PommeRecoveryProfileSelector.inputForAttempt(for: evidence())
+    for event in input.route.eventTrace.prefix(3) {
+      let action = try input.authorizeInput(preEventFrames: [event.preEventFrame, event.preEventFrame])
+      try input.commit(.init(input: action, deliveredEventCount: 1),
+                       postEventFrames: [event.postEventFrame, event.postEventFrame])
+    }
+    #expect(try input.authorizeInput(preEventFrames: [.languageEnglishInactive, .languageEnglishInactive])
+            == .activateLanguageChooser)
+    #expect(throws: PommeTahoeReviewedInputError.invalidReceipt) {
+      try input.commit(.init(key: .return, deliveredEventCount: 1),
+                       postEventFrames: [.languageEnglishActive, .languageEnglishActive])
+    }
+    #expect(throws: PommeTahoeReviewedInputError.inputOutstanding) {
+      try input.authorizeInput(preEventFrames: [.languageEnglishActive, .languageEnglishActive])
+    }
+  }
+
+  @Test("activation may advance to Utilities but never causes an extra Return")
+  func activationAdvancesToUtilities() async throws {
+    let port = LanguageActivationPort(frames: prefixFrames(post: .languageEnglishInactive) + [
+      .languageEnglishInactive, .languageEnglishInactive, .recoveryUtilities, .recoveryUtilities,
+      .recoveryUtilities, .recoveryUtilities, .applicationMenu, .applicationMenu,
+    ])
+    var interaction = try PommeTahoeRecoveryInteraction(evidence: evidence())
+    for _ in 0..<5 { try await interaction.advance(using: port) }
+    #expect(await port.inputs.suffix(2) == [.activateLanguageChooser, .key(.controlF2)])
+  }
+
+  @Test("unstable activation proof or uncertain click cannot be retried")
+  func activationFailureRequiresCleanup() async throws {
+    for uncertain in [false, true] {
+      let port = LanguageActivationPort(frames: prefixFrames(post: .languageEnglishInactive) + [
+        .languageEnglishInactive, .languageEnglishInactive, .languageEnglishActive, .languageEnglishInactive,
+      ], failActivation: uncertain)
+      var interaction = try PommeTahoeRecoveryInteraction(evidence: evidence())
+      for _ in 0..<3 { try await interaction.advance(using: port) }
+      for _ in 0..<2 {
+        await #expect(throws: PommeRecoveryInteractionError.recoveryCleanupRequired(.recoveryCleanupRequired)) {
+          try await interaction.advance(using: port)
+        }
+      }
+      #expect(await port.inputs == [.key(.right), .key(.right), .key(.return), .activateLanguageChooser])
+    }
+  }
+
+  @Test("a highlight without English geometry and a selected row cannot authorize navigation")
+  func rejectsUnprovenSelection() throws {
+    #expect(try classifiedSelection(red: 31, green: 31, blue: 31) == .unknown)
+    #expect(try classifiedSelection(red: 0, green: 89, blue: 209, englishY: 367) == .unknown)
+    #expect(try classifiedSelection(red: 0, green: 89, blue: 209, fraction: 0.1) == .unknown)
+    #expect(try classifiedSelection(red: 70, green: 70, blue: 70, context: .unproven) == .unknown)
+    #expect(try classifiedSelection(red: 0, green: 89, blue: 209, context: .optionsActivated) == .languageEnglish)
+  }
+
+  @Test("observed OCR confidence requires complete selection proof and rejects weaker text")
+  func selectionConfidenceBoundary() throws {
+    #expect(try classifiedSelection(red: 70, green: 70, blue: 70, englishConfidence: 0.5)
+            == .languageEnglishInactive)
+    #expect(try classifiedSelection(red: 0, green: 89, blue: 209, englishConfidence: 0.5)
+            == .languageEnglishActive)
+    #expect(try classifiedSelection(red: 70, green: 70, blue: 70, englishConfidence: 0.49) == .unknown)
+    #expect(try classifiedSelection(red: 0, green: 89, blue: 209, englishConfidence: 0.49) == .unknown)
+    #expect(try classifiedSelection(red: 0, green: 89, blue: 209, englishY: 367,
+                                   englishConfidence: 0.5) == .unknown)
+    #expect(try classifiedSelection(red: 0, green: 89, blue: 209, fraction: 0.1,
+                                   englishConfidence: 0.5) == .unknown)
+  }
+
+  private func evidence() throws -> PommeRecoveryProfileEvidence {
+    let descriptor = try PommeRecoveryProfileSelector.descriptor(version: "27.0", build: "26A428")
+    return .init(build: .experimental(version: "27.0", build: "26A428"), locale: .english,
+                 geometry: .pixels1280x800, privateHostABI: .qualifiedRecoveryInputV1,
+                 manifestHash: .experimentalProfile(descriptor.digest), ownership: .verified)
+  }
+
+  private func prefixFrames(post: PommeRecoveryFrame) -> [PommeRecoveryFrame] {
+    [.startupOptions, .startupOptions, .startupIntermediate, .startupIntermediate,
+     .startupIntermediate, .startupIntermediate, .startupOptionsActivated, .startupOptionsActivated,
+     .startupOptionsActivated, .startupOptionsActivated, post, post]
+  }
+
+  private func classifiedSelection(
+    red: UInt8, green: UInt8, blue: UInt8, englishY: CGFloat = 336, fraction: Double = 1,
+    englishConfidence: Double = 1,
+    context: PommeRecoveryFrameClassificationContext = .experimental27LanguageChooser
+  ) throws -> PommeRecoveryFrame {
+    // Entirely synthetic pixels, with a top-left row layout; no VM artifacts.
+    var bytes = [UInt8](repeating: 31, count: 1280 * 800 * 4)
+    for index in stride(from: 3, to: bytes.count, by: 4) { bytes[index] = 255 }
+    for y in 330..<355 {
+      for x in 508..<(508 + Int(246 * fraction)) {
+        let offset = (y * 1280 + x) * 4
+        bytes[offset] = red; bytes[offset + 1] = green; bytes[offset + 2] = blue
+      }
+    }
+    let provider = try #require(CGDataProvider(data: Data(bytes) as CFData))
+    let image = try #require(CGImage(width: 1280, height: 800, bitsPerComponent: 8, bitsPerPixel: 32,
+      bytesPerRow: 1280 * 4, space: CGColorSpaceCreateDeviceRGB(),
+      bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+      provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+    let lines: [SettingsAIOCRLine] = [
+      .init(text: "Language", confidence: 1, rect: .init(x: 580, y: 282, width: 120, height: 25)),
+      .init(text: "English", confidence: englishConfidence, rect: .init(x: 618, y: englishY, width: 44, height: 14)),
+      .init(text: "By using this software, you agree to the terms of the software license agreement", confidence: 1,
+            rect: .init(x: 270, y: 722, width: 740, height: 28)),
+    ]
+    return PommeRecoveryFrameClassifier.classify(image: image, lines: lines, context: context)
+  }
+}
+
+private actor LanguageActivationPort: PommeRecoveryKeyboardPort {
+  var frames: [PommeRecoveryFrame]
+  let failActivation: Bool
+  private(set) var inputs: [PommeRecoveryNavigationInput] = []
+  var frameCount: Int { frames.count }
+  init(frames: [PommeRecoveryFrame], failActivation: Bool = false) {
+    self.frames = frames; self.failActivation = failActivation
+  }
+  func nextRecoveryFrame() throws -> PommeRecoveryFrame {
+    guard !frames.isEmpty else { throw RecoveryPortError.depleted }
+    return frames.removeFirst()
+  }
+  func deliverRecoveryKey(_ key: PommeRecoveryVirtualKey) throws -> PommeRecoveryDurableInputReceipt {
+    try deliverRecoveryInput(.key(key))
+  }
+  func deliverRecoveryInput(_ input: PommeRecoveryNavigationInput) throws -> PommeRecoveryDurableInputReceipt {
+    inputs.append(input)
+    if failActivation && input == .activateLanguageChooser { throw RecoveryPortError.submissionFailed }
+    return .init(input: input, deliveredEventCount: 1)
+  }
+}
 
 @Suite("Pomme Tahoe Recovery interaction driver")
 struct PommeRecoveryInteractionTests {
@@ -56,8 +235,8 @@ struct PommeRecoveryInteractionTests {
 
   @Test("the live-proven experimental identity uses the direct observed trace")
   func experimentalSequenceReachesTerminalProof() async throws {
-    let transitions = PommeRecoveryNavigationRoute.directTerminal.eventTrace.map {
-      ($0.preEventFrame, $0.key, $0.postEventFrame)
+    let transitions = try PommeRecoveryNavigationRoute.directTerminal.eventTrace.map {
+      ($0.preEventFrame, try #require($0.key), $0.postEventFrame)
     }
     let frames = transitions.flatMap { pre, _, post in [pre, pre, post, post] }
     let receipts = transitions.map { _, key, _ in

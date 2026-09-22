@@ -469,7 +469,7 @@ struct PommeRecoveryVirtualizationKeyboardPortTests {
             for event in route.eventTrace {
                 try await recorder.captureNavigation(
                     from: event.preEventFrame,
-                    key: event.key,
+                    input: event.input,
                     expectedDestinations: event.acceptedPostEventFrames
                 )
             }

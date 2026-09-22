@@ -63,8 +63,16 @@ actor PommeRecoveryNavigationScreenshotRecorder {
     key: PommeRecoveryVirtualKey,
     expectedDestinations: [PommeRecoveryFrame]
   ) async throws {
+    try await captureNavigation(from: startingFrame, input: .key(key), expectedDestinations: expectedDestinations)
+  }
+
+  func captureNavigation(
+    from startingFrame: PommeRecoveryFrame,
+    input: PommeRecoveryNavigationInput,
+    expectedDestinations: [PommeRecoveryFrame]
+  ) async throws {
     let destinations = expectedDestinations.map(Self.frameName).joined(separator: "-or-")
-    let label = "\(Self.frameName(startingFrame))_\(Self.keyName(key))_to_\(destinations)"
+    let label = "\(Self.frameName(startingFrame))_\(Self.inputName(input))_to_\(destinations)"
     try await capture(label: label)
   }
 
@@ -86,12 +94,27 @@ actor PommeRecoveryNavigationScreenshotRecorder {
     reproveAfterCapture: @escaping @Sendable () async throws -> Void = {},
     deliver: @escaping @Sendable () async throws -> Void
   ) async throws {
+    try await captureBeforeNavigationInput(
+      recorder: recorder, from: startingFrame, input: .key(key), expectedDestinations: expectedDestinations,
+      awaitInputReadiness: awaitInputReadiness, reproveAfterCapture: reproveAfterCapture, deliver: deliver
+    )
+  }
+
+  nonisolated static func captureBeforeNavigationInput(
+    recorder: PommeRecoveryNavigationScreenshotRecorder?,
+    from startingFrame: PommeRecoveryFrame,
+    input: PommeRecoveryNavigationInput,
+    expectedDestinations: [PommeRecoveryFrame],
+    awaitInputReadiness: @escaping @Sendable () async throws -> Void,
+    reproveAfterCapture: @escaping @Sendable () async throws -> Void = {},
+    deliver: @escaping @Sendable () async throws -> Void
+  ) async throws {
     try await awaitInputReadiness()
     try Task.checkCancellation()
     if let recorder {
       try await recorder.captureNavigation(
         from: startingFrame,
-        key: key,
+        input: input,
         expectedDestinations: expectedDestinations
       )
       // Debug capture can itself take up to two seconds. Re-prove the closed
@@ -319,6 +342,8 @@ actor PommeRecoveryNavigationScreenshotRecorder {
     case .startupIntermediate: "startupIntermediate"
     case .startupOptionsActivated: "startupOptionsActivated"
     case .languageEnglish: "languageEnglish"
+    case .languageEnglishInactive: "languageEnglishInactive"
+    case .languageEnglishActive: "languageEnglishActive"
     case .recoveryUtilities: "recoveryUtilities"
     case .applicationMenu: "applicationMenu"
     case .recoveryMenu: "recoveryMenu"
@@ -338,6 +363,13 @@ actor PommeRecoveryNavigationScreenshotRecorder {
     case .down: "down"
     case .return: "return"
     case .shiftCommandT: "shift-command-t"
+    }
+  }
+
+  private static func inputName(_ input: PommeRecoveryNavigationInput) -> String {
+    switch input {
+    case .key(let key): keyName(key)
+    case .activateLanguageChooser: "activate-language-chooser"
     }
   }
 }

@@ -177,3 +177,44 @@ All inputs were single events bounded by observed screens; no security change
 was performed. The next change must prove window activation before language
 confirmation, rather than treating the inactive chooser as ready for Return.
 Both manual probes ended with the disposable VM stopped.
+
+### Guarded macOS 27 activation change
+
+The new experimental route is limited to canonical macOS `27.0.0` build
+`26A428`. Navigation represents keyboard and fixed language-activation input
+as distinct actions. The classifier checks the exact English label and
+Language heading geometry plus the selected row's gray/blue highlight; OCR
+text alone cannot authorize activation or Return. An inactive chooser permits
+one fixed Continue click. Two stable active-English frames are required before
+Return. An already-active chooser skips the click, and a click that reaches
+Utilities skips Return. Unknown/unstable observations or uncertain delivery
+retain the existing cleanup requirement rather than retrying input.
+
+Other routes, immutable profile descriptors/digests, journals, and security
+policy are unchanged. Offline and live validation results will be recorded
+below before this issue is considered fixed.
+
+The classifier-to-interaction regression failed before implementing the
+selection proof and passed afterward. A temporary rehearsal then exercised the
+production Vision OCR recognizer on the private inactive/active screenshots,
+including regional OCR reuse. It exposed an English confidence of `0.5`, so
+the exact-label confidence bound was corrected to accept that observed value
+while retaining the geometry and 80-percent row-color requirements. Both
+private screenshots then classified correctly. The temporary image-backed test
+was removed; raw screenshots are not committed. Permanent synthetic coverage
+locks down the confidence boundary as well as stale/unknown frames, uncertain
+delivery, mismatched receipts, and alternate observed branches.
+
+The final five focused XcodeBuildMCP suites passed all 68 tests, with no
+failures or skips: language activation, interaction, profile selection,
+virtualization observation readiness, and incremental navigation recognition.
+The local build/install regression script also passed all 21 checks. These are
+offline results; the signed build must still pass the original live SIP-status
+workflow before the Recovery navigation issue is closed.
+
+For compatibility, `pomme-agent-recovery26-20260922a` was created on internal
+storage from macOS `26.6.2 (25G83)` with a 40 GB disk and 4 GB RAM, using
+signed build `ef37f16`. Restore began at 06:32:22Z; the existing five-input
+Recovery route reached Terminal at 06:38:00Z and passed marker proof on attempt
+1. Creation then completed successfully and restored the requested stopped
+state. The sweep's macOS 26 bootstrap failure did not reproduce in this run.
