@@ -590,3 +590,31 @@ and Terminal recognition, with no failures. Result:
 The candidate is committed before the canonical signed Release build and live
 SIP-status compatibility checks. The remaining exact-marker misses are not
 represented as fixed by this prompt correction.
+
+Candidate `6aa030c` was built and installed through `Scripts/build-local.sh`.
+Release/arm64 compilation and the exact signing, entitlement, designated-
+requirement compatibility, and signed-artifact preservation checks all passed.
+A fresh login shell resolved `/Users/wes/.local/bin/pomme`, reporting that
+commit; all 104 CLI contract checks passed against the installed binary.
+
+The macOS 27 original SIP-status workflow began at 09:03:22Z on the same
+internal-drive 4 GB/40 GB VM. Inactive-English activation and the full Terminal
+menu route passed. Marker proof passed on attempt 1 at 09:05:01Z. The
+authenticated request-bound session returned verified SIP enabled, all cleanup
+fields true, and verified restoration of the previous stopped state; a separate
+status call confirmed stopped with no helper. This validates the signed build
+in the complete live workflow, while the deterministic image replay supplies
+the specific em-dash regression evidence. It does not resolve the independent
+exact-marker misses.
+
+The macOS 26 compatibility SIP-status run on the same signed `6aa030c` began
+at 09:05:43Z, retaining the internal-drive 4 GB/40 GB settings and creation-
+pinned guest agent. Its unchanged five-input navigation reached Terminal at
+09:07:12Z. Attempt 1 lacked the exact marker; attempt 2 at 09:07:15Z passed
+all proof fields with a changed adjacent frame. The authenticated request-bound
+session finalized with verified SIP enabled, all cleanup fields true, and
+verified restoration to stopped. A separate status check confirmed stopped
+with no helper. The narrow em-dash correction therefore has deterministic
+red/green regression evidence and signed live compatibility on both OS versions.
+Exact-marker OCR reliability remains open; temporary closed marker diagnostics
+remain for that investigation, with no additional Terminal screenshot logging.
