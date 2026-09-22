@@ -15,6 +15,9 @@ struct TUIRenderer {
     ) -> String {
         let layout = dashboardLayout(width: width)
         let runningCount = entries.filter(\.running).count
+        let pausedCount = entries.filter { $0.state == .paused }.count
+        let stoppedCount = entries.filter { $0.state == .stopped }.count
+        let unknownCount = entries.filter { $0.state == .unknown }.count
         let connectedAgentCount = entries.filter { $0.guestAgent.connection == .connected }.count
         let disconnectedAgentCount = entries.filter { $0.guestAgent.connection == .disconnected }.count
         let unknownAgentCount = entries.filter { $0.guestAgent.connection == .unknown }.count
@@ -23,7 +26,7 @@ struct TUIRenderer {
         lines.append(title("pomme VM dashboard"))
         lines.append(
             muted(
-                "VMs: total=\(entries.count) running=\(runningCount) stopped=\(entries.count - runningCount) guestAgentConnected=\(connectedAgentCount) guestAgentDisconnected=\(disconnectedAgentCount) guestAgentUnknown=\(unknownAgentCount)"
+                "VMs: total=\(entries.count) running=\(runningCount) paused=\(pausedCount) stopped=\(stoppedCount) unknown=\(unknownCount) guestAgentConnected=\(connectedAgentCount) guestAgentDisconnected=\(disconnectedAgentCount) guestAgentUnknown=\(unknownAgentCount)"
             )
         )
         lines.append("")
@@ -207,7 +210,7 @@ struct TUIRenderer {
     }
 
     func vmSummary(_ entry: TUIVMEntry) -> String {
-        let run = entry.running ? "[RUN]" : "[STOP]"
+        let run = entry.state.badge
         return "\(run) vmState=\(entry.vmState) boot=\(entry.bootModeLabel) guestAgent \(entry.guestAgent.summary) bundle=\(entry.bundlePath)"
     }
 
@@ -225,7 +228,7 @@ struct TUIRenderer {
 
     private func renderDashboardRow(entry: TUIVMEntry, selected: Bool, layout: DashboardLayout) -> String {
         let marker = selected ? accent(">") : " "
-        let badge = statusBadge(entry.running, width: layout.badgeWidth)
+        let badge = statusBadge(entry.state, width: layout.badgeWidth)
         let name = padRight(truncateEnd(entry.displayName, width: layout.nameWidth), width: layout.nameWidth)
         let state = padRight(truncateEnd(entry.vmState, width: layout.stateWidth), width: layout.stateWidth)
         let boot = padRight(truncateEnd(entry.bootModeLabel, width: layout.bootWidth), width: layout.bootWidth)
@@ -237,7 +240,7 @@ struct TUIRenderer {
     private func dashboardLayout(width: Int) -> DashboardLayout {
         let contentWidth = clampedWidth(width)
         var nameWidth = min(24, max(12, contentWidth / 4))
-        let badgeWidth = 6
+        let badgeWidth = 7
         let stateWidth = 12
         let bootWidth = 8
         let agentWidth = min(62, max(24, contentWidth / 3))
@@ -262,9 +265,13 @@ struct TUIRenderer {
         min(max(width, 60), 180)
     }
 
-    private func statusBadge(_ running: Bool, width: Int) -> String {
-        let text = padRight(running ? "[RUN]" : "[STOP]", width: width)
-        return running ? success(text) : muted(text)
+    private func statusBadge(_ state: TUIVMState, width: Int) -> String {
+        let text = padRight(state.badge, width: width)
+        switch state {
+        case .running: return success(text)
+        case .paused: return warning(text)
+        case .stopped, .unknown: return muted(text)
+        }
     }
 
     private func renderProgressBar(_ progress: TUIProgressState, width: Int) -> String {

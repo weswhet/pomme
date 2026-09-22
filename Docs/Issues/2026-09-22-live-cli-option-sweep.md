@@ -2156,3 +2156,42 @@ create form reproduced the same dashboard mismatch. No VM lifecycle failure
 occurred. This is an open TUI projection/formatting observation, not a fix or
 evidence that the underlying VM stopped; the fixture was subsequently stopped
 explicitly as recorded above.
+
+The unchanged signed `052f05d` reproduced the mismatch again after an explicit
+normal start at 18:01:50Z on the same internal 40 GB / 4 GB fixture. Public
+`list --format json` confirmed that the live row has no `running` Boolean;
+it reports `vmState=running`, `helperRunning=true`, numeric agent protocol 1,
+and `executableDigest`. The dashboard and VM menu both displayed `[STOP]`
+beside `vmState=running`, and the selected agent detail again omitted protocol
+and digest. Returning to the dashboard preserved the mismatch, ruling out a
+single stale initial frame. The TUI exited normally and graceful stop at
+18:02:41Z restored the fixture; all twelve internal VMs were then stopped.
+
+The projection boundary explains all three mismatches: `TUIVMEntry` reads the
+retired `running` field rather than `vmState`, and `TUIGuestAgent` expects a
+string protocol plus `digest` rather than a numeric protocol plus
+`executableDigest`. The existing renderer/snapshot fixtures repeated those
+retired fields. The false running value also bypasses the TUI's boot-mode
+change confirmation before a running session would be stopped.
+
+New canonical-payload regressions failed before the correction: four test
+functions / five invocations failed, covering badges/counts, protocol/digest,
+and the actual confirmation prompt for running and paused sessions. Red bundle:
+`test_macos_2026-09-22T18-06-33-678Z_pid77579_359de227.xcresult`.
+The candidate derives running, paused, stopped, and unknown display categories
+from `vmState`, retains the raw state in the VM-state column, and no longer
+counts paused/unknown VMs as stopped. It reads the numeric protocol and
+`executableDigest` from the closed agent object. Both running and paused
+sessions require confirmation when changing boot mode; same-mode requests and
+existing unknown-state behavior are unchanged. The cancellation tests invoke
+the real prompt but no lifecycle operation. No public status producer, VM
+lifecycle, guest protocol, credential, or journal behavior is changed.
+
+The final focused renderer, create-PTY, and snapshot-PTY suites passed all
+13 test functions / 16 invocations, with no failures or skips. Coverage checks
+actual dashboard row badges and counts, VM summaries, unknown/null values,
+the production `GuestAgentStatusV1` encode/decode projection, and cancellation
+of the real boot-transition guard for running and paused sessions. Green bundle:
+`test_macos_2026-09-22T18-09-36-761Z_pid78404_f26d3363.xcresult`.
+These results qualify the candidate for signed build and live comparison;
+they do not close the unrelated full-suite concurrency hang.

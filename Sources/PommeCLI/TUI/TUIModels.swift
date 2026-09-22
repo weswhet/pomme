@@ -83,13 +83,29 @@ struct TUIMenuItem {
     }
 }
 
+enum TUIVMState: String, Sendable {
+    case running, paused, stopped, unknown
+
+    var badge: String {
+        switch self {
+        case .running: "[RUN]"
+        case .paused: "[PAUSE]"
+        case .stopped: "[STOP]"
+        case .unknown: "[?]"
+        }
+    }
+}
+
 struct TUIVMEntry: Sendable {
     let name: String?
     let bundlePath: String
-    let running: Bool
     let vmState: String
     let bootMode: String?
     let guestAgent: TUIGuestAgent
+
+    var state: TUIVMState { TUIVMState(rawValue: vmState) ?? .unknown }
+    var running: Bool { state == .running }
+    var hasActiveSession: Bool { state == .running || state == .paused }
 
     var displayName: String {
         name ?? bundlePath
@@ -108,7 +124,6 @@ struct TUIVMEntry: Sendable {
         }
         self.name = payload["name"] as? String
         self.bundlePath = bundlePath
-        self.running = payload["running"] as? Bool ?? false
         self.vmState = payload["vmState"] as? String ?? "unknown"
         self.bootMode = payload["bootMode"] as? String
         self.guestAgent = TUIGuestAgent(payload: payload["guestAgent"] as? [String: Any] ?? [:])
@@ -138,8 +153,8 @@ struct TUIGuestAgent: Equatable, Sendable {
     init(payload: [String: Any]) {
         self.connection = Self.connection(payload["connection"])
         self.role = Self.role(payload["role"])
-        self.protocolVersion = Self.text(payload["protocolVersion"])
-        self.digest = Self.text(payload["digest"])
+        self.protocolVersion = Self.version(payload["protocolVersion"])
+        self.digest = Self.text(payload["executableDigest"])
         self.capabilities = (payload["capabilities"] as? [String] ?? []).sorted()
         self.updateState = Self.text(payload["updateState"])
     }
@@ -165,6 +180,11 @@ struct TUIGuestAgent: Equatable, Sendable {
     private static func text(_ value: Any?) -> String {
         guard let text = value as? String, !text.isEmpty else { return "-" }
         return text
+    }
+
+    private static func version(_ value: Any?) -> String {
+        guard let value, case .integer(let version) = try? JSONValue(any: value), version > 0 else { return "-" }
+        return String(version)
     }
 
     private func display(_ value: String) -> String {

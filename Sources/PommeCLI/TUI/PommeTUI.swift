@@ -888,8 +888,8 @@ struct PommeTUI {
         )
     }
 
-    private mutating func confirmBootTransitionIfNeeded(entry: TUIVMEntry, targetMode: BootMode) throws -> Bool {
-        guard entry.running else {
+    mutating func confirmBootTransitionIfNeeded(entry: TUIVMEntry, targetMode: BootMode) throws -> Bool {
+        guard entry.hasActiveSession else {
             return true
         }
         let currentMode = entry.bootMode ?? BootMode.normal.rawValue
@@ -904,7 +904,7 @@ struct PommeTUI {
                 shortcut: "y",
                 role: .warning
             ),
-            TUIMenuItem(title: "Cancel", detail: "Leave the running VM untouched.", shortcut: "n")
+            TUIMenuItem(title: "Cancel", detail: "Leave the current VM session untouched.", shortcut: "n")
         ]
         let warningMessage = [
             "Switching boot modes requires stopping the current VM session.",
@@ -913,7 +913,7 @@ struct PommeTUI {
         ].joined(separator: "\n")
         let choice = try choose(
             title: "Change boot mode",
-            subtitle: "\(entry.displayName) is running in \(currentMode).",
+            subtitle: "\(entry.displayName) is \(entry.vmState) in \(currentMode).",
             warningMessage: warningMessage,
             items: items,
             initialIndex: 1,
