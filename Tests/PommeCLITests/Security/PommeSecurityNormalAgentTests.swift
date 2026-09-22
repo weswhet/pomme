@@ -3,6 +3,29 @@ import Testing
 
 @Suite("Security normal-agent response decoding")
 struct PommeSecurityNormalAgentTests {
+  @Test("Temporary Aqua timing summary emits only allowlisted typed scalars")
+  func temporaryAquaTimingIsClosed() throws {
+    let secret = "password=private /private/path job-id"
+    let summary = try #require(PommeSecurityNormalAgent.temporaryAquaTimingSummary([
+      "result": ["_pommeDebugAqua20260922": [
+        "totalMicros": 456, "startMicros": 123, "eofMicros": secret, "statusCount": -1,
+        "statusTotalMicros": true, "lastExited": false, "signalExitFrame": secret,
+        "validPositiveStartPID": true, "arbitrary": secret
+      ]]
+    ]))
+    #expect(summary.hasPrefix("[DEBUG-aqua-20260922] "))
+    #expect(summary.contains("startMicros=123"))
+    #expect(summary.contains("totalMicros=456"))
+    #expect(summary.contains("eofMicros=unknown"))
+    #expect(summary.contains("statusCount=unknown"))
+    #expect(summary.contains("statusTotalMicros=unknown"))
+    #expect(summary.contains("lastExited=false"))
+    #expect(summary.contains("signalExitFrame=unknown"))
+    #expect(summary.contains(secret) == false)
+    #expect(summary.contains("arbitrary") == false)
+    #expect(PommeSecurityNormalAgent.temporaryAquaTimingSummary([:]) == nil)
+  }
+
   @Test("Desktop deadline diagnostics distinguish unmatched and unchecked proofs")
   func desktopDeadlineDiagnostic() {
     #expect(PommeSecurityDesktopProofObservation(

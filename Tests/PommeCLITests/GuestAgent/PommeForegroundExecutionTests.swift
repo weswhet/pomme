@@ -6,6 +6,72 @@ struct PommeForegroundExecutionTests {
     private let jobID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
     private let startRequestID = UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!
 
+    private func aquaPayload() throws -> JSONValue {
+        let request = try #require(PommeSecurityNormalAgent.aquaSessionProofRequest(uniqueID: 501))
+        return try JSONValue(any: request.agentPayload())
+    }
+
+    @Test("Temporary Aqua timing records success only for the exact probe", arguments: ["exact", "user", "environment", "stdinDataBase64", "pty", "arguments", "path"])
+    func temporaryAquaTimingOptIn(variant: String) async throws {
+        var payload = try #require(aquaPayload().objectValue)
+        if variant != "exact" { payload[variant] = variant == "pty" ? .bool(false) : .string("private-mismatch") }
+        if variant == "stdinDataBase64" { payload[variant] = .string("") }
+        let transport = ForegroundTransport(
+            start: correlated(requestID: startRequestID, result: started(), frames: []),
+            statuses: [correlated(requestID: UUID(), result: status(exited: true, exitCode: 0),
+                                 frames: [frame(jobID: jobID, stream: .exit)])]
+        )
+        let result = try await run(payload: .object(payload), transport: transport)
+        let diagnostic = result.result.objectValue?["_pommeDebugAqua20260922"]?.objectValue
+        if variant == "exact" {
+            let diagnostic = try #require(diagnostic)
+            #expect(diagnostic["statusCount"] == .integer(1))
+            #expect(diagnostic["lastExited"] == .bool(true))
+            #expect(diagnostic["exitFrameBeforeSignal"] == .bool(true))
+            #expect(diagnostic["validPositiveStartPID"] == .bool(true))
+            assertTotalTiming(diagnostic)
+            #expect(diagnostic.values.allSatisfy { value in
+                if case .integer(let count) = value { return count >= 0 }
+                if case .bool = value { return true }
+                return false
+            })
+        } else { #expect(diagnostic == nil) }
+        #expect(await transport.operationNames == ["process.start", "process.status"])
+    }
+
+    @Test("Temporary Aqua signal exit evidence never turns a timeout into success")
+    func temporaryAquaSignalExitStaysFailure() async throws {
+        let transport = ForegroundTransport(
+            start: correlated(requestID: startRequestID, result: started(), frames: []), statuses: [],
+            signalFrames: [frame(jobID: jobID, stream: .exit)]
+        )
+        let result = try await run(payload: aquaPayload(), transport: transport, timeout: 0.03)
+        let values = try #require(result.result.objectValue)
+        let diagnostic = try #require(values["_pommeDebugAqua20260922"]?.objectValue)
+        #expect(diagnostic["lastExited"] == .bool(false))
+        #expect(diagnostic["exitFrameBeforeSignal"] == .bool(false))
+        #expect(diagnostic["signalExitFrame"] == .bool(true))
+        assertTotalTiming(diagnostic)
+        #expect(values["timedOut"] == .bool(true))
+        #expect(values["outputComplete"] == .bool(false))
+        #expect(values["exited"] == .bool(false))
+        #expect(await transport.signalCalls == 1)
+        #expect(await transport.operationNames.filter { $0 == "process.start" }.count == 1)
+    }
+
+    private func assertTotalTiming(_ diagnostic: [String: JSONValue]) {
+        guard case .integer(let total)? = diagnostic["totalMicros"] else {
+            Issue.record("Expected total elapsed microseconds")
+            return
+        }
+        let measured = ["startMicros", "eofMicros", "statusTotalMicros", "signalMicros"].reduce(Int64(0)) {
+            if case .integer(let value)? = diagnostic[$1] { return $0 + value }
+            return $0
+        }
+        #expect(total >= measured)
+        #expect(total >= 0)
+    }
+
     @Test("polls until output is complete and retains stderr and exit status")
     func delayedOutputAndCompletion() async throws {
         // Given
@@ -311,14 +377,16 @@ private actor ForegroundTransport {
 
     let start: PommeAgentCorrelatedResult
     let statuses: [PommeAgentCorrelatedResult]
+    let signalFrames: [PommeAgentJobStreamFrame]
     private var statusIndex = 0
     private(set) var operationNames: [String] = []
     private(set) var streamCalls: [StreamCall] = []
     private(set) var signalCalls = 0
 
-    init(start: PommeAgentCorrelatedResult, statuses: [PommeAgentCorrelatedResult]) {
+    init(start: PommeAgentCorrelatedResult, statuses: [PommeAgentCorrelatedResult], signalFrames: [PommeAgentJobStreamFrame] = []) {
         self.start = start
         self.statuses = statuses
+        self.signalFrames = signalFrames
     }
 
     func perform(operation: String, payload: JSONValue) -> PommeAgentCorrelatedResult {
@@ -342,7 +410,7 @@ private actor ForegroundTransport {
             )
         case "process.signal":
             signalCalls += 1
-            return .init(requestID: UUID(), result: .object([:]), streamFrames: [])
+            return .init(requestID: UUID(), result: .object([:]), streamFrames: signalFrames)
         default:
             return .init(requestID: UUID(), result: .object([:]), streamFrames: [])
         }
