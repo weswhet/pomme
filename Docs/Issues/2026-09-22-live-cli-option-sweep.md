@@ -16,7 +16,7 @@ observations are recorded below; historical rows retain their original status.
 | macOS 27 creation `ownerProof` | Open; subsequent internal-drive baselines passed, including fresh creation with the exact original `ffc41a7` host, without a targeted fix. |
 | macOS 26 creation `verifyNormalAgent` / slow first boot | Open historical failure; subsequent internal-drive creations passed, including a fresh original-`ffc41a7` run with first-attempt verification receipts, without establishing its cause. |
 | macOS 27 restart after pause/resume | Open; two earlier internal-drive sequences plus ten-cycle runs with both current `a3852a5` and original `ffc41a7` hosts passed without reproducing the missing helper. |
-| Retained SIP private-PTY / pinned-authentication failures | Open historical observations; later successful security cycles do not establish their cause. |
+| Retained SIP private-PTY / pinned-authentication failures | Open historical observations; a fresh original-`ffc41a7` SIP disable/enable cycle passed without producing the failed transaction needed to test that resume sequence. |
 
 This is an observational live test. The CLI and guest images are not being
 modified during the sweep. Every failure, timeout, unexpected state, and
@@ -2005,3 +2005,49 @@ failure or require a five-minute recovery start/resume. `automaticLogin=legacy`
 and Recovery provisioning are expected for this route, not owner-proof success.
 No source fix or installed-host replacement is justified by this passing run;
 the historical slow-boot cause remains open.
+
+### Original-host owner-session/private-PTY comparison
+
+The next bounded comparison uses newly created internal
+`pomme-agent-bootstrap26-20260922a` to investigate the historical SIP owner-
+session/private-PTY/authentication sequence. Preflight confirmed stopped with
+no helper, Recovery provisioning, original `2e0a2f49…47aaeff` agent pin,
+40 GB disk / 4 GB RAM, and no existing security workflow journal. The exact
+original signed `ffc41a7` host invokes public `sip disable --force
+--final-state previous --format json --debug`. No standalone guest probes,
+owner changes, credential substitutions, journal edits, or agent updates precede
+the attempt. A failure will be captured and classified before any retained
+resume. Successful mutation will be followed by SIP enable to restore the
+original enabled security setting and stopped run state.
+
+Original-host SIP disable began at 17:17:55Z. Setup Assistant handoff passed
+at 17:18:53Z; the existing one-time fresh-owner preference reboot began at
+17:19:16Z. Owner completion and automatic-login configuration passed at
+17:20:18Z, followed by Setup Assistant completion at 17:20:21Z. Desktop
+verification began at 17:20:37Z and advanced to authenticated Recovery at
+17:21:35Z. No owner-session, private-PTY, desktop-timeout, or pinned-authentication
+failure was reported. First-attempt Recovery marker proof passed at 17:23:35Z;
+normal-boot verification followed at 17:24:10Z and stopped-state restoration
+at 17:24:39Z. The result reported `configuredDisabled=true` with all verification
+fields true. Public status confirmed stopped with no helper and the journal
+reached `restorationComplete` / `sipDisable` / `previous`. Matching original-
+host SIP enable follows to restore the initial enabled state; no AMFI command
+or manual retained-state change is used.
+
+Original-host SIP enable began at 17:25:06Z, reverified the existing owner,
+and passed first-attempt Recovery marker proof at 17:27:45Z. Normal-boot
+verification began at 17:28:20Z and stopped-state restoration at 17:28:47Z.
+The successful result reported `configuredDisabled=false` and all verification
+fields true. The journal reached `restorationComplete` / `sipEnable` /
+`previous`, with normal-boot verification true. Public inventory confirmed all
+twelve VMs stopped with no helpers. VM identity, creation plan, and original
+agent pin remain unchanged; SIP is restored enabled and no AMFI mutation was
+performed.
+
+The original-host first-owner cycle passed without the historical Aqua-session,
+private-PTY, or pinned-authentication failure. Since it did not leave a failed
+transaction, this does not exercise the reported failing SIP-resume sequence;
+no artificial failure or journal state was introduced to manufacture one.
+It supplies another bounded non-reproduction result, not a root-cause finding
+or a justification for credential/PTY changes. The current signed host remains
+installed, and the original failures remain open pending a matching failure.
