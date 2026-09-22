@@ -295,6 +295,15 @@ sequence into a fresh Terminal window. These slower manual probes do not
 reproduce the automated failure and do not establish its cause. The VM was
 stopped again before repeating the original automated command unchanged.
 
+The unchanged macOS 27 SIP-status repeat on `e9076c6` started at 07:22:19Z
+and passed end to end. Inactive English activation and Return passed again;
+Terminal was verified at 07:23:55Z and marker proof passed on attempt 1 at
+07:23:57Z. The authenticated request-bound session returned verified SIP
+enabled, all cleanup fields true, and `finalStateVerified=true` for the prior
+stopped state. This supplies full-workflow validation for the activation fix.
+The marker failure is intermittent, not consistently reproducible; no marker
+implementation was changed and no cause is claimed from the successful retry.
+
 For compatibility, `pomme-agent-recovery26-20260922a` was created on internal
 storage from macOS `26.6.2 (25G83)` with a 40 GB disk and 4 GB RAM, using
 signed build `ef37f16`. Restore began at 06:32:22Z; the existing five-input
