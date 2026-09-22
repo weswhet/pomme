@@ -17,6 +17,8 @@ observations are recorded below; historical rows retain their original status.
 | macOS 26 creation `verifyNormalAgent` / slow first boot | Open historical failure; subsequent internal-drive creations passed, including a fresh original-`ffc41a7` run with first-attempt verification receipts, without establishing its cause. |
 | macOS 27 restart after pause/resume | Open; two earlier internal-drive sequences plus ten-cycle runs with both current `a3852a5` and original `ffc41a7` hosts passed without reproducing the missing helper. |
 | Retained SIP private-PTY / pinned-authentication failures | Open historical observations; a fresh original-`ffc41a7` SIP disable/enable cycle passed without producing the failed transaction needed to test that resume sequence. |
+| TUI status projection / boot-mode warning | Fixed in `3fb1ccb`; canonical state/agent regression tests and live running, paused, resumed, and stopped display comparisons passed. Boot-mode warning cancellation preserved both running and paused sessions. |
+| Integrated test-suite concurrency hang | Open; isolated TUI driver cleanup was corrected in `052f05d`, but full parallel runs still stalled with cooperative workers blocked in socket/OCR operations. Focused passing suites are not a full-suite pass. |
 
 This is an observational live test. The CLI and guest images are not being
 modified during the sweep. Every failure, timeout, unexpected state, and
@@ -2195,3 +2197,37 @@ of the real boot-transition guard for running and paused sessions. Green bundle:
 `test_macos_2026-09-22T18-09-36-761Z_pid78404_f26d3363.xcresult`.
 These results qualify the candidate for signed build and live comparison;
 they do not close the unrelated full-suite concurrency hang.
+
+Candidate `3fb1ccb` was committed before its canonical signed Release build
+at 18:10:45Z. Build, signature, exact entitlements, designated-requirement
+compatibility, archive, and atomic install checks passed. The installed CLI
+resolves from `/Users/wes/.local/bin/pomme`, reports `3fb1ccb`, and has SHA-256
+`2b10ef689f685ba4161d3609a774d3a1a4bc7a949ea9dd1943e9bedc4f8c7707`.
+All 104 CLI contract and 21 installer regression checks passed.
+
+Live verification used the same internal-drive 40 GB / 4 GB
+`pomme-agent-ownerproof-20260922a`, explicitly confirmed stopped beforehand.
+Normal start at 18:11:07Z succeeded with helper PID 80159 and the unchanged
+creation-pinned agent. A real host PTY running the newly installed CLI showed
+`[RUN]`, `running=1 paused=0 stopped=11 unknown=0`, protocol 1, and the full
+creation-pinned executable digest. Independent JSON status agreed. Selecting
+Boot Recovery displayed the stop/restart warning; cancelling returned to the
+normal-running menu with the same helper PID, connected agent, and boot mode.
+
+Explicit pause at 18:12:12Z succeeded. Dashboard refresh showed `[PAUSE]` and
+`running=0 paused=1 stopped=11 unknown=0`, matching JSON `vmState=paused` and
+`helperRunning=true`. Agent-disconnected/null details were rendered as absent,
+not inferred from the stored creation pin. Selecting Boot Recovery again
+displayed the warning, now naming the paused state. Cancellation preserved
+paused/normal state and PID 80159. No Recovery boot was performed.
+
+Explicit resume at 18:13:00Z succeeded; dashboard refresh restored `[RUN]`,
+the running count, protocol 1, and the same authenticated agent digest.
+Graceful stop at 18:13:12Z succeeded with `stopMethod=guest-stopped`. Final
+refresh showed `[STOP]` and `running=0 paused=0 stopped=12 unknown=0`, matching
+JSON `vmState=stopped`, `helperRunning=false`, and null live agent details.
+The PTY exited zero, and inventory confirmed all twelve internal VMs stopped
+with no helpers. VM UUID, creation plan, agent pin, disk size, and memory were
+unchanged. The live TUI projection mismatch and active-session confirmation
+regression are fixed; this result does not resolve the independent historical
+creation/security/lifecycle observations or the full-suite concurrency hang.
