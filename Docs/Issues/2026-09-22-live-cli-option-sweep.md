@@ -458,6 +458,59 @@ unmeasured polling sleeps and processing; separate start, EOF, status, and
 signal timings measure the exchanges. Thrown transport failures can still
 return no timing envelope. This diagnostic candidate is committed before its
 signed Release build and fresh-owner live test; it is not a fix.
+
+Diagnostic commit `227b0d1` passed read-only review, then the canonical signed
+Release build and install completed successfully. Signature, exact entitlement,
+designated-requirement compatibility, and signed-artifact archive checks passed.
+The installed SHA-256 is
+`5d1a82a0b7719183c6e6f6d761f7e8088780ef4817ea6b99c1202e8092edfcd5`.
+A fresh login shell resolves `/Users/wes/.local/bin/pomme`, reporting that
+commit, and all 104 CLI contract checks passed. Existing PommeCore warnings
+remain unrelated to this diagnostic. Dry-run preflight at 10:42:24Z confirmed
+the same internal macOS 26.6.2/25G83 restore image and 4 GB/40 GB resources for
+new disposable `pomme-agent-owner26-20260922c`; no retained VM is reset or
+repinned to obtain another fresh-owner run.
+
+Fresh creation began at 10:42:42Z and passed restore (100% at 10:46:24Z),
+Recovery navigation, marker proof on attempt 2 at 10:47:54Z, installation,
+and normal-agent verification. It exited 0 and returned stopped state,
+independently confirmed by public status. The new internal-drive VM UUID is
+`eef17d8a-3cc8-4462-ac9b-88f18aff7795`, startup-volume group
+`a32f15b1-d2f2-47bd-a8f0-78dbe2a5dbbd`, and plan digest
+`cef6ce048104936b1c276665a23cbf5251617ea8907e2c8a6b7200aacd3fa4f1`.
+It pins the diagnostic build's `5d1a82a0…2edfcd5` agent and retains the
+comparison's exact 4 GB/40 GB resources. The first-owner SIP-disable run follows
+without intervening guest probes or account changes.
+
+The first-owner SIP-disable diagnostic run began at 10:49:02Z. Fresh owner
+creation/verification and native Setup Assistant handoff passed. Initial owner
+completion returned status 1 at 10:50:24Z, invoking the unchanged single boot
+retry; owner completion then passed at 10:51:18Z and Setup Assistant completion
+at 10:51:22Z. Post-reboot desktop verification began at 10:51:39Z.
+
+Seven Aqua requests completed successfully (approximately 1.785 s, 0.073 s,
+0.039 s, 0.030 s, 0.056 s, 0.032 s, and 2.653 s), but the eighth reproduced
+`normal-agent-aqua-timedOut` at 10:52:24Z. Its closed diagnostics were:
+
+| Measurement | Value |
+|---|---:|
+| Total foreground duration, including signal exchange | 16,410,068 µs |
+| Start exchange | 709,345 µs |
+| Stdin EOF exchange | 162,246 µs |
+| Status exchanges | 72 |
+| Total status-exchange duration | 12,926,756 µs |
+| Maximum status-exchange duration | 1,523,248 µs |
+| Signal exchange | 548,735 µs |
+| Positive spawn PID | true |
+| Last status exited | false |
+| Exit frame before signal / in signal response | false / false |
+
+The workflow exited 1 before SIP mutation, retained its transaction, and
+restored stopped state confirmed by public status. This repeats the exact
+fresh-owner Aqua failure on the signed diagnostic build. It rules out a single
+stuck transport exchange or spending the entire deadline before process start;
+it does not yet distinguish a genuinely running child from the guest's hidden
+wait-status errors. The normal desktop was not verified, and no fix is claimed.
 Consecutive-frame equality can suggest an unchanged observation, not prove that
 the capture is stale. Diagnostic regression coverage and signed live validation
 will be recorded before claiming that this instrumentation is useful.
