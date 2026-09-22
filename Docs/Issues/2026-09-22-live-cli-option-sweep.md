@@ -1819,3 +1819,46 @@ by successful bounded cleanup/retry. This is stronger than a no-timeout
 compatibility comparison, but does not establish the original delay's cause,
 live reconnect recovery, or resolution of the earlier console transport error.
 The live outcome is committed before moving to further investigation.
+
+### Retained console-transport fixture resume
+
+After the instrumentation-free fresh cycle, the next bounded comparison uses
+the retained internal `pomme-agent-owner26-20260922f` rather than allocating
+another VM. All thirteen VMs were stopped; 35 GiB was free internally. Signed
+host `a3852a5` and its `55142e26…887b5a` digest were revalidated. The target
+still has its original `990bf1bc…df69f6` creation pin and
+`autologinIntent` / `sipDisable` / `previous` journal, with original run state
+stopped and no normal-boot success receipt. No journal, credential, owner,
+agent, or immutable creation record is manually changed.
+
+The exact retained SIP-disable request is repeated through the public CLI.
+This preserves the failure record above but necessarily advances the live
+journal if resume succeeds. The fixture has already had a later normal boot
+and passing standalone probes; success therefore cannot establish a fresh
+first-login reproduction or identify the original console transport boundary.
+The intended check is recovery of the retained workflow with the newer signed
+host and older pinned guest, followed by SIP enable and stopped-state proof.
+
+Resume began at 15:27:18Z. Existing-owner completion passed at 15:28:02Z and
+Setup Assistant completion at 15:28:04Z. Console/desktop verification began at
+15:28:35Z and advanced to authenticated Recovery at 15:28:47Z, with no reported
+timeout. Recovery marker proof passed on attempt 2 at 15:30:48Z. Normal-boot
+verification followed at 15:31:23Z and stopped-state restoration at 15:31:52Z.
+The command returned `configuredDisabled=true` with all verification fields
+true. Public status confirmed stopped with no helper and the original guest
+pin unchanged. The journal reached `restorationComplete` for `sipDisable` /
+`previous`; matching SIP enable follows to restore the original enabled state.
+
+SIP enable began at 15:32:19Z, passed first-attempt marker proof at 15:34:48Z,
+and completed normal-boot verification and stopped-state restoration after
+15:35:49Z. `configuredDisabled=false` and all verification fields were true.
+The final journal is `restorationComplete` / `sipEnable` / `previous`, with
+normal-boot verification true. Public inventory confirmed all thirteen VMs
+stopped with no helpers. The original VM UUID, immutable plan, and guest digest
+are unchanged; no agent update or credential replacement was performed.
+
+This closes the retained transaction on `...22f` and validates current-host /
+older-pinned-agent resume compatibility through the complete SIP cycle. No
+desktop timeout or transport failure recurred. It does not resolve the
+historical console-transport cause, reproduce the original fresh-login timing,
+or establish live reconnect recovery. Those observations remain open.
