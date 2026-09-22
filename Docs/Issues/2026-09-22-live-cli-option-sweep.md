@@ -304,6 +304,15 @@ stopped state. This supplies full-workflow validation for the activation fix.
 The marker failure is intermittent, not consistently reproducible; no marker
 implementation was changed and no cause is claimed from the successful retry.
 
+The macOS 27 AMFI-status regression on the same build began at 07:25:04Z and
+also passed end to end. It exercised inactive-English activation again,
+verified Terminal at 07:26:39Z, and passed marker proof on attempt 1 at
+07:26:41Z. The finalized authenticated session reported verified Full Security,
+`amfiDisabled=false`, all cleanup fields true, and verified restoration of the
+previous stopped state. Both originally blocked status workflows now have
+successful live results after the activation fix. Marker reliability remains
+an open intermittent observation rather than a claimed marker fix.
+
 For compatibility, `pomme-agent-recovery26-20260922a` was created on internal
 storage from macOS `26.6.2 (25G83)` with a 40 GB disk and 4 GB RAM, using
 signed build `ef37f16`. Restore began at 06:32:22Z; the existing five-input
