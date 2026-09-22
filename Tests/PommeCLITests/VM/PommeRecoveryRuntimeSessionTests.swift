@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 @preconcurrency import Virtualization
 import Testing
 
@@ -145,6 +146,42 @@ struct PommeRecoveryRuntimeSessionTests {
 
     @Test("Recovery launch precedes listener authentication")
     func launchPrecedesAuthentication() async throws {
+        try await runLaunchPrecedesAuthentication()
+    }
+
+    @Test("Recovery launch ordering is independent of delayed authentication admission")
+    func delayedLaunchAuthenticationOrdering() async throws {
+        try await runLaunchPrecedesAuthentication(authenticationTimeout: 0.05, beforeAuthentication: {
+            try? await Task.sleep(for: .milliseconds(120))
+        })
+    }
+
+    @Test("Recovery authentication ready after the logical deadline still times out")
+    func authenticationAfterDeadlineRemainsRejected() async throws {
+        try await runLaunchPrecedesAuthentication(authenticationTimeout: 0.05, expireAfterAuthentication: true)
+    }
+
+    @Test("Recovery fixture admission wait is bounded and cancellation-aware", arguments: [false, true])
+    func fixtureAdmissionWaitFailure(cancelled: Bool) async throws {
+        let task = Task {
+            if cancelled { withUnsafeCurrentTask { $0?.cancel() } }
+            try await Self.waitForFixture(timeout: .zero) { cancelled }
+        }
+        do {
+            try await task.value
+            Issue.record("Expected fixture admission wait failure")
+        } catch is CancellationError {
+            #expect(cancelled)
+        } catch FixtureWaitFailure.timedOut {
+            #expect(!cancelled)
+        }
+    }
+
+    private func runLaunchPrecedesAuthentication(
+        authenticationTimeout: TimeInterval = 5,
+        expireAfterAuthentication: Bool = false,
+        beforeAuthentication: (@Sendable () async -> Void)? = nil
+    ) async throws {
         let fixture = try RuntimeFixture(port: .bootstrap)
         let vmConfiguration = VZVirtualMachineConfiguration()
         try fixture.configuration.apply(to: vmConfiguration)
@@ -157,9 +194,19 @@ struct PommeRecoveryRuntimeSessionTests {
             bindingProvider: { role in role == .recoveryBootstrap ? binding : nil }
         )
         let calls = RuntimeCalls()
+        let logicalNow = Mutex(Date(timeIntervalSince1970: 0))
+        let pollEntered = Mutex(false)
+        let connection = RecoveryAuthenticatedConnection(
+            token: token, events: calls, beforeAuthentication: {
+                // Ensure the real root's polling sleeper is exercised even
+                // when authentication would otherwise complete immediately.
+                try await Self.waitForFixture { pollEntered.withLock { $0 } }
+                await beforeAuthentication?()
+            }
+        )
         calls.onLaunch = {
             transport.connect(
-                RecoveryAuthenticatedConnection(token: token, events: calls),
+                connection,
                 port: PommeAgentPort.recoveryBootstrap
             )
         }
@@ -167,16 +214,62 @@ struct PommeRecoveryRuntimeSessionTests {
             configuration: fixture.configuration,
             coordinator: coordinator,
             effects: calls.effects,
-            // Keep the production timeout semantics under test while leaving
-            // enough scheduler headroom for the complete parallel suite.
-            authenticationTimeout: 5
+            authenticationTimeout: authenticationTimeout,
+            authenticationNow: { logicalNow.withLock { $0 } },
+            authenticationSleep: {
+                pollEntered.withLock { $0 = true }
+                try await Self.waitForFixture {
+                    coordinator.isAuthenticated(as: .recoveryBootstrap)
+                }
+                if expireAfterAuthentication {
+                    logicalNow.withLock { $0 = $0.addingTimeInterval(authenticationTimeout + 1) }
+                }
+            }
         )
 
-        let evidence = try await root.prepare(request: fixture.request)
-        #expect(evidence.isAcceptable)
-        #expect(calls.launchCalls == 1)
-        #expect(calls.events == ["start", "launch", "authenticate"])
-        _ = try await root.cleanup(request: fixture.request)
+        do {
+            let evidence = try await root.prepare(request: fixture.request)
+            #expect(!expireAfterAuthentication)
+            #expect(evidence.isAcceptable)
+            #expect(calls.launchCalls == 1)
+            #expect(calls.events == ["start", "launch", "authenticate"])
+            _ = try await root.cleanup(request: fixture.request)
+            await connection.drainAuthentication()
+        } catch {
+            if expireAfterAuthentication, let error = error as? PommeRecoveryRuntimeError,
+               error == .listenerAuthenticationTimedOut {
+                // Observe the root's own failure teardown before fixture
+                // cleanup can remove the listener or authenticated session.
+                #expect(root.runtimeState() == .failed)
+                #expect(!coordinator.isAuthenticated(as: .recoveryBootstrap))
+                #expect(transport.removedPorts.contains(PommeAgentPort.recoveryBootstrap))
+                #expect(calls.events == ["start", "launch", "authenticate"])
+                await connection.drainAuthentication()
+                let cleanup = try await root.cleanup(request: fixture.request)
+                #expect(cleanup.isComplete)
+                #expect(calls.cleanupCalls == 1)
+                #expect(root.runtimeState() == .cleaned)
+                return
+            }
+            coordinator.teardown()
+            await connection.drainAuthentication()
+            throw error
+        }
+    }
+
+    private enum FixtureWaitFailure: Error { case timedOut }
+
+    private static func waitForFixture(
+        timeout: Duration = .seconds(30),
+        condition: @Sendable () -> Bool
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while true {
+            try Task.checkCancellation()
+            if condition() { return }
+            guard ContinuousClock.now < deadline else { throw FixtureWaitFailure.timedOut }
+            try await Task.sleep(for: .milliseconds(1))
+        }
     }
 
     @Test("Incomplete cleanup never produces Recovery cleanup evidence")
@@ -359,17 +452,36 @@ private final class BoolSequence: @unchecked Sendable {
 }
 
 private final class RecoveryAuthenticatedConnection: PommeAgentVSOCKConnection, @unchecked Sendable {
+    private let beforeAuthentication: (@Sendable () async throws -> Void)?
     private let token: String
     private let events: RuntimeCalls
     private let lock = NSLock()
     private var storedClosed = false
+    private var authenticationRunning = false
+    private var authenticationWaiters: [CheckedContinuation<Void, Never>] = []
 
-    init(token: String, events: RuntimeCalls) {
+    init(token: String, events: RuntimeCalls, beforeAuthentication: (@Sendable () async throws -> Void)? = nil) {
+        self.beforeAuthentication = beforeAuthentication
         self.token = token
         self.events = events
     }
 
     func exchange(_ request: Data, timeout _: TimeInterval) async throws -> Data {
+        guard lock.withLock({
+            guard !storedClosed else { return false }
+            authenticationRunning = true
+            return true
+        }) else { throw PommeAgentProtocol.Error.invalidRequest }
+        defer {
+            let waiters = lock.withLock {
+                authenticationRunning = false
+                let waiters = authenticationWaiters
+                authenticationWaiters.removeAll()
+                return waiters
+            }
+            waiters.forEach { $0.resume() }
+        }
+        try await beforeAuthentication?()
         guard request.last == 0x0A else { throw PommeAgentProtocol.Error.malformedFrame }
         let envelope = try PommeAgentProtocol.decode(Data(request.dropLast()))
         guard envelope.operation == "authenticate",
@@ -377,11 +489,24 @@ private final class RecoveryAuthenticatedConnection: PommeAgentVSOCKConnection, 
         else { throw PommeAgentProtocol.Error.invalidRequest }
         events.record("authenticate")
         let proof = try PommeAgentAuthentication.proof(token: token, challenge: challenge)
-        return try PommeAgentProtocol.encode(.response(
+        let response = try PommeAgentProtocol.encode(.response(
             to: envelope,
             result: .object(["proof": .string(proof)])
         ))
+        return response
     }
 
-    func close() { lock.withLock { storedClosed = true } }
+    func close() {
+        lock.withLock { storedClosed = true }
+    }
+    func drainAuthentication() async {
+        await withCheckedContinuation { continuation in
+            let completed = lock.withLock {
+                guard authenticationRunning else { return true }
+                authenticationWaiters.append(continuation)
+                return false
+            }
+            if completed { continuation.resume() }
+        }
+    }
 }

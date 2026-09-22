@@ -2937,6 +2937,79 @@ private screenshots remain outside the repository. The one-shot fixture race
 is fixed; the remaining full-stress failures and historical live issues are
 not closed by this result.
 
+### Recovery listener authentication under parallel test load
+
+After committing the one-shot release/live evidence as `b8c6fea`, the next
+isolated investigation is `PommeRecoveryRuntimeSessionTests.launchPrecedesAuthentication()`
+throwing `listenerAuthenticationTimedOut` in repeated full workloads, most
+recently `20-23-46-257Z_pid26026_15db5953`. Installed signed Release is
+`fc4e4bf`; no production change or new live operation has been made for this
+investigation. The unchanged test passed 100 isolated repetitions
+(`20-32-56-112Z_pid29979_9875d260`), so removing parallel workload does not
+retain the failure. The original full ten-pass run remains the red-capable
+comparison while the timing trigger is minimized.
+
+Ranked hypotheses are late authentication-task admission, timely authentication
+missed by a delayed polling task, and connection rejection/teardown before
+authentication. Bounded failure-only timing probes will distinguish these;
+the production authentication deadline and security checks must remain intact.
+
+The instrumented full ten-pass run (`20-35-30-761Z_pid30483_b1cae687`)
+failed only this function: 1,177 functions / 16,019 invocations passed, one
+function / invocation failed. Launch/connect returned at 0.257 ms, but the
+authentication task's binding/secret providers first ran at 13,299.266 ms;
+the fake exchange ran at 13,299.420–13,299.540 ms. The final helper probe at
+13,510.009 ms observed authentication ready, followed immediately by timeout
+teardown. Authentication itself was therefore late relative to the fixture's
+five-second wall-clock budget, not proven ready before the deadline. The
+production timeout was correct. The ordering fixture needs controlled logical
+time, with a separate bounded scheduler wait and a regression retaining strict
+rejection of authentication observed after the logical deadline.
+
+The minimized regression (`20-39-44-953Z_pid32003_57f410e4`) delayed the
+concrete fixture's authentication exchange by 120 ms against a 50 ms
+wall-clock budget, retaining acceptable-evidence and exact
+`start → launch → authenticate` assertions. It failed with the same
+`listenerAuthenticationTimedOut`; the other eight functions passed. This
+demonstrates the ordering fixture's unwanted dependence on real scheduling,
+not a defect in the production deadline. Temporary trace was removed before
+the candidate seam is applied.
+
+The candidate injects the root's existing clock and sleeper, preserving default
+`Date()` and cancellable 25 ms sleep and the exact deadline/helper/authentication/
+failed-status/cancellation ordering. The ordering fixture holds logical time
+steady while a cancellation-aware, monotonic 30-second setup observer waits
+for the concrete coordinator's authenticated session. Its fake exchange waits
+for the root polling hook, so the seam is deterministically exercised. No
+production timeout is increased and no post-deadline readiness check is added.
+
+All eleven focused functions / 150 invocations passed over ten repetitions
+(`20-42-00-219Z_pid33199_40270b8b`). Coverage includes delayed ordering, an
+authenticated session rejected after the injected deadline, bounded fixture
+waiting, and actual task cancellation. Review found production defaults and
+security ordering intact, but identified that fallback test teardown could
+mask the strict-negative cleanup assertions. Those assertions were moved
+before any fixture teardown; the final candidate's full comparison follows.
+No temporary diagnostic prefix remains.
+
+The final full ten-pass comparison (`20-43-41-704Z_pid35061_ed28ac57`)
+passed all ten invocations of the original listener ordering, delayed ordering,
+and strict-deadline rejection functions, plus all twenty parameterized
+fixture-wait timeout/cancellation invocations. Overall 1,180 functions /
+16,059 invocations passed and one function / invocation failed:
+`PommeForegroundExecutionTests.delayedOutputAndCompletion()` returned
+`exited=false`. That independent stress observation remains open; the listener
+fixture correction does not claim to fix it. Final review confirmed the
+root teardown assertions now precede fixture cleanup and found no remaining
+blocker.
+
+The unrestricted single run (`20-45-44-340Z_pid36218_12a7efc8`) passed all
+1,181 functions / 1,606 invocations, with no failures or skips. The candidate
+is being committed before the canonical signed Release build and scoped
+read-only Recovery live check. This fixes the ordering fixture's clock
+coupling; it does not identify the cause of historical live authentication
+failures or relax the production authentication deadline.
+
 ### Live TUI status projection mismatch
 
 The same signed `052f05d` PTY smoke check exposed a separate reproducible

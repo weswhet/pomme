@@ -135,6 +135,8 @@ final class PommeRecoveryRuntimeRootPort: PommeRecoveryRootPort, @unchecked Send
     private let coordinator: PommeAgentVSOCKCoordinator
     private let effects: PommeRecoveryRuntimeEffects
     private let authenticationTimeout: TimeInterval
+    private let authenticationNow: @Sendable () -> Date
+    private let authenticationSleep: @Sendable () async throws -> Void
     private let lock = NSLock()
     private var state: PommeRecoveryRuntimeState = .configured
 
@@ -142,13 +144,19 @@ final class PommeRecoveryRuntimeRootPort: PommeRecoveryRootPort, @unchecked Send
         configuration: PommeRecoveryRuntimeConfiguration,
         coordinator: PommeAgentVSOCKCoordinator,
         effects: PommeRecoveryRuntimeEffects,
-        authenticationTimeout: TimeInterval = Constants.defaultRecoveryAgentTimeout
+        authenticationTimeout: TimeInterval = Constants.defaultRecoveryAgentTimeout,
+        authenticationNow: @escaping @Sendable () -> Date = { Date() },
+        authenticationSleep: @escaping @Sendable () async throws -> Void = {
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
     ) throws {
         guard authenticationTimeout > 0 else { throw PommeRecoveryRuntimeError.listenerAuthenticationTimedOut }
         self.configuration = configuration
         self.coordinator = coordinator
         self.effects = effects
         self.authenticationTimeout = authenticationTimeout
+        self.authenticationNow = authenticationNow
+        self.authenticationSleep = authenticationSleep
     }
 
     func prepare(request: PommeRecoverySessionRequest) async throws -> PommeRecoveryRootEvidence {
@@ -247,15 +255,15 @@ final class PommeRecoveryRuntimeRootPort: PommeRecoveryRootPort, @unchecked Send
     }
 
     private func waitForAuthentication(role: PommeAgentVSOCKRole) async throws {
-        let deadline = Date().addingTimeInterval(authenticationTimeout)
-        while Date() < deadline {
+        let deadline = authenticationNow().addingTimeInterval(authenticationTimeout)
+        while authenticationNow() < deadline {
             guard effects.helperIsAlive() else { throw PommeRecoveryRuntimeError.helperExited }
             if coordinator.isAuthenticated(as: role) { return }
             if await coordinator.status().connection == .failed {
                 throw PommeRecoveryRuntimeError.listenerAuthenticationRejected
             }
             try Task.checkCancellation()
-            try await Task.sleep(nanoseconds: 25_000_000)
+            try await authenticationSleep()
         }
         guard effects.helperIsAlive() else { throw PommeRecoveryRuntimeError.helperExited }
         throw PommeRecoveryRuntimeError.listenerAuthenticationTimedOut
