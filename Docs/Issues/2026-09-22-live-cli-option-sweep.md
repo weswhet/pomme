@@ -446,6 +446,18 @@ booleans and whether existing consecutive marker captures differ. It will not
 add captures, record Terminal screenshots or OCR text, print markers or image
 digests, or alter configured input delays, attempt limits, and strict proof
 acceptance.
+
+The temporary diagnostic regressions first failed twice on the unchanged
+implementation (35 tests passed). The final focused foreground-execution and
+normal-agent suites passed all 38 functions, 44 executions, without failures
+or skips: `test_macos_2026-09-22T10-39-33-531Z_pid91073_63183827.xcresult`.
+Coverage uses the actual generated Aqua payload, rejects opt-in mismatches and
+private/malformed logging values, and proves that a signal-response exit frame
+does not convert a timeout into success. Total monotonic elapsed time includes
+unmeasured polling sleeps and processing; separate start, EOF, status, and
+signal timings measure the exchanges. Thrown transport failures can still
+return no timing envelope. This diagnostic candidate is committed before its
+signed Release build and fresh-owner live test; it is not a fix.
 Consecutive-frame equality can suggest an unchanged observation, not prove that
 the capture is stale. Diagnostic regression coverage and signed live validation
 will be recorded before claiming that this instrumentation is useful.
@@ -882,3 +894,39 @@ not an explanation of why the Aqua command reached its deadline. No process
 completion or timeout behavior has been changed. The diagnostic VM was
 gracefully stopped again and public status confirmed no helper before the
 unchanged supported SIP-disable resume began at 10:29:55Z.
+
+That unchanged resume passed owner completion and Setup Assistant completion.
+After reboot, console/desktop verification ran from 10:31:07Z until entry to
+Recovery at 10:31:14Z. Recovery marker proof passed on attempt 1 at 10:33:15Z.
+SIP disable then returned exit 0 with normal-boot, runtime-configuration,
+enforcement, and final-state verification all true; public status confirmed
+stopped with no helper. As in the earlier retained-VM run, this successful
+retry does not resolve the fresh-owner timeout. SIP enable began at 10:34:37Z
+to restore the original setting before further experiments.
+
+The next diagnostic candidate records only closed monotonic timing, poll-count,
+and process-state fields for the exact Aqua probe, with no guest output,
+command text, process identifiers, credentials, or extra guest requests. Its
+purpose is to distinguish a live child with responsive status polls from
+transport time consumption or a missing completion receipt. Public and
+security requests both use the helper's authenticated persistent guest-agent
+connection, so the public-command comparison does not independently test a
+different guest connection lifetime. No timeout increase, retry, weakened
+desktop proof, or claimed bug fix is included. All 21 local installer checks
+passed again before preparing this diagnostic build.
+
+SIP enable completed successfully after normal-boot verification at 10:38:15Z,
+returning `configuredDisabled=false` and all normal-boot, runtime,
+enforcement, and final-state verification fields true. Separate public status
+confirmed stopped with no helper. The retained test VM therefore has its
+original SIP-enabled/stopped state again; no credentials or immutable pins
+were replaced. Both directions used the unchanged signed `1f8c47e` baseline.
+
+The timing evidence must be interpreted conservatively: the pinned guest's
+`refreshStatus` treats non-EINTR `waitpid` errors like an unchanged running
+record. Consequently, even a positive spawn PID plus repeated fast
+`exited=false` replies would not distinguish a live child from an unreported
+wait error. Read-only review found no broad competing reaper in this repository;
+inherited SIGCHLD disposition remains an untested external possibility. This
+is a diagnostic limitation, not a diagnosed cause or reason to change proof
+acceptance.

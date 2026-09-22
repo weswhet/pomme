@@ -10,6 +10,46 @@ enum PommeForegroundExecution {
     typealias FrameHandler = @Sendable ([PommeAgentJobStreamFrame]) async throws -> Void
     static let maximumBufferedOutputBytes = 64 * 1024 // per output channel
 
+    // Temporary, closed diagnostics for the September 22 Aqua timeout investigation.
+    static let aquaDebugKey = "_pommeDebugAqua20260922"
+    static let aquaDebugNumbers = ["totalMicros", "startMicros", "eofMicros", "statusCount", "statusTotalMicros", "statusMaxMicros", "signalMicros"]
+    static let aquaDebugBooleans = ["validPositiveStartPID", "lastExited", "exitFrameBeforeSignal", "signalExitFrame"]
+
+    private static func isAquaDebugPayload(_ payload: [String: JSONValue]) -> Bool {
+        guard Set(payload.keys).isSubset(of: ["path", "arguments", "timeout", "detached"]),
+              payload["path"] == .string("/bin/sh"),
+              payload["detached"] == nil || payload["detached"] == .bool(false),
+              case .array(let arguments)? = payload["arguments"], arguments.count == 4,
+              arguments[0] == .string("-c"),
+              arguments[1] == .string("exec /bin/launchctl print \"gui/$1\" >/dev/null"),
+              arguments[2] == .string("pomme-aqua-proof"),
+              let uid = arguments[3].stringValue, !uid.isEmpty,
+              uid.utf8.allSatisfy({ (48...57).contains($0) }),
+              let number = UInt32(uid), number > 0, String(number) == uid
+        else { return false }
+        return true
+    }
+
+    private struct AquaTiming {
+        var values: [String: JSONValue] = ["statusCount": .integer(0), "statusTotalMicros": .integer(0), "statusMaxMicros": .integer(0)]
+        var statusCount: Int64 = 0
+        var statusTotal: Int64 = 0
+        var statusMax: Int64 = 0
+
+        mutating func record(_ field: String, since start: ContinuousClock.Instant) {
+            let duration = start.duration(to: ContinuousClock().now).components
+            let micros = max(0, duration.seconds * 1_000_000 + duration.attoseconds / 1_000_000_000_000)
+            if field == "status" {
+                statusCount += 1
+                statusTotal += micros
+                statusMax = max(statusMax, micros)
+                values["statusCount"] = .integer(statusCount)
+                values["statusTotalMicros"] = .integer(statusTotal)
+                values["statusMaxMicros"] = .integer(statusMax)
+            } else { values[field] = .integer(micros) }
+        }
+    }
+
     enum Error: Swift.Error, Equatable, LocalizedError {
         case detachedPayload, unsupportedPTY, invalidPayload, invalidTimeout
         case unrelatedJobFrame, invalidCompletion, deadlineReached
@@ -35,6 +75,7 @@ enum PommeForegroundExecution {
         onFrames: FrameHandler? = nil
     ) async throws -> PommeAgentCorrelatedResult {
         guard var startPayload = payload.objectValue else { throw Error.invalidPayload }
+        var aquaTiming: AquaTiming? = isAquaDebugPayload(startPayload) ? AquaTiming() : nil
         guard startPayload["detached"] != .bool(true) else { throw Error.detachedPayload }
         guard startPayload["pty"] != .bool(true) else { throw Error.unsupportedPTY }
         guard timeout.isFinite, timeout > 0, timeout <= 300 else { throw Error.invalidTimeout }
@@ -46,16 +87,22 @@ enum PommeForegroundExecution {
         startPayload.removeValue(forKey: "attachStdin")
 
         let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(timeout))
+        let executionStart = clock.now
+        let deadline = executionStart.advanced(by: .seconds(timeout))
         try Task.checkCancellation()
         // This request is sent exactly once. If its outcome is uncertain there
         // is no safe job identity to retry, signal, or replace.
+        let startTime = clock.now
         let started = try await perform("process.start", .object(startPayload))
+        aquaTiming?.record("startMicros", since: startTime)
         guard let initial = started.result.objectValue,
               let text = initial["jobID"]?.stringValue, let jobID = UUID(uuidString: text)
         else { throw Error.invalidCompletion }
         var state = OutputState(jobID: jobID)
         var terminal = initial
+        if case .integer(let pid)? = initial["pid"] {
+            aquaTiming?.values["validPositiveStartPID"] = .bool(pid > 0)
+        } else { aquaTiming?.values["validPositiveStartPID"] = .bool(false) }
 
         do {
             try await state.accept(started.streamFrames, onFrames: onFrames)
@@ -68,19 +115,34 @@ enum PommeForegroundExecution {
                 offset = end
             }
             try checkpoint(clock: clock, deadline: deadline)
-            try await state.accept(try await sendStream(jobID, .eof, nil), onFrames: onFrames)
+            let eofFrames: [PommeAgentJobStreamFrame]
+            do {
+                let start = clock.now
+                defer { aquaTiming?.record("eofMicros", since: start) }
+                eofFrames = try await sendStream(jobID, .eof, nil)
+            }
+            try await state.accept(eofFrames, onFrames: onFrames)
 
             while true {
                 try checkpoint(clock: clock, deadline: deadline)
-                let status = try await perform("process.status", .object(["jobID": .string(jobID.uuidString.lowercased())]))
+                let status: PommeAgentCorrelatedResult
+                do {
+                    let start = clock.now
+                    defer { aquaTiming?.record("status", since: start) }
+                    status = try await perform("process.status", .object(["jobID": .string(jobID.uuidString.lowercased())]))
+                }
                 guard let values = status.result.objectValue,
                       let id = values["jobID"]?.stringValue, UUID(uuidString: id) == jobID,
                       case .bool = values["exited"]
                 else { throw Error.invalidCompletion }
                 terminal = initial.merging(values) { _, current in current }
+                aquaTiming?.values["lastExited"] = values["exited"]
                 try await state.accept(status.streamFrames, onFrames: onFrames)
                 if terminal["exited"] == .bool(true), state.receivedExit {
                     try validateTerminal(terminal)
+                    aquaTiming?.values["exitFrameBeforeSignal"] = .bool(state.receivedExit)
+                    aquaTiming?.record("totalMicros", since: executionStart)
+                    if let aquaTiming { terminal[aquaDebugKey] = .object(aquaTiming.values) }
                     return state.result(requestID: started.requestID, terminal: terminal)
                 }
                 try await Task.sleep(for: min(.milliseconds(25), clock.now.duration(to: deadline)))
@@ -89,16 +151,24 @@ enum PommeForegroundExecution {
             // No automatic replay, replacement process, or reboot. A failed
             // signal is retained as uncertainty, not treated as cleanup proof.
             let signalled: Bool
+            aquaTiming?.values["exitFrameBeforeSignal"] = .bool(state.receivedExit)
             do {
-                _ = try await perform("process.signal", .object([
+                let start = clock.now
+                defer { aquaTiming?.record("signalMicros", since: start) }
+                let signalResponse = try await perform("process.signal", .object([
                     "jobID": .string(jobID.uuidString.lowercased()), "signal": .integer(Int64(SIGTERM))
                 ]))
+                aquaTiming?.values["signalExitFrame"] = .bool(signalResponse.streamFrames.contains {
+                    $0.jobID == jobID && $0.frame.stream == .exit
+                })
                 signalled = true
             } catch { signalled = false }
             if error is CancellationError || (error as? Error) == .deadlineReached {
                 terminal["timedOut"] = .bool(!(error is CancellationError))
                 terminal["cancelled"] = .bool(error is CancellationError)
                 terminal["terminationRequested"] = .bool(signalled)
+                aquaTiming?.record("totalMicros", since: executionStart)
+                if let aquaTiming { terminal[aquaDebugKey] = .object(aquaTiming.values) }
                 return state.result(requestID: started.requestID, terminal: terminal)
             }
             throw error
