@@ -279,8 +279,10 @@ struct RecoveryUIObservation: Sendable {
   }
 
   private static func isShellPromptLine(_ text: String) -> Bool {
+    // Vision can render the prompt's leading hyphen as U+2014. Accept only
+    // that observed alternative in the same anchored prefix position.
     normalize(text).range(
-      of: #"^(?:-?(?:ba|z)?sh(?:-[0-9.]+)?|sh-)[[:space:]]*[#$][[:space:]]*[|]?[[:space:]]*$"#,
+      of: #"^(?:[-—]?(?:ba|z)?sh(?:-[0-9.]+)?|sh-)[[:space:]]*[#$][[:space:]]*[|]?[[:space:]]*$"#,
       options: .regularExpression
     ) != nil
   }

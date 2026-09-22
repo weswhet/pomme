@@ -4,6 +4,38 @@ import Testing
 
 @Suite("Pomme Recovery Terminal OCR")
 struct PommeRecoveryTerminalRecognitionTests {
+    @Test("an observed leading em dash in the fresh shell prompt preserves strict marker proof")
+    func observedLeadingEmDashPrompt() {
+        let proof = promptProof(prompt: "—bash-3.2#")
+        #expect(proof.terminalWindow)
+        #expect(proof.exactMarker)
+        #expect(proof.freshPromptAfterMarker)
+        #expect(proof.isVerified)
+    }
+
+    @Test("em dash support does not permit arbitrary prompt text or weaken marker ordering")
+    func emDashPromptRemainsBounded() {
+        for prompt in ["—", "——bash-3.2#", "prefix—bash-3.2#", "— bash-3.2#",
+                       "—bash—3.2#", "—bash-3.2", "—bash-3.2# printf 'POMME TEST OK'",
+                       "echo —bash-3.2#", "–bash-3.2#"] {
+            #expect(promptProof(prompt: prompt).isVerified == false)
+        }
+        #expect(promptProof(prompt: "—bash-3.2#", promptBelow: false).isVerified == false)
+        #expect(promptProof(prompt: "—bash-3.2#", markerOutput: "POMME WRONG OK").isVerified == false)
+        #expect(promptProof(prompt: "—bash-3.2#", markerOutput: "printf 'POMME TEST OK'").isVerified == false)
+        #expect(promptProof(prompt: "-bash-3.2#").isVerified)
+        #expect(promptProof(prompt: "-bash-3.2$").isVerified)
+    }
+
+    private func promptProof(prompt: String, promptBelow: Bool = true,
+                             markerOutput: String = "POMME TEST OK") -> RecoveryTerminalMarkerProofDiagnostic {
+        RecoveryUIObservation(lines: [
+            .init(text: "Terminal", confidence: 1, rect: .init(x: 24, y: 18, width: 100, height: 18)),
+            .init(text: markerOutput, confidence: 1, rect: .init(x: 24, y: 100, width: 200, height: 18)),
+            .init(text: prompt, confidence: 1, rect: .init(x: 24, y: promptBelow ? 130 : 70, width: 200, height: 18)),
+        ]).terminalMarkerProofDiagnostic("POMME TEST OK")
+    }
+
     @Test("capability command echo is a whitespace-tolerant diagnostic, never proof")
     func capabilityEchoDoesNotAuthorize() {
         let observation = diagnosticObservation([
