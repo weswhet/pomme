@@ -19,6 +19,7 @@ observations are recorded below; historical rows retain their original status.
 | Retained SIP private-PTY / pinned-authentication failures | Open historical observations; a fresh original-`ffc41a7` SIP disable/enable cycle passed without producing the failed transaction needed to test that resume sequence. |
 | TUI status projection / boot-mode warning | Fixed in `3fb1ccb`; canonical state/agent regression tests and live running, paused, resumed, and stopped display comparisons passed. Boot-mode warning cancellation preserved both running and paused sessions. |
 | Integrated test-suite concurrency hang | Test-peer thread isolation in `0291f65` removes the observed hang in the focused stress run and subsequent full parallel comparisons. Signed Release and live execution/timeout smoke checks passed. Reconnect fixture admission now has a red/green delayed-start regression, passing repeated parallel comparison, and a 1,166-function full pass; other stress-run timeout failures keep full-suite reliability open. |
+| Private-PTY logical test timing | Captured a 25 ms poll resuming after 2.36 seconds in a scripted test. Injected-clock regressions now verify prompt/process deadlines and cleanup without parallel scheduling determining logical time; production retains `ContinuousClock`. Focused/repeated checks and a 1,168-function full run passed; live verification is pending. |
 
 This is an observational live test. The CLI and guest images are not being
 modified during the sweep. Every failure, timeout, unexpected state, and
@@ -2427,6 +2428,123 @@ drive. No VM was deleted or moved; no guest agent, pin, credential, journal,
 or security configuration was changed. This is release compatibility and
 live execution/cleanup verification, not a live reproduction of the host
 test-fixture admission race.
+
+### Private-PTY initial-prompt timeout under parallel test load
+
+After completing the `db8b69a` signed release/live verification and committing
+its evidence as `4aa37ad`, the next isolated issue is
+`PommePrivatePTYRunnerTests.initialPromptGatesPrivateInput` returning
+`processTimedOut` in full parallel comparisons. All twelve internal VMs remain
+stopped; these comparisons use the isolated Debug test environment, not a VM.
+
+The unchanged test passed all 30 isolated invocations, result
+`test_macos_2026-09-22T19-08-53-082Z_pid97979_3f6760c3.xcresult`.
+A complementary 799-function selection (the full suite minus the earlier
+368-function selection, with this prompt test added back) also passed all
+three prompt invocations; its separate coordinator-pin failure remains
+recorded in `test_macos_2026-09-22T19-09-19-955Z_pid98302_d700e775.xcresult`.
+Adding the six earlier stress suites reproduced the exact prompt timeout once
+across three repetitions, with the other 836 functions passing in 18.2 seconds:
+`test_macos_2026-09-22T19-09-43-519Z_pid98537_da1c08fe.xcresult`.
+No runner, test deadline, or fixture behavior has been changed; minimization
+and phase diagnosis continue before selecting a fix.
+
+Splitting the complementary suites into two halves, each retaining the same
+six stress suites and prompt test, passed all 473 and 403 functions across
+three repetitions respectively:
+`test_macos_2026-09-22T19-10-18-088Z_pid98840_2e728e6f.xcresult` and
+`test_macos_2026-09-22T19-10-58-642Z_pid99058_160fad28.xcresult`.
+These passes narrow the observed trigger to combined load; they do not prove
+that any individual suite causes it. The failing prompt test uses a scripted
+actor transport and no real guest or OS PTY, so the test failure is not itself
+a reproduction of the historical live private-PTY failure.
+
+Removing OCR still reproduced the prompt timeout in the 828-function selection
+(`test_macos_2026-09-22T19-11-25-379Z_pid99269_255dda6b.xcresult`). Retaining
+only the daemon suite from the six stress suites also reproduced it in an
+811-function selection in 12.8 seconds
+(`test_macos_2026-09-22T19-12-21-469Z_pid99554_1b485d13.xcresult`). Both runs
+also recorded the separate coordinator-pin failure. Ranked phase hypotheses
+are callback/actor scheduling consuming the process budget, delayed resumption
+of the 25 ms poll sleep, and incorrect scripted status progression. Temporary
+test-local timestamps around validation, start/status, frame callbacks, and
+input delivery are the next discriminator; no secret, frame content, payload,
+or identity is logged. The production runner's two deadlines begin after the
+start response, and no injectable clock/sleeper currently exists.
+
+The first instrumented comparison did not reproduce the prompt failure
+(`test_macos_2026-09-22T19-14-01-792Z_pid99987_43b7922e.xcresult`); the
+unchanged next comparison did, in 12.8 seconds, with 810 other functions
+passing (`test_macos_2026-09-22T19-14-49-770Z_pid384_e33bdde2.xcresult`).
+Its redacted phase trace shows validation, start, initial prompt callback,
+input delivery, and the first nonterminal status/callback all completed by
+0.388 ms. The next event is timeout cleanup at 2,364.793 ms. Cleanup signals
+the scripted job, retrieves its second/terminal status, and rethrows
+`processTimedOut` at 2,364.818 ms. The intervening runner operation is its
+25 ms poll sleep; late resumption crosses the two-second process deadline.
+There is no slow initial actor callback or incorrect status ordering in this
+failure. The runner correctly enforces elapsed time; the logical prompt-order
+test is coupled to wall-clock scheduling of unrelated parallel tests.
+
+The bounded next change introduces a controllable clock for unit verification,
+with production continuing to use `ContinuousClock` and its existing timeout
+values, checkpoints, cleanup clock, and secret-handling rules. The test keeps
+the same scripted status progression and assertions. A deterministic advanced-
+clock timeout regression will be run red before clock wiring; no blanket
+deadline extension or new test serialization is planned.
+
+The compilable red scaffold accepted but deliberately ignored an injected
+clock, forwarding to the unchanged runner. Both selected regressions failed
+as intended in `test_macos_2026-09-22T19-18-41-528Z_pid1229_a04367f4.xcresult`:
+the logical prompt-order test observed zero injected sleeps, and advancing the
+test clock beyond the two-second process budget incorrectly returned success
+without the expected SIGTERM cleanup. These are assertion failures after
+successful compilation, not compiler failures. Temporary phase tracing has
+been removed. Clock wiring is the subsequent candidate change.
+
+After wiring, both existing runner entry points explicitly delegate to
+`ContinuousClock`. Internal generic overloads drive only prompt/process
+deadline creation, checkpoints, and the bounded 25 ms poll sleep. Validation,
+prompt/echo proof, secret delivery/wiping, correlation, cancellation mapping,
+and real-clock cleanup are unchanged. A second injected-clock regression
+advances past the prompt deadline but not the process deadline and requires
+`promptTimedOut`, no stdin delivery, and verified SIGTERM cleanup. The existing
+real-clock prompt-timeout and cancellation tests remain unchanged.
+
+The complete private-PTY suite passed all 17 functions / 170 invocations over
+ten repetitions, result
+`test_macos_2026-09-22T19-21-07-604Z_pid1846_eb9da0a7.xcresult`.
+Read-only review found no blocking clock, validation-order, secret-handling,
+or cleanup change. This makes logical test time controllable; it does not
+claim to fix the historical live private-PTY failure or global pool starvation.
+
+The original 811-function comparison then passed all three prompt invocations;
+the overall run still failed only the separately recorded coordinator-pin test
+(810 passing functions), result
+`test_macos_2026-09-22T19-22-27-153Z_pid2136_c688e66e.xcresult`.
+The first prompt invocation took 1.989 seconds of wall time but its logical
+clock remained governed by the scripted polling steps.
+
+In the unrestricted three-iteration comparison, all private-PTY functions and
+clock regressions passed, including a 5.342-second wall-time first prompt
+invocation. Result:
+`test_macos_2026-09-22T19-23-01-515Z_pid2406_ea10f3a0.xcresult`.
+The run still failed overall (1,164 passing / four failing functions;
+4,764 passing / six failing invocations): coordinator-pin availability,
+foreground delayed completion, and the daemon admission/one-shot deadlines
+remain separate failures. They are not hidden by the clock change.
+
+An unchanged unrestricted single-iteration comparison passed all 1,168
+functions in 12.5 seconds, result
+`test_macos_2026-09-22T19-23-54-170Z_pid2744_f6d73de0.xcresult`.
+The candidate is ready for commit, canonical signed Release build, and live
+private-PTY verification. The planned target is the completed internal-drive
+macOS 26 fixture `pomme-agent-bootstrap26-20260922a`, verified stopped with
+40 GB disk / 4 GB memory and an existing terminal `sipEnable` journal
+(`restorationComplete`, normal-boot verification true). A public SIP disable /
+enable cycle exercises existing-owner authentication through the production
+private-PTY provider path and restores SIP enabled and the stopped run state.
+No owner, credential, pin, or journal is manually replaced to prepare the test.
 
 ### Live TUI status projection mismatch
 

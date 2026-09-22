@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Synchronization
 import Testing
 
 @Suite("Pomme private PTY runner", .serialized)
@@ -30,7 +31,7 @@ struct PommePrivatePTYRunnerTests: Sendable {
         )
         let collector = FrameCollector()
         let validation = ValidationRecorder()
-
+        let clock = AdvancingPrivatePTYClock()
         let result = try await PommePrivatePTYRunner.run(
             command: .sysadminctlSecureTokenOn(owner: "owner"),
             secret: "pw",
@@ -47,11 +48,13 @@ struct PommePrivatePTYRunnerTests: Sendable {
                     await validation.mark()
                 }
             ),
+            clock: clock,
             onFrames: { values in
                 await collector.append(values)
             }
         )
 
+        #expect(clock.sleepCount == 1)
         #expect(await validation.wasCalled)
         #expect(result.result.objectValue?["promptSatisfied"] == .bool(true))
         #expect(result.result.objectValue?["exited"] == .bool(true))
@@ -65,6 +68,66 @@ struct PommePrivatePTYRunnerTests: Sendable {
         #expect(payload?.objectValue?["stdinDataBase64"] == nil)
         let encoded = try JSONEncoder().encode(payload)
         #expect(String(decoding: encoded, as: UTF8.self).contains("pw") == false)
+    }
+
+    @Test("poll clock advancing beyond the process budget triggers verified cleanup")
+    func injectedPollClockEnforcesProcessDeadline() async throws {
+        let terminal = PommeAgentCorrelatedResult(
+            requestID: UUID(), result: status(exited: true, exitCode: 0),
+            streamFrames: [frame(stream: .exit)]
+        )
+        let transport = PrivatePTYTransport(
+            start: .init(
+                requestID: startRequestID, result: started(),
+                streamFrames: [frame(stream: .stdout, data: Data("Password:".utf8))]
+            ),
+            statuses: [
+                .init(requestID: UUID(), result: status(exited: false), streamFrames: []),
+                terminal
+            ]
+        )
+        await transport.setCleanupResult(terminal)
+        let clock = AdvancingPrivatePTYClock(extraAdvance: .seconds(3))
+        do {
+            _ = try await PommePrivatePTYRunner.run(
+                command: .sysadminctlSecureTokenOn(owner: "owner"), secret: "pw",
+                promptTimeout: 1, processTimeout: 2,
+                transport: transport.transport(), clock: clock
+            )
+            Issue.record("Expected the injected poll clock to exhaust the process budget")
+        } catch let error as PommePrivatePTYRunner.Error {
+            #expect(error == .processTimedOut)
+        }
+        #expect(clock.sleepCount == 1)
+        #expect(await transport.streamCalls.map(\.stream) == [.stdin, .signal])
+        #expect(await transport.streamCalls.last?.signal == SIGTERM)
+    }
+
+    @Test("poll clock advancing beyond the prompt budget never sends private input")
+    func injectedPollClockEnforcesPromptDeadline() async throws {
+        let terminal = PommeAgentCorrelatedResult(
+            requestID: UUID(), result: status(exited: true, exitCode: 0),
+            streamFrames: [frame(stream: .exit)]
+        )
+        let transport = PrivatePTYTransport(
+            start: .init(requestID: startRequestID, result: started(), streamFrames: []),
+            statuses: [.init(requestID: UUID(), result: status(exited: false), streamFrames: [])]
+        )
+        await transport.setCleanupResult(terminal)
+        let clock = AdvancingPrivatePTYClock(extraAdvance: .milliseconds(1_100))
+        do {
+            _ = try await PommePrivatePTYRunner.run(
+                command: .sysadminctlSecureTokenOn(owner: "owner"), secret: "pw",
+                promptTimeout: 1, processTimeout: 2,
+                transport: transport.transport(), clock: clock
+            )
+            Issue.record("Expected the injected poll clock to exhaust the prompt budget")
+        } catch let error as PommePrivatePTYRunner.Error {
+            #expect(error == .promptTimedOut)
+        }
+        #expect(clock.sleepCount == 1)
+        #expect(await transport.streamCalls.map(\.stream) == [.signal])
+        #expect(await transport.streamCalls.last?.signal == SIGTERM)
     }
 
     @Test("constructs a closed Setup Assistant asuser autologin command")
@@ -767,4 +830,26 @@ private actor PrivatePTYTransport {
     func setInputResult(_ frames: [PommeAgentJobStreamFrame]) { inputResult = frames }
     func setCleanupResult(_ result: PommeAgentCorrelatedResult) { cleanupResult = result }
     func setIgnoreTerm(_ value: Bool) { ignoreTerm = value }
+}
+
+private final class AdvancingPrivatePTYClock: Clock, Sendable {
+    typealias Instant = ContinuousClock.Instant
+    typealias Duration = Swift.Duration
+    private let state = Mutex((instant: ContinuousClock.now, sleeps: 0))
+    private let extraAdvance: Duration
+
+    init(extraAdvance: Duration = .zero) { self.extraAdvance = extraAdvance }
+    var now: Instant { state.withLock { $0.instant } }
+    var minimumResolution: Duration { .nanoseconds(1) }
+    var sleepCount: Int { state.withLock { $0.sleeps } }
+
+    func sleep(until deadline: Instant, tolerance: Duration?) async throws {
+        try Task.checkCancellation()
+        state.withLock {
+            $0.instant = max($0.instant, deadline).advanced(by: extraAdvance)
+            $0.sleeps += 1
+        }
+        await Task.yield()
+        try Task.checkCancellation()
+    }
 }

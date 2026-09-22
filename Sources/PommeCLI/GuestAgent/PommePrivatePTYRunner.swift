@@ -341,16 +341,34 @@ enum PommePrivatePTYRunner {
         transport: Transport,
         onFrames: FrameHandler? = nil
     ) async throws -> PommeAgentCorrelatedResult {
-        try validate(command: command, prompt: prompt, promptTimeout: promptTimeout, processTimeout: processTimeout)
-        try validateSecret(secret, command: command, prompt: prompt)
-        return try await run(
+        try await run(
             command: command,
-            secretProvider: { secret },
+            secret: secret,
             prompt: prompt,
             promptTimeout: promptTimeout,
             processTimeout: processTimeout,
             transport: transport,
+            clock: ContinuousClock(),
             onFrames: onFrames
+        )
+    }
+
+    static func run<C: Clock>(
+        command: Command,
+        secret: String,
+        prompt: Prompt = .sysadminctlPassword,
+        promptTimeout: TimeInterval = defaultPromptTimeout,
+        processTimeout: TimeInterval = defaultProcessTimeout,
+        transport: Transport,
+        clock: C,
+        onFrames: FrameHandler? = nil
+    ) async throws -> PommeAgentCorrelatedResult where C.Duration == Duration {
+        try validate(command: command, prompt: prompt, promptTimeout: promptTimeout, processTimeout: processTimeout)
+        try validateSecret(secret, command: command, prompt: prompt)
+        return try await run(
+            command: command, secretProvider: { secret }, prompt: prompt,
+            promptTimeout: promptTimeout, processTimeout: processTimeout,
+            transport: transport, clock: clock, onFrames: onFrames
         )
     }
 
@@ -367,6 +385,23 @@ enum PommePrivatePTYRunner {
         transport: Transport,
         onFrames: FrameHandler? = nil
     ) async throws -> PommeAgentCorrelatedResult {
+        try await run(
+            command: command, secretProvider: secretProvider, prompt: prompt,
+            promptTimeout: promptTimeout, processTimeout: processTimeout,
+            transport: transport, clock: ContinuousClock(), onFrames: onFrames
+        )
+    }
+
+    static func run<C: Clock>(
+        command: Command,
+        secretProvider: @escaping SecretProvider,
+        prompt: Prompt = .sysadminctlPassword,
+        promptTimeout: TimeInterval = defaultPromptTimeout,
+        processTimeout: TimeInterval = defaultProcessTimeout,
+        transport: Transport,
+        clock: C,
+        onFrames: FrameHandler? = nil
+    ) async throws -> PommeAgentCorrelatedResult where C.Duration == Duration {
         try validate(command: command, prompt: prompt, promptTimeout: promptTimeout, processTimeout: processTimeout)
         let maximumPromptCount = command.maximumPromptCount(for: prompt)
         if command.autologinOwner != nil,
@@ -406,7 +441,6 @@ enum PommePrivatePTYRunner {
             throw Error.invalidCompletion
         }
 
-        let clock = ContinuousClock()
         let promptDeadline = clock.now.advanced(by: .seconds(promptTimeout))
         let processDeadline = clock.now.advanced(by: .seconds(processTimeout))
         var state = OutputState(
@@ -705,19 +739,19 @@ enum PommePrivatePTYRunner {
         return .transportFailure
     }
 
-    private static func checkpoint(
-        clock: ContinuousClock,
-        deadline: ContinuousClock.Instant,
+    private static func checkpoint<C: Clock>(
+        clock: C,
+        deadline: C.Instant,
         timeoutError: Error
     ) throws {
         try Task.checkCancellation()
         guard clock.now < deadline else { throw timeoutError }
     }
 
-    private static func sleepUntilNextPoll(clock: ContinuousClock, deadline: ContinuousClock.Instant) async throws {
+    private static func sleepUntilNextPoll<C: Clock>(clock: C, deadline: C.Instant) async throws where C.Duration == Duration {
         let remaining = clock.now.duration(to: deadline)
         guard remaining > .zero else { return }
-        try await Task.sleep(for: min(.milliseconds(25), remaining))
+        try await clock.sleep(for: min(.milliseconds(25), remaining))
     }
 
     private static func validateTerminal(_ values: [String: JSONValue]) throws {
