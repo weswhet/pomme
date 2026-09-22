@@ -10,12 +10,18 @@ struct PommeSecurityNormalAgentTests {
       "result": ["_pommeDebugAqua20260922": [
         "totalMicros": 456, "startMicros": 123, "eofMicros": secret, "statusCount": -1,
         "statusTotalMicros": true, "lastExited": false, "signalExitFrame": secret,
-        "validPositiveStartPID": true, "arbitrary": secret
+        "validPositiveStartPID": true, "arbitrary": secret,
+        "waitRunningCount": 72, "waitNoChildCount": 0,
+        "waitLastOutcome": 99, "waitOtherErrorCount": secret
       ]]
     ]))
     #expect(summary.hasPrefix("[DEBUG-aqua-20260922] "))
     #expect(summary.contains("startMicros=123"))
     #expect(summary.contains("totalMicros=456"))
+    #expect(summary.contains("waitRunningCount=72"))
+    #expect(summary.contains("waitNoChildCount=0"))
+    #expect(summary.contains("waitLastOutcome=unknown"))
+    #expect(summary.contains("waitOtherErrorCount=unknown"))
     #expect(summary.contains("eofMicros=unknown"))
     #expect(summary.contains("statusCount=unknown"))
     #expect(summary.contains("statusTotalMicros=unknown"))

@@ -12,10 +12,10 @@ enum PommeForegroundExecution {
 
     // Temporary, closed diagnostics for the September 22 Aqua timeout investigation.
     static let aquaDebugKey = "_pommeDebugAqua20260922"
-    static let aquaDebugNumbers = ["totalMicros", "startMicros", "eofMicros", "statusCount", "statusTotalMicros", "statusMaxMicros", "signalMicros"]
+    static let aquaDebugNumbers = ["totalMicros", "startMicros", "eofMicros", "statusCount", "statusTotalMicros", "statusMaxMicros", "signalMicros"] + PommeAquaWaitDebug.fields
     static let aquaDebugBooleans = ["validPositiveStartPID", "lastExited", "exitFrameBeforeSignal", "signalExitFrame"]
 
-    private static func isAquaDebugPayload(_ payload: [String: JSONValue]) -> Bool {
+    static func isAquaDebugPayload(_ payload: [String: JSONValue]) -> Bool {
         guard Set(payload.keys).isSubset(of: ["path", "arguments", "timeout", "detached"]),
               payload["path"] == .string("/bin/sh"),
               payload["detached"] == nil || payload["detached"] == .bool(false),
@@ -35,6 +35,19 @@ enum PommeForegroundExecution {
         var statusCount: Int64 = 0
         var statusTotal: Int64 = 0
         var statusMax: Int64 = 0
+
+        mutating func recordWaitSnapshot(_ terminal: [String: JSONValue]) {
+            // Replace cumulative counters; never sum snapshots or retain stale
+            // fields when an old guest supplies no diagnostic metadata.
+            for field in PommeAquaWaitDebug.fields { values.removeValue(forKey: field) }
+            guard let snapshot = terminal[PommeAquaWaitDebug.key]?.objectValue else { return }
+            for field in PommeAquaWaitDebug.fields {
+                guard case .integer(let number)? = snapshot[field], number >= 0,
+                      field != "waitLastOutcome" || PommeAquaWaitDebug.Outcome(rawValue: number) != nil
+                else { continue }
+                values[field] = .integer(number)
+            }
+        }
 
         mutating func record(_ field: String, since start: ContinuousClock.Instant) {
             let duration = start.duration(to: ContinuousClock().now).components
@@ -137,6 +150,7 @@ enum PommeForegroundExecution {
                 else { throw Error.invalidCompletion }
                 terminal = initial.merging(values) { _, current in current }
                 aquaTiming?.values["lastExited"] = values["exited"]
+                aquaTiming?.recordWaitSnapshot(values)
                 try await state.accept(status.streamFrames, onFrames: onFrames)
                 if terminal["exited"] == .bool(true), state.receivedExit {
                     try validateTerminal(terminal)

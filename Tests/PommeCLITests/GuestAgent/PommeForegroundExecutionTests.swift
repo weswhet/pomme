@@ -72,6 +72,36 @@ struct PommeForegroundExecutionTests {
         #expect(total >= 0)
     }
 
+    @Test("Temporary Aqua wait snapshot is closed and optional for old guests", arguments: ["valid", "absent", "malformed"])
+    func temporaryAquaWaitSnapshot(variant: String) async throws {
+        var completed = try #require(status(exited: true, exitCode: 0).objectValue)
+        if variant != "absent" {
+            completed["_pommeDebugAquaWait20260922"] = .object([
+                "waitRunningCount": variant == "valid" ? .integer(2) : .string("private-path"),
+                "waitReapedCount": .integer(1), "waitInterruptedCount": .integer(3),
+                "waitNoChildCount": .integer(0), "waitOtherErrorCount": .integer(0),
+                "waitLastOutcome": variant == "valid" ? .integer(1) : .integer(99),
+                "secret": .string("private-path")
+            ])
+        }
+        let transport = ForegroundTransport(
+            start: correlated(requestID: startRequestID, result: started(), frames: []),
+            statuses: [correlated(requestID: UUID(), result: .object(completed), frames: [frame(jobID: jobID, stream: .exit)])]
+        )
+        let result = try await run(payload: aquaPayload(), transport: transport)
+        let diagnostic = try #require(result.result.objectValue?["_pommeDebugAqua20260922"]?.objectValue)
+        #expect(result.result.objectValue?["outputComplete"] == .bool(true))
+        #expect(diagnostic["secret"] == nil)
+        if variant == "valid" {
+            #expect(diagnostic["waitRunningCount"] == .integer(2))
+            #expect(diagnostic["waitInterruptedCount"] == .integer(3))
+            #expect(diagnostic["waitLastOutcome"] == .integer(1))
+        } else {
+            #expect(diagnostic["waitRunningCount"] == nil)
+            #expect(diagnostic["waitLastOutcome"] == nil)
+        }
+    }
+
     @Test("polls until output is complete and retains stderr and exit status")
     func delayedOutputAndCompletion() async throws {
         // Given
