@@ -104,7 +104,7 @@ extension PommeRecoveryProfileSelector {
     /// identity or a planner-qualified experimental identity. Experimental
     /// evidence remains bounded by the same locale, geometry, private ABI,
     /// ownership, descriptor, and manifest checks as reviewed input; only the
-    /// exact live-qualified identity opts into the direct Terminal trace.
+    /// exact observed identities opt into their bounded experimental traces.
     static func inputForAttempt(
         for evidence: PommeRecoveryProfileEvidence
     ) throws -> PommeTahoeReviewedInput {
@@ -143,6 +143,8 @@ extension PommeRecoveryProfileSelector {
         let route: PommeRecoveryNavigationRoute
         if descriptor.version == "26.6.2", descriptor.build == "25G83" {
             route = .directTerminal
+        } else if descriptor.version == "27.0.0", descriptor.build == "26A428" {
+            route = .experimentalLanguageActivation
         } else if descriptor.version == "15.6.1", descriptor.build == "24G90" {
             // This remains an experimental identity. Its alternate Options
             // transition is not a reviewed-record extension.
@@ -157,6 +159,7 @@ extension PommeRecoveryProfileSelector {
 /// Closed observer labels: no OCR output or pixels escape the observer.
 enum PommeRecoveryFrame: Equatable, Sendable {
     case startupOptions, startupIntermediate, startupOptionsActivated, languageEnglish
+    case languageEnglishInactive, languageEnglishActive
     case recoveryUtilities, applicationMenu, recoveryMenu, fileMenu, editMenu
     case utilitiesMenu, terminalMenuItem, terminal, unknown
 }
@@ -165,16 +168,30 @@ enum PommeRecoveryVirtualKey: Equatable, Sendable {
     case controlF2, right, down, `return`, shiftCommandT
 }
 
+/// Closed navigation effects. The activation click has one fixed guest-display
+/// point, qualified only for the experimental 27.0/26A428 LanguageChooser.
+/// This is deliberately not a general pointer or host-focus interface.
+enum PommeRecoveryNavigationInput: Equatable, Sendable {
+    case key(PommeRecoveryVirtualKey)
+    case activateLanguageChooser
+
+    var key: PommeRecoveryVirtualKey? {
+        guard case .key(let key) = self else { return nil }
+        return key
+    }
+}
+
 /// One immutable, closed Recovery navigation transition. The input contract
 /// validates the observed frames around every event before and after delivery.
 struct PommeRecoveryNavigationEvent: Equatable, Sendable {
     let preEventFrame: PommeRecoveryFrame
-    let key: PommeRecoveryVirtualKey
+    let input: PommeRecoveryNavigationInput
+    var key: PommeRecoveryVirtualKey? { input.key }
     let postEventFrame: PommeRecoveryFrame
     /// A bounded experimental branch that is accepted only after the same
     /// two-frame post-input observation as the primary transition. The
     /// optional next index skips the recorded language chooser; it never
-    /// authorizes an additional key.
+    /// authorizes an additional input.
     let alternatePostEventFrame: PommeRecoveryFrame?
     let alternateNextEventIndex: Int?
 
@@ -185,8 +202,20 @@ struct PommeRecoveryNavigationEvent: Equatable, Sendable {
         alternatePostEventFrame: PommeRecoveryFrame? = nil,
         alternateNextEventIndex: Int? = nil
     ) {
+        self.init(preEventFrame: preEventFrame, input: .key(key), postEventFrame: postEventFrame,
+                  alternatePostEventFrame: alternatePostEventFrame,
+                  alternateNextEventIndex: alternateNextEventIndex)
+    }
+
+    init(
+        preEventFrame: PommeRecoveryFrame,
+        input: PommeRecoveryNavigationInput,
+        postEventFrame: PommeRecoveryFrame,
+        alternatePostEventFrame: PommeRecoveryFrame? = nil,
+        alternateNextEventIndex: Int? = nil
+    ) {
         self.preEventFrame = preEventFrame
-        self.key = key
+        self.input = input
         self.postEventFrame = postEventFrame
         self.alternatePostEventFrame = alternatePostEventFrame
         self.alternateNextEventIndex = alternateNextEventIndex
@@ -215,11 +244,24 @@ enum PommeRecoveryNavigationRoute: Equatable, Sendable {
     /// a language chooser. The branch is proved by two stable utilities
     /// observations and skips the otherwise required Return.
     case experimentalMenusOptionalLanguage
+    case experimentalLanguageActivation
 
     /// The complete immutable trace for this route. Every event has exactly
-    /// one key and the closed frame labels required around that key.
+    /// one closed input and the frame labels required around that input.
     var eventTrace: [PommeRecoveryNavigationEvent] {
         switch self {
+        case .experimentalLanguageActivation:
+            return [
+                .init(preEventFrame: .startupOptions, key: .right, postEventFrame: .startupIntermediate),
+                .init(preEventFrame: .startupIntermediate, key: .right, postEventFrame: .startupOptionsActivated),
+                .init(preEventFrame: .startupOptionsActivated, key: .return,
+                      postEventFrame: .languageEnglishInactive,
+                      alternatePostEventFrame: .languageEnglishActive, alternateNextEventIndex: 4),
+                .init(preEventFrame: .languageEnglishInactive, input: .activateLanguageChooser,
+                      postEventFrame: .languageEnglishActive,
+                      alternatePostEventFrame: .recoveryUtilities, alternateNextEventIndex: 5),
+                .init(preEventFrame: .languageEnglishActive, key: .return, postEventFrame: .recoveryUtilities),
+            ] + Array(Self.reviewedMenus.eventTrace.dropFirst(4))
         case .reviewedMenus:
             return [
                 .init(preEventFrame: .startupOptions, key: .right, postEventFrame: .startupIntermediate),
@@ -266,13 +308,22 @@ enum PommeRecoveryNavigationRoute: Equatable, Sendable {
     }
 
     var keys: [PommeRecoveryVirtualKey] {
-        eventTrace.map(\.key)
+        eventTrace.compactMap(\.key)
     }
 }
 
 struct PommeRecoveryDurableInputReceipt: Equatable, Sendable {
-    let key: PommeRecoveryVirtualKey
+    let input: PommeRecoveryNavigationInput
     let deliveredEventCount: Int
+
+    init(input: PommeRecoveryNavigationInput, deliveredEventCount: Int) {
+        self.input = input
+        self.deliveredEventCount = deliveredEventCount
+    }
+
+    init(key: PommeRecoveryVirtualKey, deliveredEventCount: Int) {
+        self.init(input: .key(key), deliveredEventCount: deliveredEventCount)
+    }
 }
 
 enum PommeTahoeReviewedInputError: Error, Equatable, Sendable {
@@ -281,11 +332,11 @@ enum PommeTahoeReviewedInputError: Error, Equatable, Sendable {
 }
 
 /// Tahoe's sole production input contract: two equal pre-event observations,
-/// one key, one durable receipt, and two equal post-event observations.
+/// one closed input, one durable receipt, and two equal post-event observations.
 struct PommeTahoeReviewedInput: Sendable {
     let route: PommeRecoveryNavigationRoute
     private var eventIndex = 0
-    private var outstandingKey: PommeRecoveryVirtualKey?
+    private var outstandingInput: PommeRecoveryNavigationInput?
     private(set) var committedInputCount = 0
 
     init(route: PommeRecoveryNavigationRoute = .reviewedMenus) {
@@ -293,9 +344,18 @@ struct PommeTahoeReviewedInput: Sendable {
     }
 
     mutating func authorize(preEventFrames: [PommeRecoveryFrame]) throws -> PommeRecoveryVirtualKey {
+        guard currentEvent?.input.key != nil else {
+            throw PommeTahoeReviewedInputError.unexpectedPreEventFrame
+        }
+        let input = try authorizeInput(preEventFrames: preEventFrames)
+        guard let key = input.key else { throw PommeTahoeReviewedInputError.unexpectedPreEventFrame }
+        return key
+    }
+
+    mutating func authorizeInput(preEventFrames: [PommeRecoveryFrame]) throws -> PommeRecoveryNavigationInput {
         do { try Task.checkCancellation() }
         catch { throw PommeTahoeReviewedInputError.cancelled }
-        guard outstandingKey == nil else { throw PommeTahoeReviewedInputError.inputOutstanding }
+        guard outstandingInput == nil else { throw PommeTahoeReviewedInputError.inputOutstanding }
         guard preEventFrames.count == 2,
               preEventFrames[0] == preEventFrames[1],
               preEventFrames[0] != .unknown
@@ -303,9 +363,8 @@ struct PommeTahoeReviewedInput: Sendable {
         guard let event = currentEvent, preEventFrames[0] == event.preEventFrame else {
             throw PommeTahoeReviewedInputError.unexpectedPreEventFrame
         }
-        let key = event.key
-        outstandingKey = key
-        return key
+        outstandingInput = event.input
+        return event.input
     }
 
     mutating func commit(
@@ -314,7 +373,7 @@ struct PommeTahoeReviewedInput: Sendable {
     ) throws {
         do { try Task.checkCancellation() }
         catch { throw PommeTahoeReviewedInputError.cancelled }
-        guard receipt.deliveredEventCount == 1, receipt.key == outstandingKey else {
+        guard receipt.deliveredEventCount == 1, receipt.input == outstandingInput else {
             throw PommeTahoeReviewedInputError.invalidReceipt
         }
         guard postEventFrames.count == 2,
@@ -330,13 +389,13 @@ struct PommeTahoeReviewedInput: Sendable {
         else {
             throw PommeTahoeReviewedInputError.unexpectedPostEventFrame
         }
-        outstandingKey = nil
+        outstandingInput = nil
         committedInputCount += 1
         eventIndex = nextEventIndex
     }
 
     var isComplete: Bool {
-        eventIndex == route.eventTrace.count && outstandingKey == nil
+        eventIndex == route.eventTrace.count && outstandingInput == nil
     }
 
     private var currentEvent: PommeRecoveryNavigationEvent? {

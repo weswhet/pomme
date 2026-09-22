@@ -445,6 +445,7 @@ final class PommeRecoveryNavigationRecognizer: @unchecked Sendable {
     switch context {
     case .unproven: "unproven"
     case .optionsActivated: "options-activated"
+    case .experimental27LanguageChooser: "experimental-27-language-chooser"
     }
   }
 }
