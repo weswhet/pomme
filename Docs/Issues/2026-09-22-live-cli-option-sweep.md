@@ -19,7 +19,7 @@ observations are recorded below; historical rows retain their original status.
 | Retained SIP private-PTY / pinned-authentication failures | Open historical observations; a fresh original-`ffc41a7` SIP disable/enable cycle passed without producing the failed transaction needed to test that resume sequence. |
 | TUI status projection / boot-mode warning | Fixed in `3fb1ccb`; canonical state/agent regression tests and live running, paused, resumed, and stopped display comparisons passed. Boot-mode warning cancellation preserved both running and paused sessions. |
 | Integrated test-suite concurrency hang | Test-peer thread isolation in `0291f65` removes the observed hang in the focused stress run and subsequent full parallel comparisons. Signed Release and live execution/timeout smoke checks passed. Reconnect fixture admission now has a red/green delayed-start regression, passing repeated parallel comparison, and a 1,166-function full pass; other stress-run timeout failures keep full-suite reliability open. |
-| Private-PTY logical test timing | Captured a 25 ms poll resuming after 2.36 seconds in a scripted test. Injected-clock regressions now verify prompt/process deadlines and cleanup without parallel scheduling determining logical time; production retains `ContinuousClock`. Focused/repeated checks and a 1,168-function full run passed; live verification is pending. |
+| Private-PTY logical test timing | Fixed in `f7a6139`: injected-clock regressions verify prompt/process deadlines and cleanup without parallel scheduling determining logical test time; production retains `ContinuousClock`. Focused/repeated checks and a 1,168-function full run passed. Signed Release live owner authentication and a complete SIP disable/enable cycle passed, restoring SIP enabled and the stopped VM state. |
 
 This is an observational live test. The CLI and guest images are not being
 modified during the sweep. Every failure, timeout, unexpected state, and
@@ -2545,6 +2545,53 @@ macOS 26 fixture `pomme-agent-bootstrap26-20260922a`, verified stopped with
 enable cycle exercises existing-owner authentication through the production
 private-PTY provider path and restores SIP enabled and the stopped run state.
 No owner, credential, pin, or journal is manually replaced to prepare the test.
+
+The candidate and evidence were committed as `f7a6139` before the canonical
+signed Release build at 19:24:35Z. Build, strict signature, exact entitlements,
+designated-requirement compatibility, archive retention, and atomic installation
+checks passed. Fresh login-shell resolution selected
+`/Users/wes/.local/bin/pomme`, reporting `f7a6139`. Installed SHA-256:
+`8b2af021f535af31daa1327a0d04a4aef51b6fbddcfb0c59df82b8468ed08ea7`.
+All 104 CLI contract and 21 local build/install checks passed.
+
+Public SIP disable began at 19:25:04Z on the scoped macOS 26 fixture with
+`--force --final-state previous --format json --debug`. The unchanged
+creation-pinned normal agent authenticated at 19:25:19Z and owner-evidence
+collection began at 19:25:20Z. The matching enable operation will restore the
+initial security state after a successful disable; no other VM is operated.
+Existing-owner verification began at 19:25:37Z and returned its receipt at
+19:25:42Z, exercising the real private-PTY password authentication path on the
+new host. The workflow then entered authenticated Recovery and confirmed the
+Recovery runtime at 19:26:13Z.
+Recovery Terminal was verified at 19:27:41Z; marker proof passed on attempt 2
+at 19:27:44Z, and the launcher was submitted at 19:27:46Z.
+Normal-boot verification began at 19:28:19Z and stopped-state restoration at
+19:28:46Z. SIP disable completed successfully with `configuredDisabled=true`
+and all verification fields true; public status confirmed stopped/no helper
+and the journal reached `restorationComplete` / `sipDisable` / `previous`.
+The matching public enable operation began at 19:28:58Z to restore the original
+enabled state.
+Enable reverified the existing owner from 19:29:27Z to 19:29:31Z, providing a
+second successful live private-PTY authentication, then verified its Recovery
+runtime at 19:30:02Z.
+Terminal was verified at 19:31:30Z; marker proof passed on attempt 1 at
+19:31:32Z, the launcher was submitted at 19:31:35Z, and normal-boot
+verification began at 19:32:08Z.
+Stopped-state restoration began at 19:32:37Z, and SIP enable completed with
+`configuredDisabled=false` and every verification field true. Public status
+confirmed stopped/no helper, and the journal reached `restorationComplete` /
+`sipEnable` / `previous` with normal-boot verification true. Final inventory
+confirmed all twelve VMs stopped with no helpers and internal bundle paths.
+The target retains its original UUID, startup volume, immutable plan,
+`2e0a2f49…47aaeff` agent pin, and 40 GB / 4 GB resource settings. SIP is restored
+enabled; no AMFI operation, VM deletion, relocation, manual journal change,
+credential replacement, or guest-agent update was performed.
+
+The signed-release live check validates both existing-owner private-PTY
+authentications and the completed security/restoration workflows with the
+unchanged production clock. It does not reproduce or close the historical
+private-PTY/pinned-authentication failure, nor the separate full-suite stress
+failures retained above.
 
 ### Live TUI status projection mismatch
 
