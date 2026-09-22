@@ -272,6 +272,15 @@ moves to the separately observed Terminal marker failure; the activation
 change is retained with its live navigation evidence, not represented as a
 successful security-status command.
 
+The macOS 26 compatibility `sip status --debug` run on `e9076c6` began at
+07:08:16Z and completed successfully. Its unchanged five-input direct-Terminal
+route reached Terminal at 07:09:43Z; marker proof passed on attempt 1 at
+07:09:45Z. The authenticated, request-bound Recovery session returned verified
+`sipEnabled=true`, finalized with all cleanup fields true, and verified the
+previous stopped state. The historical macOS 26 marker failure did not
+reproduce in this internal-drive run. The current repeatable marker failure
+is on macOS 27 after its now-successful navigation.
+
 For compatibility, `pomme-agent-recovery26-20260922a` was created on internal
 storage from macOS `26.6.2 (25G83)` with a 40 GB disk and 4 GB RAM, using
 signed build `ef37f16`. Restore began at 06:32:22Z; the existing five-input
