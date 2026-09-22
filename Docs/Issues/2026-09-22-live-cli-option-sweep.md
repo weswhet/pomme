@@ -337,3 +337,19 @@ The operation retained `phase=autologinIntent`, `operation=sipDisable`,
 `requestedFinalState=previous`, and original state stopped; the VM was verified
 stopped after failure. No SIP mutation stage was reached. This new red is being
 investigated before any credential, journal, or automatic-login policy change.
+
+Read-only normal-agent probes after a separate diagnostic boot found native
+automatic login OFF, the global `autoLoginUser` key absent, and `/etc/kcpassword`
+present with metadata `0:0:600` (contents were never read). Both owner completion
+preferences were absent with the expected native diagnostic; the owner home,
+Library, and Preferences directories had correct UID 501 ownership. The console
+was still `_mbsetupuser:248`.
+
+The supported same-operation/same-final-state resume began at 07:36:15Z without
+source changes. It reused the retained owner credential, configured automatic
+login, passed owner completion at 07:36:28Z, and finished Setup Assistant at
+07:36:31Z. After the normal reboot, desktop verification instead failed at
+07:37:30Z with `normal-agent-aqua-timedOut`: `stage=aqua, exited=false,
+outputComplete=false, terminationRequested=true`. No security mutation was
+reached. The preference-write failure did not repeat; the current investigation
+is the later bounded Aqua process timeout, not a claimed preference fix.
