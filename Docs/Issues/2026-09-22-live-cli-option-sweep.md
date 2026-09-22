@@ -90,3 +90,33 @@ checks are recorded separately from guest-backed results.
 Both fresh macOS 27 and macOS 26 disposable VMs were stopped and deleted. No Pomme VM bundles remain in `/Volumes/LACIE/pomme-live-option-sweep-20260922/pomme`; Recovery screenshot directories remain in the host temporary directory for post-run inspection. No source or installed CLI changes were made during this sweep.
 
 Final scoped inventories at 2026-09-22T05:16Z were empty for the default root, the prior `/Volumes/LACIE/pomme-macos27-private/pomme` root, and the new sweep root.
+
+## Follow-up investigation — 2026-09-22
+
+The observations above are preserved as recorded. Review of the current
+creation contract clarifies that the macOS 26 missing-owner observation at
+04:59–05:01Z is not, by itself, a failed creation postcondition. The Recovery
+route installs and verifies the persistent agent; owner preparation is a
+separate security/provisioned-template step. `guestProvisioning=recovery` and
+`automaticLogin=legacy` describe that route, not an unfinished phase. See
+`README.md` under durable creation and provisioned templates. The preceding
+`verifyNormalAgent` failure and subsequent owner-session/security failures
+remain unresolved.
+
+The first fix investigation targets the explicit macOS 27 framework
+`ownerProof` failure. Baseline build `d780b81` was built and installed with
+`Scripts/build-local.sh`, passed signature/entitlement/requirement checks,
+and passed all 88 CLI contract checks; the installer regression suite passed
+all 21 checks. The disposable baseline VM is
+`pomme-agent-ownerproof-20260922a`, using local macOS 27.0 (26A428), a 40 GB
+disk, and 4 GB RAM. Its bundle and restore image are on the internal drive
+under `/Users/wes/Library/Application Support/pomme`.
+
+At 06:05:20Z, the unchanged baseline completed successfully. Restore began at
+05:56:54Z; owner proof passed between 06:04:49Z and 06:05:12Z, desktop proof
+passed, Remote Login was disabled, and creation restored the requested stopped
+state with automatic login enabled. Both focused owner-verification suites also
+passed (80 tests). The earlier failure is not reproduced on this internal-drive
+run; this does not establish its cause or justify a product fix. It remains open
+pending a failing reproduction. The next sequential investigation uses this
+same disposable VM for the reported pause/resume/restart failure.
