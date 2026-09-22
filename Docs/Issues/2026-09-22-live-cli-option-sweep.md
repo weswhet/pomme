@@ -23,6 +23,7 @@ observations are recorded below; historical rows retain their original status.
 | Coordinator-pin fixture polling | Fixed in `f3dfff6`: checks readiness after delayed sleep with cancellation precedence and bounded unavailability. Deterministic red/green, ten-pass full-workload coordinator checks, and a 1,170-function full pass succeeded. Signed Release/live start, execution, restart, reauthentication, and stopped-state restoration passed. Production pin/authentication behavior is unchanged; other stress failures remain open. |
 | Daemon socket-admission fixture timing | Fixed in `ca45976`: waits for actual serving-task entry before starting the response-read budget, with separate bounded/cancellable setup. Delayed-start red/green, timeout/cancellation safeguards, full ten-pass socket checks, and a 1,175-function full pass succeeded. Signed Release/live agent status, execution, and stopped-state restoration passed; production daemon and Recovery one-shot test are unchanged. |
 | Recovery one-shot daemon fixture timing | Fixed in `fc4e4bf`: separates serving-task admission from the response budget without weakening natural one-shot completion or replay assertions. Delayed-start red/green, setup timeout/cancellation checks, ten-pass one-shot checks, and a 1,178-function full pass succeeded. Signed Release/live authenticated SIP status and stopped-state restoration passed; production daemon behavior is unchanged and other stress failures remain open. |
+| Recovery listener ordering fixture timing | Fixed in `cf7a22e`: controlled test time separates launch/authentication ordering from scheduler delay; production retains the existing clock, polling interval, and strict deadline. Delayed-ordering red/green, late-authentication rejection and teardown checks, ten-pass comparison, and a 1,181-function full pass succeeded. Signed Release/live authenticated SIP status restored the stopped state; other stress and historical live failures remain open. |
 
 This is an observational live test. The CLI and guest images are not being
 modified during the sweep. Every failure, timeout, unexpected state, and
@@ -3009,6 +3010,34 @@ is being committed before the canonical signed Release build and scoped
 read-only Recovery live check. This fixes the ordering fixture's clock
 coupling; it does not identify the cause of historical live authentication
 failures or relax the production authentication deadline.
+
+Candidate `cf7a22e` was committed before the canonical signed Release build
+at 20:46:17Z. Build, exact signing/entitlements, designated-requirement
+compatibility, archive, and atomic install checks passed. The fresh login
+shell resolves `/Users/wes/.local/bin/pomme`, version `cf7a22e`, SHA-256
+`d5cec603e1b1d30af4aabd53c81c298d5aa26439a07db2c593b7365030a121c7`.
+All 104 CLI contract checks and 21 installer regression checks passed.
+
+Preflight confirmed the internal-drive 40 GB / 4 GB macOS 26.6.2
+`pomme-agent-bootstrap26-20260922a` stopped with no helper, unchanged UUID,
+startup volume, plan, agent pin, and completed prior security journal.
+Read-only `sip status --final-state previous --format json --debug` began
+at 20:46:39Z. This exercises the production root with its default clock/sleeper;
+no security mutation, agent update, credential change, or VM deletion is
+requested.
+
+The live command completed successfully, observed by 20:49:17Z. Recovery
+reached Terminal, passed marker proof on attempt two, and authenticated the
+request-bound operation listener on port 505053. Verified SIP status remained
+enabled, the session finalized with its credential consumed and all cleanup
+flags true, and `finalStateVerified=true`. Independent status confirmed
+stopped/no helper, unchanged UUID/startup volume/plan/agent pin/resources, and
+the unchanged completed prior security journal. All twelve VMs were stopped
+with internal bundle paths. No VM was deleted or moved; no persistent
+credential, journal, agent pin, or security setting was changed. Private
+screenshots remain outside source control. This verifies the signed production
+clock path remains compatible; deterministic regressions establish the fixture
+timing fix, not a claim that historical live timeouts have been explained.
 
 ### Live TUI status projection mismatch
 
