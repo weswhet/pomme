@@ -2387,6 +2387,55 @@ failures or skips:
 The four pre-existing PommeCore warnings are unchanged. Source, tests, and
 evidence are committed before the next canonical signed Release build.
 
+Classification commit `98f5b3f` built and installed through the canonical
+signed Release workflow at 23:46Z. Signature, exact entitlement, designated-
+requirement compatibility, archive, and atomic-install checks passed; fresh
+login-shell resolution/version and all 104 CLI contract checks passed.
+Installed SHA-256:
+`2085cd8ed243ab674c8ceb90238add938b579f991d12eb51b9442e34871b3286`.
+After stopped/internal inventory and dry-run preflight, fresh
+`pomme-agent-autologinclass26-20260922a` creation began at 23:47:57Z with the
+same local macOS 26.6.2/25G83 image, 40 GB disk / 4 GB memory, and `--boot none`.
+No existing VM, immutable identity, or credential was reset for this run.
+
+Bounded read-only mapping also confirms that the preceding owner-completion
+status 1 could come from either native preference write: Setup Assistant build
+version or MiniBuddy launch. Both use `sudo -n -H -u` for the verified owner and
+both map nonzero write status to the same typed `ownerCompletion` error. Current
+journal/trace evidence does not identify the failing write; no claim about a
+missing home directory or either preference domain follows from status 1 alone.
+
+The classification guest reached restore completion at 23:51:41Z, Terminal at
+23:53:09Z, and exact marker proof on attempt two at 23:53:13Z. Creation passed
+and returned stopped state by 23:54:10Z, separately confirmed. VM UUID:
+`d2f51376-1e6a-4b6a-b365-01c4fee36b22`; startup-volume group:
+`6c1dea0c-1cf0-46c9-a8b9-9543d059a61f`; immutable plan:
+`9a7cf73be645aaaab1b566bfa20e6f41c7939fd014f4e68fdd8cea133afab2ce`.
+The exact creation-pinned guest digest is `2085cd8e…1b3286`, matching the
+installed signed host. No security journal existed before the same first-owner
+SIP-disable command at 23:54:22Z. A fixed-tag-only helper follower was started
+before this command; no standalone guest probes or manual account edits
+intervened between creation and first-owner preparation.
+
+The classified run reproduced the readback failure. Post-setter checks at
+23:55:45–46Z reported `nativeExpectedOwner`, `preferenceMatch`, and `artifactValid`.
+Owner completion status 1 triggered the existing single reboot at 23:55:47Z.
+The same owner verification passed at 23:56:07Z; at 23:56:08Z native readback
+emitted `nativeSetupAssistantOwner`, then `reconcileRejected`. This identifies
+the stock Setup Assistant record as the failure-time account in this run,
+ruling out generic other-owner, root, and account-shaped OFF classifications.
+It does not identify the preceding failed preference write or prove why macOS
+restored that account during reboot.
+
+The command exited 1 before Recovery mutation and restored stopped state,
+independently confirmed with the original `sipDisable` / `autologinIntent` /
+`previous` journal retained. The helper follower emitted no signal event and
+was stopped. The fixture is preserved without a subsequent inspection boot or
+manual state change. The next candidate must retain arbitrary-owner rejection
+and prove the existing fresh-owner/password/restriction/Setup Assistant session
+checks before any native setter; a stock account name alone cannot authorize
+another mutation.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
