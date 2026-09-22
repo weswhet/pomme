@@ -467,3 +467,39 @@ that leaves a valid proof intact. These tests validate instrumentation, not
 reproduction or resolution of the intermittent marker failure. The green
 XcodeBuildMCP result is
 `test_macos_2026-09-22T08-18-38-433Z_pid60265_d337737e.xcresult`.
+
+Read-only review found no proof-gate or redaction regression. The diagnostic
+limits are intentional: `commandEcho` means the fixed witness is visible in
+OCR and can include scrollback; it is not a receipt for this submission.
+`nearMarker` means a standalone nonexact marker-shaped line, not a measured
+edit distance from the requested marker; it can include older output. Neither
+field, nor adjacent-frame equality, establishes the cause of a failure alone.
+
+Diagnostic candidate `0f030b4` was committed, built and installed through the
+canonical signed Release workflow, and passed all 104 CLI contract checks.
+The first live macOS 27 SIP-status run began at 08:21:24Z and finalized
+successfully with SIP enabled, verified cleanup, and restoration to stopped.
+At 08:23:03Z its marker proof passed on attempt 1 while the new evidence line
+reported `commandEcho=false`, `nearMarker=false`, and adjacent-frame comparison
+`unknown`. Thus false echo evidence is not evidence of missing input, even on
+a successful current run. The fixed echo witness is being checked against the
+retained benign manual-probe images before using it to interpret a failure.
+No marker-reliability fix is claimed.
+
+Four temporary image-backed rehearsals then used the production OCR/proof
+path on retained benign manual-probe captures. All four passed the current
+echo witness, simpler fixed-witness variants, and strict marker proof. They
+did not reproduce the live false-echo condition, so no production recognizer
+change followed. Temporary tests/imports and private path references were
+removed; no images or OCR text entered source control or logs. Result:
+`test_macos_2026-09-22T08-26-29-480Z_pid62089_639a636c.xcresult`.
+
+The unchanged diagnostic build also passed the internal-drive macOS 26
+SIP-status compatibility run begun at 08:26:50Z. Its five-input route reached
+Terminal at 08:28:18Z and strict marker proof passed on attempt 1 at 08:28:20Z.
+Closed evidence was `commandEcho=true`, `nearMarker=false`, and first-attempt
+frame comparison `unknown`. The session finalized with verified SIP enabled,
+all cleanup fields true, and verified restoration of the previous stopped
+state. The new diagnostics have successful live coverage on both OS versions;
+a failing instrumented run is still needed to investigate the original
+intermittent failure. Temporary diagnostics remain explicitly investigative.
