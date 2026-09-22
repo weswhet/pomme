@@ -9,6 +9,21 @@ import Testing
 struct PommeSecurityDesktopCleanupIntegrationTests {
   private static let digest = String(repeating: "a", count: 64)
 
+  @Test("Malformed relay input is reported after teardown and repeated finish is safe")
+  func malformedRelayFinish() async throws {
+    let agent = try PommeAgent(role: .persistent, executableSHA256: Self.digest)
+    let relay = try Relay(agent: agent, dropSignalResponse: false)
+    relay.start()
+    do { try relay.sendMalformedFrame() }
+    catch { try? await relay.finish(); throw error }
+    // Synchronize on actual decode failure, not a near-deadline sleep.
+    _ = await relay.waitForLoop()
+    await #expect(throws: Relay.Failure.invalidFrame) { try await relay.finish() }
+    await #expect(throws: Relay.Failure.invalidFrame) { try await relay.finish() }
+    #expect(relay.closed.withLock { $0 })
+    #expect(relay.operations.withLock { $0 }.isEmpty)
+  }
+
   @Test("Real lost signal response reconnects through coordinator and cleanup adapter", arguments: [false, true])
   func lostSignalResponse(newRegistry: Bool) async throws {
     let agent = try PommeAgent(role: .persistent, executableSHA256: Self.digest)
@@ -41,7 +56,7 @@ struct PommeSecurityDesktopCleanupIntegrationTests {
       try #require(first.withheld.withLock { $0 })
       #expect(first.closed.withLock { $0 })
       #expect(throws: RunnerError.self) { try coordinator.captureAuthenticatedSession(as: .normal) }
-      await first.finish()
+      try await first.finish()
       #expect(first.operations.withLock { $0 } == ["authenticate", "process.start", "process.signal"])
 
       let nextAgent = try newRegistry ? PommeAgent(role: .persistent, executableSHA256: Self.digest) : agent
@@ -76,11 +91,16 @@ struct PommeSecurityDesktopCleanupIntegrationTests {
         $0 == .object(["jobID": .string(id.uuidString.lowercased())])
       })
       coordinator.teardown()
-      await next.finish()
+      try await next.finish()
     } catch {
       coordinator.teardown()
-      await first.finish()
-      if let second { await second.finish() }
+      // Teardown failures must not skip the other relay or child cleanup.
+      do { try await first.finish() }
+      catch { Issue.record("Relay A teardown failed: \(error)") }
+      if let second {
+        do { try await second.finish() }
+        catch { Issue.record("Relay B teardown failed: \(error)") }
+      }
       if let jobID { await Self.cleanChild(agent, jobID: jobID, force: true) }
       throw error
     }
@@ -126,7 +146,18 @@ struct PommeSecurityDesktopCleanupIntegrationTests {
 
   /// Two socketpairs put a transparent test relay between the real host wire
   /// and real daemon. Only A's successful signal response is discarded.
+  /// start() is called once by the owning test before publishing the connection.
+  /// Mutable cross-thread observations/completion are mutex-protected. finish()
+  /// is shared/idempotent; descriptors close only after both workers finish and
+  /// the owning test has completed its host exchanges.
   private final class Relay: PommeAgentVSOCKConnection, @unchecked Sendable {
+    enum Failure: Error, Equatable { case invalidFrame, invalidAcknowledgement }
+    private struct Completion {
+      var result: Result<Void, any Error>?
+      var waiters: [CheckedContinuation<Result<Void, any Error>, Never>] = []
+    }
+    private let completion = Mutex(Completion())
+    private let finishing = Mutex<Task<Void, any Error>?>(nil)
     let operations = Mutex<[String]>([])
     let forwardedPayloads = Mutex<[JSONValue]>([])
     let withheld = Mutex(false)
@@ -140,8 +171,7 @@ struct PommeSecurityDesktopCleanupIntegrationTests {
     private let connection: PommeAgentConnection
     private let dropSignalResponse: Bool
     private var daemonTask: Task<Void, Never>?
-    private var relayTask: Task<Void, Never>?
-    private var finished = false
+    private var relayThread: Thread?
 
     init(agent: PommeAgent, dropSignalResponse: Bool) throws {
       let connection = try PommeAgentConnection(token: PommeSecurityDesktopCleanupIntegrationTests.digest, lifetime: .persistent)
@@ -163,10 +193,13 @@ struct PommeSecurityDesktopCleanupIntegrationTests {
       daemonTask = Task.detached { [self] in
         await PommeAgentDaemon.serve(descriptor: guestServer, connection: connection, agent: agent, allowedOperation: nil)
       }
-      relayTask = Task.detached { [self] in
+      let thread = Thread { [self] in
+        let outcome: Result<Void, any Error>
         do {
           while let data = try readLine() {
-            let request = try PommeAgentProtocol.decode(data)
+            let request: PommeAgentProtocol.Envelope
+            do { request = try PommeAgentProtocol.decode(data) }
+            catch { throw Failure.invalidFrame }
             operations.withLock { $0.append(request.operation) }
             if request.operation == "process.status" { forwardedPayloads.withLock { $0.append(request.payload) } }
             let response = try PommeAgentVSOCKWire(fileDescriptor: guestClient).exchange(
@@ -174,17 +207,33 @@ struct PommeSecurityDesktopCleanupIntegrationTests {
             let frames = try response.split(separator: 0x0A).map { try PommeAgentProtocol.decode(Data($0)) }
             if frames.contains(where: { $0.error?.code == "not-found" }) { notFound.withLock { $0 = true } }
             if dropSignalResponse && request.operation == "process.signal" {
-              let ack = try #require(frames.last)
-              try #require(ack.kind == .response && ack.ok == true && ack.requestID == request.requestID)
+              guard let ack = frames.last,
+                ack.kind == .response && ack.ok == true && ack.requestID == request.requestID
+              else { throw Failure.invalidAcknowledgement }
               withheld.withLock { $0 = true }
               continue
             }
             try writeAll(response)
           }
+          outcome = .success(())
         } catch {
-          if closed.withLock({ $0 }) == false { Issue.record("Relay failed before coordinated shutdown: \(error)") }
+          if error is Failure || closed.withLock({ $0 }) == false {
+            outcome = .failure(error)
+          } else {
+            outcome = .success(())
+          }
         }
+        let waiters = completion.withLock { state in
+          state.result = outcome
+          let waiters = state.waiters
+          state.waiters.removeAll()
+          return waiters
+        }
+        // No descriptor access occurs after publishing completion.
+        for waiter in waiters { waiter.resume(returning: outcome) }
       }
+      relayThread = thread
+      thread.start()
     }
 
     func exchange(_ request: Data, timeout: TimeInterval) async throws -> Data {
@@ -205,14 +254,37 @@ struct PommeSecurityDesktopCleanupIntegrationTests {
       }
     }
 
-    func finish() async {
-      guard !finished else { return }
-      close()
-      for fd in [relay, guestClient, guestServer] { _ = shutdown(fd, SHUT_RDWR) }
-      await relayTask?.value
-      await daemonTask?.value
-      for fd in [host, relay, guestClient, guestServer] { _ = Darwin.close(fd) }
-      finished = true
+    func waitForLoop() async -> Result<Void, any Error> {
+      await withCheckedContinuation { continuation in
+        let ready: Result<Void, any Error>? = completion.withLock { state in
+          if let result = state.result { return result }
+          state.waiters.append(continuation)
+          return nil
+        }
+        if let ready { continuation.resume(returning: ready) }
+      }
+    }
+
+    func finish() async throws {
+      let task = finishing.withLock { task in
+        if let task { return task }
+        let created = Task { [self] in
+          close()
+          for fd in [relay, guestClient, guestServer] { _ = shutdown(fd, SHUT_RDWR) }
+          let outcome = await waitForLoop()
+          await daemonTask?.value
+          for fd in [host, relay, guestClient, guestServer] { _ = Darwin.close(fd) }
+          try outcome.get()
+        }
+        task = created
+        return created
+      }
+      try await task.value
+    }
+
+    func sendMalformedFrame() throws {
+      var newline: UInt8 = 0x0A
+      guard send(host, &newline, 1, 0) == 1 else { throw POSIXError(.EIO) }
     }
 
     private func readLine() throws -> Data? {

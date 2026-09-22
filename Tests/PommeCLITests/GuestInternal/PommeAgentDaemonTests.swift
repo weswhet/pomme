@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Synchronization
 import Testing
 
 @Suite("Pomme agent daemon framing")
@@ -7,39 +8,37 @@ struct PommeAgentDaemonTests {
     @Test("socketpair admission is newline framed and bounded before allocation")
     func socketpairAdmission() async throws {
         var sockets: [Int32] = [0, 0]
-        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
+        try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
         defer { _ = Darwin.close(sockets[0]); _ = Darwin.close(sockets[1]) }
         let token = String(repeating: "a", count: 64)
         let connection = try PommeAgentConnection(token: token, lifetime: .persistent)
         let agent = try PommeAgent(role: .persistent, executableSHA256: token)
+        let authenticate = PommeAgentProtocol.Envelope.request(operation: "authenticate", payload: .object(["challenge": .string(String(repeating: "b", count: 64))]))
+        let health = PommeAgentProtocol.Envelope.request(operation: "agent.health")
+        let bytes = try PommeAgentProtocol.encode(authenticate) + PommeAgentProtocol.encode(health)
         let serverDescriptor = sockets[1]
-        async let serving: Void = PommeAgentDaemon.serve(
+        let serving = Task { await PommeAgentDaemon.serve(
             descriptor: serverDescriptor,
             connection: connection,
             agent: agent,
             allowedOperation: nil
-        )
-        let authenticate = PommeAgentProtocol.Envelope.request(operation: "authenticate", payload: .object(["challenge": .string(String(repeating: "b", count: 64))]))
-        let health = PommeAgentProtocol.Envelope.request(operation: "agent.health")
-        let bytes = try PommeAgentProtocol.encode(authenticate) + PommeAgentProtocol.encode(health)
+        ) }
         #expect(bytes.withUnsafeBytes { Darwin.write(sockets[0], $0.baseAddress, $0.count) } == bytes.count)
         _ = shutdown(sockets[0], SHUT_WR)
         // A stream read may return either response independently or both
         // coalesced.  Read until both newline-delimited responses arrive;
         // framing must not depend on packet boundaries.
-        var reply = Data()
-        var scratch = [UInt8](repeating: 0, count: 4096)
-        while reply.split(separator: 0x0A).count < 2 {
-            let count = scratch.withUnsafeMutableBytes { Darwin.read(sockets[0], $0.baseAddress, $0.count) }
-            guard count > 0 else { break }
-            reply.append(contentsOf: scratch.prefix(Int(count)))
-        }
+        let result = await DaemonPeerReader.read(descriptor: sockets[0])
+        let completedNaturally = await DaemonPeerReader.finish(
+            serving: serving, result: result, sockets: sockets
+        )
+        let reply = try result.get()
+        #expect(completedNaturally)
         let lines = reply.split(separator: 0x0A)
         #expect(lines.count == 2)
-        guard lines.count >= 2 else { return }
+        try #require(lines.count >= 2)
         #expect(try PommeAgentProtocol.decode(Data(lines[0])).requestID == authenticate.requestID)
         #expect(try PommeAgentProtocol.decode(Data(lines[1])).requestID == health.requestID)
-        _ = await serving
     }
 
     @Test("daemon grammar constrains normal and bounded Recovery ports")
@@ -310,18 +309,11 @@ struct PommeAgentDaemonTests {
     @Test("Recovery daemon closes after one allowlisted operation")
     func oneShotOperation() async throws {
         var sockets: [Int32] = [0, 0]
-        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
+        try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
         defer { _ = Darwin.close(sockets[0]); _ = Darwin.close(sockets[1]) }
         let token = String(repeating: "a", count: 64)
         let connection = try PommeAgentConnection(token: token, lifetime: .oneShot, expiresAt: Date(timeIntervalSinceNow: 60), vmBinding: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", sessionBinding: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
         let agent = try PommeAgent(role: .recovery, executableSHA256: token)
-        let serverDescriptor = sockets[1]
-        async let serving: Void = PommeAgentDaemon.serve(
-            descriptor: serverDescriptor,
-            connection: connection,
-            agent: agent,
-            allowedOperation: "agent.install"
-        )
         let auth = PommeAgentProtocol.Envelope.request(operation: "authenticate", payload: .object([
             "challenge": .string(String(repeating: "b", count: 64)),
             "vmID": .string("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
@@ -330,20 +322,40 @@ struct PommeAgentDaemonTests {
         let operation = PommeAgentProtocol.Envelope.request(operation: "agent.install", payload: .object([:]))
         let replay = PommeAgentProtocol.Envelope.request(operation: "agent.install", payload: .object([:]))
         let bytes = try PommeAgentProtocol.encode(auth) + PommeAgentProtocol.encode(operation) + PommeAgentProtocol.encode(replay)
+        let serverDescriptor = sockets[1]
+        let serving = Task { await PommeAgentDaemon.serve(
+            descriptor: serverDescriptor,
+            connection: connection,
+            agent: agent,
+            allowedOperation: "agent.install"
+        ) }
         #expect(bytes.withUnsafeBytes { Darwin.write(sockets[0], $0.baseAddress, $0.count) } == bytes.count)
 
-        var reply = Data()
-        var scratch = [UInt8](repeating: 0, count: 4096)
-        while reply.split(separator: 0x0A).count < 2 {
-            let count = scratch.withUnsafeMutableBytes { Darwin.read(sockets[0], $0.baseAddress, $0.count) }
-            guard count > 0 else { break }
-            reply.append(contentsOf: scratch.prefix(Int(count)))
-        }
+        let result = await DaemonPeerReader.read(descriptor: sockets[0])
+        let completedNaturally = await DaemonPeerReader.finish(
+            serving: serving, result: result, sockets: sockets
+        )
+        let reply = try result.get()
+        #expect(completedNaturally)
         let lines = reply.split(separator: 0x0A)
         #expect(lines.count == 2)
+        try #require(lines.count >= 2)
         #expect(try PommeAgentProtocol.decode(Data(lines[0])).ok == true)
+        #expect(try PommeAgentProtocol.decode(Data(lines[0])).requestID == auth.requestID)
         #expect(try PommeAgentProtocol.decode(Data(lines[1])).requestID == operation.requestID)
-        _ = await serving
+    }
+
+    @Test("daemon peer reader reports a silent peer deadline before descriptor teardown")
+    func peerReadDeadline() async throws {
+        var sockets: [Int32] = [0, 0]
+        try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
+        defer { _ = Darwin.close(sockets[0]); _ = Darwin.close(sockets[1]) }
+        let result = await DaemonPeerReader.read(descriptor: sockets[0], timeout: .zero)
+        // Completion means the reader has relinquished the descriptor; only
+        // this owning task shuts down/closes it, including the failure path.
+        _ = shutdown(sockets[0], SHUT_RDWR)
+        _ = shutdown(sockets[1], SHUT_RDWR)
+        #expect(throws: DaemonPeerReader.Failure.deadline) { try result.get() }
     }
 
     private func makeRecoveryRunWorkspace(
@@ -408,6 +420,102 @@ struct PommeAgentDaemonTests {
             "--operation", PommeRecoveryOperation.installAgent.wireName,
             "--request-file", workspace.appendingPathComponent(PommeRecoveryArtifactNames.request).path,
         ]
+    }
+}
+
+private enum DaemonPeerReader {
+    enum Failure: Error, Equatable {
+        case deadline
+        case socket(Int32)
+        case oversizedReply
+    }
+
+    static func finish(
+        serving: Task<Void, Never>,
+        result: Result<Data, any Error>,
+        sockets: [Int32]
+    ) async -> Bool {
+        if case .failure = result {
+            for descriptor in sockets { _ = shutdown(descriptor, SHUT_RDWR) }
+            await serving.value
+            return false
+        }
+        let serverReturned = Mutex(false)
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await serving.value
+                serverReturned.withLock { $0 = true }
+                return true
+            }
+            group.addTask {
+                do { try await Task.sleep(for: .seconds(5)) }
+                catch {
+                    // Timer cancellation following a joined server is benign;
+                    // outer task cancellation must still unblock the server.
+                    if serverReturned.withLock({ $0 }) { return true }
+                }
+                for descriptor in sockets { _ = shutdown(descriptor, SHUT_RDWR) }
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            // Join BOTH children. In particular, a timeout must remain false
+            // even when shutdown lets the serving child win group.next().
+            var natural = first
+            for await completed in group { natural = natural && completed }
+            return natural
+        }
+    }
+
+    static func read(
+        descriptor: Int32,
+        timeout: Duration = .seconds(5)
+    ) async -> Result<Data, any Error> {
+        await withCheckedContinuation { continuation in
+            // The caller retains both descriptors until completion. This
+            // dedicated thread is their sole reader, and never accesses them
+            // after resuming the continuation. No cooperative worker blocks.
+            let deadline = ContinuousClock.now.advanced(by: timeout)
+            let thread = Thread {
+                let result = Result { try readReply(descriptor: descriptor, deadline: deadline) }
+                continuation.resume(returning: result)
+            }
+            thread.name = "pomme-test-daemon-peer"
+            thread.start()
+        }
+    }
+
+    private static func readReply(
+        descriptor: Int32,
+        deadline: ContinuousClock.Instant
+    ) throws -> Data {
+        var reply = Data()
+        var scratch = [UInt8](repeating: 0, count: 4096)
+        while reply.filter({ $0 == 0x0A }).count < 2 {
+            let remaining = ContinuousClock.now.duration(to: deadline)
+            guard remaining > .zero else { throw Failure.deadline }
+            let parts = remaining.components
+            let milliseconds = max(1, min(5_000, parts.seconds * 1_000 + parts.attoseconds / 1_000_000_000_000_000))
+            var event = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            let ready = Darwin.poll(&event, 1, Int32(milliseconds))
+            if ready < 0 {
+                if errno == EINTR { continue }
+                throw Failure.socket(errno)
+            }
+            if ready == 0 { continue }
+            if event.revents & Int16(POLLNVAL) != 0 { throw Failure.socket(EBADF) }
+            let count = scratch.withUnsafeMutableBytes {
+                Darwin.recv(descriptor, $0.baseAddress, $0.count, MSG_DONTWAIT)
+            }
+            if count < 0 {
+                if errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK { continue }
+                throw Failure.socket(errno)
+            }
+            if count == 0 { break }
+            reply.append(contentsOf: scratch.prefix(count))
+            guard reply.count <= 1_048_576 else { throw Failure.oversizedReply }
+        }
+        return reply
     }
 }
 
