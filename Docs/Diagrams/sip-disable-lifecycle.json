@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "SIP Disable Steps and Safe Endings",
+    "locale": "en",
+    "output": "Docs/Diagrams/sip-disable-lifecycle.html",
+    "viewBox": [1050, 566],
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "main", "label": "Main steps" },
+    { "id": "branches", "label": "Skip, cleanup, or return" },
+    { "id": "terminal", "label": "Endings" }
+  ],
+  "states": [
+    { "id": "checkSip", "type": "start", "label": "Check SIP", "sublabel": "csrutil status", "lane": "main", "col": 0, "step": "01" },
+    { "id": "prepareAdmin", "type": "decision", "label": "Local admin ready", "sublabel": "verify or create", "lane": "main", "col": 1, "step": "02" },
+    { "id": "bootRecovery", "type": "active", "label": "Boot Recovery", "sublabel": "open Terminal", "lane": "main", "col": 2, "step": "03" },
+    { "id": "disableSip", "type": "active", "label": "Disable SIP", "sublabel": "csrutil disable", "lane": "main", "col": 3, "step": "04" },
+    { "id": "checkMacos", "type": "success", "label": "Check in macOS", "sublabel": "csrutil status", "lane": "main", "col": 4, "step": "05" },
+    { "id": "alreadyOff", "type": "success", "label": "SIP already off", "sublabel": "done; VM restored", "lane": "terminal", "col": 0, "yOffset": -64 },
+    { "id": "cleanup", "type": "active", "label": "Clean up Recovery", "sublabel": "remove temporary files", "lane": "branches", "col": 1 },
+    { "id": "returnVm", "type": "waiting", "label": "Return the VM", "sublabel": "restore starting state", "lane": "branches", "col": 2 },
+    { "id": "stopped", "type": "failure", "label": "Leave VM stopped", "sublabel": "cleanup did not finish", "lane": "terminal", "col": 1, "yOffset": -64 },
+    { "id": "done", "type": "success", "label": "Done", "sublabel": "starting state restored", "lane": "terminal", "col": 2, "yOffset": -64 }
+  ],
+  "transitions": [
+    { "id": "skip", "from": "checkSip", "to": "alreadyOff", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "via": [[94, 230], [240, 230], [240, 370], [402, 370]] },
+    { "id": "clean", "from": "disableSip", "to": "cleanup", "variant": "security", "route": "straight", "fromSide": "bottom", "toSide": "top" },
+    { "id": "cleanupDone", "from": "cleanup", "to": "checkMacos", "variant": "emphasis", "fromSide": "top", "toSide": "bottom", "via": [[556, 230], [710, 230]] },
+    { "id": "cleanupFails", "from": "cleanup", "to": "stopped", "variant": "security", "route": "straight", "fromSide": "bottom", "toSide": "top" },
+    { "id": "restore", "from": "checkMacos", "to": "returnVm", "variant": "emphasis", "route": "straight", "fromSide": "bottom", "toSide": "top" },
+    { "id": "complete", "from": "returnVm", "to": "done", "variant": "emphasis", "route": "straight", "fromSide": "bottom", "toSide": "top" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Fresh VM only", "items": ["Create the local pomme administrator", "Enable automatic login", "Finish Setup Assistant, restart, and confirm the pomme desktop opens"] },
+    { "dot": "violet", "title": "Shortcuts and retries", "items": ["SIP already off: skip Recovery and restore the starting state", "Other failure: save the completed step and restore the starting state", "Resume only the same action and ending; check VM and SIP state first", "SIP confirmed off: do not run csrutil disable again", "Retry the macOS check or VM return from the saved step"] }
+  ]
+}

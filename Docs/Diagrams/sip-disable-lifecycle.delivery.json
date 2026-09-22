@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "deliver",
+  "type": "lifecycle",
+  "input": "sip-disable-lifecycle.json",
+  "output": "sip-disable-lifecycle.html",
+  "specification": {
+    "sha256": "91a63e2f60fb0618091d1961fb38a997a2de5836e98177e77590eec4d1a60026",
+    "bytes": 3462
+  },
+  "artifact": {
+    "sha256": "2ba60c0dcd88fa4159ae35a727c864233490adc6df3cec5e088a105930238aa7",
+    "bytes": 711361
+  },
+  "validation": {
+    "checksPassed": 9,
+    "checkCount": 9,
+    "compositionProfile": "showcase",
+    "compositionStatus": "pass",
+    "errors": 0,
+    "warnings": 0
+  }
+}

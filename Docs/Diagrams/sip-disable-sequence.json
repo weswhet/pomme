@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Steps to Turn Off System Integrity Protection (SIP)",
+    "locale": "en",
+    "output": "Docs/Diagrams/sip-disable-sequence.html",
+    "viewBox": [1200, 740],
+    "quality_profile": "showcase",
+    "column_fit": "spread"
+  },
+  "participants": [
+    { "id": "you", "type": "external", "label": "You" },
+    { "id": "pomme", "type": "security", "label": "Pomme" },
+    { "id": "normal", "type": "backend", "label": "Normal macOS" },
+    { "id": "recovery", "type": "frontend", "label": "macOS Recovery" },
+    { "id": "saved", "type": "database", "label": "Saved progress" }
+  ],
+  "segments": [
+    { "from": 150, "to": 338, "label": "Check SIP and the local administrator" },
+    { "from": 346, "to": 446, "label": "Prepare and boot into macOS Recovery" },
+    { "from": 454, "to": 558, "label": "Turn off SIP and clean up" },
+    { "from": 566, "to": 650, "label": "Check normal macOS and finish" }
+  ],
+  "messages": [
+    { "id": "command", "from": "you", "to": "pomme", "y": 160, "label": "1. Ask Pomme to turn off SIP", "variant": "emphasis" },
+    { "id": "saveStart", "from": "pomme", "to": "saved", "y": 188, "label": "2. Save the VM's starting run state", "variant": "security" },
+    { "id": "checkFirst", "from": "pomme", "to": "normal", "y": 216, "label": "3. Run csrutil status", "variant": "security" },
+    { "id": "alreadyOff", "from": "normal", "to": "pomme", "y": 244, "label": "If SIP is already off, save no change and skip to step 17", "variant": "return" },
+    { "id": "admin", "from": "pomme", "to": "normal", "y": 272, "label": "4. Verify a local administrator, or create the pomme user", "variant": "security", "note": "Pomme uses an existing authorized administrator when possible. It creates the pomme account only after proving the VM is new and receiving confirmation or --force." },
+    { "id": "autologin", "from": "pomme", "to": "normal", "y": 300, "label": "5. On a new VM, enable automatic login", "variant": "default" },
+    { "id": "setup", "from": "pomme", "to": "normal", "y": 328, "label": "6. On a new VM, finish setup and open the desktop as pomme", "variant": "default" },
+    { "id": "savePlan", "from": "pomme", "to": "saved", "y": 356, "label": "7. Save the plan and prepare Pomme's signed Recovery helper", "variant": "security" },
+    { "id": "bootRecovery", "from": "pomme", "to": "recovery", "y": 384, "label": "8. Shut down the VM and boot into macOS Recovery", "variant": "emphasis" },
+    { "id": "openTerminal", "from": "pomme", "to": "recovery", "y": 412, "label": "9. Open Terminal in Recovery", "variant": "default", "note": "Reviewed Tahoe 25G72 route: Right twice, Return twice, Control-F2, Right four times, Down, Shift-Command-T. Guarded experimental 25G83 route: Right twice, Return twice, Shift-Command-T. For each key, Pomme checks two matching screen images, sends and confirms one key, then checks two matching images again." },
+    { "id": "verifyRecovery", "from": "pomme", "to": "recovery", "y": 440, "label": "10. Start the helper and verify Recovery, root, and the Mac disk", "variant": "security", "note": "root is macOS's highest-privilege system account. The helper must match this request and this VM before it can continue." },
+    { "id": "disable", "from": "pomme", "to": "recovery", "y": 468, "label": "11. Run csrutil disable with the administrator password", "variant": "security" },
+    { "id": "checkRecovery", "from": "pomme", "to": "recovery", "y": 496, "label": "12. Run csrutil status and confirm SIP is off", "variant": "security" },
+    { "id": "saveResult", "from": "pomme", "to": "saved", "y": 524, "label": "13. Save the result", "variant": "return" },
+    { "id": "cleanup", "from": "pomme", "to": "recovery", "y": 552, "label": "14. Remove temporary files and confirm cleanup", "variant": "security", "note": "Disconnect the temporary share and stop the Recovery helper. If any cleanup check fails, Pomme leaves the VM stopped." },
+    { "id": "bootNormal", "from": "pomme", "to": "normal", "y": 580, "label": "15. Boot into normal macOS", "variant": "emphasis" },
+    { "id": "checkNormal", "from": "pomme", "to": "normal", "y": 608, "label": "16. Run csrutil status again and confirm SIP is off", "variant": "security" },
+    { "id": "finish", "from": "pomme", "to": "you", "y": 636, "label": "17. Return the VM to its starting state and report success", "variant": "return" }
+  ]
+}
