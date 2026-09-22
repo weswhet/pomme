@@ -2839,6 +2839,74 @@ changed. The live result verifies release compatibility; the scheduling defect
 is proven by the isolated red/green fixture and full-workload comparison, not
 by a claim that a unit-only timing seam executes in the live CLI.
 
+### Recovery one-shot daemon deadline under parallel test load
+
+After committing the socket-admission release/live evidence as `dc083f3`, the
+next isolated failure is `PommeAgentDaemonTests.oneShotOperation()` throwing
+`DaemonPeerReader.Failure.deadline` in the full ten-pass workload
+(`20-10-13-072Z_pid20205_85c47d29`). Installed signed Release remains `ca45976`;
+the working tree began clean except for unrelated untracked artifacts.
+
+The unchanged one-shot method passed 100 isolated repetitions
+(`20-15-41-581Z_pid23827_77f3f9c1`). It also passed the preceding focused daemon
+comparisons, including the final seventeen-function ten-pass run. Those passing
+cases do not explain its full-workload failure.
+
+Ranked hypotheses are late serving-task admission, late native reader-thread
+entry, and a stall during authentication/one-shot processing. A bounded,
+failure-only timing trace will distinguish admission from post-entry behavior.
+Unlike persistent socket admission, this test deliberately does not half-close
+the client; it requires the daemon to return after the allowed operation while
+a replay request is buffered. Binding, sixty-second one-shot expiry, allowlist,
+two-response correlation, and natural-completion proof must remain unchanged.
+No deadline or production behavior has been altered, and no VM is being operated
+for this isolated diagnostic.
+
+The instrumented full ten-pass run reproduced the one-shot deadline alongside
+foreground completion, Recovery listener authentication, and Recovery retry:
+1,171 passing / four failing functions and 15,986 passing / four failing
+invocations (`20-17-44-497Z_pid24221_fc00ac6c`). The reader thread entered at
+0.511 ms and timed out at 5,001.55 ms with zero bytes. The one-shot serving task
+did not enter until 17,941.556 ms, then returned at 17,941.951 ms; the owning test
+resumed at 17,993 ms and performed shutdown/join before descriptor closure.
+This identifies delayed serving-task admission rather than delayed reader
+startup or observed post-entry processing delay. The configured sixty-second
+one-shot expiry remains unchanged; the reader failed far earlier than that bound.
+
+The next red regression deliberately delays this same one-shot fixture's serving
+task by 1.2 seconds against a one-second reader budget. The intended fix reuses
+the existing bounded/cancellable admission gate before starting response timing;
+the no-half-close/replay and natural-completion requirements remain intact.
+
+The minimized regression failed with `.deadline` while all seventeen existing
+daemon functions passed (`20-21-30-362Z_pid25533_4f122ea2`). Original and delayed
+cases share the same real one-shot fixture, which still uses the old ungated
+ordering in this red run. All temporary diagnostics were removed before the run.
+The candidate now reuses `DaemonServingAdmission` and the existing 30-second
+setup policy, leaving the response-read and natural-completion guards at five
+seconds. One-shot setup timeout/cancellation will also verify task joining before
+descriptor closure; no protocol or production behavior is being changed.
+
+The candidate passed all twenty daemon functions / 210 invocations over ten
+repetitions (`20-22-58-614Z_pid25818_c67bc7b7`). Delayed one-shot admission now
+passes, and dedicated one-shot timeout/caller-cancellation tests confirm the
+cooperative setup hook has exited before failure returns. Review found no
+blocker: client write-side openness, binding/expiry/allowlist, buffered replay,
+response correlation, and natural completion remain unchanged. The shared gate
+and persistent socket fixture were not modified.
+
+The unrestricted ten-pass comparison (`20-23-46-257Z_pid26026_15db5953`)
+passed all ten invocations of each original/delayed one-shot and setup
+timeout/cancellation function. Overall, 1,175 functions passed and three
+failed (16,017 passed / three failed invocations): Recovery listener
+authentication, coordinator retry authentication, and terminal output replay
+(99,328 rather than 100,000 bytes). These remain separate open observations;
+this test-only change does not explain or fix them. The subsequent unrestricted
+single run (`20-25-26-208Z_pid26993_84f24d13`) passed all 1,178 functions /
+1,602 invocations, with no failures or skips. The candidate is ready for the
+required pre-build commit, signed Release install, and scoped live Recovery
+compatibility check; no live result is claimed yet.
+
 ### Live TUI status projection mismatch
 
 The same signed `052f05d` PTY smoke check exposed a separate reproducible

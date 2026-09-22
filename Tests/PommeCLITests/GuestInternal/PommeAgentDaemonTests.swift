@@ -411,6 +411,21 @@ struct PommeAgentDaemonTests {
 
     @Test("Recovery daemon closes after one allowlisted operation")
     func oneShotOperation() async throws {
+        try await runOneShotOperation()
+    }
+
+    @Test("one-shot peer budget starts after delayed serving admission")
+    func delayedOneShotOperation() async throws {
+        try await runOneShotOperation(readTimeout: .seconds(1), beforeServing: {
+            try? await Task.sleep(for: .milliseconds(1_200))
+        })
+    }
+
+    private func runOneShotOperation(
+        readTimeout: Duration = .seconds(5),
+        setupTimeout: Duration = .seconds(30),
+        beforeServing: (@Sendable () async -> Void)? = nil
+    ) async throws {
         var sockets: [Int32] = [0, 0]
         try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
         defer { _ = Darwin.close(sockets[0]); _ = Darwin.close(sockets[1]) }
@@ -426,15 +441,36 @@ struct PommeAgentDaemonTests {
         let replay = PommeAgentProtocol.Envelope.request(operation: "agent.install", payload: .object([:]))
         let bytes = try PommeAgentProtocol.encode(auth) + PommeAgentProtocol.encode(operation) + PommeAgentProtocol.encode(replay)
         let serverDescriptor = sockets[1]
-        let serving = Task { await PommeAgentDaemon.serve(
-            descriptor: serverDescriptor,
-            connection: connection,
-            agent: agent,
-            allowedOperation: "agent.install"
-        ) }
+        let admission = DaemonServingAdmission()
+        let serving = Task {
+            await beforeServing?()
+            guard !Task.isCancelled else {
+                admission.resolve(.failure(CancellationError()))
+                return
+            }
+            admission.resolve(.success(()))
+            await PommeAgentDaemon.serve(
+                descriptor: serverDescriptor,
+                connection: connection,
+                agent: agent,
+                allowedOperation: "agent.install"
+            )
+        }
         #expect(bytes.withUnsafeBytes { Darwin.write(sockets[0], $0.baseAddress, $0.count) } == bytes.count)
 
-        let result = await DaemonPeerReader.read(descriptor: sockets[0])
+        // Keep the write side open: natural one-shot completion, not EOF,
+        // must terminate serving after the one allowlisted operation.
+        do {
+            try await admission.wait(timeout: setupTimeout)
+            try Task.checkCancellation()
+        } catch {
+            _ = shutdown(sockets[0], SHUT_RDWR)
+            _ = shutdown(sockets[1], SHUT_RDWR)
+            serving.cancel()
+            await serving.value
+            throw error
+        }
+        let result = await DaemonPeerReader.read(descriptor: sockets[0], timeout: readTimeout)
         let completedNaturally = await DaemonPeerReader.finish(
             serving: serving, result: result, sockets: sockets
         )
@@ -446,6 +482,45 @@ struct PommeAgentDaemonTests {
         #expect(try PommeAgentProtocol.decode(Data(lines[0])).ok == true)
         #expect(try PommeAgentProtocol.decode(Data(lines[0])).requestID == auth.requestID)
         #expect(try PommeAgentProtocol.decode(Data(lines[1])).requestID == operation.requestID)
+    }
+
+    @Test("one-shot admission timeout cancels and joins the setup task")
+    func oneShotAdmissionTimeout() async throws {
+        let hookReturned = Mutex(false)
+        do {
+            try await runOneShotOperation(setupTimeout: .milliseconds(10), beforeServing: {
+                defer { hookReturned.withLock { $0 = true } }
+                try? await Task.sleep(for: .seconds(60))
+            })
+            Issue.record("Expected bounded one-shot setup admission failure")
+        } catch DaemonServingAdmission.Failure.timedOut {}
+        #expect(hookReturned.withLock { $0 })
+    }
+
+    @Test("one-shot admission caller cancellation joins the setup task")
+    func oneShotAdmissionCancellation() async throws {
+        let hookEntered = DaemonServingAdmission()
+        let hookReturned = Mutex(false)
+        let caller = Task {
+            try await runOneShotOperation(beforeServing: {
+                defer { hookReturned.withLock { $0 = true } }
+                hookEntered.resolve(.success(()))
+                try? await Task.sleep(for: .seconds(60))
+            })
+        }
+        do {
+            try await hookEntered.wait(timeout: .seconds(30))
+        } catch {
+            caller.cancel()
+            _ = try? await caller.value
+            throw error
+        }
+        caller.cancel()
+        do {
+            try await caller.value
+            Issue.record("Expected caller cancellation during one-shot setup")
+        } catch is CancellationError {}
+        #expect(hookReturned.withLock { $0 })
     }
 
     @Test("daemon peer reader reports a silent peer deadline before descriptor teardown")
