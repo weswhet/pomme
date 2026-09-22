@@ -2064,6 +2064,55 @@ classifications of native automatic-login status, the owner preference, and
 credential-file existence/metadata only—never credential-file contents.
 No such probe or resume has yet been run on this fixture.
 
+At 22:46:22Z, the unchanged diagnostic host started this exact retained VM
+normally for read-only classification, after confirming stopped/no helper and
+the retained journal. Authentication reported the original `c1960d43…890acab`
+guest pin. Two bounded default-identity guest probes found canonical native
+automatic-login OFF (exit 0, one nonempty line), unavailable `autoLoginUser`
+preference (exit 1), and valid root-owned 0600 artifact metadata. The second
+probe also found `.AppleSetupDone` present and the console owned by the native
+Setup Assistant account. Both probes completed with no truncated output;
+only fixed classifications and exit codes were emitted. Credential-file
+contents were never read. Graceful stop began at 22:48:24Z and returned
+`guest-stopped`; independent status confirmed stopped/no helper, unchanged
+guest pin, and the same `sipDisable` / `autologinIntent` / `previous` journal.
+
+These later observations show the configured preference is now absent, not
+which predicate failed immediately after the first-owner reboot. Canonical
+OFF alone is a supported reconciliation branch. The exact public error is
+distinct from command failure and unavailable evidence. The next temporary
+host-only trace will classify each native status/preference/artifact predicate
+at the failing call site, with tag `[DEBUG-autologin-readback-20260922]` and
+no raw native output, account names, or credential contents. No validation,
+deadline, retry, journal, protocol, or guest agent is changed by that diagnostic
+plan. A supported retained resume may advance the journal; a subsequent success
+will not establish the original transient cause.
+
+Read-only review of the readback trace found no validation, command-acceptance,
+error, retry, or phase/journal-semantic changes. Its sink accepts only fixed
+enum events; account comparisons become expected/other or match/mismatch, and
+all errors are rethrown unchanged. The early reconcile marker distinguishes
+post-reboot reconciliation from verification after the native setter. As with
+the signal trace, default runtime logging is temporary and can perturb timing;
+without request/VM correlation it is interpreted only for the isolated run.
+All 21 offline build/install regression checks passed again.
+
+The owner-preparation/workflow ten-repeat run passed 105 functions / 1,400 invocations,
+with no failures or skips:
+`test_macos_2026-09-22T22-54-17-493Z_pid71170_394428ce.xcresult`.
+New trace coverage distinguishes fourteen status/preference/artifact branches,
+including empty versus multiple native status lines. A real configure-login /
+preference-recovery composition verifies native setter proof, owner-completion
+status 1, reboot/re-authentication, and rejected post-reboot readback before
+Setup Assistant completion. The post-reboot invalid status is simulated; this
+test does not identify the live failure's predicate.
+
+The full isolated suite passed all 1,193 functions / 1,638 invocations with
+no failures or skips:
+`test_macos_2026-09-22T22-55-43-338Z_pid71399_1d4df3f4.xcresult`.
+The diagnostic source, tests, and evidence are committed before signed Release
+build and retained-VM resume. Earlier PommeCore warnings remain unchanged.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
