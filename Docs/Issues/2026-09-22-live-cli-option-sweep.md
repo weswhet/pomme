@@ -24,6 +24,8 @@ observations are recorded below; historical rows retain their original status.
 | Daemon socket-admission fixture timing | Fixed in `ca45976`: waits for actual serving-task entry before starting the response-read budget, with separate bounded/cancellable setup. Delayed-start red/green, timeout/cancellation safeguards, full ten-pass socket checks, and a 1,175-function full pass succeeded. Signed Release/live agent status, execution, and stopped-state restoration passed; production daemon and Recovery one-shot test are unchanged. |
 | Recovery one-shot daemon fixture timing | Fixed in `fc4e4bf`: separates serving-task admission from the response budget without weakening natural one-shot completion or replay assertions. Delayed-start red/green, setup timeout/cancellation checks, ten-pass one-shot checks, and a 1,178-function full pass succeeded. Signed Release/live authenticated SIP status and stopped-state restoration passed; production daemon behavior is unchanged and other stress failures remain open. |
 | Recovery listener ordering fixture timing | Fixed in `cf7a22e`: controlled test time separates launch/authentication ordering from scheduler delay; production retains the existing clock, polling interval, and strict deadline. Delayed-ordering red/green, late-authentication rejection and teardown checks, ten-pass comparison, and a 1,181-function full pass succeeded. Signed Release/live authenticated SIP status restored the stopped state; other stress and historical live failures remain open. |
+| Foreground completion ordering fixture timing | Fixed in `97d26b9`: monotonic timing injection isolates ordering assertions from delayed polling without changing production defaults. Delayed-poll red/green, strict partial-output deadline/cancellation checks, twenty-pass foreground comparison, and a 1,183-function full pass succeeded. Signed Release/live delayed stdout/stderr/exit and timeout reporting passed; the separate post-timeout defunct PID observation remains open. |
+| Foreground timeout child reaping | Open live observation: with host `97d26b9` and unchanged creation-pinned macOS 27 agent, a one-second timed-out sleep was reported as signalled, but guest `ps` still showed its PID as `<defunct>` nine seconds later. VM was gracefully stopped afterward; no reaping fix or root cause is claimed. |
 
 This is an observational live test. The CLI and guest images are not being
 modified during the sweep. Every failure, timeout, unexpected state, and
@@ -3122,6 +3124,47 @@ The unrestricted single run (`21-08-01-318Z_pid45613_440da75d`) passed all
 is being committed before its canonical signed Release build and live
 foreground output/timeout comparison. The scheduling defect is in the ordering
 fixture; no production execution deadline or output-completion policy is relaxed.
+
+Candidate `97d26b9` was committed before the canonical signed Release build
+at 21:08:36Z. Build/signature/exact-entitlement/designated-requirement/archive/
+atomic-install checks passed. A fresh login shell resolves
+`/Users/wes/.local/bin/pomme`, version `97d26b9`, SHA-256
+`747d7873284cb6c3d18eb526928a0030a56b4ab410ac7d6ed27e1ac2c050fc73`.
+All 104 CLI contract checks and 21 installer checks passed; existing untouched Core compiler warnings
+were also emitted by the Release build.
+
+Live preflight confirmed `pomme-agent-ownerproof-20260922a` stopped on the
+internal drive with unchanged 40 GB / 4 GB resources, UUID, startup volume,
+creation plan, and agent pin. Normal start began at 21:09:24Z. The scoped
+verification will compare delayed stdout/stderr/nonzero exit and real timeout
+cleanup through the production default clock, then restore stopped state.
+No security mutation, agent update, or deletion is requested.
+
+Normal start succeeded with helper PID 47724 and the unchanged authenticated
+agent pin. At 21:10:19Z, a ten-second-budget shell command printed `early`,
+slept 200 ms, printed `late` plus stderr `warning`, and exited 7. The CLI
+returned both ordered stdout frames, the expected stderr, `exited=true`,
+`exitCode=7`, `outputComplete=true`, and host exit 7 (expected `ok=false` for
+the deliberate nonzero guest exit). No output was truncated.
+
+At 21:10:32Z, a one-second-budget shell printed `early` then exec'd
+`/bin/sleep 10`. The CLI returned host exit 124, `timedOut=true`,
+`cancelled=false`, `terminationRequested=true`, `outputComplete=false`, and
+the retained early frame. It did not claim successful completion. This
+verifies default-clock timeout reporting and signalling, not reaping proof.
+At 21:10:41Z, independent guest `ps -p 722 -o pid=,comm=` returned
+`722 <defunct>` for that exact timed-out PID. The child had exited but was
+not yet reaped at that observation; this is a new open live follow-up, not
+closed by the test-clock correction. The guest agent remained the original
+creation-pinned executable throughout.
+
+Graceful stop began at 21:10:41Z and completed with `guest-stopped`.
+Independent status/inventory confirmed all twelve internal VMs stopped,
+with no helper and unchanged target UUID/startup volume/plan/pin/resources.
+No VM was deleted or moved and no persistent credential, security state,
+agent pin, or journal was changed. The foreground ordering fixture fix and
+live output/timeout reporting checks are complete; process reaping and the
+other full-stress failures remain open.
 
 ### Live TUI status projection mismatch
 
