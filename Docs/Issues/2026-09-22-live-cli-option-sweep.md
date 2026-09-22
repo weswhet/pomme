@@ -1926,3 +1926,17 @@ with no helpers. Installed version remains `a3852a5`, SHA-256
 No lifecycle source change or rebuild was made without a failing case. This
 bounded original/current-host comparison is complete; the issue stays open
 pending evidence that distinguishes the deleted sweep fixture or its timing.
+
+### Authorized capacity recovery
+
+The user authorized deleting Pomme VMs needed for continued testing. At
+16:15:57Z the signed installed CLI deleted only the completed internal fixtures
+`pomme-agent-owner26-20260922j`, `pomme-agent-owner26-20260922k`, and
+`pomme-agent-owner26-20260922l`. Before deletion each was stopped with no helper,
+and its journal was `restorationComplete` / `sipEnable` / `previous` with
+normal-boot verification true. Their live results remain recorded above.
+The public delete results all succeeded; inventory independently confirmed
+the three targets absent and all ten remaining VMs stopped. Free internal
+space increased from 35 GiB to 113 GiB. These three VM states were permanently
+removed; the retained failure fixtures, restore images, and signed-agent
+archives were preserved. No external storage was used.
