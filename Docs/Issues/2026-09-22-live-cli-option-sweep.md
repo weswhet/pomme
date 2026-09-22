@@ -255,6 +255,23 @@ after the target change, with no failures. Signed build and full live retest
 follow this commit; manual navigation is not a substitute for SIP-status
 completion.
 
+Signed Release `e9076c6` passed signing/entitlement/requirement checks and all
+88 CLI contract checks. The original macOS 27 `sip status --debug` retest
+started at 07:05:29Z. It proved the inactive chooser, activated the selected row
+at 07:06:51Z, proved active English, sent Return at 07:06:53Z, reached Utilities
+at 07:06:58Z, and verified Terminal at 07:07:07Z. This validates the previously
+failing inactive-to-active branch in the complete production navigation path.
+The original Language Chooser timeout no longer reproduced.
+
+The command nevertheless failed the subsequent Terminal capability proof:
+all 20 attempts reported `terminalWindow=true, exactMarker=false,
+freshPromptAfterMarker=false`, and the probe was rejected at 07:07:23Z.
+It exited with `Recovery Terminal capability proof failed` and restored the
+stopped state. SIP status is not yet end-to-end successful. Investigation now
+moves to the separately observed Terminal marker failure; the activation
+change is retained with its live navigation evidence, not represented as a
+successful security-status command.
+
 For compatibility, `pomme-agent-recovery26-20260922a` was created on internal
 storage from macOS `26.6.2 (25G83)` with a 40 GB disk and 4 GB RAM, using
 signed build `ef37f16`. Restore began at 06:32:22Z; the existing five-input
