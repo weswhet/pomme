@@ -3,6 +3,23 @@ import Testing
 
 @Suite("Security normal-agent response decoding")
 struct PommeSecurityNormalAgentTests {
+  @Test("Desktop deadline diagnostics distinguish unmatched and unchecked proofs")
+  func desktopDeadlineDiagnostic() {
+    #expect(PommeSecurityDesktopProofObservation(
+      consoleMatches: false, aquaMatches: nil, desktopMatches: nil
+    ).timeoutDiagnostic == "Normal desktop proof deadline expired: console=not-matched aqua=not-checked desktop=not-checked.")
+    #expect(PommeSecurityDesktopProofObservation(
+      consoleMatches: true, aquaMatches: false, desktopMatches: true
+    ).timeoutDiagnostic == "Normal desktop proof deadline expired: console=matched aqua=not-matched desktop=matched.")
+    #expect(PommeSecurityDesktopProofObservation(
+      consoleMatches: true, aquaMatches: true, desktopMatches: false
+    ).timeoutDiagnostic == "Normal desktop proof deadline expired: console=matched aqua=matched desktop=not-matched.")
+    // All predicates may match without satisfying the required stability interval.
+    #expect(PommeSecurityDesktopProofObservation(
+      consoleMatches: true, aquaMatches: true, desktopMatches: true
+    ).timeoutDiagnostic == "Normal desktop proof deadline expired: console=matched aqua=matched desktop=matched.")
+  }
+
   @Test("Normal AMFI support requires the opt-in version, pinned digest, and closed capabilities")
   func validatesNormalAMFICapabilityReceipt() {
     let digest = String(repeating: "a", count: 64)

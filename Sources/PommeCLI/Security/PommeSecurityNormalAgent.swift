@@ -1,5 +1,21 @@
 import Foundation
 
+/// Only proof outcomes enter this diagnostic; no guest identity or output is retained.
+struct PommeSecurityDesktopProofObservation: Equatable, Sendable {
+  let consoleMatches: Bool
+  let aquaMatches: Bool?
+  let desktopMatches: Bool?
+
+  var timeoutDiagnostic: String {
+    func label(_ matched: Bool?) -> String {
+      guard let matched else { return "not-checked" }
+      return matched ? "matched" : "not-matched"
+    }
+    return "Normal desktop proof deadline expired: console=\(label(consoleMatches)) "
+      + "aqua=\(label(aquaMatches)) desktop=\(label(desktopMatches))."
+  }
+}
+
 /// Closed context for read-only normal-boot proof failures. The values are
 /// intentionally independent of the guest response and never carry command
 /// output, arguments, or transport descriptions.
@@ -902,6 +918,7 @@ struct PommeSecurityNormalAgent: Sendable {
     let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
     var desktopStableSince: ContinuousClock.Instant?
     while true {
+      try Task.checkCancellation()
       let user = try execute(
         .init(path: "/usr/bin/stat", arguments: ["-f", "%Su:%u", "/dev/console"], timeout: 15),
         proofStage: .console)
@@ -910,6 +927,8 @@ struct PommeSecurityNormalAgent: Sendable {
       let consoleMatches = !user.detached && user.exited && !user.timedOut && user.signal == nil
         && user.exitCode == 0 && !user.stdoutTruncated && !user.stderrTruncated
         && observed == "\(username):\(uniqueID)"
+      var observation = PommeSecurityDesktopProofObservation(
+        consoleMatches: consoleMatches, aquaMatches: nil, desktopMatches: nil)
       if consoleMatches {
         let session = try execute(aquaRequest, proofStage: .aqua)
         let aquaSessionMatches = Self.isCompletedAquaSessionProof(session)
@@ -919,6 +938,8 @@ struct PommeSecurityNormalAgent: Sendable {
         let desktopMatches = !desktop.detached && desktop.exited && !desktop.timedOut && desktop.signal == nil
           && desktop.exitCode == 0 && !desktop.stdoutTruncated && !desktop.stderrTruncated
           && Self.parseDesktopProcessList(desktop.stdout, expectedUID: uniqueID)
+        observation = .init(
+          consoleMatches: true, aquaMatches: aquaSessionMatches, desktopMatches: desktopMatches)
         let now = ContinuousClock.now
         if aquaSessionMatches && desktopMatches {
           if desktopStableSince == nil { desktopStableSince = now }
@@ -934,6 +955,8 @@ struct PommeSecurityNormalAgent: Sendable {
         desktopStableSince = nil
       }
       guard ContinuousClock.now < deadline else {
+        try Task.checkCancellation()
+        PommeCore.log(observation.timeoutDiagnostic, vmName: reference.displayName)
         throw PommeSecurityWorkflowError.ownerLoginUnverified
       }
       try Task.checkCancellation()

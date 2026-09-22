@@ -2532,7 +2532,10 @@ struct PommeCore {
         let proof = try await preparation.verifyFrameworkProvisionedOwner(password: password,
             expectedGeneratedUID: owner.generatedUID)
         checkpoint(.desktopProof)
-        _ = try await normal.verifyConsoleLogin(username: owner.account, uniqueID: proof.owner.uniqueID)
+        // A newly provisioned desktop can take longer than an established security workflow.
+        _ = try await normal.verifyConsoleLogin(
+            username: owner.account, uniqueID: proof.owner.uniqueID,
+            timeout: Constants.defaultRecoveryAgentTimeout)
         checkpoint(.persistVolumeIdentity)
         try persistProvisioningStartupVolumeGroup(proof.owner.startupVolumeGroupUUID, for: plan)
         // systemsetup's setter requires Full Disk Access on macOS 27. Stop
