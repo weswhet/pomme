@@ -761,3 +761,49 @@ This includes navigation, interaction, profile selection, observation,
 Terminal OCR, VirtioFS bootstrap, and live-runtime composition. The candidate
 and this evidence are committed before the signed Release build; live
 end-to-end validation remains pending at that commit.
+
+Candidate `1f8c47e` was committed and then built and installed through
+`Scripts/build-local.sh`. Release/arm64 compilation and the exact signature,
+entitlement, designated-requirement compatibility, and signed-artifact archive
+checks passed. The installed SHA-256 is
+`d640a76adda6f5e6f7690d0fa5af590bfe2a53ee644d3a87b0fba38d4ca2597d`.
+A fresh login shell resolved `/Users/wes/.local/bin/pomme`, reporting
+`pomme 0.1.0 (1f8c47e)`. All 104 CLI contract checks passed against the installed
+binary. The build retained existing warnings in SettingsAIPlanner and
+PommeCore; this marker change does not claim to resolve them.
+
+The signed macOS 27 SIP-status run began at 09:59:50Z. The same internal-drive
+4 GB/40 GB VM passed inactive-English activation and the full menu route,
+reached Terminal at 10:01:27Z, and passed the new marker proof on attempt 1
+at 10:01:29Z. The authenticated, request-bound session finalized with verified
+SIP enabled and every cleanup field true. A separate status call verified
+restoration to stopped with no helper and unchanged creation-pinned identities.
+
+The macOS 26 compatibility run began at 10:02:17Z on the same internal-drive
+4 GB/40 GB VM and original pinned agent. Its five-input route reached Terminal
+at 10:03:45Z. Attempt 1 lacked the exact marker; attempt 2 at 10:03:48Z passed
+all strict proof fields. The authenticated, request-bound session finalized
+with verified SIP enabled, every cleanup field true, and verified restoration
+to stopped; a separate status call confirmed no helper. This passes complete
+workflow compatibility without claiming that every initial capture contains
+recognizable marker output.
+
+The second unchanged macOS 27 run began at 10:04:33Z with a fresh request.
+It exercised the already-active Language Chooser branch, reached Terminal at
+10:06:07Z, and passed marker proof on attempt 1 at 10:06:10Z. It finalized with
+authenticated request binding, verified SIP enabled, all cleanup fields true,
+and restoration to stopped confirmed by a separate status call. The two macOS
+27 runs and macOS 26 compatibility run therefore passed end to end on the
+installed candidate. No security settings, credentials, creation records, or
+agent pins were changed.
+
+This closes the bounded word-encoding/output-separation fix with deterministic
+red/green evidence and signed live validation. It does not establish universal
+OCR reliability or resolve the other creation, owner-session, and lifecycle
+observations. The earlier 998/1,000 synthetic strict result and macOS 26's first
+attempt miss remain recorded limitations. Both test VMs remain stopped on
+internal storage at unchanged 4 GB/40 GB settings. The 54 individually known
+benign screenshots from this comparison and their empty private directory were
+deleted after validation; no raw images entered source control. Earlier
+investigation artifacts and production navigation-only debug directories were
+not removed by this cleanup.
