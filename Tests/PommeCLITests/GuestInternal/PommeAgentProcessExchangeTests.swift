@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Testing
+import Synchronization
 
 /// Each test starts a real daemon whose descriptor read blocks synchronously
 /// between exchanges. Serialize the suite so concurrent tests cannot occupy
@@ -8,6 +9,102 @@ import Testing
 /// cross-test concurrency.
 @Suite("Pomme agent process exchanges", .serialized)
 struct PommeAgentProcessExchangeTests: Sendable {
+    @Test("Authenticated reconnect retains the original job after a dropped signal response")
+    func reconnectAfterDroppedSignalResponse() async throws {
+        let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64))
+        let retainedID = Mutex<UUID?>(nil)
+        do {
+            let jobID = try await withDaemon(agent: agent) { context in
+                try await authenticate(using: context.wire)
+                let started = try await exchange(.request(
+                    operation: "process.start",
+                    payload: .object(["path": .string("/bin/sleep"), "arguments": .array([.string("10")])])
+                ), using: context.wire)
+                try #require(started.response.ok == true)
+                let text = try #require(started.response.result?.objectValue?["jobID"]?.stringValue)
+                let id = try #require(UUID(uuidString: text))
+                retainedID.withLock { $0 = id }
+                let signal = PommeAgentProtocol.Envelope.request(
+                    operation: "process.signal",
+                    payload: .object(["jobID": .string(text), "signal": .integer(Int64(SIGTERM))])
+                )
+                // Send once without reading the response. withDaemon then
+                // half-closes A and joins serve, proving queued requests were
+                // processed before its unread response and socket are dropped.
+                let encoded = try PommeAgentProtocol.encode(signal)
+                let sent = encoded.withUnsafeBytes {
+                    Darwin.send(context.clientDescriptor, $0.baseAddress, $0.count, 0)
+                }
+                try #require(sent == encoded.count)
+                return id
+            }
+
+            try await withDaemon(agent: agent) { context in
+                try await authenticate(using: context.wire)
+                let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+                var observedExit = false
+                var operations: [String] = []
+                while ContinuousClock.now < deadline, !observedExit {
+                    let request = PommeAgentProtocol.Envelope.request(
+                        operation: "process.status",
+                        payload: .object(["jobID": .string(jobID.uuidString.lowercased())])
+                    )
+                    operations.append(request.operation)
+                    let remaining = ContinuousClock.now.duration(to: deadline).components
+                    let seconds = Double(remaining.seconds) + Double(remaining.attoseconds) / 1e18
+                    guard seconds > 0 else { break }
+                    let result = try await exchange(request, using: context.wire, timeout: min(1, seconds))
+                    try #require(result.response.ok == true)
+                    #expect(result.response.result?.objectValue?["jobID"]?.stringValue == jobID.uuidString.lowercased())
+                    #expect(result.streams.allSatisfy { $0.jobID == jobID && $0.frame.requestID == request.requestID })
+                    // The response can precede reaping in streamEvents; an
+                    // exited=false snapshot does not invalidate its later exit.
+                    if let exit = result.streams.first(where: { $0.frame.stream == .exit }) {
+                        #expect(exit.frame.signal == SIGTERM)
+                        #expect(exit.frame.data == nil)
+                        observedExit = true
+                    }
+                    await Task.yield()
+                }
+                try #require(observedExit)
+                #expect(operations.isEmpty == false)
+                #expect(operations.allSatisfy { $0 == "process.status" })
+            }
+
+            // A new registry cannot manufacture the original job's cleanup.
+            try await withDaemon { context in
+                try await authenticate(using: context.wire)
+                let result = try await exchange(.request(
+                    operation: "process.status",
+                    payload: .object(["jobID": .string(jobID.uuidString.lowercased())])
+                ), using: context.wire)
+                #expect(result.response.ok == false)
+                #expect(result.response.error?.code == "not-found")
+                #expect(result.streams.isEmpty)
+                #expect(result.response.result == nil)
+            }
+        } catch {
+            if let jobID = retainedID.withLock({ $0 }) {
+                // Failure-only cleanup is direct to the original actor, never
+                // a mutation on reconnected B. The child is also bounded.
+                _ = try? await agent.perform(.request(operation: "process.signal", payload: .object([
+                    "jobID": .string(jobID.uuidString.lowercased()), "signal": .integer(Int64(SIGKILL))
+                ])))
+                let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+                var reaped = false
+                while ContinuousClock.now < deadline, !reaped {
+                    let status = try? await agent.perform(.request(operation: "process.status", payload: .object([
+                        "jobID": .string(jobID.uuidString.lowercased())
+                    ])))
+                    reaped = status?.objectValue?["exited"] == .bool(true)
+                    await Task.yield()
+                }
+                #expect(reaped, "Failure cleanup must reap the bounded child")
+            }
+            throw error
+        }
+    }
+
     @Test("Successful process exchanges put bounded output before the response")
     func processOutputPrecedesResponse() async throws {
         try await withDaemon { context in
@@ -484,6 +581,7 @@ struct PommeAgentProcessExchangeTests: Sendable {
     }
 
     private func withDaemon<R: Sendable>(
+        agent suppliedAgent: PommeAgent? = nil,
         body: @Sendable (DaemonContext) async throws -> R
     ) async throws -> R {
         var sockets: [Int32] = [-1, -1]
@@ -494,10 +592,11 @@ struct PommeAgentProcessExchangeTests: Sendable {
         let server = sockets[1]
         let token = String(repeating: "a", count: 64)
         let connection = try PommeAgentConnection(token: token, lifetime: .persistent)
-        let agent = try PommeAgent(role: .persistent, executableSHA256: token)
+        let agent = try suppliedAgent ?? PommeAgent(role: .persistent, executableSHA256: token)
         let context = DaemonContext(
             wire: PommeAgentVSOCKWire(fileDescriptor: client),
-            connection: connection
+            connection: connection,
+            clientDescriptor: client
         )
         let serving = Task {
             await PommeAgentDaemon.serve(
@@ -529,6 +628,7 @@ struct PommeAgentProcessExchangeTests: Sendable {
 private struct DaemonContext: Sendable {
     let wire: PommeAgentVSOCKWire
     let connection: PommeAgentConnection
+    let clientDescriptor: Int32
 }
 
 private struct ExchangeResult: Sendable {

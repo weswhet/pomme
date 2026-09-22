@@ -1408,6 +1408,12 @@ struct PommeCore {
         )
         let remaining = deadline.map { $0 - ProcessInfo.processInfo.systemUptime }
         let result = try PommeControlSocketClient(identity: identity).send(request, timeout: remaining)
+        return normalizedControlObject(result)
+    }
+
+    /// Shared by the live control bridge and contract tests; normalization is
+    /// not security verification and intentionally preserves the existing shape.
+    static func normalizedControlObject(_ result: JSONValue) -> [String: Any] {
         guard let object = result.objectValue else {
             return ["ok": true, "response": result.publicValue, "hostExitCode": 0]
         }
@@ -4703,6 +4709,9 @@ struct PommeCore {
                 }
                 return try await terminalSessionControlResponse(request, runtime: runtime)
             case .agentPerform(let request, _):
+                if PommeSecurityDesktopCleanup.handles(request) {
+                    return try await securityDesktopCleanupControlResponse(request, runtime: runtime)
+                }
                 if isSecurityNormalAMFI(request) {
                     return await securityNormalAMFIControlResponse(request, runtime: runtime)
                 }
@@ -4837,6 +4846,9 @@ struct PommeCore {
             return "ERROR Pomme control streaming is limited to agent.perform or terminal.attach."
         }
         do {
+            if PommeSecurityDesktopCleanup.handles(operation) {
+                return try await securityDesktopCleanupControlResponse(operation, runtime: runtime)
+            }
             if isSecurityNormalAMFI(operation) {
                 return await securityNormalAMFIControlResponse(operation, runtime: runtime)
             }
@@ -4890,6 +4902,19 @@ struct PommeCore {
             return (try? jsonLine(["ok": false, "error": error.localizedDescription, "hostExitCode": 1]))
                 ?? "{\"ok\":false,\"hostExitCode\":1}"
         }
+    }
+
+    private static func securityDesktopCleanupControlResponse(
+        _ request: PommeAgentPerformRequest, runtime: PommeVMRuntime
+    ) async throws -> String {
+        let response = await PommeSecurityDesktopCleanup.perform(
+            operation: request.operation, payload: request.payload,
+            capture: { try runtime.captureAuthenticatedAgentSession(as: .normal) }
+        )
+        guard let object = response.objectValue else {
+            throw RunnerError.invalidControlResponse("Desktop cleanup envelope is invalid.")
+        }
+        return try jsonLine(object.mapValues(\.publicValue))
     }
 
     private static func isSecurityPrivatePTY(_ request: PommeAgentPerformRequest) -> Bool {
@@ -5281,7 +5306,7 @@ struct PommeCore {
         ])
     }
 
-    private static func agentStreamPayload(_ frame: PommeAgentJobStreamFrame) -> [String: Any] {
+    static func agentStreamPayload(_ frame: PommeAgentJobStreamFrame) -> [String: Any] {
         var payload: [String: Any] = [
             "jobID": frame.jobID.uuidString.lowercased(),
             "requestID": frame.frame.requestID.uuidString.lowercased(),
