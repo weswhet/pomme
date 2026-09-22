@@ -120,3 +120,40 @@ passed (80 tests). The earlier failure is not reproduced on this internal-drive
 run; this does not establish its cause or justify a product fix. It remains open
 pending a failing reproduction. The next sequential investigation uses this
 same disposable VM for the reported pause/resume/restart failure.
+
+The initial pause/resume/restart sequence passed at 06:07Z, with a clean guest
+shutdown and a new connected helper. `agent status --debug` stayed in normal
+macOS. `sip status --debug` then reproduced the Recovery failure: after the
+English-language confirmation at 06:09:30Z, it waited five minutes for
+`recoveryUtilities` and reported `lastObserved=unknown` at 06:14:30Z. The
+retained timeout PNG is byte-identical to the pre-input PNG, showing English
+selected in Language Chooser. A first image rendering appeared blank, but
+reopening the full image and comparing SHA-256 corrected that interpretation.
+This alone cannot distinguish replayed pixels from a key that did not advance
+the guest. The command failed and restored normal macOS with
+a connected agent. A second pause/resume/restart sequence after that failure
+also passed. The restart defect remains unconfirmed on internal storage.
+
+Normal display capture subsequently returned a boot image followed by the
+logged-in desktop; `/dev/console` was `pomme:501`, and Dock/Finder were running.
+The Recovery failure is being investigated at the framebuffer publication and
+observer-registration boundary. No navigation or security guard has been
+relaxed, and no fix is claimed from these probes.
+
+### Frame publication candidate
+
+The production presenter-association path previously suppressed synchronous
+cached-frame completion only on the first registration. Later captures detach
+and re-register the observer, but could accept the synchronous replay as their
+result. The candidate applies replay suppression to every native association,
+retaining the surface for a subsequent fresh full-frame or damage callback.
+Re-registration, source-identity validation, ABI qualification, and navigation
+guards are unchanged.
+
+A regression at the actual registration-policy seam reproduces this behavior
+across three registrations. With the old policy, the new parameterized test
+failed while the other 22 capture tests passed. With the candidate, all 23
+capture tests passed via XcodeBuildMCP. The test also checks old-source callback
+rejection and both full-frame and damage-only publication. This establishes
+the replay-policy change, not yet the cause or resolution of the live Recovery
+timeout. Signed Release and live validation follow the candidate commit.

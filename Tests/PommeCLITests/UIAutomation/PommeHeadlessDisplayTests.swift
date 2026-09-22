@@ -456,10 +456,9 @@ struct VirtualizationPrivateHeadlessBackendTests {
         }
     }
 
-    @Test("Cold registration caches replay but waits for a later frame callback")
-    func coldRegistrationWaitsForPublication() async throws {
+    @Test("Every presenter registration caches replay but waits for a live callback", arguments: [false, true])
+    func registrationWaitsForPublication(damageOnly: Bool) async throws {
         let state = HeadlessFramebufferCaptureState()
-        let source = NSObject()
         let surface = try #require(IOSurfaceCreate([
             kIOSurfaceWidth: 2,
             kIOSurfaceHeight: 2,
@@ -468,37 +467,50 @@ struct VirtualizationPrivateHeadlessBackendTests {
             kIOSurfacePixelFormat: 0x42475241,
             kIOSurfaceAllocSize: 16
         ] as CFDictionary))
-        state.associateSource(source)
-        let request = try state.beginRequest()
-        func deliver() {
+        func deliver(source: NSObject, full: Bool = true) -> Bool {
             var frame = [UInt64](repeating: 0, count: 2)
-            frame.withUnsafeMutableBytes { bytes in
+            return frame.withUnsafeMutableBytes { bytes in
                 bytes.storeBytes(of: Unmanaged.passUnretained(surface).toOpaque(), as: UnsafeMutableRawPointer.self)
-                bytes.storeBytes(of: UInt8(1), toByteOffset: 8, as: UInt8.self)
+                bytes.storeBytes(of: UInt8(full ? 1 : 0), toByteOffset: 8, as: UInt8.self)
                 var pointer = bytes.baseAddress.map(UnsafeRawPointer.init)
-                withUnsafePointer(to: &pointer) { shared in
-                    _ = state.receive(sharedFrameUpdatePointer: UnsafeRawPointer(shared), source: source)
+                return withUnsafePointer(to: &pointer) { shared in
+                    state.receive(sharedFrameUpdatePointer: UnsafeRawPointer(shared), allowDamageReuse: true, source: source)
                 }
             }
         }
-        state.suppressRequestCompletion { deliver() }
-        #expect(state.hasLatestSurface)
-        // Allow any accidentally scheduled render to finish before checking.
-        try await Task.sleep(nanoseconds: 50_000_000)
-        #expect(state.takeResult(requestID: request) == nil)
-        deliver()
-        let deadline = Date().addingTimeInterval(2)
-        while Date() < deadline {
-            if let result = state.takeResult(requestID: request) {
-                let image = try result.get().value
-                #expect(image.width == 2)
-                #expect(image.height == 2)
-                return
+        var priorSource: NSObject?
+        for _ in 0..<3 {
+            state.associateSource(nil)
+            let source = NSObject()
+            let request = try state.beginRequest()
+            HeadlessFramebufferPresenterRegistration.associate(source: source, state: state) {
+                #expect(deliver(source: source))
             }
-            try await Task.sleep(nanoseconds: 10_000_000)
+            #expect(state.hasLatestSurface)
+            if let priorSource {
+                #expect(!deliver(source: priorSource))
+                #expect(!deliver(source: priorSource, full: false))
+            }
+            // Allow any accidentally scheduled replay render to finish.
+            try await Task.sleep(nanoseconds: 100_000_000)
+            #expect(state.takeResult(requestID: request) == nil)
+            #expect(deliver(source: source, full: !damageOnly))
+            let deadline = Date().addingTimeInterval(2)
+            var completed = false
+            while Date() < deadline {
+                if let result = state.takeResult(requestID: request) {
+                    let image = try result.get().value
+                    #expect(image.width == 2)
+                    #expect(image.height == 2)
+                    completed = true
+                    break
+                }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            #expect(completed, "The live callback did not complete capture")
+            state.cancel(requestID: request)
+            priorSource = source
         }
-        Issue.record("The first asynchronous publication did not complete capture")
-        state.cancel(requestID: request)
     }
 
     @Test("Frame validation rejects wrong-sized and blank frames")
