@@ -54,11 +54,25 @@ enum PommeForegroundExecution {
         }
     }
 
+    struct PollTiming: Sendable {
+        let now: @Sendable () -> ContinuousClock.Instant
+        let sleep: @Sendable (Duration) async throws -> Void
+
+        init(
+            now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
+            sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+        ) {
+            self.now = now
+            self.sleep = sleep
+        }
+    }
+
     static func run(
         payload: JSONValue,
         timeout: TimeInterval,
         perform: @escaping Perform,
         sendStream: @escaping SendStream,
+        pollTiming: PollTiming = .init(),
         onFrames: FrameHandler? = nil
     ) async throws -> PommeAgentCorrelatedResult {
         guard var startPayload = payload.objectValue else { throw Error.invalidPayload }
@@ -73,8 +87,7 @@ enum PommeForegroundExecution {
         } else { input = Data() }
         startPayload.removeValue(forKey: "attachStdin")
 
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(timeout))
+        let deadline = pollTiming.now().advanced(by: .seconds(timeout))
         try Task.checkCancellation()
         // This request is sent exactly once. If its outcome is uncertain there
         // is no safe job identity to retry, signal, or replace.
@@ -91,18 +104,18 @@ enum PommeForegroundExecution {
             try await state.accept(started.streamFrames, onFrames: onFrames)
             var offset = 0
             while offset < input.count {
-                try checkpoint(clock: clock, deadline: deadline)
+                try checkpoint(timing: pollTiming, deadline: deadline)
                 let end = min(input.count, offset + PommeAgentProtocol.maximumStreamChunkBytes)
                 let frames = try await sendStream(jobID, .stdin, input.subdata(in: offset..<end))
                 try await state.accept(frames, onFrames: onFrames)
                 offset = end
             }
-            try checkpoint(clock: clock, deadline: deadline)
+            try checkpoint(timing: pollTiming, deadline: deadline)
             let eofFrames = try await sendStream(jobID, .eof, nil)
             try await state.accept(eofFrames, onFrames: onFrames)
 
             while true {
-                try checkpoint(clock: clock, deadline: deadline)
+                try checkpoint(timing: pollTiming, deadline: deadline)
                 let status = try await perform("process.status", .object(["jobID": .string(jobID.uuidString.lowercased())]))
                 guard let values = status.result.objectValue,
                       let id = values["jobID"]?.stringValue, UUID(uuidString: id) == jobID,
@@ -114,7 +127,7 @@ enum PommeForegroundExecution {
                     try validateTerminal(terminal)
                     return state.result(requestID: started.requestID, terminal: terminal)
                 }
-                try await Task.sleep(for: min(.milliseconds(25), clock.now.duration(to: deadline)))
+                try await pollTiming.sleep(min(.milliseconds(25), pollTiming.now().duration(to: deadline)))
             }
         } catch {
             // No automatic replay, replacement process, or reboot. A failed
@@ -160,9 +173,9 @@ enum PommeForegroundExecution {
             + (timedOut ? " Use --detach to run a command that outlives the request." : "")
     }
 
-    private static func checkpoint(clock: ContinuousClock, deadline: ContinuousClock.Instant) throws {
+    private static func checkpoint(timing: PollTiming, deadline: ContinuousClock.Instant) throws {
         try Task.checkCancellation()
-        guard clock.now < deadline else { throw Error.deadlineReached }
+        guard timing.now() < deadline else { throw Error.deadlineReached }
     }
 
     private static func validateTerminal(_ values: [String: JSONValue]) throws {

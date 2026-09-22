@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 import Synchronization
@@ -128,6 +129,20 @@ struct PommeForegroundExecutionTests {
 
     @Test("polls until output is complete and retains stderr and exit status")
     func delayedOutputAndCompletion() async throws {
+        try await runDelayedOutputAndCompletion()
+    }
+
+    @Test("Foreground completion ordering survives a delayed polling resume")
+    func delayedPollCompletionOrdering() async throws {
+        try await runDelayedOutputAndCompletion(timeout: 0.05, pollSleep: { _ in
+            try await Task.sleep(for: .milliseconds(120))
+        })
+    }
+
+    private func runDelayedOutputAndCompletion(
+        timeout: TimeInterval = 5,
+        pollSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+    ) async throws {
         // Given
         let firstStatus = correlated(
             requestID: UUID(),
@@ -153,9 +168,21 @@ struct PommeForegroundExecutionTests {
         )
 
         // When
-        let result = try await run(transport: transport)
+        let logicalNow = ContinuousClock.now
+        let pollCount = Mutex(0)
+        let result = try await run(
+            transport: transport, timeout: timeout,
+            pollTiming: .init(now: { logicalNow }, sleep: { duration in
+                let count = pollCount.withLock { $0 += 1; return $0 }
+                // A missing scripted completion must fail, not spin forever
+                // against this ordering fixture's intentionally frozen clock.
+                try #require(count == 1)
+                try await pollSleep(duration)
+            })
+        )
 
         // Then
+        #expect(pollCount.withLock { $0 } == 1)
         #expect(result.requestID == startRequestID)
         #expect(result.result.objectValue?["jobID"] == .string(jobID.uuidString.lowercased()))
         #expect(result.result.objectValue?["exited"] == .bool(true))
@@ -164,6 +191,64 @@ struct PommeForegroundExecutionTests {
         #expect(result.streamFrames.contains { $0.frame.stream == .stderr && $0.frame.data == Data("warning".utf8) })
         #expect(await transport.operationNames == ["process.start", "process.status", "process.status"])
         #expect(await transport.streamCalls.map(\.stream) == [.eof])
+    }
+
+    @Test("Foreground logical deadline and actual cancellation retain partial output without another poll", arguments: [false, true])
+    func logicalPollInterruption(cancelled: Bool) async throws {
+        let transport = ForegroundTransport(
+            start: correlated(requestID: startRequestID, result: started(), frames: []),
+            statuses: [
+                correlated(requestID: UUID(), result: status(exited: false), frames: [
+                    frame(jobID: jobID, stream: .stdout, data: Data("early".utf8))
+                ]),
+                correlated(requestID: UUID(), result: status(exited: true, exitCode: 7), frames: [
+                    frame(jobID: jobID, stream: .stdout, data: Data("late".utf8)),
+                    frame(jobID: jobID, stream: .exit)
+                ])
+            ]
+        )
+        let instant = Mutex(ContinuousClock.now)
+        let events = Mutex<[String]>([])
+        let signalPayload = Mutex<JSONValue?>(nil)
+        let sleeps = Mutex<[Duration]>([])
+        let task = Task {
+            try await PommeForegroundExecution.run(
+                payload: .object(["path": .string("/bin/true")]), timeout: 0.05,
+                perform: { operation, payload in
+                    events.withLock { $0.append(operation) }
+                    if operation == "process.signal" { signalPayload.withLock { $0 = payload } }
+                    return await transport.perform(operation: operation, payload: payload)
+                },
+                sendStream: { jobID, stream, data in
+                    events.withLock { $0.append("stream.\(stream)") }
+                    return await transport.sendStream(jobID: jobID, stream: stream, data: data)
+                },
+                pollTiming: .init(now: { instant.withLock { $0 } }, sleep: { duration in
+                    sleeps.withLock { $0.append(duration) }
+                    instant.withLock { $0 = $0.advanced(by: .seconds(1)) }
+                    // Cancel the actual runner task while its injected sleep
+                    // is active, with an expired clock at the same checkpoint.
+                    if cancelled { withUnsafeCurrentTask { $0?.cancel() } }
+                })
+            )
+        }
+        let result = try await task.value
+        #expect(result.requestID == startRequestID)
+        #expect(result.result.objectValue?["jobID"] == .string(jobID.uuidString.lowercased()))
+        #expect(result.result.objectValue?["timedOut"] == .bool(!cancelled))
+        #expect(result.result.objectValue?["cancelled"] == .bool(cancelled))
+        #expect(result.result.objectValue?["exited"] == .bool(false))
+        #expect(result.result.objectValue?["outputComplete"] == .bool(false))
+        #expect(result.streamFrames.count == 1)
+        #expect(result.streamFrames.first?.jobID == jobID)
+        #expect(result.streamFrames.first?.frame.stream == .stdout)
+        #expect(result.streamFrames.first?.frame.data == Data("early".utf8))
+        #expect(events.withLock { $0 } == ["process.start", "stream.eof", "process.status", "process.signal"])
+        #expect(sleeps.withLock { $0 } == [.milliseconds(25)])
+        #expect(signalPayload.withLock { $0 } == .object([
+            "jobID": .string(jobID.uuidString.lowercased()), "signal": .integer(Int64(SIGTERM))
+        ]))
+        #expect(await transport.signalCalls == 1)
     }
 
     @Test("sends supplied input in bounded chunks followed by one EOF")
@@ -363,17 +448,19 @@ struct PommeForegroundExecutionTests {
         // tests below; the larger default avoids starvation under the full
         // parallel suite.
         timeout: TimeInterval = 5,
+        pollTiming: PommeForegroundExecution.PollTiming = .init(),
         onFrames: PommeForegroundExecution.FrameHandler? = nil
     ) async throws -> PommeAgentCorrelatedResult {
         try await PommeForegroundExecution.run(
             payload: payload,
             timeout: timeout,
             perform: { operation, payload in
-                try await transport.perform(operation: operation, payload: payload)
+                await transport.perform(operation: operation, payload: payload)
             },
             sendStream: { jobID, stream, data in
-                try await transport.sendStream(jobID: jobID, stream: stream, data: data)
+                await transport.sendStream(jobID: jobID, stream: stream, data: data)
             },
+            pollTiming: pollTiming,
             onFrames: onFrames
         )
     }
@@ -480,6 +567,7 @@ private actor ForegroundTransport {
         return []
     }
 }
+
 @Suite("Foreground interruption messages")
 struct PommeForegroundInterruptionMessageTests {
     @Test("A signalled timeout says the process was stopped, not that it is listed")
