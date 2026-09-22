@@ -458,7 +458,9 @@ struct PommeSecurityOwnerPreparation: Sendable {
       PommeSecurityOwnerPreparationEvent
     ) throws -> Void
 
-  static let commandTimeout: TimeInterval = 30
+  // Native account and APFS tools can take over 30 seconds during macOS 27's
+  // first boot. Keep each evidence command bounded while allowing initialization.
+  static let commandTimeout: TimeInterval = 120
   private static let setupAssistantRecordName = "_mbsetupuser"
   private static let setupAssistantUID: UInt32 = 248
   private static let setupAssistantExecutablePath =
