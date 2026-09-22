@@ -1323,3 +1323,54 @@ coordinator, foreground-control, and real daemon exchange suites also passed.
 Read-only review found no behavioral or redaction blocker. All seven VMs are
 stopped and internal storage has 191 GiB free before the next signed comparison.
 This candidate is committed before building and is not a transport fix.
+
+Diagnostic candidate `051bd6c` built and installed through the canonical signed
+Release workflow. Signature, exact entitlements, designated-requirement
+compatibility, and archive checks passed. Installed SHA-256:
+`0297d320550ff5c3b1fc7a4146e9e8b0440d1baba54d2361825143569a29af24`.
+A fresh login shell resolved `/Users/wes/.local/bin/pomme` with the expected
+commit. All 104 CLI contract checks and all 21 installer checks passed.
+Fresh `pomme-agent-owner26-20260922g` creation began at 12:26:23Z after dry-run
+preflight, using the internal cached 26.6.2/25G83 IPSW, explicit 40 GB disk and
+4 GB RAM, and `--boot none`. The seven existing VMs remain stopped. No
+previously pinned agent, owner, credential, or journal is replaced.
+
+Restore reached 100% at 12:30:09Z; Recovery reached Terminal at 12:31:36Z
+and marker proof passed on attempt 2 at 12:31:39Z. Creation passed normal-agent
+verification and returned stopped state, independently confirmed by public
+status. The VM UUID is `d3636887-e18e-4fcc-857a-2d3dc4e36a3a`, startup-volume
+group `8a66674d-549a-4c2a-ab50-bc8a7874b81e`, and immutable plan digest
+`3b74c054627ccec45f0f9534f344cc2c2365b26cf2625258b65065a84416e1dc`.
+It pins the installed `0297d320…a29af24` agent. The original fresh-owner
+`sip disable --force --final-state previous` began at 12:32:42Z without
+intervening guest probes or owner changes.
+
+This diagnostic run passed fresh-owner desktop proof without a transport
+failure or cleanup retry. The existing owner-completion status-1 boot retry
+began at 12:34:03Z; owner completion passed at 12:34:51Z and Setup Assistant
+at 12:34:54Z. Desktop verification began at 12:35:11Z. Aqua probes included
+3.387 seconds at 12:35:31Z and 9.305 seconds at 12:35:46Z, each with a reap
+and no recorded wait errors. All desktop predicates matched at 12:35:56Z;
+the next Aqua probe took 4.085 seconds and stable proof passed at 12:36:06Z.
+The workflow advanced to authenticated Recovery. This is slow successful
+first-owner compatibility, not a reproduction or fix of the transport failure.
+
+SIP disable completed successfully after its 12:38:07Z first-attempt Recovery
+marker proof and fresh normal-boot verification. The result reported
+`configuredDisabled=true` and all normal-boot, runtime-configuration,
+enforcement, and final-state verification fields true. Public status separately
+confirmed stopped with no helper. Matching SIP-enable restoration began at
+12:39:48Z. Internal storage has 166 GiB free; subsequent fresh comparisons
+remain sequential so concurrent guest load does not alter this baseline.
+
+SIP-enable restoration passed its second-attempt marker proof at 12:42:23Z,
+then returned `configuredDisabled=false` with all normal-boot, runtime,
+enforcement, and final-state verification fields true. Public inventory
+confirmed all eight internal VMs stopped with no helpers. A closed journal
+projection confirmed `phase=restorationComplete`, `operation=sipEnable`, and
+`requestedFinalState=previous` for `...22g`. Its original SIP-enabled/stopped
+state is restored. The signed diagnostic build is compatible with the complete
+disable/enable cycle, but the intermittent first-login transport failure remains
+open and the temporary diagnostics remain. The next evidence step is another
+fresh, sequential comparison on this unchanged binary and resource settings,
+not a reset of any retained failing VM or a speculative transport retry.
