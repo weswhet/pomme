@@ -11,6 +11,50 @@ enum PommeForegroundExecution {
     static let maximumBufferedOutputBytes = 64 * 1024 // per output channel
     static let desktopCleanupReceiptKey = "_pommeDesktopProofCleanupReceipt"
 
+    // Temporary diagnostics: never interpolate an error or its associated text.
+    static func desktopTransportErrorKind(_ error: any Swift.Error) -> String {
+        if error is CancellationError { return "cancelled" }
+        if let error = error as? POSIXError {
+            return error.code == .ETIMEDOUT ? "posixDeadline" : "posix"
+        }
+        if let error = error as? Error {
+            switch error {
+            case .deadlineReached: return "foregroundDeadline"
+            case .unrelatedJobFrame: return "unrelatedJobFrame"
+            case .invalidCompletion: return "invalidCompletion"
+            default: return "foregroundValidation"
+            }
+        }
+        if error is PommeAgentProtocol.Error { return "agentProtocol" }
+        if error is PommeAgentVSOCKError { return "vsockSession" }
+        if let error = error as? RunnerError {
+            switch error {
+            case .posix(_, let code): return code == ETIMEDOUT ? "posixDeadline" : "posix"
+            case .controlCommandFailed: return "controlCommandFailed"
+            case .noRunningVM: return "noHelper"
+            case .invalidControlResponse, .incompatibleHelperProtocol: return "controlProtocol"
+            case .guestAgentTimedOut, .guestAgentProbeTimedOut: return "agentTimeout"
+            case .guestAgentProtocol: return "agentProtocol"
+            case .guestAgentDisconnected: return "agentDisconnected"
+            case .guestAgentUnavailable: return "agentUnavailable"
+            case .guestAgentConnecting: return "agentConnecting"
+            case .guestAgentError: return "agentError"
+            default: return "runnerOther"
+            }
+        }
+        return "other"
+    }
+
+    static func desktopElapsedMilliseconds(since start: ContinuousClock.Instant) -> Int64 {
+        let duration = start.duration(to: ContinuousClock.now).components
+        return max(0, duration.seconds * 1_000 + duration.attoseconds / 1_000_000_000_000_000)
+    }
+
+    private enum DesktopBoundary: String {
+        case start, startValidation, frameAccept, eof, status, statusValidation
+        case terminalValidation, checkpoint, wait, signal
+    }
+
     // Temporary, closed diagnostics for the September 22 Aqua timeout investigation.
     static let aquaDebugKey = "_pommeDebugAqua20260922"
     static let aquaDebugNumbers = ["totalMicros", "startMicros", "eofMicros", "statusCount", "statusTotalMicros", "statusMaxMicros", "signalMicros"] + PommeAquaWaitDebug.fields
@@ -119,21 +163,34 @@ enum PommeForegroundExecution {
         let clock = ContinuousClock()
         let executionStart = clock.now
         let deadline = executionStart.advanced(by: .seconds(timeout))
+        var pollCount = 0
+        func diagnose(_ error: any Swift.Error, at boundary: DesktopBoundary, jobEstablished: Bool) {
+            guard isDesktopProof else { return }
+            PommeCore.log("[DEBUG-desktop-transport-20260922] side=helper boundary=\(boundary.rawValue) "
+                + "elapsedMs=\(desktopElapsedMilliseconds(since: executionStart)) "
+                + "jobEstablished=\(jobEstablished) pollCount=\(pollCount) errorKind=\(desktopTransportErrorKind(error))")
+        }
         try Task.checkCancellation()
         // This request is sent exactly once. If its outcome is uncertain there
         // is no safe job identity to retry, signal, or replace.
         let startTime = clock.now
-        let started = try await perform("process.start", .object(startPayload))
+        let started: PommeAgentCorrelatedResult
+        do { started = try await perform("process.start", .object(startPayload)) }
+        catch { diagnose(error, at: .start, jobEstablished: false); throw error }
         aquaTiming?.record("startMicros", since: startTime)
         guard let initial = started.result.objectValue,
               let text = initial["jobID"]?.stringValue, let jobID = UUID(uuidString: text)
-        else { throw Error.invalidCompletion }
+        else {
+            diagnose(Error.invalidCompletion, at: .startValidation, jobEstablished: false)
+            throw Error.invalidCompletion
+        }
         var state = OutputState(jobID: jobID)
         var terminal = initial
         if case .integer(let pid)? = initial["pid"] {
             aquaTiming?.values["validPositiveStartPID"] = .bool(pid > 0)
         } else { aquaTiming?.values["validPositiveStartPID"] = .bool(false) }
 
+        var boundary = DesktopBoundary.frameAccept
         do {
             try await state.accept(started.streamFrames, onFrames: onFrames)
             var offset = 0
@@ -144,23 +201,30 @@ enum PommeForegroundExecution {
                 try await state.accept(frames, onFrames: onFrames)
                 offset = end
             }
+            boundary = .checkpoint
             try checkpoint(clock: clock, deadline: deadline)
             let eofFrames: [PommeAgentJobStreamFrame]
             do {
+                boundary = .eof
                 let start = clock.now
                 defer { aquaTiming?.record("eofMicros", since: start) }
                 eofFrames = try await sendStream(jobID, .eof, nil)
             }
+            boundary = .frameAccept
             try await state.accept(eofFrames, onFrames: onFrames)
 
             while true {
+                boundary = .checkpoint
                 try checkpoint(clock: clock, deadline: deadline)
                 let status: PommeAgentCorrelatedResult
                 do {
+                    boundary = .status
+                    pollCount += 1
                     let start = clock.now
                     defer { aquaTiming?.record("status", since: start) }
                     status = try await perform("process.status", .object(["jobID": .string(jobID.uuidString.lowercased())]))
                 }
+                boundary = .statusValidation
                 guard let values = status.result.objectValue,
                       let id = values["jobID"]?.stringValue, UUID(uuidString: id) == jobID,
                       case .bool = values["exited"]
@@ -168,17 +232,21 @@ enum PommeForegroundExecution {
                 terminal = initial.merging(values) { _, current in current }
                 aquaTiming?.values["lastExited"] = values["exited"]
                 aquaTiming?.recordWaitSnapshot(values)
+                boundary = .frameAccept
                 try await state.accept(status.streamFrames, onFrames: onFrames)
                 if terminal["exited"] == .bool(true), state.receivedExit {
+                    boundary = .terminalValidation
                     try validateTerminal(terminal)
                     aquaTiming?.values["exitFrameBeforeSignal"] = .bool(state.receivedExit)
                     aquaTiming?.record("totalMicros", since: executionStart)
                     if let aquaTiming { terminal[aquaDebugKey] = .object(aquaTiming.values) }
                     return state.result(requestID: started.requestID, terminal: terminal)
                 }
+                boundary = .wait
                 try await Task.sleep(for: min(.milliseconds(25), clock.now.duration(to: deadline)))
             }
         } catch {
+            diagnose(error, at: boundary, jobEstablished: true)
             // No automatic replay, replacement process, or reboot. A failed
             // signal is retained as uncertainty, not treated as cleanup proof.
             let signalled: Bool
@@ -201,7 +269,10 @@ enum PommeForegroundExecution {
                     reapedAndDrained = true
                 }
                 signalled = true
-            } catch { signalled = false }
+            } catch {
+                diagnose(error, at: .signal, jobEstablished: true)
+                signalled = false
+            }
             if error is CancellationError || (error as? Error) == .deadlineReached {
                 terminal["timedOut"] = .bool(!(error is CancellationError))
                 terminal["cancelled"] = .bool(error is CancellationError)

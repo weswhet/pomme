@@ -1,8 +1,55 @@
 import Foundation
 import Testing
+import Synchronization
 
 @Suite("Security normal-agent response decoding")
 struct PommeSecurityNormalAgentTests {
+  @Test("Outer desktop transport logs closed failure kinds", arguments: ["deadline", "rejected", "noHelper", "protocol"])
+  func desktopOuterTransportDiagnostic(kind: String) async throws {
+    let messages = Mutex<[String]>([])
+    let calls = Mutex(0)
+    let agent = PommeSecurityNormalAgent(
+      reference: .init(name: "private-name", bundle: .init(rootURL: URL(fileURLWithPath: "/tmp/private-path"))),
+      expectedExecutableDigest: String(repeating: "a", count: 64),
+      desktopProofHooks: .init(execute: { _, timeout in
+        calls.withLock { $0 += 1 }
+        #expect(timeout == 30)
+        switch kind {
+        case "deadline": throw POSIXError(.ETIMEDOUT)
+        case "rejected": throw RunnerError.controlCommandFailed("private-secret")
+        case "noHelper": throw RunnerError.noRunningVM(URL(fileURLWithPath: "/tmp/private-path"))
+        default: throw RunnerError.invalidControlResponse("private-secret")
+        }
+      }, status: { _, _ in Issue.record("No cleanup for transport failure"); return .null })
+    )
+    await PommeCore.withLogSink({ line in messages.withLock { $0.append(line) } }) {
+      do {
+        try await agent.verifyConsoleLogin(username: "owner", uniqueID: 501)
+        Issue.record("Expected unchanged transport error")
+      } catch let error as POSIXError {
+        #expect(kind == "deadline")
+        #expect(error.code == .ETIMEDOUT)
+      } catch let error as RunnerError {
+        switch error {
+        case .controlCommandFailed(let text): #expect(kind == "rejected"); #expect(text == "private-secret")
+        case .noRunningVM: #expect(kind == "noHelper")
+        case .invalidControlResponse(let text): #expect(kind == "protocol"); #expect(text == "private-secret")
+        default: Issue.record("Unexpected RunnerError case")
+        }
+      } catch { Issue.record("Unexpected error type") }
+    }
+    let lines = messages.withLock { $0.filter { $0.contains("[DEBUG-desktop-transport-20260922]") } }
+    let line = try #require(lines.first)
+    #expect(lines.count == 1)
+    #expect(line.contains("side=host boundary=control stage=console"))
+    let expected = ["deadline": "posixDeadline", "rejected": "controlCommandFailed", "noHelper": "noHelper", "protocol": "controlProtocol"]
+    #expect(line.contains("errorKind=\(try #require(expected[kind]))"))
+    #expect(line.contains("budgetMs=30000"))
+    #expect(line.contains("elapsedMs="))
+    #expect(line.contains("private") == false)
+    #expect(calls.withLock { $0 } == 1)
+  }
+
   @Test("Each fixed desktop probe retries only after verified cleanup", arguments: PommeSecurityNormalAgentProofStage.allCases, ["verified", "resetStable", "unknown", "wrongJob", "malformedExit", "cancelled", "deadline", "cleanupDeadline", "transport", "repeatedTimeout"])
   func allDesktopStagesRetry(stage: PommeSecurityNormalAgentProofStage, mode: String) async throws {
     let trace = DesktopTrace(mode: mode, timeoutStage: stage)
