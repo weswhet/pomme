@@ -18,7 +18,7 @@ observations are recorded below; historical rows retain their original status.
 | macOS 27 restart after pause/resume | Open; two earlier internal-drive sequences plus ten-cycle runs with both current `a3852a5` and original `ffc41a7` hosts passed without reproducing the missing helper. |
 | Retained SIP private-PTY / pinned-authentication failures | Open historical observations; a fresh original-`ffc41a7` SIP disable/enable cycle passed without producing the failed transaction needed to test that resume sequence. |
 | TUI status projection / boot-mode warning | Fixed in `3fb1ccb`; canonical state/agent regression tests and live running, paused, resumed, and stopped display comparisons passed. Boot-mode warning cancellation preserved both running and paused sessions. |
-| Integrated test-suite concurrency hang | Open; isolated TUI driver cleanup was corrected in `052f05d`, but full parallel runs still stalled with cooperative workers blocked in socket/OCR operations. Focused passing suites are not a full-suite pass. |
+| Integrated test-suite concurrency hang | Test-peer thread isolation removes the observed hang in the focused stress run and three full parallel comparisons. All three full runs finish, but each reports one timeout failure; full-suite reliability remains open and no full-suite pass is claimed. |
 
 This is an observational live test. The CLI and guest images are not being
 modified during the sweep. Every failure, timeout, unexpected state, and
@@ -2143,6 +2143,124 @@ pass. Direct invocation through the command proxy rejected its noninteractive
 stdin/stdout; `script -q /dev/null` supplied the real PTY without a transcript
 file. Graceful stop at 18:00:14Z succeeded with `stopMethod=guest-stopped`;
 the final inventory confirmed all twelve VMs stopped with no helpers.
+
+#### Parallel socket/OCR reproduction narrowing
+
+After the TUI fixes, an unchanged six-suite selection (create PTY, daemon,
+control wire, helper shutdown, Terminal OCR, and desktop cleanup integration)
+passed 36 test functions / 39 invocations once at 18:15:19Z. Repeating that
+selection ten times reproduced the stall at 18:16:06Z. The main thread was idle;
+all eight cooperative workers were occupied by socket reads or Vision OCR.
+The isolated runner was cancelled after sampling, not counted as a pass.
+Result bundles: `test_macos_2026-09-22T18-15-19-788Z_pid81160_8382e014.xcresult`
+and `test_macos_2026-09-22T18-16-06-815Z_pid81329_2871cb8d.xcresult`.
+
+The following six-method selection with `-test-iterations 10` reproduced the
+same stall at 18:20:17Z, without the TUI or helper-shutdown suites:
+
+```text
+PommeAgentDaemonTests/socketpairAdmission()
+PommeAgentDaemonTests/oneShotOperation()
+ControlWireTests/streamingSocketRoundTrip()
+PommeRecoveryTerminalRecognitionTests/generatedProbeHasStrictOCRProof(_:)
+PommeRecoveryTerminalRecognitionTests/generatedProbeEchoCannotAuthorize()
+PommeSecurityDesktopCleanupIntegrationTests/lostSignalResponse(newRegistry:)
+```
+
+Each selector is supplied as `-only-testing:PommeCLITests/<selector>` through
+XcodeBuildMCP with the same isolated app-support environment and Debug build
+settings as the full run. After five minutes, a process sample again showed
+three synchronous client reads, the cleanup relay's daemon read and relay
+`recv`, and three OCR invocations occupying the cooperative pool. Cancellation
+ended the run; its result is
+`test_macos_2026-09-22T18-20-17-621Z_pid82430_6b872c5b.xcresult`.
+An earlier selector attempt without the function-signature suffixes executed
+zero test cases despite the discovery banner and success exit; it is excluded
+from validation evidence.
+
+Each single-method removal from that selection then completed ten repetitions
+without code changes. Actual executed case lines, rather than the discovery
+banner, establish the counts (parameterized functions have multiple cases):
+
+| Removed method | Passing invocations | Elapsed | Result bundle suffix (2026-09-22) |
+|---|---:|---:|---|
+| `lostSignalResponse(newRegistry:)` | 60 | 11.8 s | `18-25-34-343Z_pid83348_7dba8885` |
+| `socketpairAdmission()` | 70 | 25.5 s | `18-26-18-057Z_pid83547_64983b4e` |
+| `oneShotOperation()` | 70 | 25.3 s | `18-27-09-369Z_pid83864_b2dc17ab` |
+| `streamingSocketRoundTrip()` | 70 | 25.3 s | `18-27-41-739Z_pid83966_983d39ba` |
+| `generatedProbeHasStrictOCRProof(_:)` | 60 | 25.5 s | `18-28-15-364Z_pid84139_09f34f2f` |
+| `generatedProbeEchoCannotAuthorize()` | 70 | 25.3 s | `18-28-55-113Z_pid84327_2c9b265e` |
+
+The leading hypothesis is aggregate cooperative-pool starvation, with the
+test relay's synchronous blocking loop as the first removable contributor.
+The bounded candidate moves only that loop to a dedicated thread and delivers
+its completion/error back to the owning test asynchronously. The actual async
+daemon and host exchange remain unchanged for this comparison. A passing
+candidate must still rerun the six-method reproducer, the six-suite repeated
+selection, and the full parallel suite. This is not evidence of a production
+multi-connection daemon bug or the historical live-VM failures' root cause.
+
+The relay-only candidate passed the exact six-method selection for all 80
+invocations across ten repetitions (25.3 seconds), result
+`test_macos_2026-09-22T18-32-24-235Z_pid85200_22377fe0.xcresult`.
+Adding the malformed-relay-input/repeated-finish regression also passed all
+90 invocations, result
+`test_macos_2026-09-22T18-31-39-938Z_pid84995_5daee562.xcresult`.
+The regression delivers a real decode error to the owning test only after
+coordinated teardown; repeated finish preserves the same error without closing
+descriptors again.
+
+The expanded six-suite repeated run still stalled, result
+`test_macos_2026-09-22T18-33-04-678Z_pid85323_cc3521c5.xcresult`.
+Its sample confirmed that the relay loop no longer occupied a cooperative
+worker, but `PommeSecurityHelperShutdownTests.normalClientReleasesExitAfterResponseHook`
+joined the two daemon-test client reads, control-stream client read, daemon
+read, and three OCR invocations in occupying all eight workers. The runner was
+cancelled after sampling. Thus relay isolation is a verified contributor fix,
+not a complete integrated-hang fix. The next bounded comparison moves the two
+sampled daemon-test client reads off the cooperative pool, leaving actual
+daemon serving unchanged and requiring shutdown/await before descriptor close
+on failure as well as success.
+Xcode also reported that cancellation prevented the action log from finishing
+within its result-save window; this incomplete bundle is not validation proof.
+The exact runner and test-host processes were confirmed gone before further
+testing.
+
+The second candidate moves the two daemon-test client read loops onto dedicated
+threads, returning results through checked continuations. Polling uses a total
+five-second deadline and nonblocking receive; a silent-peer deadline regression
+covers error delivery before descriptor teardown. Successful tests still require
+the actual daemon to finish naturally (including the one-shot operation); they
+do not force success by shutting down its socket after reading the responses.
+Only a read failure or completion-watchdog failure triggers shutdown, followed
+by joining before close. The watchdog joins both results so a shutdown-induced
+daemon return cannot disguise a timeout as natural completion.
+
+With both test-only changes, the six-suite selection passed all 38 functions /
+410 invocations across ten repetitions (37.7 seconds), result
+`test_macos_2026-09-22T18-39-50-158Z_pid86710_da7578fe.xcresult`.
+Production code, test parallelism, the real daemon/wire/coordinator boundaries,
+and authentication/job-correlation assertions remain unchanged. Full parallel
+verification is still required before declaring the integrated hang resolved.
+
+Three unrestricted, unchanged full parallel comparisons subsequently finished
+without the hang, each reporting 1,164 passing functions and one failure:
+
+| Start UTC | Elapsed | Remaining failure | Result bundle |
+|---|---:|---|---|
+| 18:40:42 | 13.5 s | `PommePrivatePTYRunnerTests.initialPromptGatesPrivateInput`: `processTimedOut` | `test_macos_2026-09-22T18-40-42-033Z_pid87056_6d1ebc40.xcresult` |
+| 18:41:10 | 11.9 s | `PommeAgentProcessExchangeTests.reconnectAfterDroppedSignalResponse`: `guestAgentTimedOut` | `test_macos_2026-09-22T18-41-10-042Z_pid87221_f716aad0.xcresult` |
+| 18:41:49 | 12.1 s | Same reconnect exchange timeout | `test_macos_2026-09-22T18-41-49-826Z_pid87447_24e11d84.xcresult` |
+
+These are completed failing runs, not passes, cancellations, or proof that all
+parallel timing issues are fixed. The bounded change removes three known
+blocking test peers from the cooperative pool and preserves the original
+assertions; it does not change production code or extend the failing tests'
+deadlines. The newly exposed prompt/reconnect timing failures remain the next
+investigation after committing, signed-building, and live-checking this change.
+Read-only review found no descriptor-lifetime or one-shot-proof blocker. The
+reader's cancellation may wait for its five-second deadline; this bounded wait
+does not allow descriptor teardown while its thread can still access them.
 
 ### Live TUI status projection mismatch
 
