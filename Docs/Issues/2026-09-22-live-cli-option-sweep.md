@@ -212,6 +212,20 @@ The local build/install regression script also passed all 21 checks. These are
 offline results; the signed build must still pass the original live SIP-status
 workflow before the Recovery navigation issue is closed.
 
+Signed Release `385ac5f` was installed with all signing/entitlement checks
+passing, and all 88 CLI contract checks passed. Its live `sip status` attempt
+started at 06:47:52Z on the same stopped internal-drive macOS 27 VM. The
+inactive chooser was recognized; the activation event's pre-input screenshot
+was saved at 06:49:12Z. At 06:54:13Z, observation timed out with
+`expected=languageEnglishActive, lastObserved=recoveryUtilities`. The timeout
+image visibly shows Recovery Utilities and the pointer at Continue. The click
+advanced the guest, but a transient active-English post-click pair had already
+committed the route to waiting for active English again before Return. No
+Return event followed the click. The command exited with failure and the
+original stopped state was restored. This candidate is therefore not a complete
+fix; the asynchronous Continue transition needs to be addressed before another
+signed build and live retest.
+
 For compatibility, `pomme-agent-recovery26-20260922a` was created on internal
 storage from macOS `26.6.2 (25G83)` with a 40 GB disk and 4 GB RAM, using
 signed build `ef37f16`. Restore began at 06:32:22Z; the existing five-input
