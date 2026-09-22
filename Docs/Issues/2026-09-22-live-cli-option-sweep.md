@@ -353,3 +353,33 @@ login, passed owner completion at 07:36:28Z, and finished Setup Assistant at
 outputComplete=false, terminationRequested=true`. No security mutation was
 reached. The preference-write failure did not repeat; the current investigation
 is the later bounded Aqua process timeout, not a claimed preference fix.
+
+A diagnostic normal boot at 07:45:10Z ran the same shell/`launchctl print
+gui/501` command with stdout redirected to `/dev/null` through public guest
+execution, explicitly as root. It completed within its 15-second deadline
+with exit 0 and no output; `/dev/console` reported `pomme:501`, and
+`/usr/bin/true` also completed. This is not an identical host transport replay:
+the security path has an additional outer deadline and uses the daemon's
+default identity rather than explicit UID/GID options. The VM was stopped
+again before retrying the original workflow.
+
+The unchanged, supported SIP-disable resume began at 07:46:46Z on `e9076c6`.
+Owner completion and Setup Assistant completion passed, and desktop verification
+ran from 07:47:54Z until the workflow advanced to Recovery at 07:48:21Z.
+The normal desktop proof therefore passed without a code or policy change.
+Recovery reached Terminal at 07:50:19Z; marker proof passed on attempt 2.
+SIP disable then completed with `normalBootVerified=true`,
+`runtimeConfigurationVerified=true`, `enforcementVerified=true`, and verified
+restoration of the previous stopped state. No credentials, agent pins, or
+journal contents were manually changed. A concurrent public process-list probe
+was rejected by the existing mutation lease; no bypass was attempted.
+
+This supplies an end-to-end successful retained retry, not a fix for the
+earlier Aqua timeout. That timeout remains an intermittent observation. SIP
+enable started at 07:51:46Z to restore the original security setting and
+completed successfully after normal-boot verification at 07:55:37Z. It
+reported `configuredDisabled=false`, all three normal-boot/runtime/enforcement
+verification fields true, and verified restoration to stopped. Its Recovery
+marker proof passed on attempt 1. Both directions therefore completed on the
+unchanged signed build; the intermittent failure remains open without a
+speculative timeout increase or relaxed desktop proof.
