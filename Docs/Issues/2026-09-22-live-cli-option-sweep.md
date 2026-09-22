@@ -25,7 +25,7 @@ observations are recorded below; historical rows retain their original status.
 | Recovery one-shot daemon fixture timing | Fixed in `fc4e4bf`: separates serving-task admission from the response budget without weakening natural one-shot completion or replay assertions. Delayed-start red/green, setup timeout/cancellation checks, ten-pass one-shot checks, and a 1,178-function full pass succeeded. Signed Release/live authenticated SIP status and stopped-state restoration passed; production daemon behavior is unchanged and other stress failures remain open. |
 | Recovery listener ordering fixture timing | Fixed in `cf7a22e`: controlled test time separates launch/authentication ordering from scheduler delay; production retains the existing clock, polling interval, and strict deadline. Delayed-ordering red/green, late-authentication rejection and teardown checks, ten-pass comparison, and a 1,181-function full pass succeeded. Signed Release/live authenticated SIP status restored the stopped state; other stress and historical live failures remain open. |
 | Foreground completion ordering fixture timing | Fixed in `97d26b9`: monotonic timing injection isolates ordering assertions from delayed polling without changing production defaults. Delayed-poll red/green, strict partial-output deadline/cancellation checks, twenty-pass foreground comparison, and a 1,183-function full pass succeeded. Signed Release/live delayed stdout/stderr/exit and timeout reporting passed; the separate post-timeout defunct PID observation remains open. |
-| Foreground timeout child reaping | Open live observation: with host `97d26b9` and unchanged creation-pinned macOS 27 agent, a one-second timed-out sleep was reported as signalled, but guest `ps` still showed its PID as `<defunct>` nine seconds later. VM was gracefully stopped afterward; no reaping fix or root cause is claimed. |
+| Foreground timeout child reaping | Confirmed request-driven reaping: a timed-out child remained defunct until a later job-list request. The autonomous, output-writer-aware candidate passes focused and full ten-pass tests, including retained descendant cleanup and lost-ownership safeguards. Signed Release and a fresh creation-pinned guest comparison remain pending. |
 
 This is an observational live test. The CLI and guest images are not being
 modified during the sweep. Every failure, timeout, unexpected state, and
@@ -3165,6 +3165,135 @@ No VM was deleted or moved and no persistent credential, security state,
 agent pin, or journal was changed. The foreground ordering fixture fix and
 live output/timeout reporting checks are complete; process reaping and the
 other full-stress failures remain open.
+
+### Foreground timeout child reaping investigation
+
+After committing the foreground release/live evidence as `a87cdf1`, the
+reaping observation was repeated with unchanged signed host `97d26b9` and
+the original creation-pinned macOS 27 guest agent. The same internal-drive
+40 GB / 4 GB `pomme-agent-ownerproof-20260922a` was confirmed stopped before
+normal start at 21:12:06Z (helper PID 48299).
+
+The smaller command `exec --timeout 1 -- /bin/sleep 10` began at 21:12:52Z
+and returned exit 124 with PID 676, `terminationRequested=true`, and incomplete
+output. At 21:12:58Z, exact-PID `ps` showed PID 676 as `Z <defunct>` with
+parent 290. At 21:13:11Z, it remained defunct, and parent 290 was identified
+by command path as `/usr/local/libexec/pomme` (parent 1). Ranked hypotheses
+were request-driven reaping, failed reaping attempts, and another process
+owning the child. A public read-only `jobs list` then returned an empty
+detached-job list; immediately afterward, `ps -p 676` returned no process
+and exit 1. This isolates reaping to the later request rather than proving
+autonomous cleanup.
+
+Current source refreshes `waitpid(..., WNOHANG)` for individual status/stream
+queries and for every job during list. The live observation is consistent
+with that request-driven ownership. Graceful stop at 21:13:30Z restored the
+fixture; all twelve internal VMs are stopped. A concrete-agent regression
+will test child exit without follow-up job requests before any correction.
+Existing creation pins and journals will not be rewritten to validate new
+guest code.
+
+The concrete-agent regression reproduced the defect
+(`21-17-05-457Z_pid49165_79a98b97`): after one SIGTERM, exact-child
+`waitid(P_PID, ..., WEXITED | WNOHANG | WNOWAIT)` observed a zombie for two
+seconds without consuming status or invoking an agent job query. Autonomous
+reaping failed; only the post-observation exact-job status cleanup reaped it.
+Retained signal/exit-frame assertions passed afterward. No real credential or
+VM was used by this local regression.
+
+The proposed guest correction uses per-job exit notifications to schedule
+actor-owned reaping, preserving raw exit status and output until later
+queries. Apple documents process dispatch sources and their `.exit` event:
+[DispatchSourceProcess](https://developer.apple.com/documentation/dispatch/dispatchsourceprocess).
+No process-wide signal handler, broad `waitpid(-1)`, host polling workaround,
+or output-EOF shortcut is planned. Registration, immediate-exit races,
+source cancellation, and signalling already-reaped jobs require regression
+coverage before a signed guest comparison.
+
+The first focused candidate run (`21-20-51-037Z_pid49874_6ccca857`)
+passed autonomous-reaping observations but failed both immediate-exit test
+arguments: the new test expected an exit frame after only one bounded output
+read, before the next read could establish EOF. Its detached variant also
+incorrectly used destructive `streamEvents` for retained-log replay. Those
+test assertions are being corrected to drain through EOF after the independent
+kernel observation, and to use `retainedLogEvents` for repeatable replay.
+
+Review also found an unqualified production edge: rejecting every signal once
+the leader is reaped prevents process-group cleanup when a descendant still
+holds output open. Merely allowing a later group signal is not sufficient,
+because released PID/process-group numbers can be reused. The candidate is
+not ready to commit or install until process identity remains owned throughout
+pending-output cleanup, including PTY resize signalling. No live guest or
+creation-pinned artifact has been updated for this candidate.
+
+After the test-only corrections, focused concrete-agent, process-exchange,
+and daemon suites passed all 45 functions / 47 invocations
+(`21-27-00-949Z_pid50934_894cb6c2`). This validates autonomous reaping and
+retained output for the simple child cases, not the still-unresolved descendant
+cleanup boundary. Inventory still contains twelve stopped internal-drive VMs;
+no VM was deleted or moved for these checks.
+
+The descendant-cleanup regression reproduced the review finding through both
+unary and stream signals (`21-29-56-128Z_pid51453_8ff8df2e`): the leader
+exited 7 while its descendant held stdout/stderr open, and both same-job signal
+paths returned `invalid`. A private sentinel then released the finite-lived
+fixture descendant; EOF and retained leader status were verified before
+rethrowing each expected failure. No stale numeric PID was killed by cleanup.
+
+The revised design separates observed termination from consumed wait status.
+Non-destructive `waitid(..., WNOWAIT)` can expose `exited` and the original
+exit status while the unreaped leader still reserves its PID. Reaping is gated
+on all tracked output endpoints having no remaining writer (HUP or previously
+observed EOF); this does not consume buffered bytes or authorize an early
+terminal frame. During that interval, group-only cleanup remains allowed.
+Released or lost process ownership rejects signal and resize paths. Exit
+notifications schedule one cancellable, bounded-frequency retry per job.
+This addresses descendants holding tracked output; it does not claim general
+supervision of silent descendants that close all tracked descriptors.
+
+The revised implementation compiled and passed 76 of 77 focused functions
+(`21-35-51-396Z_pid52414_44ab60d9`), including both descendant signal paths
+and a real external-reap/ECHILD test. The only failing assertion expected
+eight unread PTY bytes after the child's complete exit; reaping, exit status,
+EOF, and stale-resize rejection themselves passed. Existing PTY tests drain
+while the child is alive and do not establish this delayed-read guarantee.
+
+A one-variable baseline disabled exit-observer registration. Its temporary
+diagnostic read the PTY master without refreshing status or consuming the
+child's wait status. Run `21-39-02-065Z_pid54136_dfb57fcf` observed both
+pipe and PTY children as unreaped zombies for the full 30-second observer
+budget. The PTY had zero readable bytes **before any consuming wait**, and
+the same eight-byte assertion failed afterward. Thus the delayed-unread PTY
+loss is not introduced by autonomous reaping. This is consistent with Apple's
+[XNU terminal-close implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/tty.c),
+which flushes the terminal queues, but that source is not a version match for
+the running experimental kernel. Local observations are the comparison evidence.
+
+The temporary probes are being removed. The autonomous PTY case will use a
+quiet child to verify reaping and stale resize; pipe-output preservation,
+detached replay, and existing live-drain PTY assertions remain intact.
+Non-interruption native-wait failures also revoke signal authority and cancel
+observation, avoiding an indefinite background error retry. All 21 isolated
+local build/install regression checks passed; the installed signed CLI and
+all existing VM pins remain unchanged.
+
+The final six-suite focused comparison passed all 77 functions / 810
+invocations over ten repetitions (`21-41-35-773Z_pid54541_acf83a14`). It
+covers foreground/signalled and immediate natural exits, pipe bytes retained
+until later reads, repeatable detached logs, quiet PTY reaping and stale resize,
+both descendant group-signal paths, real ECHILD ownership loss, and existing
+process/daemon/execution-option/private-PTY behavior. Both temporary diagnostic
+markers are absent and `git diff --check` passes. The full ten-pass parallel
+workload follows before committing the source candidate.
+
+The unrestricted ten-pass parallel run passed all 1,188 functions / 16,170
+invocations with no failures or skips (`21-42-57-423Z_pid55166_1e756532`).
+This includes every new concrete-child case and the existing host, protocol,
+Recovery, UI, and private-PTY suites. Previously recorded intermittent stress
+failures were not reproduced; this does not establish their causes or close
+those separate issues. The candidate will be committed before the canonical
+signed Release build, then verified in a fresh internal-drive 40 GB / 4 GB
+macOS 27 guest without changing any existing VM's agent pin.
 
 ### Live TUI status projection mismatch
 

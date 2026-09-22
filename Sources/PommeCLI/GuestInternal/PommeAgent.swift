@@ -1,4 +1,5 @@
 import Darwin
+import Dispatch
 import Foundation
 
 enum PommeAgentRole: String, Sendable { case persistent, recovery }
@@ -63,12 +64,14 @@ actor PommeAgent {
     /// monopolize the agent while a child continuously produces output.
     static let maximumJobCaptureBytes = 512 * 1024
     static let maximumJobCaptureDuration = Duration.milliseconds(50)
+    enum ChildOwnership: Sendable { case owned, reaped, lost }
     struct Job: Sendable {
         let id: UUID
         let pid: Int32
         let startedAt: Date
         var exited: Bool
         var status: Int32?
+        var ownership: ChildOwnership = .owned
         let ptyMaster: Int32?
         var stdin: Int32?
         let stdout: Int32?
@@ -108,6 +111,8 @@ actor PommeAgent {
     private var pendingFileCleanup: [UUID: FileCleanup] = [:]
     private var completedFileCleanup: Set<UUID> = []
     private var jobs: [UUID: Job] = [:]
+    private var jobExitSources: [UUID: any DispatchSourceProcess] = [:]
+    private var jobReapRetries: [UUID: Task<Void, Never>] = [:]
     private var activationPending = false
     private var update: PommeAgentUpdateJournal?
     private let journalPath: String
@@ -151,6 +156,8 @@ actor PommeAgent {
     }
 
     deinit {
+        for source in jobExitSources.values { source.cancel() }
+        for retry in jobReapRetries.values { retry.cancel() }
         for file in files.values { _ = Darwin.close(file.descriptor) }
         for job in jobs.values { [job.ptyMaster, job.stdin, job.stdout, job.stderr].compactMap { $0 }.forEach { _ = Darwin.close($0) } }
     }
@@ -315,6 +322,7 @@ actor PommeAgent {
         )
         let job = Job(id: UUID(), pid: launched.pid, startedAt: Date(), exited: false, status: nil, ptyMaster: launched.ptyMaster, stdin: launched.stdin, stdout: launched.stdout, stderr: launched.stderr, outputEOF: [], detached: detached, stdoutLog: Data(), stderrLog: Data(), stdoutLogTruncated: false, stderrLogTruncated: false, stdoutBytes: 0, stderrBytes: 0)
         jobs[job.id] = job
+        observeExit(for: job)
         var result: [String: JSONValue] = [
             "jobID": .string(job.id.uuidString.lowercased()),
             "pid": .integer(Int64(launched.pid)),
@@ -388,7 +396,7 @@ actor PommeAgent {
             _ = try refreshStatus(for: id)
             _ = try captureAvailableOutput(jobID: id)
             guard let current = jobs[id] else { throw PommeAgentOperationError.notFound }
-            if current.exited, outputIsDrained(current) {
+            if current.ownership == .reaped, outputIsDrained(current) {
                 var result = statusResult(for: current, id: id)
                 result["outputComplete"] = .bool(true)
                 result["timedOut"] = .bool(false)
@@ -412,20 +420,112 @@ actor PommeAgent {
         }
     }
 
+    private func observeExit(for job: Job) {
+        let id = job.id
+        let pid = job.pid
+        let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .global(qos: .utility))
+        source.setEventHandler { [weak self] in
+            Task { [weak self] in await self?.reapObservedExit(jobID: id, pid: pid) }
+        }
+        jobExitSources[id] = source
+        source.activate()
+        // A short-lived child can exit before source registration. The
+        // immediate nonblocking check and later callback share actor ownership.
+        _ = try? refreshStatus(for: id)
+        if jobs[id]?.exited == true { scheduleReapRetry(jobID: id, pid: pid) }
+    }
+
+    private func reapObservedExit(jobID: UUID, pid: Int32) {
+        guard let job = jobs[jobID], job.pid == pid, job.ownership == .owned else { return }
+        _ = try? refreshStatus(for: jobID)
+        scheduleReapRetry(jobID: jobID, pid: pid)
+    }
+
+    private func scheduleReapRetry(jobID: UUID, pid: Int32) {
+        guard let job = jobs[jobID], job.pid == pid, job.ownership == .owned,
+              jobReapRetries[jobID] == nil else { return }
+        jobReapRetries[jobID] = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(100)) }
+                catch { return }
+                guard await self?.retryReap(jobID: jobID, pid: pid) == true else { return }
+            }
+        }
+    }
+
+    private func retryReap(jobID: UUID, pid: Int32) -> Bool {
+        guard let job = jobs[jobID], job.pid == pid, job.ownership == .owned else { return false }
+        _ = try? refreshStatus(for: jobID)
+        return jobs[jobID]?.ownership == .owned
+    }
+
+    private func stopExitObservation(for id: UUID) {
+        jobExitSources.removeValue(forKey: id)?.cancel()
+        jobReapRetries.removeValue(forKey: id)?.cancel()
+    }
+
+    /// HUP proves no writer remains on a tracked output endpoint, but does not
+    /// consume buffered bytes or establish output EOF. Retaining the waitable
+    /// leader until then reserves its PID/process-group identity for cleanup.
+    /// Arbitrary descendants that close every tracked output are out of scope.
+    private func outputWritersClosed(_ job: Job) -> Bool {
+        for descriptor in [job.ptyMaster, job.stdout, job.stderr].compactMap({ $0 }) {
+            if job.outputEOF.contains(descriptor) { continue }
+            var event = pollfd(fd: descriptor, events: Int16(POLLHUP), revents: 0)
+            var result: Int32
+            repeat { result = poll(&event, 1, 0) } while result < 0 && errno == EINTR
+            guard result > 0, event.revents & Int16(POLLHUP) != 0 else { return false }
+        }
+        return true
+    }
+
     private func refreshStatus(for id: UUID) throws -> Job {
         guard var job = jobs[id] else { throw PommeAgentOperationError.notFound }
-        guard !job.exited else { return job }
+        guard job.ownership == .owned else { return job }
+        var info = siginfo_t()
+        var observed: Int32
+        repeat { observed = waitid(P_PID, id_t(job.pid), &info, WEXITED | WNOHANG | WNOWAIT) }
+        while observed < 0 && errno == EINTR
+        if observed < 0 {
+            // ECHILD or any other non-interruption failure leaves ownership
+            // unverified. Never keep signalling or retry errors indefinitely.
+            job.ownership = .lost
+            jobs[id] = job
+            stopExitObservation(for: id)
+            return job
+        }
+        guard info.si_pid == job.pid else { return job }
+        let rawStatus: Int32
+        switch info.si_code {
+        case CLD_EXITED: rawStatus = (info.si_status & 0xff) << 8
+        case CLD_KILLED: rawStatus = info.si_status & 0x7f
+        case CLD_DUMPED: rawStatus = (info.si_status & 0x7f) | 0x80
+        default: return job
+        }
+        job.exited = true
+        job.status = rawStatus
+        jobs[id] = job
+        guard outputWritersClosed(job) else {
+            scheduleReapRetry(jobID: id, pid: job.pid)
+            return job
+        }
         while true {
             var value: Int32 = 0
             let result = waitpid(job.pid, &value, WNOHANG)
             if result == job.pid {
-                job.exited = true
+                job.ownership = .reaped
                 job.status = value
                 jobs[id] = job
+                stopExitObservation(for: id)
                 return job
             }
             if result == 0 { return job }
             if result < 0, errno == EINTR { continue }
+            if result < 0 {
+                job.ownership = .lost
+                jobs[id] = job
+                stopExitObservation(for: id)
+            }
             return job
         }
     }
@@ -440,11 +540,13 @@ actor PommeAgent {
     }
 
     private func signal(_ payload: JSONValue) throws -> JSONValue {
-        let id = try jobID(payload); guard let job = jobs[id] else { throw PommeAgentOperationError.notFound }
+        let id = try jobID(payload)
+        let job = try refreshStatus(for: id)
+        guard job.ownership == .owned else { throw PommeAgentOperationError.invalid }
         let raw = try integer(try object(payload), "signal")
         guard [SIGHUP, SIGINT, SIGTERM, SIGKILL].contains(Int32(raw)) else { throw PommeAgentOperationError.invalid }
         let groupSignalled = kill(-job.pid, Int32(raw)) == 0
-        let processSignalled = kill(job.pid, Int32(raw)) == 0
+        let processSignalled = !job.exited && kill(job.pid, Int32(raw)) == 0
         guard groupSignalled || processSignalled else { throw PommeAgentOperationError.invalid }
         return .object(["jobID": .string(id.uuidString.lowercased()), "signalled": .bool(true)])
     }
@@ -705,7 +807,8 @@ actor PommeAgent {
     }
     func resizePTY(jobID: UUID, columns: Int, rows: Int) throws {
         guard role == .persistent else { throw PommeAgentOperationError.unsupported }
-        guard let job = jobs[jobID], let master = job.ptyMaster, columns > 0, rows > 0 else { throw PommeAgentOperationError.invalid }
+        let job = try refreshStatus(for: jobID)
+        guard job.ownership == .owned, let master = job.ptyMaster, columns > 0, rows > 0 else { throw PommeAgentOperationError.invalid }
         var size = winsize(ws_row: UInt16(clamping: rows), ws_col: UInt16(clamping: columns), ws_xpixel: 0, ws_ypixel: 0)
         guard ioctl(master, TIOCSWINSZ, &size) == 0 else { throw PommeAgentOperationError.io }
         _ = kill(-job.pid, SIGWINCH)
@@ -837,14 +940,15 @@ actor PommeAgent {
             guard let raw = frame.signal,
                   [Int32(SIGHUP), Int32(SIGINT), Int32(SIGTERM), Int32(SIGKILL)].contains(raw)
             else { throw PommeAgentOperationError.invalid }
-            guard let job = jobs[jobID] else { throw PommeAgentOperationError.notFound }
+            let job = try refreshStatus(for: jobID)
+            guard job.ownership == .owned else { throw PommeAgentOperationError.invalid }
             // Bytes written before a signal may already be readable from the
             // PTY master. Drain them before killing the process group so a
             // signal arriving immediately after launch cannot discard a
             // completed prompt or marker from the correlated exchange.
             let pending = try drainPTY(jobID: jobID, requestID: frame.requestID)
             let groupSignalled = kill(-job.pid, raw) == 0
-            let processSignalled = kill(job.pid, raw) == 0
+            let processSignalled = !job.exited && kill(job.pid, raw) == 0
             guard groupSignalled || processSignalled else { throw PommeAgentOperationError.invalid }
             return pending + (try streamEvents(jobID: jobID, requestID: frame.requestID))
         case .eof:
@@ -859,11 +963,12 @@ actor PommeAgent {
         guard role == .persistent else { throw PommeAgentOperationError.unsupported }
         _ = try refreshStatus(for: jobID)
         var frames = try drainPTY(jobID: jobID, requestID: requestID)
+        _ = try refreshStatus(for: jobID)
         // An exited child can still have bytes buffered in either pipe. Do
         // not publish the terminal frame until bounded nonblocking reads have
         // observed EOF on every output descriptor; POLLHUP remains readable
         // on Darwin after the final bytes are consumed.
-        if let current = jobs[jobID], current.exited, outputIsDrained(current), let rawStatus = current.status {
+        if let current = jobs[jobID], current.ownership == .reaped, outputIsDrained(current), let rawStatus = current.status {
             let terminal = terminalStatus(rawStatus)
             frames.append(try .init(requestID: requestID, stream: .exit, signal: terminal.signal))
         }
@@ -880,7 +985,7 @@ actor PommeAgent {
         var frames: [PommeAgentStreamFrame] = []
         frames += try logFrames(data: job.stdoutLog, stream: .stdout, requestID: requestID)
         frames += try logFrames(data: job.stderrLog, stream: .stderr, requestID: requestID)
-        if job.exited, outputIsDrained(job), let rawStatus = job.status {
+        if job.ownership == .reaped, outputIsDrained(job), let rawStatus = job.status {
             frames.append(try .init(requestID: requestID, stream: .exit, signal: terminalStatus(rawStatus).signal))
         }
         return frames

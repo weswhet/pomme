@@ -6,6 +6,314 @@ import Testing
 @Suite("Pomme persistent agent")
 struct PommeAgentTests {
 
+    @Test("Same-job signal cleans descendants after their leader exits", arguments: [false, true])
+    func exitedLeaderDescendantCleanup(streamSignal: Bool) async throws {
+        try await descendantFixture(streamSignal: streamSignal)
+    }
+
+    @Test("Unexpected external reap loses signal authority and cannot manufacture an exit frame")
+    func externallyReapedLeaderFailsClosed() async throws {
+        try await descendantFixture(streamSignal: false, loseOwnership: true)
+    }
+
+    private func descendantFixture(streamSignal: Bool, loseOwnership: Bool = false) async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pomme-descendant-cleanup-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let ready = directory.appendingPathComponent("ready")
+        let stop = directory.appendingPathComponent("stop")
+        let done = directory.appendingPathComponent("done")
+        let childPID = directory.appendingPathComponent("child-pid")
+        let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64),
+                                  journalPath: directory.appendingPathComponent("journal").path)
+        // The descendant retains both output pipes. A private sentinel and
+        // finite loop provide cleanup even when the candidate rejects signal;
+        // the test never kills a numeric PID after its leader was reaped.
+        let childScript = """
+        trap 'printf done > "$3"; exit 0' TERM
+        printf ready > "$1"
+        n=0
+        while [ ! -e "$2" ] && [ "$n" -lt 60 ]; do
+          /bin/sleep 1
+          n=$((n + 1))
+        done
+        printf done > "$3"
+        """
+        let leaderScript = """
+        /bin/sh -c "$1" descendant "$2" "$3" "$4" &
+        printf '%s' "$!" > "$5"
+        exit 7
+        """
+        let started = try await agent.perform(.request(operation: "process.start", payload: .object([
+            "path": .string("/bin/sh"), "detached": .bool(loseOwnership),
+            "arguments": .array(["-c", leaderScript, "leader", childScript, ready.path, stop.path, done.path, childPID.path].map(JSONValue.string))
+        ])))
+        let values = try #require(started.objectValue)
+        let jobText = try #require(values["jobID"]?.stringValue)
+        let jobID = try #require(UUID(uuidString: jobText))
+        guard case .integer(let rawPID)? = values["pid"], let pid = pid_t(exactly: rawPID), pid > 0 else {
+            throw PommeAgentOperationError.invalid
+        }
+        var failure: (any Error)?
+        var frames: [PommeAgentStreamFrame] = []
+        do {
+            let readyDeadline = ContinuousClock.now.advanced(by: .seconds(30))
+            while !FileManager.default.fileExists(atPath: ready.path) || !FileManager.default.fileExists(atPath: childPID.path) {
+                try #require(ContinuousClock.now < readyDeadline)
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let descendantPID = try #require(Int32(String(contentsOf: childPID, encoding: .utf8)))
+            #expect(descendantPID > 0 && descendantPID != pid)
+            var leaderExited = false
+            repeat {
+                var info = siginfo_t()
+                let observed = Darwin.waitid(P_PID, id_t(pid), &info, WEXITED | WNOHANG | WNOWAIT)
+                leaderExited = (observed == 0 && info.si_pid == pid) || (observed == -1 && errno == ECHILD)
+                if leaderExited { break }
+                try #require(ContinuousClock.now < readyDeadline)
+                try await Task.sleep(for: .milliseconds(10))
+            } while true
+            #expect(leaderExited)
+            let terminal = try await agent.perform(.request(operation: "process.status", payload: .object(["jobID": .string(jobText)])))
+            #expect(terminal.objectValue?["exited"] == .bool(true))
+            #expect(terminal.objectValue?["exitCode"] == .integer(7))
+            frames = try await agent.streamEvents(jobID: jobID, requestID: UUID())
+            #expect(!frames.contains { $0.stream == .exit })
+            #expect(!FileManager.default.fileExists(atPath: done.path))
+            if loseOwnership {
+                var info = siginfo_t()
+                try #require(Darwin.waitid(P_PID, id_t(pid), &info, WEXITED | WNOHANG | WNOWAIT) == 0)
+                try #require(info.si_pid == pid)
+                var consumedStatus: Int32 = 0
+                try #require(Darwin.waitpid(pid, &consumedStatus, WNOHANG) == pid)
+                #expect(consumedStatus & 0x7f == 0)
+                #expect((consumedStatus >> 8) & 0xff == 7)
+                // Real ECHILD on the next refresh must revoke ownership while
+                // retaining only the previously observed leader status.
+                let lost = try await agent.perform(.request(operation: "process.status", payload: .object(["jobID": .string(jobText)])))
+                #expect(lost.objectValue?["exitCode"] == .integer(7))
+                frames += try await agent.streamEvents(jobID: jobID, requestID: UUID())
+                #expect(!frames.contains { $0.stream == .exit })
+                await #expect(throws: PommeAgentOperationError.self) {
+                    _ = try await agent.perform(.request(operation: "process.signal", payload: .object([
+                        "jobID": .string(jobText), "signal": .integer(Int64(SIGTERM))
+                    ])))
+                }
+                await #expect(throws: PommeAgentOperationError.self) {
+                    _ = try await agent.acceptStream(.init(requestID: UUID(), stream: .signal, signal: SIGTERM), jobID: jobID)
+                }
+                // This fixture has pipes, so this is not an ownership-specific
+                // resize proof; the autonomous PTY case covers stale resize.
+                await #expect(throws: PommeAgentOperationError.self) {
+                    try await agent.resizePTY(jobID: jobID, columns: 80, rows: 24)
+                }
+            } else if streamSignal {
+                frames += try await agent.acceptStream(.init(requestID: UUID(), stream: .signal, signal: SIGTERM), jobID: jobID)
+            } else {
+                let response = try await agent.perform(.request(operation: "process.signal", payload: .object([
+                    "jobID": .string(jobText), "signal": .integer(Int64(SIGTERM))
+                ])))
+                #expect(response.objectValue?["signalled"] == .bool(true))
+            }
+            if !loseOwnership {
+                let signalDeadline = ContinuousClock.now.advanced(by: .seconds(30))
+                while !frames.contains(where: { $0.stream == .exit }), ContinuousClock.now < signalDeadline {
+                    frames += try await agent.streamEvents(jobID: jobID, requestID: UUID())
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                // This proof precedes the fallback sentinel, so an accepted but
+                // ineffective group signal cannot pass using fixture cleanup.
+                try #require(frames.contains { $0.stream == .exit })
+                #expect(FileManager.default.fileExists(atPath: done.path))
+            }
+        } catch {
+            failure = error
+        }
+        // Always release the exact descendant through its private sentinel,
+        // including the expected RED rejection, before rethrowing any failure.
+        try Data().write(to: stop)
+        let cleanupDeadline = ContinuousClock.now.advanced(by: .seconds(30))
+        if loseOwnership {
+            var outputComplete = false
+            repeat {
+                let output = try await agent.perform(.request(operation: "process.output", payload: .object(["jobID": .string(jobText)])))
+                outputComplete = output.objectValue?["outputComplete"] == .bool(true)
+                if outputComplete { break }
+                try? await Task.sleep(for: .milliseconds(10))
+            } while ContinuousClock.now < cleanupDeadline
+            #expect(outputComplete)
+            #expect(FileManager.default.fileExists(atPath: done.path))
+            let replay = try await agent.retainedLogEvents(jobID: jobID, requestID: UUID())
+            #expect(!replay.contains { $0.stream == .exit })
+            let streamed = try await agent.streamEvents(jobID: jobID, requestID: UUID())
+            #expect(!streamed.contains { $0.stream == .exit })
+            if outputComplete { try FileManager.default.removeItem(at: directory) }
+            if let failure { throw failure }
+            return
+        }
+        while !frames.contains(where: { $0.stream == .exit }), ContinuousClock.now < cleanupDeadline {
+            frames += try await agent.streamEvents(jobID: jobID, requestID: UUID())
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        let drained = frames.contains { $0.stream == .exit }
+        #expect(drained)
+        if drained {
+            var info = siginfo_t()
+            let observed = Darwin.waitid(P_PID, id_t(pid), &info, WEXITED | WNOHANG | WNOWAIT)
+            #expect(observed == -1 && errno == ECHILD, "Exit frame must prove the leader was actually reaped")
+        }
+        #expect(FileManager.default.fileExists(atPath: done.path))
+        let retained = try await agent.perform(.request(operation: "process.status", payload: .object(["jobID": .string(jobText)])))
+        #expect(retained.objectValue?["exitCode"] == .integer(7))
+        #expect(retained.objectValue?["signal"] == nil)
+        if drained { try FileManager.default.removeItem(at: directory) }
+        if let failure { throw failure }
+    }
+
+    @Test("Signalled child is reaped without a later job request")
+    func signalledChildReapedWithoutPolling() async throws {
+        try await autonomousReap(signalled: true, detached: false)
+    }
+
+    @Test("Immediate child exit is reaped autonomously with terminal output retained", arguments: [false, true])
+    func immediateChildReapedWithoutPolling(detached: Bool) async throws {
+        try await autonomousReap(signalled: false, detached: detached)
+    }
+
+    @Test("No-output and PTY children are reaped without polling", arguments: [false, true])
+    func autonomousReapOutputEndpoints(pty: Bool) async throws {
+        // Local observer-disabled characterization found that closing a PTY
+        // can discard unread output before any waitpid. Use a quiet PTY for
+        // reaping proof; pipes below retain bytes, and live PTY tests drain
+        // while the writer remains alive.
+        try await autonomousReap(signalled: false, detached: false, pty: pty, producesOutput: false)
+    }
+
+    private func autonomousReap(signalled: Bool, detached: Bool, pty: Bool = false, producesOutput: Bool = true) async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pomme-autonomous-reap-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let agent = try PommeAgent(
+            role: .persistent,
+            executableSHA256: String(repeating: "a", count: 64),
+            journalPath: directory.appendingPathComponent("journal").path
+        )
+        let started = try await agent.perform(.request(operation: "process.start", payload: .object([
+            "path": .string(signalled ? "/bin/sleep" : "/bin/sh"),
+            "arguments": .array((signalled ? ["60"] : ["-c", producesOutput ? "printf retained; exit 7" : "exit 7"]).map(JSONValue.string)),
+            "detached": .bool(detached), "pty": .bool(pty)
+        ])))
+        let values = try #require(started.objectValue)
+        let jobText = try #require(values["jobID"]?.stringValue)
+        let jobID = try #require(UUID(uuidString: jobText))
+        guard case .integer(let rawPID)? = values["pid"], let pid = pid_t(exactly: rawPID), pid > 0 else {
+            throw PommeAgentOperationError.invalid
+        }
+
+        var observedZombie = false
+        let observation: Result<Bool, any Error>
+        do {
+            if signalled {
+                let response = try await agent.perform(.request(operation: "process.signal", payload: .object([
+                    "jobID": .string(jobText), "signal": .integer(Int64(SIGTERM))
+                ])))
+                #expect(response.objectValue?["signalled"] == .bool(true))
+            }
+            // Scheduler guard, not a two-second production reap SLA: complete
+            // parallel test runs can defer an actor task for over 17 seconds.
+            let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+            var reaped = false
+            repeat {
+                var info = siginfo_t()
+                // WNOWAIT observes this exact child without consuming its
+                // terminal status. No agent status/list/stream call occurs here.
+                let result = Darwin.waitid(P_PID, id_t(pid), &info, WEXITED | WNOHANG | WNOWAIT)
+                if result == -1 {
+                    if errno == ECHILD { reaped = true; break }
+                    if errno != EINTR { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                } else if info.si_pid == pid {
+                    observedZombie = true
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            } while ContinuousClock.now < deadline
+            observation = .success(reaped)
+        } catch {
+            observation = .failure(error)
+        }
+        if case .success(let reaped) = observation {
+            #expect(reaped, "Expected autonomous reap without requests; observedZombie=\(observedZombie)")
+        }
+
+        // Observation is complete. Only now may an agent request refresh/reap
+        // the job, including on the expected red path or caller cancellation.
+        var terminal = try? await agent.perform(.request(operation: "process.status", payload: .object([
+            "jobID": .string(jobText)
+        ])))
+        if terminal?.objectValue?["exited"] != .bool(true) {
+            // Reaping and signalling now share actor ownership, so cleanup
+            // cannot race the autonomous reaper and signal a released PID.
+            _ = try? await agent.perform(.request(operation: "process.signal", payload: .object([
+                "jobID": .string(jobText), "signal": .integer(Int64(SIGKILL))
+            ])))
+            let cleanupDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while terminal?.objectValue?["exited"] != .bool(true), ContinuousClock.now < cleanupDeadline {
+                terminal = try? await agent.perform(.request(operation: "process.status", payload: .object([
+                    "jobID": .string(jobText)
+                ])))
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        #expect(terminal?.objectValue?["exited"] == .bool(true), "Exact-child failure cleanup must reap")
+        var finalInfo = siginfo_t()
+        let finalWait = Darwin.waitid(P_PID, id_t(pid), &finalInfo, WEXITED | WNOHANG | WNOWAIT)
+        #expect(finalWait == -1 && errno == ECHILD)
+        _ = try observation.get()
+        #expect(terminal?.objectValue?["jobID"] == .string(jobText))
+        if signalled {
+            #expect(terminal?.objectValue?["signal"] == .integer(Int64(SIGTERM)))
+        } else {
+            #expect(terminal?.objectValue?["exitCode"] == .integer(7))
+        }
+        // Reaping does not imply pipe EOF was already consumed. Only after
+        // the independent kernel assertion may these bounded reads drain it.
+        let streamRequestID = UUID()
+        let drainDeadline = ContinuousClock.now.advanced(by: .seconds(30))
+        var frames: [PommeAgentStreamFrame] = []
+        repeat {
+            frames += try await agent.streamEvents(jobID: jobID, requestID: streamRequestID)
+            if frames.contains(where: { $0.stream == .exit }) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        } while ContinuousClock.now < drainDeadline
+        let exits = frames.filter { $0.stream == .exit }
+        #expect(exits.count == 1)
+        #expect(exits.first?.signal == (signalled ? SIGTERM : nil))
+        #expect(frames.allSatisfy { $0.requestID == streamRequestID })
+        if !signalled {
+            #expect(frames.filter { $0.stream == .stdout }.reduce(into: Data()) { $0.append($1.data ?? Data()) } == (producesOutput ? Data("retained".utf8) : Data()))
+            if detached {
+                for _ in 0..<2 {
+                    let replay = try await agent.retainedLogEvents(jobID: jobID, requestID: UUID())
+                    #expect(replay.filter { $0.stream == .stdout }.reduce(into: Data()) { $0.append($1.data ?? Data()) } == Data("retained".utf8))
+                    #expect(replay.filter { $0.stream == .exit }.count == 1)
+                }
+            }
+        }
+        // Autonomous reaping releases the kernel PID; neither signal entry
+        // point may target that PID again through the retained job record.
+        await #expect(throws: PommeAgentOperationError.self) {
+            _ = try await agent.perform(.request(operation: "process.signal", payload: .object([
+                "jobID": .string(jobText), "signal": .integer(Int64(SIGTERM))
+            ])))
+        }
+        await #expect(throws: PommeAgentOperationError.self) {
+            _ = try await agent.acceptStream(.init(requestID: UUID(), stream: .signal, signal: SIGTERM), jobID: jobID)
+        }
+        await #expect(throws: PommeAgentOperationError.self) {
+            try await agent.resizePTY(jobID: jobID, columns: 80, rows: 24)
+        }
+    }
+
     @Test("Recovery terminal authority exposes only health and terminal capabilities")
     func recoveryTerminalAuthority() async throws {
         let agent = try PommeAgent(
