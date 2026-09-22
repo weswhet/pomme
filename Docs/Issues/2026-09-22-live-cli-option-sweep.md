@@ -281,6 +281,20 @@ previous stopped state. The historical macOS 26 marker failure did not
 reproduce in this internal-drive run. The current repeatable marker failure
 is on macOS 27 after its now-successful navigation.
 
+### Terminal marker investigation
+
+A scoped manual macOS 27 Recovery session tested benign fixed markers only.
+The simple marker printed with a fresh prompt; `/sbin/mount_virtiofs` was
+executable and `/sbin/sha256 -q` produced the expected `abc` digest. The
+production-shaped conditional command then printed both an eight-character
+test marker and a ten-character marker using the production-safe alphabet.
+Temporary tests through the production Terminal OCR/proof path passed for all
+three private screenshots; those tests were removed without committing images.
+The same conditional probe also printed after retracing the production menu
+sequence into a fresh Terminal window. These slower manual probes do not
+reproduce the automated failure and do not establish its cause. The VM was
+stopped again before repeating the original automated command unchanged.
+
 For compatibility, `pomme-agent-recovery26-20260922a` was created on internal
 storage from macOS `26.6.2 (25G83)` with a 40 GB disk and 4 GB RAM, using
 signed build `ef37f16`. Restore began at 06:32:22Z; the existing five-input
