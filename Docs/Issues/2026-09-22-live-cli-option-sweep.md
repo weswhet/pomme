@@ -503,3 +503,47 @@ all cleanup fields true, and verified restoration of the previous stopped
 state. The new diagnostics have successful live coverage on both OS versions;
 a failing instrumented run is still needed to investigate the original
 intermittent failure. Temporary diagnostics remain explicitly investigative.
+
+The next unchanged instrumented macOS 27 SIP-status run began at 08:30:43Z.
+It again passed strict marker proof on attempt 1 at 08:32:21Z, with
+`commandEcho=false`, `nearMarker=false`, and first-frame comparison `unknown`.
+The session finalized with SIP enabled, verified cleanup, and restoration to
+stopped. Since full workflows are not currently reproducing the failure, a
+temporary deterministic, memory-only synthetic Terminal corpus is being used
+to test marker spelling sensitivity through the production OCR/proof path.
+This cannot by itself establish the cause of the historical live failure.
+
+The ordinary synthetic `ACDEHJKMNP` baseline passed. Two identical 64-case
+corpus runs then produced the same seven strict-proof misses in 5.371 and
+5.398 seconds of test execution. Every miss still recognized Terminal but
+reported `exactMarker=false` and `freshPromptAfterMarker=false`. The generated
+suffixes were `HHHHHHHHHH`, `QQQQQQQQQQ`, `EHEHEHEHEH`, `QRQRQRQRQR`,
+`AQDKQRQPEK`, `UDKYTRQNDN`, and `KMRQNQMPKE`. No images were persisted and
+no production code changed. A real Recovery Terminal comparison of the mixed
+case `AQDKQRQPEK` is the next step; a synthetic miss alone does not justify a
+live-workflow fix.
+
+The paired synthetic spacing experiment kept the same 64 suffixes and strict
+proof requirements. Adding spaces between suffix characters increased misses
+from 7/64 to 22/64: 20 recognized the exact marker but lacked fresh-prompt
+proof, and two missed the exact marker. Character spacing is therefore not a
+supported fix. No production marker format changed.
+
+The retained internal-drive macOS 27 VM was then manually navigated into
+Recovery Terminal using stable pre/post frame pairs. A benign `printf` printed
+`POMME AQDKQRQPEK OK` correctly with a fresh prompt visibly below it. Initial
+production OCR replay of two byte-identical captures passed once and rejected
+fresh-prompt proof once despite recognizing the exact marker. This differs
+from the synthetic case's missing-exact-marker symptom. Repeated identical-image
+replays and a benign baseline control are being used to measure that distinction
+before selecting a production change. Only private temporary lab images were
+captured; no credentials, launcher payloads, or image data entered this log.
+
+The serial replay then reused the same decoded mixed-marker image ten times:
+all ten failed with Terminal and exact marker recognized but no accepted shell
+prompt. Each used both full-frame and supplemental crop OCR and returned two
+exact-marker lines. The baseline image passed ten of ten replays. The paired
+PNG files also had equal decoded pixels, checked without logging their digests.
+This supplies a repeatable real-image prompt-recognition failure, not evidence
+that the earlier missing-exact-marker failures share its cause. The result is
+`test_macos_2026-09-22T08-51-37-315Z_pid66241_e807a27f.xcresult`.
