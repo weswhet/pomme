@@ -2113,6 +2113,72 @@ no failures or skips:
 The diagnostic source, tests, and evidence are committed before signed Release
 build and retained-VM resume. Earlier PommeCore warnings remain unchanged.
 
+Diagnostic commit `f678e3e` built and installed through the canonical signed
+Release workflow at 22:56Z. Signature, exact entitlements, designated-requirement
+compatibility, and signed archive checks passed. Installed SHA-256:
+`2de87ce4680521c6e8d6526dfa72826d2805a1afca260d04dedf21d077a719a1`.
+Fresh-login resolution/version and all 104 CLI contract checks passed. The
+retained fixture was revalidated stopped with its original `c1960d43…890acab`
+guest pin, UUID/plan, and unchanged `autologinIntent` journal. Public SIP-disable
+resume began at 22:57:54Z with the same operation/final-state request. A filtered
+helper-log follower captures only the two fixed diagnostic tags; no guest agent,
+credential, immutable pin, or journal phase was manually changed.
+
+The traced resume recognized native OFF at 22:58:30Z, then reran the guarded
+native setter. At 22:58:44–45Z, status reported the expected owner, the
+preference matched, and artifact metadata was valid. Owner completion passed
+at 22:58:47Z and Setup Assistant completion at 22:58:51Z. After normal reboot,
+desktop verification began at 22:59:08Z. This demonstrates later successful
+reconciliation, not the original readback failure's cause.
+
+The original cleanup-signal symptom then recurred. The isolated helper trace
+at 22:59:48Z recorded `hostExchangeAdmitted` at 0.001167 ms and
+`hostWriteCompleted` at 0.212334 ms. At 22:59:53Z it recorded
+`hostResponseFailed` at 4999.958959 ms. The workflow reported
+`normal-agent-aqua-timedOut`, `stage=aqua`, `exited=false`,
+`outputComplete=false`, `terminationRequested=false`; cleanup proof did not
+permit another probe. It exited 1 before Recovery mutation and retained
+`sipDisable` / `autologinIntent` / `previous`. Independent status confirmed
+stopped/no helper with the original guest pin. The filtered follower was stopped
+before another boot could replace the helper log. A bounded read-only normal
+boot will retrieve only the guest's fixed signal-boundary log events; no signal
+or security operation is replayed for that inspection.
+
+The read-only inspection boot began at 23:01:23Z and authenticated the same
+pinned guest. A bounded unified-log query restricted to the fixed subsystem /
+`signal-boundary` category emitted only timestamp, fixed event, and local
+elapsed time. It completed successfully with `closedEventCount=0` for the
+failure. Absence was not immediately treated as non-delivery evidence.
+
+A separate bounded `/bin/sleep 10` with a one-second foreground budget then
+calibrated the trace without replaying the failed job. At 23:03:09Z, the host
+wrote the control signal in 0.317375 ms and received its correlated response
+at 1.555209 ms. Eight guest events were recovered: handler entry, perform return,
+stream collection entry/return, one stream-write entry/return, and response-write
+entry/return. The guest response write completed at 0.884584 ms. The foreground
+command's host exit 124 was the expected one-second deadline result, not a
+failed signal exchange.
+
+After graceful stop at 23:05:07Z and another normal start at 23:05:26Z, the same
+bounded query recovered exactly those eight control events and no events from
+the failed exchange. This validates the trace/filter and normal-stop persistence
+on the same pinned guest. It does not exclude failure-boot log loss or establish
+that the signal was never physically received. The next useful diagnostic
+boundary is frame receipt/decode/authentication dispatch before handler entry,
+not a speculative signal/output wait fix. Graceful stop at 23:06:25Z restored
+the stopped state; all twelve internal VMs are stopped, and the original
+`sipDisable` / `autologinIntent` / `previous` journal remains retained. No
+credential, pin, journal, SIP, or AMFI setting was manually changed.
+
+Bounded read-only tracing identifies silent pre-handler exits at daemon frame
+read/decode and connection replay/authentication admission. The current guest
+trace begins only inside the authenticated handler and cannot classify those
+paths. The next minimal checkpoints are closed read-return/EOF/error, decoded
+signal frame, and closed admission-rejection reasons. Evidence must be captured
+for the failing boot; post-reboot absence alone is not proof of non-delivery.
+No retry, timeout extension, parser relaxation, or signal replay is justified
+by the present evidence, and no cause is declared fixed.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
