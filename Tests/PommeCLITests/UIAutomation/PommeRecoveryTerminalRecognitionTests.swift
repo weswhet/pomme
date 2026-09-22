@@ -1,9 +1,116 @@
 import CoreGraphics
+import CoreText
 import Foundation
 import Testing
 
 @Suite("Pomme Recovery Terminal OCR")
 struct PommeRecoveryTerminalRecognitionTests {
+    @Test("generated probe output remains recognizable for repeated and alternating nonce nibbles",
+          arguments: ["44444444-4444-4444-8444-444444444444", "34343434-3434-4434-8434-343434343434"])
+    func generatedProbeHasStrictOCRProof(_ requestID: String) throws {
+        let plan = try markerPlan(requestID)
+        let probe = try #require(plan.capabilityProbes.first)
+        let image = try renderedProbe(probe.command)
+        let lines = try SettingsAIOCRRecognizer().recognizeRecoveryTerminalMarker(
+            image: image, displaySize: displaySize, marker: probe.marker)
+        let proof = RecoveryUIObservation(lines: lines).terminalMarkerProofDiagnostic(probe.marker)
+        #expect(proof.terminalWindow)
+        #expect(proof.exactMarker)
+        #expect(proof.freshPromptAfterMarker)
+        #expect(proof.isVerified)
+    }
+
+    @Test("word marker proof rejects changed, missing, extra, echoed, and stale output")
+    func wordMarkerProofRemainsStrict() throws {
+        let plan = try markerPlan("01234567-89ab-cdef-8123-456789abcdef")
+        let marker = plan.completionMarker
+        var words = marker.split(separator: " ").map(String.init)
+        try #require(words.count == 12)
+        words[1] = "pig"
+        let wrong = words.joined(separator: " ")
+        let missing = marker.split(separator: " ").enumerated().filter { $0.offset != 1 }.map { String($0.element) }.joined(separator: " ")
+        let extra = marker.replacingOccurrences(of: " OK", with: " ash OK")
+        for output in [wrong, missing, extra, "printf '\(marker)\\n\\n'", "-bash-3.2# printf '\(marker)\\n\\n'"] {
+            let proof = markerObservation(output: output, promptBelow: true).terminalMarkerProofDiagnostic(marker)
+            #expect(proof.exactMarker == false)
+            #expect(proof.isVerified == false)
+        }
+        #expect(markerObservation(output: marker, promptBelow: false).terminalMarkerProofDiagnostic(marker).isVerified == false)
+        #expect(markerObservation(output: marker, promptBelow: true).terminalMarkerProofDiagnostic(marker).isVerified)
+    }
+
+    @Test("real OCR does not accept a correct command echo as successful marker output")
+    func generatedProbeEchoCannotAuthorize() throws {
+        let plan = try markerPlan("01234567-89ab-cdef-8123-456789abcdef")
+        let probe = try #require(plan.capabilityProbes.first)
+        let words = probe.marker.split(separator: " ")
+        let wrong = ([String(words[0]), "pig"] + words.dropFirst(2).map(String.init)).joined(separator: " ")
+        for typedOnly in [false, true] {
+            let image = try renderedProbe(probe.command, outputOverride: wrong + "\n\n", typedOnly: typedOnly)
+            let lines = try SettingsAIOCRRecognizer().recognizeRecoveryTerminalMarker(
+                image: image, displaySize: displaySize, marker: probe.marker)
+            let proof = RecoveryUIObservation(lines: lines).terminalMarkerProofDiagnostic(probe.marker)
+            #expect(proof.exactMarker == false)
+            #expect(proof.isVerified == false)
+        }
+    }
+
+    private func markerObservation(output: String, promptBelow: Bool) -> RecoveryUIObservation {
+        .init(lines: [
+            .init(text: "Terminal", confidence: 1, rect: .init(x: 24, y: 18, width: 100, height: 18)),
+            .init(text: output, confidence: 1, rect: .init(x: 24, y: 100, width: 500, height: 18)),
+            .init(text: "-bash-3.2#", confidence: 1, rect: .init(x: 24, y: promptBelow ? 150 : 70, width: 100, height: 18)),
+        ])
+    }
+
+    private func markerPlan(_ requestID: String) throws -> PommeRecoveryVirtioFSTerminalPlan {
+        let expiry = Date(timeIntervalSince1970: 10_060)
+        let credential = try PommeRecoveryCredential(
+            id: #require(UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")),
+            secret: Data(repeating: 0x42, count: 32), expiresAt: expiry)
+        let request = try PommeRecoverySessionRequest(
+            requestID: #require(UUID(uuidString: requestID)),
+            vmUUID: #require(UUID(uuidString: "11111111-2222-3333-4444-555555555555")),
+            operation: .installAgent, issuedAt: expiry.addingTimeInterval(-60), expiresAt: expiry,
+            executableSHA256: String(repeating: "a", count: 64), credential: credential)
+        return try PommeRecoveryVirtioFSTerminalPlan(request: request)
+    }
+
+    /// Synthetic pixels only. Decode the generated literal printf output instead
+    /// of independently constructing the expected marker or its prompt spacing.
+    private func renderedProbe(_ command: String, outputOverride: String? = nil, typedOnly: Bool = false) throws -> CGImage {
+        let start = try #require(command.range(of: "printf '", options: .backwards)).upperBound
+        let end = try #require(command[start...].firstIndex(of: "'"))
+        let output = outputOverride ?? command[start..<end].replacingOccurrences(of: "\\n", with: "\n")
+        let outputRows = output.split(separator: "\n", omittingEmptySubsequences: false)
+        try #require(outputRows.last?.isEmpty == true)
+        let context = try #require(CGContext(data: nil, width: 1280, height: 800, bitsPerComponent: 8,
+            bytesPerRow: 5120, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(gray: 0.08, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 1280, height: 800))
+        context.setFillColor(CGColor(gray: 0.02, alpha: 1))
+        context.fill(CGRect(x: 39, y: 250, width: 879, height: 500))
+        let attributes: [NSAttributedString.Key: Any] = [
+            NSAttributedString.Key(kCTFontAttributeName as String): CTFontCreateWithName("Menlo" as CFString, 12, nil),
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(gray: 0.95, alpha: 1),
+        ]
+        let echo = Array("-bash-3.2# " + command)
+        var rows = [("Terminal", 16)]
+        for offset in stride(from: 0, to: echo.count, by: 120) {
+            rows.append((String(echo[offset..<min(offset + 120, echo.count)]), 100 + (offset / 120) * 14))
+        }
+        let outputTop = 100 + ((echo.count + 119) / 120) * 14
+        if !typedOnly {
+            for (index, row) in outputRows.dropLast().enumerated() { rows.append((String(row), outputTop + index * 18)) }
+            rows.append(("-bash-3.2#", outputTop + (outputRows.count - 1) * 18))
+        }
+        for (text, top) in rows {
+            context.textPosition = CGPoint(x: 50, y: 800 - top - 12)
+            CTLineDraw(CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes)), context)
+        }
+        return try #require(context.makeImage())
+    }
+
     @Test("an observed leading em dash in the fresh shell prompt preserves strict marker proof")
     func observedLeadingEmDashPrompt() {
         let proof = promptProof(prompt: "—bash-3.2#")
@@ -34,56 +141,6 @@ struct PommeRecoveryTerminalRecognitionTests {
             .init(text: markerOutput, confidence: 1, rect: .init(x: 24, y: 100, width: 200, height: 18)),
             .init(text: prompt, confidence: 1, rect: .init(x: 24, y: promptBelow ? 130 : 70, width: 200, height: 18)),
         ]).terminalMarkerProofDiagnostic("POMME TEST OK")
-    }
-
-    @Test("capability command echo is a whitespace-tolerant diagnostic, never proof")
-    func capabilityEchoDoesNotAuthorize() {
-        let observation = diagnosticObservation([
-            "-bash-3.2# p = /sbin ; u = /usr/bin ; test -x $p /mount_virtiofs &&",
-            "case $( $u/printf abc | $p/sha256 -q ) in ba7816bf8f01cfea*)printf 'POMME ACDEHJKMNP OK\\n';;esac",
-        ])
-        let evidence = observation.terminalMarkerEvidenceDiagnostic("POMME ACDEHJKMNP OK")
-        #expect(evidence.commandEcho)
-        #expect(evidence.nearMarker == false)
-        #expect(observation.terminalMarkerProofDiagnostic("POMME ACDEHJKMNP OK").isVerified == false)
-    }
-
-    @Test("only standalone nonexact marker-shaped output sets nearMarker")
-    func nearMarkerIsDiagnosticOnly() {
-        let expected = "POMME ACDEHJKMNP OK"
-        let wrong = diagnosticObservation(["POMME ACDEHJKMNQ OK"])
-        #expect(wrong.terminalMarkerEvidenceDiagnostic(expected).nearMarker)
-        #expect(wrong.terminalMarkerProofDiagnostic(expected).exactMarker == false)
-        #expect(wrong.terminalMarkerProofDiagnostic(expected).isVerified == false)
-        for text in [expected, "prefix POMME ACDEHJKMNQ OK", "POMME ACDEHJKMNQ OK suffix",
-                     "printf 'POMME ACDEHJKMNQ OK'", "-bash-3.2# POMME ACDEHJKMNQ OK"] {
-            #expect(diagnosticObservation([text]).terminalMarkerEvidenceDiagnostic(expected).nearMarker == false)
-        }
-        #expect(diagnosticObservation([expected]).terminalMarkerProofDiagnostic(expected).isVerified)
-    }
-
-    @Test("rendered marker diagnostics contain only fixed labels and closed values")
-    func markerDiagnosticRenderingIsClosed() {
-        let expected = "POMME ACDEHJKMNP OK"
-        let observation = diagnosticObservation([
-            "p=/sbin;u=/usr/bin;test -x $p/mount_virtiofs&&PRIVATE_SENTINEL",
-            "POMME ACDEHJKMNQ OK",
-        ])
-        let line = observation.terminalMarkerEvidenceDiagnostic(expected)
-            .debugLine(frameChangedSincePreviousAttempt: .unknown)
-        #expect(line == "[DEBUG-marker-20260922] commandEcho=true, nearMarker=true, frameChangedSincePreviousAttempt=unknown")
-        for forbidden in [expected, "ACDEHJKMNQ", "PRIVATE_SENTINEL", "/sbin", "/usr/bin", "printf"] {
-            #expect(line.contains(forbidden) == false)
-        }
-    }
-
-    private func diagnosticObservation(_ output: [String]) -> RecoveryUIObservation {
-        var text = ["Terminal", "-bash-3.2#"]
-        text += output
-        text.append("-bash-3.2#")
-        return .init(lines: text.enumerated().map { index, value in
-            .init(text: value, confidence: 1, rect: .init(x: 24, y: 18 + index * 25, width: 400, height: 18))
-        })
     }
 
     private let displaySize = CGSize(

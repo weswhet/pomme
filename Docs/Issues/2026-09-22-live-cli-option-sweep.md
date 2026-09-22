@@ -670,3 +670,94 @@ custom-word lists produced that same partial result, and all 15 sampled
 one-character-wrong expected-marker checks rejected proof. These results do
 not support a complete correction-mode fix. The next isolated comparison varies
 letter case, leaving nonce characters, spacing, and proof rules unchanged.
+
+Letter-case changes also failed to eliminate synthetic misses: nonce-only
+lowercase missed 9/64, entire-marker lowercase 13/64, and lowercase wrapper
+with uppercase nonce 4/64, versus the original 7/64. The marker format remains
+unchanged. A test-only fast-OCR comparison then failed all six real cases when
+used for both passes, and failed the same four problematic cases when used
+only as a crop supplement to the accurate full frame. Neither fast native-size
+nor fast 2x crop recovered those cases. No fast-path fallback was adopted.
+Result: `test_macos_2026-09-22T09-28-35-984Z_pid74956_b4d08441.xcresult`.
+
+The runtime supports Vision request revisions 1, 2, and 3 (default 3). Each
+revision missed the same four problematic real cases, so pinning an older
+revision is not supported by the evidence. A test-only 16-word encoding of the
+same ten UUID nibbles then recognized all 64 synthetic markers exactly, but
+three cases lacked fresh-prompt proof. Before selecting that larger format
+change, a smaller fixed Latin-disambiguating prefix is being compared. Neither
+experiment changes nonce entropy, production code, or proof acceptance.
+
+The fixed `READY` prefix did not eliminate synthetic misses: the uppercase
+wrapper missed 4/64 and the lowercase wrapper missed 3/64. The three word-nonce
+fresh-prompt failures contained recognized prompt-region lines with internal
+punctuation or character substitutions, not just the already-corrected leading
+em dash. A separate single-variable comparison added one blank line between
+the word marker and prompt: exact recognition remained 64/64 and strict proof
+improved from 61/64 to 64/64. Result: `50eef54c.xcresult`. This remains a
+test-only candidate pending a larger corpus and real Recovery Terminal output;
+the matcher and production marker format are unchanged.
+
+The expanded word-plus-blank-line corpus completed 1,000 cases without a
+resource error: all 1,000 exact markers were recognized, compared with 53
+exact-marker misses in the original format. Strict proof passed 998/1,000;
+one case missed Terminal recognition and one missed fresh-prompt recognition.
+Both isolated cases passed when the simplified synthetic command echo was
+replaced with the full wrapped capability probe. These are bounded comparison
+results, not a universal OCR guarantee.
+
+On the same internal-drive macOS 27 VM, the word encoding of repeated `H`
+(`elm` repeated ten times) initially failed all ten real-image replays without
+a blank line. The output region was recognized with a wrong word count, not
+Cyrillic substitutions. Adding only one blank line after the same output made
+all ten strict proofs pass. The full production-shaped capability probe with
+that word marker and blank line also passed ten of ten. Wrong-first-word and
+typed-command-only controls each rejected ten of ten for both passing cases.
+The alternating `dry`/`elm` control passed without a blank line; the `hen`,
+`ink`, and `key` repeated-word controls with blank lines each passed ten strict
+proofs and rejected ten wrong-marker and ten typed-only checks. All captures
+contain benign fixed lab probes only and remain private temporary artifacts.
+
+The candidate therefore changes the transient capability marker to ten fixed
+three-letter words encoding the same first ten UUID nibbles (40 bits), and
+prints a blank line between probe output and the shell prompt. One marker
+value is shared by the probe and launcher. The launcher keeps its existing
+single-newline output. Generated-command assertions measured the probe at
+138 bytes before the change and 169 bytes afterward, correcting the earlier
+hand estimate. This remains within the
+unchanged 256-byte limit; its focused regression budget is deliberately updated
+from less than 160 to at most 176 bytes. Exact whole-line recognition, Terminal
+recognition, and a fresh prompt below the marker remain mandatory. No fuzzy
+matching, language correction, credential, pinned-agent, journal, or profile
+change is included. Temporary diagnostic instrumentation is being removed.
+Tests-first candidate verification precedes commit, signed build, and live
+end-to-end status retests.
+
+The manual macOS 27 session was stopped through the public command, which used
+its existing forced-stop fallback after Recovery did not shut itself down.
+Separate status calls verified both internal-drive test VMs stopped with no
+helper. Both retain their original 4 GB/40 GB resources and creation-pinned
+agent identities. All 21 local build/install regression checks passed before
+candidate integration.
+
+The permanent generator regressions first failed on the old implementation
+(four failed, twelve passed), then all sixteen test functions passed with the
+candidate, including 160 nibble-position/value combinations. The plan-driven
+Vision regression independently reproduced the old alternating-nibble marker
+failure before implementation. With the candidate, all 25 functions in the
+Terminal-recognition and virtualization-port suites passed (26 parameterized
+executions), including actual-OCR wrong-output and typed-only rejection.
+Results: generator `575c3a63.xcresult`; OCR/port `9ed90fa8.xcresult`.
+The renderer reads the generated probe output and newline count rather than
+independently recreating the desired marker. All temporary corpus/image-backed
+tests and private-path references were removed, as were the temporary
+`[DEBUG-marker-20260922]` evidence and adjacent-frame-hash instrumentation.
+The existing closed Terminal/exact-marker/fresh-prompt diagnostics remain.
+
+Combined XcodeBuildMCP verification passed all 98 test functions across eight
+Recovery suites, with zero failures or skips (112 reported executions):
+`test_macos_2026-09-22T09-56-57-932Z_pid82062_9194c16d.xcresult`.
+This includes navigation, interaction, profile selection, observation,
+Terminal OCR, VirtioFS bootstrap, and live-runtime composition. The candidate
+and this evidence are committed before the signed Release build; live
+end-to-end validation remains pending at that commit.

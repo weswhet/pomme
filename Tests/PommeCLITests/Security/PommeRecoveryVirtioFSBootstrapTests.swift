@@ -18,6 +18,8 @@ struct PommeRecoveryVirtioFSBootstrapTests {
         #expect(plan.runScriptPath == "\(plan.mountWorkspacePath)/run")
         #expect(plan.capabilityProbes.count == 1)
         #expect(plan.capabilityProbes[0].marker == plan.completionMarker)
+        #expect(plan.completionMarker == "POMME ash bay cow dry elm fox gum hen ink joy OK")
+        #expect(plan.launcherScript.contains("/usr/bin/printf '%s\\n' '\(plan.completionMarker)'"))
         #expect(plan.capabilityProbes[0].command.contains("POMME"))
         #expect(plan.commands.count == 1)
 
@@ -119,8 +121,11 @@ struct PommeRecoveryVirtioFSBootstrapTests {
         #expect(probe.command.contains("test -x $p/mount_virtiofs&&case"))
         #expect(probe.command.contains("$u/printf abc|$p/sha256 -q"))
         #expect(probe.command.contains("in \(knownVector.prefix(16))*)"))
-        #expect(probe.command.utf8.count < 160)
-        #expect(probe.command.contains("printf '\(probe.marker)\\n'"))
+        // Ten fixed-width words and a blank line improve OCR separation while
+        // retaining a tighter budget than the production 256-byte ceiling.
+        #expect(probe.command.utf8.count <= 176)
+        #expect(probe.command.utf8.count == 169)
+        #expect(probe.command.contains("printf '\(probe.marker)\\n\\n'"))
         #expect(!probe.command.contains("/usr/bin/shasum"))
         #expect(!probe.command.contains("/usr/bin/openssl"))
         #expect(plan.launcherScript.contains("/sbin/sha256 -q \"$g/pomme-agent\""))
@@ -163,7 +168,44 @@ struct PommeRecoveryVirtioFSBootstrapTests {
         let errorOutput = stderr.fileHandleForReading.readDataToEndOfFile()
         #expect(process.terminationStatus == 0)
         #expect(errorOutput.isEmpty)
-        #expect(output == "\(probe.marker)\n")
+        #expect(output == "\(probe.marker)\n\n")
+    }
+
+    @Test("Each request nibble changes exactly one marker word", arguments: 0..<10)
+    func markerPreservesEveryNibble(position: Int) throws {
+        let words = ["ash", "bay", "cow", "dry", "elm", "fox", "gum", "hen",
+                     "ink", "joy", "key", "log", "mud", "new", "oak", "pig"]
+        var observed = Set<String>()
+        for nibble in 0..<16 {
+            var digits = Array(String(repeating: "0", count: 32))
+            digits[position] = Character(String(nibble, radix: 16))
+            let compact = String(digits)
+            let groups = [0..<8, 8..<12, 12..<16, 16..<20, 20..<32]
+            let uuidText = groups.map { String(digits[$0]) }.joined(separator: "-")
+            let request = try makeFractionalExpiryRequest(
+                epoch: 9_999_999_000,
+                requestID: #require(UUID(uuidString: uuidText))
+            )
+            let plan = try PommeRecoveryVirtioFSTerminalPlan(request: request)
+            let suffix = Array(plan.completionMarker.split(separator: " ").dropFirst().dropLast())
+            try #require(suffix.count == 10)
+            for index in 0..<10 {
+                #expect(suffix[index] == (index == position ? words[nibble] : "ash"))
+                #expect(suffix[index].utf8.count == 3)
+                #expect(suffix[index].utf8.allSatisfy { (97...122).contains($0) })
+            }
+            #expect(suffix.enumerated().filter { $0.element != "ash" }.map(\.offset)
+                == (nibble == 0 ? [] : [position]))
+            observed.insert(String(suffix[position]))
+            let probe = try #require(plan.capabilityProbes.first)
+            #expect(probe.marker == plan.completionMarker)
+            #expect(probe.command.contains("printf '\(plan.completionMarker)\\n\\n'"))
+            #expect(plan.launcherScript.contains("/usr/bin/printf '%s\\n' '\(plan.completionMarker)'"))
+            #expect(probe.command.utf8.count == 169)
+            #expect(probe.command.allSatisfy { HostDisplayKey.lookup(character: $0) != nil })
+            #expect(plan.mountWorkspacePath.hasSuffix(String(compact.prefix(8))))
+        }
+        #expect(observed == Set(words))
     }
 
     @Test("Compact launcher keeps workspace confinement and stops at failed guards", arguments: ["success", "existing", "mountFailure", "copyFailure"])
@@ -568,7 +610,10 @@ private func launcherArgumentValue(named name: String, in script: String) -> Str
     return String(script[range.upperBound...].prefix { !$0.isWhitespace })
 }
 
-private func makeFractionalExpiryRequest(epoch: TimeInterval) throws -> PommeRecoverySessionRequest {
+private func makeFractionalExpiryRequest(
+    epoch: TimeInterval,
+    requestID: UUID = UUID(uuidString: "01234567-89ab-cdef-0123-456789abcdef")!
+) throws -> PommeRecoverySessionRequest {
     let expiresAt = Date(timeIntervalSince1970: epoch)
     let credential = try PommeRecoveryCredential(
         id: UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!,
@@ -576,7 +621,7 @@ private func makeFractionalExpiryRequest(epoch: TimeInterval) throws -> PommeRec
         expiresAt: expiresAt
     )
     return try PommeRecoverySessionRequest(
-        requestID: UUID(uuidString: "01234567-89ab-cdef-0123-456789abcdef")!,
+        requestID: requestID,
         vmUUID: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
         operation: .installAgent,
         issuedAt: expiresAt.addingTimeInterval(-60),
