@@ -15,7 +15,7 @@ observations are recorded below; historical rows retain their original status.
 | macOS 26 first-owner desktop readiness / cleanup | Same-job cleanup-verified retry and pinned reconnect adapter implemented. Three fresh signed-candidate SIP cycles passed, including a live Aqua timeout recovered after instrumentation cleanup; original intermittent signal delay and earlier console transport failure remain unexplained. |
 | macOS 27 creation `ownerProof` | Open; subsequent internal-drive baseline passed without a targeted fix. |
 | macOS 26 creation `verifyNormalAgent` / slow first boot | Open historical failure; subsequent internal-drive creations passed without establishing its cause. |
-| macOS 27 restart after pause/resume | Open; two earlier internal-drive sequences and a later ten-cycle repetition passed without reproducing the missing helper. |
+| macOS 27 restart after pause/resume | Open; two earlier internal-drive sequences plus ten-cycle runs with both current `a3852a5` and original `ffc41a7` hosts passed without reproducing the missing helper. |
 | Retained SIP private-PTY / pinned-authentication failures | Open historical observations; later successful security cycles do not establish their cause. |
 
 This is an observational live test. The CLI and guest images are not being
@@ -1900,3 +1900,29 @@ root-cause finding or justified lifecycle source change.
 Graceful stop began at 15:45:50Z and completed with `guest-stopped`. Public
 inventory confirmed all thirteen internal VMs stopped with no helpers. The
 current signed Release remains installed; only this evidence document changed.
+
+Read-only archive inspection found the exact original sweep host `ffc41a7`
+preserved at `AgentArtifacts/sha256/2e0a2f4959071eb80051ab103b9b41cd5f8fea8eae8aa257376cbf4a747aaeff/pomme-agent`.
+It is an owned regular non-symlink executable with mode `0555`; digest, version,
+and required Developer ID/team/signature checks passed. The next comparison
+invokes that archived binary directly for the same ten-cycle sequence on the
+same stopped internal VM. The installed `a3852a5` remains untouched. Using
+the original host removes a host-build difference, but the fixture remains an
+initialized internal-drive VM rather than the deleted original sweep VM.
+
+Original-host baseline start began at 15:49:04Z and passed independently before
+the loop. All ten baseline cycles then passed from 15:49:56Z to 15:56:58Z.
+Cycle completion times were 15:50:39, 15:51:23, 15:52:06, 15:52:46, 15:53:26,
+15:54:12, 15:54:37, 15:55:22, 15:55:53, and 15:56:58Z. Each restart returned
+a new helper PID and passed identical postconditions. No missing-helper error
+or failed readiness/status check occurred. The original signed host therefore
+also fails to reproduce the historical symptom on this fixture; later source
+changes cannot be credited as its fix from these observations.
+
+The original host gracefully stopped the VM at 15:57:18Z with `guest-stopped`.
+Current-host public inventory independently confirmed all thirteen VMs stopped
+with no helpers. Installed version remains `a3852a5`, SHA-256
+`55142e268e4402985cb6012326df6450687fca094888ffad3937bc1701887b5a`.
+No lifecycle source change or rebuild was made without a failing case. This
+bounded original/current-host comparison is complete; the issue stays open
+pending evidence that distinguishes the deleted sweep fixture or its timing.
