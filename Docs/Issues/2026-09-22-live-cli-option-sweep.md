@@ -1745,3 +1745,24 @@ for the retained creation pin. Native `csrutil status` returned enabled with
 complete output and exit 0. Graceful stop began at 14:59:07Z and completed with
 `guest-stopped`; public inventory again confirmed all twelve VMs stopped with
 no helpers. No guest update, credential change, or journal rewrite occurred.
+
+### Transport instrumentation cleanup
+
+With composed real-wire reconnect/rejection coverage and signed live adapter
+checks in place, the temporary `[DEBUG-desktop-transport-20260922]` layer is
+now removed. Permanent stage/error diagnostics, timeout summaries, original
+thrown errors, exact-probe gating, and all cleanup/retry/deadline guards remain.
+This cleanup does not explain the original native first-login delay or claim
+that the earlier console transport failure was reproduced. The current status
+table retains those limits rather than treating successful comparisons as a
+root-cause finding. All twelve VMs were stopped before the cleanup test build;
+61 GiB was free internally before final signed-build validation.
+
+The nine focused XcodeBuildMCP suites passed 104 test functions / 262 executions,
+zero failures or skips:
+`test_macos_2026-09-22T15-02-35-709Z_pid41953_29c3041c.xcresult`.
+Independent review confirmed the diff removes only diagnostic instrumentation;
+error propagation, single-start/single-signal assertions, cleanup receipts, and
+all readiness/reconnect bounds remain. Temporary-symbol searches in Sources
+and Tests and `git diff --check` passed. This cleanup is committed before the
+signed Release build and fresh internal-drive live validation.

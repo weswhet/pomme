@@ -11,50 +11,6 @@ enum PommeForegroundExecution {
     static let maximumBufferedOutputBytes = 64 * 1024 // per output channel
     static let desktopCleanupReceiptKey = "_pommeDesktopProofCleanupReceipt"
 
-    // Temporary diagnostics: never interpolate an error or its associated text.
-    static func desktopTransportErrorKind(_ error: any Swift.Error) -> String {
-        if error is CancellationError { return "cancelled" }
-        if let error = error as? POSIXError {
-            return error.code == .ETIMEDOUT ? "posixDeadline" : "posix"
-        }
-        if let error = error as? Error {
-            switch error {
-            case .deadlineReached: return "foregroundDeadline"
-            case .unrelatedJobFrame: return "unrelatedJobFrame"
-            case .invalidCompletion: return "invalidCompletion"
-            default: return "foregroundValidation"
-            }
-        }
-        if error is PommeAgentProtocol.Error { return "agentProtocol" }
-        if error is PommeAgentVSOCKError { return "vsockSession" }
-        if let error = error as? RunnerError {
-            switch error {
-            case .posix(_, let code): return code == ETIMEDOUT ? "posixDeadline" : "posix"
-            case .controlCommandFailed: return "controlCommandFailed"
-            case .noRunningVM: return "noHelper"
-            case .invalidControlResponse, .incompatibleHelperProtocol: return "controlProtocol"
-            case .guestAgentTimedOut, .guestAgentProbeTimedOut: return "agentTimeout"
-            case .guestAgentProtocol: return "agentProtocol"
-            case .guestAgentDisconnected: return "agentDisconnected"
-            case .guestAgentUnavailable: return "agentUnavailable"
-            case .guestAgentConnecting: return "agentConnecting"
-            case .guestAgentError: return "agentError"
-            default: return "runnerOther"
-            }
-        }
-        return "other"
-    }
-
-    static func desktopElapsedMilliseconds(since start: ContinuousClock.Instant) -> Int64 {
-        let duration = start.duration(to: ContinuousClock.now).components
-        return max(0, duration.seconds * 1_000 + duration.attoseconds / 1_000_000_000_000_000)
-    }
-
-    private enum DesktopBoundary: String {
-        case start, startValidation, frameAccept, eof, status, statusValidation
-        case terminalValidation, checkpoint, wait, signal
-    }
-
     static func isAquaProofPayload(_ payload: [String: JSONValue]) -> Bool {
         guard Set(payload.keys).isSubset(of: ["path", "arguments", "timeout", "detached"]),
               payload["path"] == .string("/bin/sh"),
@@ -118,31 +74,19 @@ enum PommeForegroundExecution {
         startPayload.removeValue(forKey: "attachStdin")
 
         let clock = ContinuousClock()
-        let executionStart = clock.now
-        let deadline = executionStart.advanced(by: .seconds(timeout))
-        var pollCount = 0
-        func diagnose(_ error: any Swift.Error, at boundary: DesktopBoundary, jobEstablished: Bool) {
-            guard isDesktopProof else { return }
-            PommeCore.log("[DEBUG-desktop-transport-20260922] side=helper boundary=\(boundary.rawValue) "
-                + "elapsedMs=\(desktopElapsedMilliseconds(since: executionStart)) "
-                + "jobEstablished=\(jobEstablished) pollCount=\(pollCount) errorKind=\(desktopTransportErrorKind(error))")
-        }
+        let deadline = clock.now.advanced(by: .seconds(timeout))
         try Task.checkCancellation()
         // This request is sent exactly once. If its outcome is uncertain there
         // is no safe job identity to retry, signal, or replace.
-        let started: PommeAgentCorrelatedResult
-        do { started = try await perform("process.start", .object(startPayload)) }
-        catch { diagnose(error, at: .start, jobEstablished: false); throw error }
+        let started = try await perform("process.start", .object(startPayload))
         guard let initial = started.result.objectValue,
               let text = initial["jobID"]?.stringValue, let jobID = UUID(uuidString: text)
         else {
-            diagnose(Error.invalidCompletion, at: .startValidation, jobEstablished: false)
             throw Error.invalidCompletion
         }
         var state = OutputState(jobID: jobID)
         var terminal = initial
 
-        var boundary = DesktopBoundary.frameAccept
         do {
             try await state.accept(started.streamFrames, onFrames: onFrames)
             var offset = 0
@@ -153,37 +97,26 @@ enum PommeForegroundExecution {
                 try await state.accept(frames, onFrames: onFrames)
                 offset = end
             }
-            boundary = .checkpoint
             try checkpoint(clock: clock, deadline: deadline)
-            boundary = .eof
             let eofFrames = try await sendStream(jobID, .eof, nil)
-            boundary = .frameAccept
             try await state.accept(eofFrames, onFrames: onFrames)
 
             while true {
-                boundary = .checkpoint
                 try checkpoint(clock: clock, deadline: deadline)
-                boundary = .status
-                pollCount += 1
                 let status = try await perform("process.status", .object(["jobID": .string(jobID.uuidString.lowercased())]))
-                boundary = .statusValidation
                 guard let values = status.result.objectValue,
                       let id = values["jobID"]?.stringValue, UUID(uuidString: id) == jobID,
                       case .bool = values["exited"]
                 else { throw Error.invalidCompletion }
                 terminal = initial.merging(values) { _, current in current }
-                boundary = .frameAccept
                 try await state.accept(status.streamFrames, onFrames: onFrames)
                 if terminal["exited"] == .bool(true), state.receivedExit {
-                    boundary = .terminalValidation
                     try validateTerminal(terminal)
                     return state.result(requestID: started.requestID, terminal: terminal)
                 }
-                boundary = .wait
                 try await Task.sleep(for: min(.milliseconds(25), clock.now.duration(to: deadline)))
             }
         } catch {
-            diagnose(error, at: boundary, jobEstablished: true)
             // No automatic replay, replacement process, or reboot. A failed
             // signal is retained as uncertainty, not treated as cleanup proof.
             let signalled: Bool
@@ -201,7 +134,6 @@ enum PommeForegroundExecution {
                 }
                 signalled = true
             } catch {
-                diagnose(error, at: .signal, jobEstablished: true)
                 signalled = false
             }
             if error is CancellationError || (error as? Error) == .deadlineReached {
