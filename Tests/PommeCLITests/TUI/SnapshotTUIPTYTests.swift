@@ -4,6 +4,31 @@ import Testing
 @Suite("Snapshot TUI PTY", .serialized)
 @MainActor
 struct SnapshotTUIPTYTests {
+    @Test("Changing boot mode requires confirmation for canonical active sessions", arguments: ["running", "paused"])
+    func activeBootModeChangeCanBeCancelled(state: String) throws {
+        let session = try TUITestPTYSession()
+        defer { session.close() }
+        let entry = try #require(TUIVMEntry(payload: [
+            "bundlePath": "/tmp/guard-only.macvm",
+            "name": "guard-only",
+            "vmState": state,
+            "bootMode": "normal",
+            "helperRunning": true
+        ]))
+        var tui = PommeTUI(
+            initialVMName: nil,
+            terminal: session.terminal,
+            createAction: { _, _, _, _, _ in throw GuardTestError.unexpectedAction }
+        )
+        try session.write("n\n")
+        #expect(try tui.confirmBootTransitionIfNeeded(entry: entry, targetMode: .recovery) == false)
+        #expect(session.readTranscript().contains("Change boot mode"))
+        #expect(session.readTranscript().contains("is \(state) in normal"))
+        // Same-mode requests do not stop the active session and need no prompt.
+        #expect(try tui.confirmBootTransitionIfNeeded(entry: entry, targetMode: .normal))
+    }
+
+    private enum GuardTestError: Error { case unexpectedAction }
     @Test("Snapshot creation rejects empty input, refreshes without rerunning, and restores the terminal")
     func createsSnapshotAndRefreshesWithoutRerunning() async throws {
         let recorder = SnapshotActionRecorder(records: [])
@@ -73,14 +98,14 @@ struct SnapshotTUIPTYTests {
         TUIVMEntry(payload: [
             "name": "dev",
             "bundlePath": "/tmp/dev.macvm",
-            "running": true,
+            "helperRunning": true,
             "vmState": "running",
             "bootMode": "normal",
             "guestAgent": [
                 "connection": "connected",
                 "role": "normal",
-                "protocolVersion": "3",
-                "digest": "test-digest",
+                "protocolVersion": 3,
+                "executableDigest": "test-digest",
                 "capabilities": ["snapshots"],
                 "updateState": "current"
             ]
