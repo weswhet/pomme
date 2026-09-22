@@ -4,45 +4,6 @@ import Foundation
 enum PommeAgentRole: String, Sendable { case persistent, recovery }
 enum PommeAgentAuthority: Sendable { case standard, recoveryTerminal }
 
-/// Temporary Aqua-only waitpid evidence. Raw errno and process identities
-/// never leave this classifier. Counters are cumulative per job, not per poll.
-struct PommeAquaWaitDebug: Sendable {
-    static let key = "_pommeDebugAquaWait20260922"
-    enum Outcome: Int64, CaseIterable, Sendable {
-        case running = 0, reaped = 1, interrupted = 2, noChild = 3, otherError = 4
-        var countKey: String {
-            switch self {
-            case .running: "waitRunningCount"
-            case .reaped: "waitReapedCount"
-            case .interrupted: "waitInterruptedCount"
-            case .noChild: "waitNoChildCount"
-            case .otherError: "waitOtherErrorCount"
-            }
-        }
-    }
-    static var countKeys: [String] { Outcome.allCases.map(\.countKey) }
-    static var fields: [String] { countKeys + ["waitLastOutcome"] }
-    private(set) var values: [String: JSONValue]
-
-    init?(payload: [String: JSONValue]) {
-        guard PommeForegroundExecution.isAquaDebugPayload(payload) else { return nil }
-        values = Dictionary(uniqueKeysWithValues: Self.countKeys.map { ($0, .integer(0)) })
-    }
-
-    mutating func record(result: Int32, expectedPID: Int32, capturedErrno: Int32) {
-        let outcome: Outcome
-        if result == expectedPID { outcome = .reaped }
-        else if result == 0 { outcome = .running }
-        else if result < 0, capturedErrno == EINTR { outcome = .interrupted }
-        else if result < 0, capturedErrno == ECHILD { outcome = .noChild }
-        else { outcome = .otherError }
-        if case .integer(let count)? = values[outcome.countKey] {
-            values[outcome.countKey] = .integer(count + 1)
-        }
-        values["waitLastOutcome"] = .integer(outcome.rawValue)
-    }
-}
-
 /// A single long-lived normal-boot agent or a bounded Recovery session.
 /// VSOCK integration owns framing I/O and delegates each authenticated request
 /// to this actor; process and file state intentionally survive reconnects.
@@ -124,7 +85,6 @@ actor PommeAgent {
         var stderrLogTruncated: Bool
         var stdoutBytes: Int64
         var stderrBytes: Int64
-        var aquaWaitDebug: PommeAquaWaitDebug? = nil
     }
 
     private struct OpenFile {
@@ -353,8 +313,7 @@ actor PommeAgent {
             pty: pty,
             options: options
         )
-        var job = Job(id: UUID(), pid: launched.pid, startedAt: Date(), exited: false, status: nil, ptyMaster: launched.ptyMaster, stdin: launched.stdin, stdout: launched.stdout, stderr: launched.stderr, outputEOF: [], detached: detached, stdoutLog: Data(), stderrLog: Data(), stdoutLogTruncated: false, stderrLogTruncated: false, stdoutBytes: 0, stderrBytes: 0)
-        job.aquaWaitDebug = PommeAquaWaitDebug(payload: object)
+        let job = Job(id: UUID(), pid: launched.pid, startedAt: Date(), exited: false, status: nil, ptyMaster: launched.ptyMaster, stdin: launched.stdin, stdout: launched.stdout, stderr: launched.stderr, outputEOF: [], detached: detached, stdoutLog: Data(), stderrLog: Data(), stdoutLogTruncated: false, stderrLogTruncated: false, stdoutBytes: 0, stderrBytes: 0)
         jobs[job.id] = job
         var result: [String: JSONValue] = [
             "jobID": .string(job.id.uuidString.lowercased()),
@@ -369,11 +328,7 @@ actor PommeAgent {
     private func status(_ payload: JSONValue) throws -> JSONValue {
         let id = try jobID(payload)
         let job = try refreshStatus(for: id)
-        var result = statusResult(for: job, id: id)
-        if let diagnostic = job.aquaWaitDebug {
-            result[PommeAquaWaitDebug.key] = .object(diagnostic.values)
-        }
-        return .object(result)
+        return .object(statusResult(for: job, id: id))
     }
 
     private func statusResult(for job: Job, id: UUID) -> [String: JSONValue] {
@@ -463,12 +418,6 @@ actor PommeAgent {
         while true {
             var value: Int32 = 0
             let result = waitpid(job.pid, &value, WNOHANG)
-            let capturedErrno = errno
-            if job.aquaWaitDebug != nil {
-                let expectedPID = job.pid
-                job.aquaWaitDebug?.record(result: result, expectedPID: expectedPID, capturedErrno: capturedErrno)
-                jobs[id] = job
-            }
             if result == job.pid {
                 job.exited = true
                 job.status = value
@@ -476,7 +425,7 @@ actor PommeAgent {
                 return job
             }
             if result == 0 { return job }
-            if result < 0, capturedErrno == EINTR { continue }
+            if result < 0, errno == EINTR { continue }
             return job
         }
     }

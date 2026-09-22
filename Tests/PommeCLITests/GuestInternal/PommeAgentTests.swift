@@ -5,60 +5,6 @@ import Testing
 
 @Suite("Pomme persistent agent")
 struct PommeAgentTests {
-    @Test("Temporary Aqua wait metadata opts in only to the exact request", arguments: ["exact", "uidZero", "uidText", "pty", "user", "environment", "stdinDataBase64", "path"])
-    func aquaWaitMetadataGate(variant: String) throws {
-        let request = try #require(PommeSecurityNormalAgent.aquaSessionProofRequest(uniqueID: 501))
-        var payload = try #require(JSONValue(any: request.agentPayload()).objectValue)
-        if variant == "uidZero" || variant == "uidText" {
-            var arguments = try #require(payload["arguments"]?.arrayValue)
-            arguments[3] = .string(variant == "uidZero" ? "0" : "private-name")
-            payload["arguments"] = .array(arguments)
-        } else if variant != "exact" {
-            payload[variant] = .string("private-value")
-        }
-        let diagnostic = PommeAquaWaitDebug(payload: payload)
-        #expect((diagnostic != nil) == (variant == "exact"))
-    }
-
-    @Test("Temporary wait outcomes classify each syscall without changing retry policy", arguments: [
-        (Int32(0), EINTR, Int64(0)), (Int32(42), ECHILD, Int64(1)),
-        (Int32(-1), EINTR, Int64(2)), (Int32(-1), ECHILD, Int64(3)),
-        (Int32(-1), EINVAL, Int64(4))
-    ])
-    func aquaWaitOutcomeClassification(example: (Int32, Int32, Int64)) throws {
-        let request = try #require(PommeSecurityNormalAgent.aquaSessionProofRequest(uniqueID: 501))
-        let payload = try #require(JSONValue(any: request.agentPayload()).objectValue)
-        var diagnostic = try #require(PommeAquaWaitDebug(payload: payload))
-        diagnostic.record(result: example.0, expectedPID: 42, capturedErrno: example.1)
-        let outcome = try #require(PommeAquaWaitDebug.Outcome(rawValue: example.2))
-        #expect(diagnostic.values["waitLastOutcome"] == .integer(example.2))
-        for candidate in PommeAquaWaitDebug.Outcome.allCases {
-            #expect(diagnostic.values[candidate.countKey] == .integer(candidate == outcome ? 1 : 0))
-        }
-        diagnostic.record(result: -1, expectedPID: 42, capturedErrno: EINTR)
-        diagnostic.record(result: 0, expectedPID: 42, capturedErrno: 0)
-        #expect(diagnostic.values["waitInterruptedCount"] == .integer(outcome == .interrupted ? 2 : 1))
-        #expect(diagnostic.values["waitRunningCount"] == .integer(outcome == .running ? 2 : 1))
-        #expect(diagnostic.values.keys.sorted() == PommeAquaWaitDebug.fields.sorted())
-    }
-
-    @Test("An ordinary harmless process never emits temporary Aqua metadata")
-    func ordinaryProcessHasNoAquaMetadata() async throws {
-        let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64))
-        let started = try await agent.perform(.request(operation: "process.start", payload: .object([
-            "path": .string("/usr/bin/true"), "arguments": .array([])
-        ])))
-        #expect(started.objectValue?[PommeAquaWaitDebug.key] == nil)
-        let id = try #require(started.objectValue?["jobID"])
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-        while ContinuousClock.now < deadline {
-            let status = try await agent.perform(.request(operation: "process.status", payload: .object(["jobID": id])))
-            #expect(status.objectValue?[PommeAquaWaitDebug.key] == nil)
-            if status.objectValue?["exited"] == .bool(true) { return }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        Issue.record("Harmless process failed to reap within the test deadline")
-    }
 
     @Test("Recovery terminal authority exposes only health and terminal capabilities")
     func recoveryTerminalAuthority() async throws {
