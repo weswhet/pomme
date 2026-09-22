@@ -6,24 +6,53 @@ import OSLog
 /// exchange, not a cross-host clock or a request identity.
 struct PommeSignalBoundaryTrace: Sendable {
     enum Event: String, CaseIterable, Sendable {
+        case guestSignalDecoded, guestSignalRejectedReplay, guestSignalRejectedAuthenticationRequired
+        case guestSignalRejectedExpired, guestSignalRejectedOther
         case guestHandlerEntered, guestPerformReturned, guestPerformFailed
         case guestStreamsEntered, guestStreamsReturned, guestStreamsFailed
         case guestStreamWriteEntered, guestStreamWritten, guestStreamWriteFailed
         case guestResponseWriteEntered, guestResponseWritten, guestResponseWriteFailed
+        case guestStatusHandlerEntered, guestStatusPerformReturned, guestStatusPerformFailed
+        case guestStatusStreamsEntered, guestStatusStreamsReturned, guestStatusStreamsFailed
+        case guestStatusStreamWriteEntered, guestStatusStreamWritten, guestStatusStreamWriteFailed
+        case guestStatusResponseWriteEntered, guestStatusResponseWritten, guestStatusResponseWriteFailed
         case hostExchangeAdmitted, hostWriteCompleted, hostResponseReceived
         case hostWriteFailed, hostResponseFailed
+
+        fileprivate var statusEvent: Self {
+            switch self {
+            case .guestHandlerEntered: .guestStatusHandlerEntered
+            case .guestPerformReturned: .guestStatusPerformReturned
+            case .guestPerformFailed: .guestStatusPerformFailed
+            case .guestStreamsEntered: .guestStatusStreamsEntered
+            case .guestStreamsReturned: .guestStatusStreamsReturned
+            case .guestStreamsFailed: .guestStatusStreamsFailed
+            case .guestStreamWriteEntered: .guestStatusStreamWriteEntered
+            case .guestStreamWritten: .guestStatusStreamWritten
+            case .guestStreamWriteFailed: .guestStatusStreamWriteFailed
+            case .guestResponseWriteEntered: .guestStatusResponseWriteEntered
+            case .guestResponseWritten: .guestStatusResponseWritten
+            case .guestResponseWriteFailed: .guestStatusResponseWriteFailed
+            default: self
+            }
+        }
     }
 
     typealias Sink = @Sendable (Event, Double) -> Void
     private static let logger = Logger(subsystem: "com.github.weswhet.pomme", category: "signal-boundary")
     private let started = ContinuousClock.now
     let sink: Sink
+    private let isStatus: Bool
 
-    init(sink: @escaping Sink) { self.sink = sink }
+    init(sink: @escaping Sink, isStatus: Bool = false) {
+        self.sink = sink
+        self.isStatus = isStatus
+    }
 
     func emit(_ event: Event) {
         let elapsed = started.duration(to: .now).components
-        sink(event, Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15)
+        sink(isStatus ? event.statusEvent : event,
+             Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15)
     }
 
     static func message(_ event: Event, elapsedMilliseconds: Double) -> String {
@@ -402,14 +431,23 @@ enum PommeAgentDaemon {
                     }
                 }
                 var signalTrace: PommeSignalBoundaryTrace?
+                let normalScope = agent.role == .persistent && allowedOperation == nil && !terminalAuthority
+                if normalScope, request?.kind == .request, request?.operation == "process.signal" {
+                    // Fixed decoded/admission events contain no request data,
+                    // including when the connection has not authenticated.
+                    signalTrace = PommeSignalBoundaryTrace(sink: signalTraceSink ?? PommeSignalBoundaryTrace.guestLog)
+                    signalTrace?.emit(.guestSignalDecoded)
+                }
+                var handlerEntered = false
                 let response = await connection.receive(line) { request in
                     // receive invokes this handler only after authentication
                     // and credential/replay checks. Recovery never opts in.
-                    if request.operation == "process.signal", agent.role == .persistent,
-                       allowedOperation == nil, !terminalAuthority {
-                        signalTrace = PommeSignalBoundaryTrace(sink: signalTraceSink ?? PommeSignalBoundaryTrace.guestLog)
-                        signalTrace?.emit(.guestHandlerEntered)
+                    if normalScope, request.kind == .request, request.operation == "process.status" {
+                        signalTrace = PommeSignalBoundaryTrace(
+                            sink: signalTraceSink ?? PommeSignalBoundaryTrace.guestLog, isStatus: true)
                     }
+                    handlerEntered = true
+                    signalTrace?.emit(.guestHandlerEntered)
                     do {
                         let result = try await agent.performAsynchronously(request)
                         signalTrace?.emit(.guestPerformReturned)
@@ -420,6 +458,16 @@ enum PommeAgentDaemon {
                         if allowedOperation != nil && !terminalAuthority { try? oneShotCleanup() }
                         throw error
                     }
+                }
+                if signalTrace != nil, !handlerEntered {
+                    let rejection: PommeSignalBoundaryTrace.Event
+                    switch (try? decodeResponse(response))?.error?.code {
+                    case "replayed-request": rejection = .guestSignalRejectedReplay
+                    case "authentication-required": rejection = .guestSignalRejectedAuthenticationRequired
+                    case "credential-expired": rejection = .guestSignalRejectedExpired
+                    default: rejection = .guestSignalRejectedOther
+                    }
+                    signalTrace?.emit(rejection)
                 }
                 // Process output is part of the same request exchange.  The
                 // correlated response is the host-side delimiter, so drain

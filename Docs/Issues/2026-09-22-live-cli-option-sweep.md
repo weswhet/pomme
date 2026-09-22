@@ -2179,6 +2179,96 @@ for the failing boot; post-reboot absence alone is not proof of non-delivery.
 No retry, timeout extension, parser relaxation, or signal replay is justified
 by the present evidence, and no cause is declared fixed.
 
+The next minimization attempt kept the installed `f678e3e` host and original
+`c1960d43…890acab` guest. After revalidating the stopped/internal fixture, a
+normal start authenticated that pin; the console UID was 501. Ten sequential
+public commands used the exact Aqua proof executable/arguments and unchanged
+15-second budget:
+
+```sh
+rtk proxy /Users/wes/.local/bin/pomme exec pomme-agent-signaltrace26-20260922a \
+  --timeout 15 --format json -- /bin/sh -c \
+  'exec /bin/launchctl print "gui/$1" >/dev/null' pomme-aqua-proof 501
+```
+
+All ten returned complete exit 0, no timeout, no truncated channels, and zero
+stdout/stderr bytes. Omitting owner preparation and its first-login reboot
+sequence therefore removed the symptom in this sample; it does not establish
+which omitted condition is necessary or prove a fix. Graceful stop at 23:13Z
+restored the fixture. Independent status/inventory confirmed all twelve VMs
+stopped and internal, with unchanged UUID, startup volume, plan, guest pin,
+40 GB disk, 4 GB memory, and retained security journal.
+
+The existing real-daemon socket-pair test seam can exercise the foreground
+runner, stdin EOF, status polling, actual child output, and signal response
+together. A bounded characterization advances only the foreground logical
+clock after real status/output, leaving the real five-second signal exchange
+unmodified and unwithheld. This tests the connected cleanup path, not a
+reproduction of the natural first-login signal delay. No synthetic withheld
+response is being substituted as evidence for its cause.
+
+The initial characterization passed all twenty serialized parameter cases in
+`test_macos_2026-09-22T23-16-24-631Z_pid75485_4538ebf2.xcresult`.
+Each uses a real bounded child producing both output channels, one process
+start, real EOF/status exchanges, one TERM request, correlated response/frames,
+and exact-job reaping/output-EOF cleanup. Only the foreground logical deadline
+is advanced; the wire and daemon responses are not replaced or delayed.
+It reports `timedOut=true`, `cancelled=false`, `terminationRequested=true`.
+The five-second natural signal delay did not occur in these twenty cases.
+
+The five focused transport/foreground/daemon/cleanup suites then passed all
+57 functions / 1,330 invocations over ten repetitions, including 200 cases of
+the new characterization:
+`test_macos_2026-09-22T23-17-37-986Z_pid76723_62bab26d.xcresult`.
+All 21 isolated installer regression checks also passed. These passing checks
+qualify the test seam; they do not reproduce or close the original signal delay.
+
+Before allocating the next diagnostic guest, internal free space was 40 GiB.
+The completed `pomme-agent-owner26-20260922h` comparison was revalidated stopped
+with no helper and terminal `sipEnable` / `restorationComplete` / `previous`
+journal, `normalBootVerified=true`. Its original UUID
+`bd4acfad-f091-4248-878b-002459d0ff23`, startup volume, plan digest, and successful
+cleanup-verified retry/SIP cycle are recorded above. Public `delete --force`
+removed that exact 26 GiB internal bundle at 23:20Z; this permanently deletes
+the test disk and is not recoverable through that operation. Its signed agent
+archive remains present with verified SHA-256
+`0297d320550ff5c3b1fc7a4146e9e8b0440d1baba54d2361825143569a29af24`.
+Inventory confirmed eleven remaining VMs, all stopped/internal, and 66 GiB free.
+The retained `signaltrace26` failure and original comparison baselines were
+not changed or deleted.
+
+The next temporary trace extension keeps the existing fixed
+`[DEBUG-signal-boundary-20260922]` tag and enum-plus-local-elapsed-time sink.
+Normal persistent `process.signal` now emits a decoded-frame event before
+connection admission. A response that did not enter the handler is classified
+only as replay, authentication-required, expired, or other; request data and
+error text never reach diagnostics. This permits closed admission events for
+an unauthenticated signal without executing its handler or observing job data.
+Recovery, restricted-operation, and terminal-authority scopes remain excluded.
+
+Authenticated normal `process.status` receives separate fixed labels around
+handler/perform, output collection, stream writes, and response write. The
+purpose is to distinguish a preceding status/stream operation still in flight
+from a signal decoded and rejected before its handler. No behavior, retry,
+deadline, protocol, credential, pin, or journal policy changes. The tests cover
+real status-before-signal order, authenticated replay, unauthenticated signal
+rejection, and silent unauthenticated status/Recovery paths. The broader trace
+may perturb timing and remains temporary. It does not trace every raw read or
+malformed frame; a missing decoded-signal event still cannot prove physical
+non-delivery. Log queries must retain the last bounded closed events, rather
+than the first events, now that status polling is visible.
+
+The final trace-extension focused run passed all 57 functions / 1,360
+invocations over ten repetitions, including the new real foreground cases and
+added admission/scope cases, with no failures or skips:
+`test_macos_2026-09-22T23-22-06-772Z_pid77798_ee7151a7.xcresult`.
+The full isolated suite then passed all 1,194 functions / 1,661 invocations
+with no failures or skips:
+`test_macos_2026-09-22T23-23-44-137Z_pid78503_954b2fd6.xcresult`.
+These source/test/evidence changes are committed before the signed Release
+build. A fresh guest must pin that release to exercise these new guest-side
+checkpoints; existing guest pins will not be rewritten.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
