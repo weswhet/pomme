@@ -534,6 +534,74 @@ The closed outcome codes are 0 running, 1 reaped, 2 interrupted, 3 no-child,
 and 4 other-error; counters accumulate per guest job and the host copies the
 latest snapshot without summing it. All temporary instrumentation remains
 explicitly diagnostic, pending signed-build live reproduction.
+
+Candidate `b35bbdc` was committed, then built and installed through the
+canonical signed Release workflow. All signature/entitlement/requirement and
+artifact-archive checks passed; the installed digest is
+`0dd4236141483d68f6b63fe39cfdf27a2a5b1b7074d0bc19fc756d9ad21fa127`.
+Fresh login-shell resolution and version matched, and all 104 CLI contract
+checks passed. The build reports existing PommeCore and guest MDM Keychain
+deprecation warnings, not changes to those paths. Read-only review confirmed
+unchanged wait/signal/proof behavior. Per-loop closed proof observations are
+intentionally retained to identify why successful Aqua probes did not yield
+stable desktop proof. Counters are the last completed status-response snapshot:
+the daemon can perform another wait during stream-event collection after
+encoding that response, so they are not a complete final syscall census.
+Preflight at 11:01:51Z confirmed the same internal restore image, experimental
+profile, and explicit 4 GB/40 GB resources for `pomme-agent-owner26-20260922d`.
+
+Fresh creation began at 11:02:11Z and completed successfully: restore reached
+100% at 11:05:52Z, marker proof passed on attempt 2 at 11:07:23Z, and normal
+agent verification passed before return to stopped. Public status independently
+confirmed stopped with no helper. The new internal VM UUID is
+`5f07b9ad-41c7-4be7-8a9e-97dc644db000`, startup-volume group
+`d2b1f757-1938-4b1f-b437-2b166ab459e5`, and immutable plan digest
+`1b4a96afed065f5d372a3ee567f30cfb5d729b2383fc89da0b6e14b72a6aa8bd`.
+Its pinned agent is the signed `0dd42361…1fa127` diagnostic build. The original
+first-owner SIP-disable command follows without additional guest probes.
+
+The first-owner run began at 11:08:30Z. Initial owner completion status 1
+triggered the unchanged boot retry at 11:09:53Z; completion then passed at
+11:10:53Z and Setup Assistant completion at 11:10:56Z. Desktop verification
+began at 11:11:12Z. Early completed Aqua probes took approximately 31–161 ms;
+the first did not satisfy Aqua proof, then subsequent Aqua proofs passed while
+the existing desktop-process predicate remained false. A later probe took
+4.154 s. At 11:12:00Z a probe completed in 14.141 s, just below the 15-second
+limit: start 2.112 s, EOF 0.278 s, 31 status exchanges totaling 10.830 s,
+maximum 1.440 s. Its last guest snapshot showed 62 running waits, one reap,
+zero EINTR/ECHILD/other-error waits, and last outcome reaped. Desktop proof
+then matched at 11:12:05Z. The next Aqua request completed in 7.386 s with
+102 running waits, one reap, and no wait errors. The combined desktop proof
+passed at 11:12:18Z and the workflow entered Recovery.
+
+This fresh run did not reproduce the timeout. It proves that a nearly
+deadline-length successful probe can involve a genuinely running child, not
+a hidden wait error. It does not classify the earlier failing probe on the
+other VM or establish a fix. The temporary per-loop observation reuses the
+existing formatter's phrase `deadline expired`; those tagged lines above are
+observations, not additional failures. The actual 120-second desktop deadline
+did not expire. SIP restoration will follow the pending transaction.
+
+SIP disable completed successfully after normal-boot verification at 11:15:31Z,
+returning all normal-boot/runtime/enforcement/final-state verification fields
+true and `configuredDisabled=true`. Public status confirmed stopped with no
+helper before the matching SIP-enable restoration was started. Recovery marker
+proof in the successful disable workflow passed on attempt 2 at 11:14:21Z.
+This is diagnostic-build live compatibility and a slow successful first-owner
+run, not closure of the intermittent Aqua defect.
+
+SIP enable started at 11:15:50Z and completed successfully after normal-boot
+verification at 11:19:38Z. Recovery marker proof passed on attempt 1 at
+11:18:36Z. The final result reported `configuredDisabled=false` and all
+normal-boot/runtime/enforcement/final-state verification fields true, restoring
+the original SIP-enabled/stopped state. A separate inventory confirmed all
+five internal-drive test VMs stopped with no helper. The failing `...22c` VM
+retains its unmodified pre-mutation SIP transaction; the successful `...22d`
+comparison retains its own exact agent pin. No guest credentials, immutable
+journals, or pinned agents were manually replaced, and no external drive was
+used. Temporary closed diagnostics remain for the unresolved Aqua investigation;
+the next step must preserve fail-closed behavior when process cleanup is not
+proven, rather than treating a signal acknowledgement as termination proof.
 Consecutive-frame equality can suggest an unchanged observation, not prove that
 the capture is stale. Diagnostic regression coverage and signed live validation
 will be recorded before claiming that this instrumentation is useful.
