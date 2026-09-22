@@ -748,7 +748,8 @@ struct PommeSecurityNormalAgent: Sendable {
     else { return nil }
     let numbers = PommeForegroundExecution.aquaDebugNumbers.map { key in
       guard let raw = fields[key], let decoded = try? JSONValue(any: raw),
-        case .integer(let number) = decoded, number >= 0
+        case .integer(let number) = decoded, number >= 0,
+        key != "waitLastOutcome" || PommeAquaWaitDebug.Outcome(rawValue: number) != nil
       else { return "\(key)=unknown" }
       return "\(key)=\(number)"
     }
@@ -963,6 +964,7 @@ struct PommeSecurityNormalAgent: Sendable {
         observation = .init(
           consoleMatches: true, aquaMatches: aquaSessionMatches, desktopMatches: desktopMatches)
         let now = ContinuousClock.now
+        PommeCore.log("[DEBUG-aqua-20260922] " + observation.timeoutDiagnostic, vmName: reference.displayName)
         if aquaSessionMatches && desktopMatches {
           if desktopStableSince == nil { desktopStableSince = now }
           if let stableSince = desktopStableSince,
@@ -975,6 +977,7 @@ struct PommeSecurityNormalAgent: Sendable {
         }
       } else {
         desktopStableSince = nil
+        PommeCore.log("[DEBUG-aqua-20260922] " + observation.timeoutDiagnostic, vmName: reference.displayName)
       }
       guard ContinuousClock.now < deadline else {
         try Task.checkCancellation()

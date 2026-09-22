@@ -511,6 +511,29 @@ fresh-owner Aqua failure on the signed diagnostic build. It rules out a single
 stuck transport exchange or spending the entire deadline before process start;
 it does not yet distinguish a genuinely running child from the guest's hidden
 wait-status errors. The normal desktop was not verified, and no fix is claimed.
+
+The next bounded diagnostic adds exact-Aqua-only closed guest wait outcomes
+and records the host's existing console/Aqua/desktop observation after each
+completed loop. It preserves the current waitpid calls, EINTR retry, signal
+calls, deadlines, and proof acceptance. This is needed because the existing
+signal receipt reports group-or-process success, which does not prove the
+exact child PID was still alive. No extra signal, sample, guest command, or
+credential access is part of this candidate. The four retained test VMs are
+all stopped, and internal storage has about 272 GiB available before another
+fresh diagnostic comparison.
+
+The additive wait-diagnostic snapshot test failed before implementation. The
+final four focused suites (foreground execution, normal-agent decoding,
+persistent agent, and real daemon process exchange) passed all 63 functions,
+82 executions, with no failures or skips:
+`test_macos_2026-09-22T10-59-00-870Z_pid94554_cc6382d3.xcresult`.
+Tests cover all wait classifications, exact-payload exclusions, malformed and
+missing old-agent fields, and a real harmless `/usr/bin/true` process that
+receives no diagnostic metadata. They do not execute an Aqua probe on the host.
+The closed outcome codes are 0 running, 1 reaped, 2 interrupted, 3 no-child,
+and 4 other-error; counters accumulate per guest job and the host copies the
+latest snapshot without summing it. All temporary instrumentation remains
+explicitly diagnostic, pending signed-build live reproduction.
 Consecutive-frame equality can suggest an unchanged observation, not prove that
 the capture is stale. Diagnostic regression coverage and signed live validation
 will be recorded before claiming that this instrumentation is useful.
