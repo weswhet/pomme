@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "deliver",
+  "type": "sequence",
+  "input": "sip-disable-sequence.json",
+  "output": "sip-disable-sequence.html",
+  "specification": {
+    "sha256": "a47b3079db910540c8dd3020bb2f7202129348eb5b59d8ee696ad999843827ec",
+    "bytes": 4461
+  },
+  "artifact": {
+    "sha256": "a5c4af482fe92618dd7b194d9ee6720ca3830c70923710a5a3c097f4113a07c4",
+    "bytes": 716373
+  },
+  "validation": {
+    "checksPassed": 9,
+    "checkCount": 9,
+    "compositionProfile": "showcase",
+    "compositionStatus": "pass",
+    "errors": 0,
+    "warnings": 0
+  }
+}
