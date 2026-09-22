@@ -1727,3 +1727,21 @@ timeout or production fault hook. It is socketpair evidence, not physical VSOCK
 fault injection or an explanation of the original live delay. Production source
 is unchanged from `e38d50a`; the new test and live protocol evidence are committed
 before refreshing the signed Release and verifying retained-pin compatibility.
+
+Tests/evidence commit `1f377b7` was built and installed through the canonical
+signed Release workflow. Signature, exact entitlements, designated requirement,
+and archive checks passed. Installed SHA-256:
+`c34baeda5838e1f3e934a1c2dde04500a05e613916c38afb398c1993eb3427c8`.
+Fresh-login command resolution and reported commit matched; all 104 CLI checks
+passed. Production source/configuration/scripts remain identical to `e38d50a`.
+The retained `...22k` was confirmed stopped and started normally at 14:58:00Z
+for live host compatibility against its unchanged `2728f132…0e36d7e` guest pin.
+
+The refreshed host passed the live adapter check using another naturally exited
+two-second job. The canonical receipt carried the original guest digest and
+same-job exit frame. Supplying the new host executable digest instead was
+rejected, demonstrating that rebuilding the host did not substitute its digest
+for the retained creation pin. Native `csrutil status` returned enabled with
+complete output and exit 0. Graceful stop began at 14:59:07Z and completed with
+`guest-stopped`; public inventory again confirmed all twelve VMs stopped with
+no helpers. No guest update, credential change, or journal rewrite occurred.
