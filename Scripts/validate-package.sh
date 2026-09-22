@@ -150,6 +150,8 @@ validate_signed_runner() {
 validate_pkg_payload() {
   local path
   local normalized
+  local leaf
+  local target
   local found=0
   local payload_files
 
@@ -160,10 +162,27 @@ validate_pkg_payload() {
   while IFS= read -r path; do
     [[ -n "$path" ]] || continue
     normalized="${path#./}"
-    if [[ "$normalized" != "usr/local/bin/pomme" ]]; then
-      fail "unexpected pkg payload path: $path (only $PACKAGE_BINARY_PATH is allowed)"
+    normalized="${normalized%/}"
+    # pkgutil includes the archive root and the binary's parent directories.
+    [[ -z "$normalized" || "$normalized" == "." ]] && continue
+    leaf="${normalized##*/}"
+    if [[ "$leaf" == ._* ]]; then
+      # AppleDouble entries describe a sibling's extended attributes. Permit
+      # metadata only for the same paths permitted as ordinary payload entries.
+      target="${leaf#._}"
+      if [[ "$normalized" == */* ]]; then
+        target="${normalized%/*}/$target"
+      fi
+      case "$target" in
+        usr|usr/local|usr/local/bin|usr/local/bin/pomme) continue ;;
+        *) fail "unexpected pkg payload metadata: $path (only $PACKAGE_BINARY_PATH is allowed)" ;;
+      esac
     fi
-    found=1
+    case "$normalized" in
+      usr|usr/local|usr/local/bin) ;;
+      usr/local/bin/pomme) found=1 ;;
+      *) fail "unexpected pkg payload path: $path (only $PACKAGE_BINARY_PATH is allowed)" ;;
+    esac
   done <<<"$payload_files"
   [[ "$found" -eq 1 ]] || fail "pkg payload does not contain $PACKAGE_BINARY_PATH"
 }
