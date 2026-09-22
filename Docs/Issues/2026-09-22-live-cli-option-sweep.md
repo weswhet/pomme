@@ -14,7 +14,7 @@ observations are recorded below; historical rows retain their original status.
 | Recovery Terminal marker recognition | Bounded prompt-punctuation and word-encoding/output-separation fixes validated; not a claim of universal OCR reliability. |
 | macOS 26 first-owner desktop readiness / cleanup | Same-job cleanup-verified retry and pinned reconnect adapter implemented. Three fresh signed-candidate SIP cycles passed, including a live Aqua timeout recovered after instrumentation cleanup; original intermittent signal delay and earlier console transport failure remain unexplained. |
 | macOS 27 creation `ownerProof` | Open; subsequent internal-drive baselines passed, including fresh creation with the exact original `ffc41a7` host, without a targeted fix. |
-| macOS 26 creation `verifyNormalAgent` / slow first boot | Open historical failure; subsequent internal-drive creations passed without establishing its cause. |
+| macOS 26 creation `verifyNormalAgent` / slow first boot | Open historical failure; subsequent internal-drive creations passed, including a fresh original-`ffc41a7` run with first-attempt verification receipts, without establishing its cause. |
 | macOS 27 restart after pause/resume | Open; two earlier internal-drive sequences plus ten-cycle runs with both current `a3852a5` and original `ffc41a7` hosts passed without reproducing the missing helper. |
 | Retained SIP private-PTY / pinned-authentication failures | Open historical observations; later successful security cycles do not establish their cause. |
 
@@ -1971,3 +1971,37 @@ Its persistent agent pins the original `2e0a2f49…47aaeff` executable. This
 fresh original-host run did not reproduce the reported owner-proof failure;
 it is not evidence that later changes fixed that historical observation.
 No owner-proof source change or installed-host replacement occurred.
+
+### Fresh original-host macOS 26 bootstrap comparison
+
+After the original-host macOS 27 owner-proof run passed, the next single-issue
+comparison targets the historical macOS 26 `verifyNormalAgent` failure. All
+eleven retained VMs were stopped; 84 GiB was free internally. Original signed
+host `ffc41a7` passed direct local-image dry run for new
+`pomme-agent-bootstrap26-20260922a`, resolving macOS 26.6.2/25G83 and Recovery
+agent installation. Creation uses the same internal IPSW, explicit 40 GB disk
+/ 4 GB RAM, and `--boot none`. The archived original host is invoked directly;
+installed `a3852a5` remains unchanged. No retained fixture is reset or cloned.
+If the attempt fails, the phase/result and public state are captured before
+any retry; an earlier navigation/marker failure is not counted as a reproduction
+of the later normal-agent verification failure.
+
+Creation began at 17:09:56Z and restore reached 100% at 17:13:42Z. Recovery
+Terminal was verified at 17:15:09Z, first-attempt marker proof passed at
+17:15:11Z, and launcher submission followed at 17:15:14Z. The command completed
+successfully with requested final state stopped. The closed journal projection
+is schema 1 / generation 9, with first-attempt intent and receipt pairs for
+`install`, `installRecoveryAgent`, `verifyNormalAgent`, and `restoreFinalState`;
+there are no failure events. Public status independently confirmed stopped
+with no helper and the original-host agent pin unchanged.
+
+VM UUID: `1d66aa22-5c8d-46a4-8af4-cc16f6377c85`; startup-volume group:
+`1a0d05f1-1264-498e-b249-19b65eff2625`; immutable plan digest:
+`d200ce057a9fc2bd8ace9baf5d3853e8d3c3bcd5946756994b7b74f581b798fc`.
+The persistent agent pins `2e0a2f4959071eb80051ab103b9b41cd5f8fea8eae8aa257376cbf4a747aaeff`.
+All twelve internal VMs are stopped with no helpers; free internal space is
+62 GiB. The original-host fresh run did not reproduce `verifyNormalAgent`
+failure or require a five-minute recovery start/resume. `automaticLogin=legacy`
+and Recovery provisioning are expected for this route, not owner-proof success.
+No source fix or installed-host replacement is justified by this passing run;
+the historical slow-boot cause remains open.
