@@ -22,6 +22,7 @@ observations are recorded below; historical rows retain their original status.
 | Private-PTY logical test timing | Fixed in `f7a6139`: injected-clock regressions verify prompt/process deadlines and cleanup without parallel scheduling determining logical test time; production retains `ContinuousClock`. Focused/repeated checks and a 1,168-function full run passed. Signed Release live owner authentication and a complete SIP disable/enable cycle passed, restoring SIP enabled and the stopped VM state. |
 | Coordinator-pin fixture polling | Fixed in `f3dfff6`: checks readiness after delayed sleep with cancellation precedence and bounded unavailability. Deterministic red/green, ten-pass full-workload coordinator checks, and a 1,170-function full pass succeeded. Signed Release/live start, execution, restart, reauthentication, and stopped-state restoration passed. Production pin/authentication behavior is unchanged; other stress failures remain open. |
 | Daemon socket-admission fixture timing | Fixed in `ca45976`: waits for actual serving-task entry before starting the response-read budget, with separate bounded/cancellable setup. Delayed-start red/green, timeout/cancellation safeguards, full ten-pass socket checks, and a 1,175-function full pass succeeded. Signed Release/live agent status, execution, and stopped-state restoration passed; production daemon and Recovery one-shot test are unchanged. |
+| Recovery one-shot daemon fixture timing | Fixed in `fc4e4bf`: separates serving-task admission from the response budget without weakening natural one-shot completion or replay assertions. Delayed-start red/green, setup timeout/cancellation checks, ten-pass one-shot checks, and a 1,178-function full pass succeeded. Signed Release/live authenticated SIP status and stopped-state restoration passed; production daemon behavior is unchanged and other stress failures remain open. |
 
 This is an observational live test. The CLI and guest images are not being
 modified during the sweep. Every failure, timeout, unexpected state, and
@@ -2906,6 +2907,35 @@ single run (`20-25-26-208Z_pid26993_84f24d13`) passed all 1,178 functions /
 1,602 invocations, with no failures or skips. The candidate is ready for the
 required pre-build commit, signed Release install, and scoped live Recovery
 compatibility check; no live result is claimed yet.
+
+Candidate `fc4e4bf` was committed before the canonical signed Release build
+at 20:29:13Z. Build, signature, exact entitlements, designated-requirement
+compatibility, artifact archival, and atomic installation passed. A fresh
+login shell resolves `/Users/wes/.local/bin/pomme`; it reports `fc4e4bf` and
+SHA-256 `e4b394a159af5a5af88a8cf73c047ce9b1487bf723d658c43359ee57d8f7421f`.
+All 104 CLI contract checks and 21 installer regression checks passed.
+
+Live compatibility verification began at 20:29:30Z with read-only
+`sip status pomme-agent-bootstrap26-20260922a --final-state previous
+--format json --debug`. Preflight confirmed the same internal-drive 40 GB /
+4 GB macOS 26.6.2 fixture was stopped, with unchanged UUID, startup volume,
+creation plan, agent pin, and a completed prior security journal. No security
+mutation, agent update, credential change, or VM deletion was requested.
+This exercises the signed CLI's Recovery compatibility, not the test-only
+admission hook.
+
+The live command completed successfully, observed by 20:31:50Z. Recovery
+reached Terminal, passed marker proof on attempt two, and authenticated the
+request-bound one-shot session on port 505053. SIP status returned
+`sipEnabled=true`, `sipDisabled=false`, and `verified=true`; session lifecycle
+was finalized with the credential consumed, all cleanup flags true, and
+`finalStateVerified=true`. Independent status confirmed stopped/no helper,
+unchanged VM/startup/plan/pin/resources, and the unchanged completed prior
+security journal. Inventory confirmed all twelve VMs stopped on the internal
+drive. No VM was deleted, no persistent credential or pin was changed, and
+private screenshots remain outside the repository. The one-shot fixture race
+is fixed; the remaining full-stress failures and historical live issues are
+not closed by this result.
 
 ### Live TUI status projection mismatch
 
