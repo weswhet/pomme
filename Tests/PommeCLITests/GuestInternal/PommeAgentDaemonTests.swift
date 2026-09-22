@@ -7,6 +7,21 @@ import Testing
 struct PommeAgentDaemonTests {
     @Test("socketpair admission is newline framed and bounded before allocation")
     func socketpairAdmission() async throws {
+        try await runSocketpairAdmission()
+    }
+
+    @Test("socketpair peer budget starts after delayed serving admission")
+    func delayedSocketpairAdmission() async throws {
+        try await runSocketpairAdmission(readTimeout: .seconds(1), beforeServing: {
+            try? await Task.sleep(for: .milliseconds(1_200))
+        })
+    }
+
+    private func runSocketpairAdmission(
+        readTimeout: Duration = .seconds(5),
+        setupTimeout: Duration = .seconds(30),
+        beforeServing: (@Sendable () async -> Void)? = nil
+    ) async throws {
         var sockets: [Int32] = [0, 0]
         try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0)
         defer { _ = Darwin.close(sockets[0]); _ = Darwin.close(sockets[1]) }
@@ -17,18 +32,39 @@ struct PommeAgentDaemonTests {
         let health = PommeAgentProtocol.Envelope.request(operation: "agent.health")
         let bytes = try PommeAgentProtocol.encode(authenticate) + PommeAgentProtocol.encode(health)
         let serverDescriptor = sockets[1]
-        let serving = Task { await PommeAgentDaemon.serve(
-            descriptor: serverDescriptor,
-            connection: connection,
-            agent: agent,
-            allowedOperation: nil
-        ) }
+        let admission = DaemonServingAdmission()
+        let serving = Task {
+            await beforeServing?()
+            guard !Task.isCancelled else {
+                admission.resolve(.failure(CancellationError()))
+                return
+            }
+            admission.resolve(.success(()))
+            await PommeAgentDaemon.serve(
+                descriptor: serverDescriptor,
+                connection: connection,
+                agent: agent,
+                allowedOperation: nil
+            )
+        }
         #expect(bytes.withUnsafeBytes { Darwin.write(sockets[0], $0.baseAddress, $0.count) } == bytes.count)
         _ = shutdown(sockets[0], SHUT_WR)
+        // Fixture setup has its own bound. The five-second peer budget starts
+        // only once the actual serving task enters, not while it is queued.
+        do {
+            try await admission.wait(timeout: setupTimeout)
+            try Task.checkCancellation()
+        } catch {
+            _ = shutdown(sockets[0], SHUT_RDWR)
+            _ = shutdown(sockets[1], SHUT_RDWR)
+            serving.cancel()
+            await serving.value
+            throw error
+        }
         // A stream read may return either response independently or both
         // coalesced.  Read until both newline-delimited responses arrive;
         // framing must not depend on packet boundaries.
-        let result = await DaemonPeerReader.read(descriptor: sockets[0])
+        let result = await DaemonPeerReader.read(descriptor: sockets[0], timeout: readTimeout)
         let completedNaturally = await DaemonPeerReader.finish(
             serving: serving, result: result, sockets: sockets
         )
@@ -39,6 +75,73 @@ struct PommeAgentDaemonTests {
         try #require(lines.count >= 2)
         #expect(try PommeAgentProtocol.decode(Data(lines[0])).requestID == authenticate.requestID)
         #expect(try PommeAgentProtocol.decode(Data(lines[1])).requestID == health.requestID)
+    }
+
+    @Test("socketpair admission timeout cancels and joins the setup task")
+    func socketpairAdmissionTimeout() async throws {
+        let hookReturned = Mutex(false)
+        do {
+            try await runSocketpairAdmission(setupTimeout: .milliseconds(10), beforeServing: {
+                defer { hookReturned.withLock { $0 = true } }
+                try? await Task.sleep(for: .seconds(60))
+            })
+            Issue.record("Expected bounded setup admission failure")
+        } catch DaemonServingAdmission.Failure.timedOut {}
+        #expect(hookReturned.withLock { $0 })
+    }
+
+    @Test("socketpair admission caller cancellation joins the setup task")
+    func socketpairAdmissionCancellation() async throws {
+        let hookEntered = DaemonServingAdmission()
+        let hookReturned = Mutex(false)
+        let caller = Task {
+            try await runSocketpairAdmission(beforeServing: {
+                defer { hookReturned.withLock { $0 = true } }
+                hookEntered.resolve(.success(()))
+                try? await Task.sleep(for: .seconds(60))
+            })
+        }
+        do {
+            try await hookEntered.wait(timeout: .seconds(30))
+        } catch {
+            caller.cancel()
+            _ = try? await caller.value
+            throw error
+        }
+        caller.cancel()
+        do {
+            try await caller.value
+            Issue.record("Expected caller cancellation during setup")
+        } catch is CancellationError {}
+        #expect(hookReturned.withLock { $0 })
+    }
+
+    @Test("serving admission before waiting survives losing timeout resolution")
+    func servingAdmissionBeforeWait() async throws {
+        let admission = DaemonServingAdmission()
+        admission.resolve(.success(()))
+        admission.resolve(.failure(DaemonServingAdmission.Failure.timedOut))
+        try await admission.wait(timeout: .zero)
+        try await admission.wait(timeout: .zero)
+    }
+
+    @Test("serving admission failure stays terminal after a late entry", arguments: [false, true])
+    func servingAdmissionTerminalFailure(cancelled: Bool) async throws {
+        let admission = DaemonServingAdmission()
+        if cancelled { admission.resolve(.failure(CancellationError())) }
+        // The timeout case exercises the actual watchdog, not an injected
+        // timeout result. A late entry cannot overwrite either terminal error.
+        for attempt in 0..<2 {
+            if attempt == 1 { admission.resolve(.success(())) }
+            do {
+                try await admission.wait(timeout: .zero)
+                Issue.record("Late entry must not replace terminal admission failure")
+            } catch is CancellationError {
+                #expect(cancelled)
+            } catch DaemonServingAdmission.Failure.timedOut {
+                #expect(!cancelled)
+            }
+        }
     }
 
     @Test("daemon grammar constrains normal and bounded Recovery ports")
@@ -420,6 +523,55 @@ struct PommeAgentDaemonTests {
             "--operation", PommeRecoveryOperation.installAgent.wireName,
             "--request-file", workspace.appendingPathComponent(PommeRecoveryArtifactNames.request).path,
         ]
+    }
+}
+
+private final class DaemonServingAdmission: Sendable {
+    enum Failure: Error { case timedOut }
+    private struct State {
+        var result: Result<Void, any Error>?
+        var waiter: CheckedContinuation<Void, any Error>?
+    }
+    private let state = Mutex(State())
+
+    func resolve(_ result: Result<Void, any Error>) {
+        let waiter = state.withLock { value -> CheckedContinuation<Void, any Error>? in
+            guard value.result == nil else { return nil }
+            value.result = result
+            let waiter = value.waiter
+            value.waiter = nil
+            return waiter
+        }
+        waiter?.resume(with: result)
+    }
+
+    func wait(timeout: Duration) async throws {
+        let watchdog = Task {
+            do { try await Task.sleep(for: timeout) }
+            catch { return }
+            resolve(.failure(Failure.timedOut))
+        }
+        do {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                    let result = state.withLock { value -> Result<Void, any Error>? in
+                        if let result = value.result { return result }
+                        value.waiter = continuation
+                        return nil
+                    }
+                    if let result { continuation.resume(with: result) }
+                }
+                try Task.checkCancellation()
+            } onCancel: {
+                self.resolve(.failure(CancellationError()))
+            }
+            watchdog.cancel()
+            await watchdog.value
+        } catch {
+            watchdog.cancel()
+            await watchdog.value
+            throw error
+        }
     }
 }
 
