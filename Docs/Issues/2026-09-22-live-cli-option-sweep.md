@@ -11,6 +11,7 @@ observations are recorded below; historical rows retain their original status.
 |---|---|
 | CLI discovery omissions / `agent-help` output ambiguity | Fixed in `e0f6544`; signed CLI contract and live compatibility checks passed. |
 | macOS 27 inactive Language Chooser / framebuffer replay | Guarded activation and replay-policy fixes validated; complete SIP/AMFI status workflows passed. |
+| macOS 26 direct-to-Utilities Recovery transition | Fixed in `e5584da`; signed CLI resumed the retained SIP transaction through the four-input branch, then completed SIP disable/enable with normal-boot verification and restored SIP enabled/stopped state. |
 | Recovery Terminal marker recognition | Bounded prompt-punctuation and word-encoding/output-separation fixes validated; not a claim of universal OCR reliability. |
 | macOS 26 first-owner desktop readiness / cleanup | Same-job cleanup-verified retry and pinned reconnect adapter implemented. Three fresh signed-candidate SIP cycles passed. Narrow post-preference-restart recovery `96edcf2` passed its stock-Setup-Assistant branch live in diagnostic build `01cab9f`, including exact context, setter readback, owner preferences, and Setup Assistant completion. That run then reproduced Aqua timeout (signal response about 4.1 s) and console-transport failure before SIP mutation. Expected-native-owner plus mismatched preference is separately unresolved. Failure fixtures and temporary diagnostics are retained; the overall issue remains open. |
 | macOS 27 creation `ownerProof` | Open; subsequent internal-drive baselines passed, including fresh creation with the exact original `ffc41a7` host, without a targeted fix. |
@@ -3055,6 +3056,26 @@ and atomic-install checks passed. The fresh-login CLI resolves to
 All 104 CLI contract checks passed. The retained guest agent remains pinned
 to its original `a9ec6ce0…039dd` signed bytes; this host-only route change
 does not rewrite that pin or the journal.
+
+Live resume on the same internal 40 GB / 4 GB VM began at 04:29:40Z. Normal
+desktop revalidation passed and Recovery navigation reached Terminal at
+04:31:23Z with four delivered inputs, exactly the branch that skips the
+Language Chooser Return. Marker proof passed on attempt one. The retained
+SIP-disable operation completed with `configuredDisabled=true`,
+`enforcementVerified=true`, `runtimeConfigurationVerified=true`, and
+`normalBootVerified=true`; final state was stopped. A matching public
+`sip enable --force --final-state previous` began at 04:32:38Z, took the same
+four-input Recovery route, passed Terminal marker proof on attempt two, and
+completed at 04:35:15Z with `configuredDisabled=false`, enforcement/runtime/
+normal-boot verification true, and final state stopped. Its journal is
+`sipEnable/restorationComplete/previous` with `normalBootVerified=true`.
+Independent status confirms stopped/no helper, unchanged UUID
+`35025292-6f89-40c2-98ec-82c733d6ff7b` and creation-pinned agent digest
+`a9ec6ce0…039dd`. All 13 inventoried VMs are stopped and internal. The
+direct-to-Utilities navigation mismatch is fixed and live-verified for this
+exact experimental identity; the intermittent Aqua/process-list transport
+failures and first owner preference-write status 1 are still separate open
+issues.
 
 ### macOS 27 pause/resume/restart repetition
 
