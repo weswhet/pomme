@@ -4,6 +4,68 @@ import Synchronization
 
 @Suite("Pomme normal guest owner preparation")
 struct PommeSecurityOwnerPreparationTests {
+  @Test("Failed build write reads strict preference state without changing the failure", arguments: [
+    "committed", "missingPair", "missingDomain", "mismatch", "wrongType", "malformed",
+    "unknown", "thrown", "truncated", "oversize", "readThrown", "readTruncated",
+  ])
+  func failedBuildWriteState(mode: String) async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    fixture.setupAssistantBuildWriteExit = 1
+    let failed = Mutex(false)
+    let writes = Mutex(0)
+    let reads = Mutex<[String]>([])
+    let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: { request in
+        if request.path == "/usr/bin/sudo", request.arguments.contains("write"),
+          request.arguments.contains("LastSeenBuddyBuildVersion") {
+          failed.withLock { $0 = true }
+          writes.withLock { $0 += 1 }
+          return try fixture.execute(request)
+        }
+        if failed.withLock({ $0 }), request.path == "/usr/bin/sudo",
+          request.arguments.contains("/usr/bin/defaults") {
+          let operation = request.arguments[5]
+          #expect(request.timeout == 5)
+          #expect(request.arguments == ["-n", "-H", "-u", "pomme", "/usr/bin/defaults",
+                                       operation, "com.apple.SetupAssistant", "LastSeenBuddyBuildVersion"])
+          reads.withLock { $0.append(operation) }
+          let isType = operation == "read-type"
+          if mode == "thrown" || (mode == "readThrown" && !isType) { throw CocoaError(.fileReadUnknown) }
+          let missing = mode == "missingPair" || mode == "missingDomain"
+          var output = isType ? "Type is string\n" : mode == "mismatch" ? "25G72\n" : "25G83\n"
+          if mode == "wrongType" { output = "Type is boolean\n" }
+          if mode == "malformed", !isType { output = "private-synthetic-sentinel\n" }
+          if mode == "oversize" { output = String(repeating: "x", count: 65537) }
+          let diagnostic = mode == "missingDomain" ? "Domain com.apple.SetupAssistant does not exist\n"
+            : "The domain/default pair of (com.apple.SetupAssistant, LastSeenBuddyBuildVersion) does not exist\n"
+          return .init(exitCode: missing || mode == "unknown" ? 1 : 0, signal: nil,
+                       stdout: Data((missing || mode == "unknown" ? "" : output).utf8),
+                       stderr: Data((missing ? diagnostic : mode == "unknown" ? "private-synthetic-sentinel" : "").utf8),
+                       stdoutTruncated: mode == "truncated" || (mode == "readTruncated" && !isType),
+                       stderrTruncated: false, exited: true)
+        }
+        return try fixture.execute(request)
+      }, executePrivatePTY: fixture.executePTY,
+      autoLoginTrace: { event in trace.withLock { $0.append(event) } })
+    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
+      try await preparation.configureLogin(password: "opaque-owner-secret")
+    }
+    let expected = mode == "committed" ? "Committed" : mode.hasPrefix("missing") ? "Missing"
+      : mode == "mismatch" ? "Mismatch" : "Unavailable"
+    #expect(trace.withLock { $0.map(\.rawValue).filter { $0.hasPrefix("ownerPostWriteBuildState") } }
+            == ["ownerPostWriteBuildState" + expected])
+    #expect(writes.withLock { $0 } == 1)
+    #expect(reads.withLock { $0.first } == "read-type")
+    #expect(reads.withLock { $0.count } <= 2)
+    #expect(!fixture.setupDone)
+    for secret in ["private-synthetic-sentinel", "opaque-owner-secret", "25G83", "25G72", "/Users/pomme"] {
+      #expect(trace.withLock { $0.allSatisfy { !$0.message.contains(secret) } })
+    }
+  }
+
   @Test("Failed owner writes collect bounded read-only context without replacing the failure", arguments: [
     "expected", "mismatch", "unavailable", "truncated", "timeout", "malformed",
     "oversize", "statusTwo", "signal", "detached", "notExited", "invalidUTF8", "stderr",
@@ -72,7 +134,9 @@ struct PommeSecurityOwnerPreparationTests {
       try await preparation.configureLogin(password: "opaque-owner-secret")
     }
     #expect(probes.withLock { $0 } == ["Preferences", "UID", "HOME", "Processes"])
-    let labels = trace.withLock { $0.map(\.rawValue).filter { $0.hasPrefix("ownerPostWrite") } }
+    let labels = trace.withLock { $0.map(\.rawValue).filter {
+      $0.hasPrefix("ownerPostWrite") && !$0.hasPrefix("ownerPostWriteBuildState")
+    } }
     if mode == "expected" || mode.hasPrefix("preferences") || mode.hasPrefix("process") {
       let metadata: String
       switch mode {

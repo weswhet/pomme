@@ -3421,6 +3421,33 @@ admission also covers MiniBuddy failures, and `defaults read` itself could
 initialize CFPreferences after the original failure. Any probe result must
 therefore stay observational and preserve the original error and journal.
 
+### Bounded post-write target-state diagnostic candidate
+
+At the exact initial build-preference status-1 boundary, the candidate now
+performs owner-scoped `defaults read-type` and, if appropriate, `defaults read`,
+using the existing strict type/value and missing-diagnostic rules. Each request
+has a five-second bound. One closed label records whether the expected build
+value was committed, the key/domain is missing, a valid but different build
+value is present, or the read is unavailable/malformed. It runs only for the
+build key's status 1, not MiniBuddy or other exit statuses. The original write
+error, pre-existing probes, guarded reboot, and journal behavior are
+unchanged. These reads occur after the failure and may themselves initialize
+CFPreferences; even a live result cannot prove the pre-failure state or cause.
+
+Test-first red found the new probe absent: 1,208 existing functions passed
+and the new 12-case parameterized function failed
+(`test_macos_2026-09-23T06-34-20-266Z_pid67311_90a91d94.xcresult`; the
+initial XcodeBuildMCP test selector was ignored, so this was a full run).
+The corrected focused owner-preparation run passed 86 functions / 215
+executions, zero failures/skips
+(`test_macos_2026-09-23T06-35-21-204Z_pid67641_ab0aecac.xcresult`). A fresh
+isolated full run passed 1,209 functions / 1,779 executions, zero
+failures/skips (`test_macos_2026-09-23T06-36-35-349Z_pid67914_a65ec2b8.xcresult`).
+Tests cover committed, missing pair/domain, mismatch, wrong type, malformed,
+unknown, thrown/truncated/oversize, bounded request shapes, single write
+attempt, original error, and no private values in traces. Signed build and
+fresh-clone validation are next.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
