@@ -2958,6 +2958,24 @@ helper and does not require changing an existing VM's creation-pinned guest
 agent. The restored internal 40 GB / 4 GB home-class fixture can therefore
 exercise the new helper on a normal boot without another VM creation.
 
+The same retained `pomme-agent-homeclass26-20260922a` preflight was stopped
+with completed SIP-enable restoration, unchanged UUID/pin, and no helper.
+Normal start using signed host `a7df129` connected to its original
+`bd658113…15fa6f` guest agent. Exact public desktop process-list
+(`/bin/ps -axo uid=,comm=`) and console-stat
+(`/usr/bin/stat -f %Su:%u /dev/console`) foreground commands both completed
+with exit 0 and complete output; their process output was not retained in this
+note. A single 0.001-second process-list run produced the expected typed
+foreground timeout (`hostExitCode=124`, `terminationRequested=true`) without a
+helper transport-cause field, and the next exact process-list command on the
+same session completed normally. This exercises successful and expected
+timeout behavior with the new host helper; it does **not** reproduce the
+earlier thrown helper transport failure, so the new cause label has not yet
+been observed live. Graceful stop returned `guest-stopped`; independent status
+confirmed the same UUID/pin, stopped/no helper. Inventory confirms all 13 VMs
+stopped/internal. A fresh first-owner or bounded failure reproduction remains
+necessary to classify the intermittent `normal-agent-ps-transport` cause.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
