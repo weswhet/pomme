@@ -3498,6 +3498,40 @@ the owner proof's timing or prove that the earlier `agentOtherTimeout` was
 spurious. The retained security journal was not edited, and SIP remains
 independently verified enabled.
 
+### Owner desktop transport phase diagnostic revisit
+
+The repeated Aqua, console, and process-list `agentOtherTimeout` failures are
+still a separate blocker after owner completion and before SIP mutation. A
+bounded code-path review found that the normal-agent foreground executor sends
+`process.start`, stream EOF, repeated `process.status`, and possibly a cleanup
+`process.signal`; the VSOCK coordinator's five-second exchange timeout is
+reported as the same generic cause at every phase. The later three successful
+public process-list requests on the same pinned clone weaken a permanently
+broken agent or `/bin/ps` explanation but do not reproduce first-owner timing.
+
+The next candidate restores temporary, closed phase diagnostics for the exact
+three desktop-proof payloads only. Helper records include the start, EOF,
+status, validation, checkpoint, or signal boundary; elapsed milliseconds;
+whether a job was established; status poll count; and a closed error kind.
+The outer host record includes the proof stage, elapsed time, budget, and
+closed error kind. The new tag is `[DEBUG-desktop-transport-20260923]`.
+No request, command, VM identity, guest output, raw error text, credential,
+deadline, retry, cleanup, or acceptance behavior is changed. These markers
+cannot alone distinguish a VSOCK request-write stall from a response-read
+stall. The retained internal clone remains stopped with SIP independently
+verified enabled; its exact pinned agent digest is present in the append-only
+artifact archive.
+
+Focused XcodeBuildMCP validation passed 50 test functions / 205 executions,
+zero failures or skips, including exact-payload gating, phase classification,
+original-error and single-cleanup preservation, and host control failures:
+`test_macos_2026-09-23T07-02-43-391Z_pid73146_7b60ea44.xcresult`.
+The focused tests use injected exchange failures; they do not reproduce a
+physical VSOCK stall. The full XcodeBuildMCP suite then passed 1,213 test
+functions / 1,822 executions, zero failures or skips:
+`test_macos_2026-09-23T07-03-37-193Z_pid73329_211427e6.xcresult`.
+Signed live validation follows after committing this candidate.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
