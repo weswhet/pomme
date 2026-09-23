@@ -214,6 +214,7 @@ private final class PommeLiveRecoveryRuntimeResources: @unchecked Sendable {
     let coordinator: PommeAgentVSOCKCoordinator
     let staging: PommeRecoveryStaging
     let request: PommeRecoverySessionRequest
+    let sensitiveFramesCleared: @Sendable () async -> Bool
 
     init(
         vm: VZVirtualMachine,
@@ -222,7 +223,8 @@ private final class PommeLiveRecoveryRuntimeResources: @unchecked Sendable {
         runtime: PommeVMRuntime,
         coordinator: PommeAgentVSOCKCoordinator,
         staging: PommeRecoveryStaging,
-        request: PommeRecoverySessionRequest
+        request: PommeRecoverySessionRequest,
+        sensitiveFramesCleared: @escaping @Sendable () async -> Bool
     ) {
         self.vm = vm
         self.configuration = configuration
@@ -231,6 +233,7 @@ private final class PommeLiveRecoveryRuntimeResources: @unchecked Sendable {
         self.coordinator = coordinator
         self.staging = staging
         self.request = request
+        self.sensitiveFramesCleared = sensitiveFramesCleared
     }
 
     func isRunningRecovery() -> Bool {
@@ -280,7 +283,7 @@ private final class PommeLiveRecoveryRuntimeResources: @unchecked Sendable {
             shareDetached: shareDetached,
             helperStoppedAndReaped: stopped,
             stagingArtifactsRemoved: stagingRemoved,
-            sensitiveFramesCleared: true,
+            sensitiveFramesCleared: await sensitiveFramesCleared(),
             unknownStateRejected: stopped && shareDetached && stagingRemoved
         )
     }
@@ -919,6 +922,22 @@ struct PommeCore {
             agentProvider: coordinator,
             bootMode: .recovery
         )
+        let backend = VirtualizationPrivateHeadlessBackend(
+            virtualMachine: vm,
+            configuration: configuration,
+            queue: queue
+        )
+        let screenshotRecorder = PommeRecoveryDebugContext.screenshotsEnabled
+            ? PommeRecoveryNavigationScreenshotRecorder(
+                vmName: plan.vm.name,
+                capture: { timeout in try await backend.recoveryFrame(timeout: timeout) }
+            )
+            : nil
+        let terminal = PommeRecoveryVirtualizationKeyboardPort(
+            backend: backend,
+            timeout: Constants.defaultRecoveryAgentTimeout,
+            screenshotRecorder: screenshotRecorder
+        )
         let resources = PommeLiveRecoveryRuntimeResources(
             vm: vm,
             configuration: configuration,
@@ -926,7 +945,8 @@ struct PommeCore {
             runtime: vmRuntime,
             coordinator: coordinator,
             staging: recoveryConfiguration.staging,
-            request: request
+            request: request,
+            sensitiveFramesCleared: { await terminal.sensitiveFramesCleared() }
         )
         let vmPort = PommeLiveRecoveryVMStatePort(
             capture: {
@@ -958,22 +978,6 @@ struct PommeCore {
             helperIsAlive: { resources.isRunningRecovery() },
             verifyBootstrapAttachment: { resources.hasExactBootstrapAttachment() },
             stopReapAndClean: { try await resources.stopReapAndClean() }
-        )
-        let backend = VirtualizationPrivateHeadlessBackend(
-            virtualMachine: vm,
-            configuration: configuration,
-            queue: queue
-        )
-        let screenshotRecorder = PommeRecoveryDebugContext.screenshotsEnabled
-            ? PommeRecoveryNavigationScreenshotRecorder(
-                vmName: plan.vm.name,
-                capture: { timeout in try await backend.recoveryFrame(timeout: timeout) }
-            )
-            : nil
-        let terminal = PommeRecoveryVirtualizationKeyboardPort(
-            backend: backend,
-            timeout: Constants.defaultRecoveryAgentTimeout,
-            screenshotRecorder: screenshotRecorder
         )
         return .init(
             coordinator: coordinator,

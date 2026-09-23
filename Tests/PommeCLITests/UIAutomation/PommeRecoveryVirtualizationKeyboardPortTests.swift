@@ -3,8 +3,196 @@ import Foundation
 import ImageIO
 import Testing
 
+private final class RecoveryBlockingOCR: @unchecked Sendable {
+    let calls = RecoveryClassificationCounter()
+    let release = DispatchSemaphore(value: 0)
+    private let exited = RecoveryClassificationCounter()
+
+    func call() {
+        calls.increment()
+        // A regression must fail the wall-bound assertions, not hang the suite.
+        _ = release.wait(timeout: .now() + 10)
+        exited.increment()
+    }
+
+    func waitForExit() async -> Bool {
+        for _ in 0..<1_000 {
+            if exited.value == 1 { return true }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return false
+    }
+}
+
 @Suite("Pomme Recovery framebuffer observation readiness")
 struct PommeRecoveryVirtualizationKeyboardPortTests {
+    @Test("blocked OCR returns at deadline and permanently closes the shared session")
+    func blockedOCRDeadline() async throws {
+        let worker = DispatchQueue(label: "pomme.tests.blocked-ocr-worker")
+        let session = PommeRecoveryOCRSession(workerQueue: worker)
+        #expect(!session.hasAbandonedOCRWork)
+        let blocker = RecoveryBlockingOCR()
+        defer { blocker.release.signal() }
+        let clock = RecoveryTestClock()
+        let readiness = PommeRecoveryObservationReadiness(
+            capture: { _ in .init(digest: "stable") },
+            classify: { _, _ in blocker.call(); return .startupOptions },
+            sleep: { clock.advance(nanoseconds: $0) },
+            clock: { clock.now },
+            pollNanoseconds: 1_000_000,
+            ocrSession: session
+        )
+        let started = ContinuousClock.now
+        await #expect(throws: PommeRecoveryVirtualizationPortError.observationTimedOut(.startupOptions)) {
+            try await readiness.waitForExpected(.startupOptions, context: .unproven, timeout: 0.15)
+        }
+        #expect(started.duration(to: .now) < .seconds(5))
+        #expect(session.hasAbandonedOCRWork)
+        // A saturated scheduler may expire the queued worker before entry.
+        // Cancellation coverage separately proves the already-running case.
+        #expect(blocker.calls.value <= 1)
+        // Clearing caches must neither wait for Vision nor reopen the session.
+        await readiness.clear()
+        session.clearIfIdle { Issue.record("poisoned session cleared recognizer") }
+        await #expect(throws: PommeRecoveryVirtualizationPortError.unprovenFrame) {
+            try await readiness.waitForExpected(.startupOptions, context: .unproven, timeout: 1)
+        }
+        await #expect(throws: PommeRecoveryVirtualizationPortError.unprovenFrame) {
+            try await session.run(timeout: 1, expected: .terminal) {
+                blocker.calls.increment()
+                return false
+            }
+        }
+        blocker.release.signal()
+        await withCheckedContinuation { continuation in
+            worker.async { continuation.resume() }
+        }
+        #expect(blocker.calls.value <= 1)
+        #expect(session.hasAbandonedOCRWork)
+    }
+
+    @Test("cancellation abandons OCR promptly and ignores its late result")
+    func blockedOCRCancellation() async throws {
+        let session = PommeRecoveryOCRSession()
+        let blocker = RecoveryBlockingOCR()
+        defer { blocker.release.signal() }
+        let task = Task {
+            try await session.run(timeout: 10, expected: .terminal) {
+                blocker.call()
+                return true
+            }
+        }
+        for _ in 0..<1_000 where blocker.calls.value == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(blocker.calls.value == 1)
+        #expect(!session.sensitiveFramesCleared)
+        session.clearIfIdle { Issue.record("active OCR entered recognizer cleanup") }
+        await #expect(throws: PommeRecoveryVirtualizationPortError.unprovenFrame) {
+            try await session.run(timeout: 1, expected: .startupOptions) {
+                blocker.calls.increment()
+                return true
+            }
+        }
+        let started = ContinuousClock.now
+        task.cancel()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(session.hasAbandonedOCRWork)
+        #expect(started.duration(to: .now) < .seconds(5))
+        blocker.release.signal()
+        #expect(await blocker.waitForExit())
+        #expect(session.hasAbandonedOCRWork)
+        #expect(!session.sensitiveFramesCleared)
+        await #expect(throws: PommeRecoveryVirtualizationPortError.unprovenFrame) {
+            try await session.run(timeout: 1, expected: .startupOptions) { true }
+        }
+    }
+
+    @Test("an already cancelled OCR caller never invokes the classifier")
+    func alreadyCancelledOCR() async {
+        let session = PommeRecoveryOCRSession()
+        let calls = RecoveryClassificationCounter()
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await session.run(timeout: 1, expected: .terminal) {
+                calls.increment()
+                return true
+            }
+        }
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(calls.value == 0)
+        #expect(session.hasAbandonedOCRWork)
+    }
+
+    @Test("completed OCR keeps the sensitive-frame cleanup proof available")
+    func completedOCRHasNoAbandonedWork() async throws {
+        let session = PommeRecoveryOCRSession()
+        #expect(!session.hasAbandonedOCRWork)
+        #expect(session.sensitiveFramesCleared)
+        #expect(try await session.run(timeout: 5, expected: .terminal) { true })
+        #expect(!session.hasAbandonedOCRWork)
+        #expect(session.sensitiveFramesCleared)
+        session.clearIfIdle {}
+        #expect(!session.hasAbandonedOCRWork)
+    }
+
+    @Test("a late OCR success fails closed even when timer delivery is suspended")
+    func lateSuccessCannotBeatDelayedTimer() async {
+        let queue = DispatchQueue(label: "pomme.tests.delayed-ocr-deadline")
+        queue.suspend()
+        defer { queue.resume() }
+        let session = PommeRecoveryOCRSession(deadlineQueue: queue)
+        await #expect(throws: PommeRecoveryVirtualizationPortError.observationTimedOut(.terminal)) {
+            try await session.run(timeout: 0.01, expected: .terminal) {
+                Thread.sleep(forTimeInterval: 0.05)
+                return true
+            }
+        }
+        await #expect(throws: PommeRecoveryVirtualizationPortError.unprovenFrame) {
+            try await session.run(timeout: 1, expected: .terminal) { true }
+        }
+    }
+
+    @Test("an expired queued OCR worker never enters the classifier")
+    func queuedWorkerExpiresBeforeEntry() async throws {
+        let worker = DispatchQueue(label: "pomme.tests.suspended-ocr-worker")
+        let timer = DispatchQueue(label: "pomme.tests.suspended-ocr-timer")
+        worker.suspend()
+        timer.suspend()
+        var workerResumed = false
+        defer {
+            if !workerResumed { worker.resume() }
+            timer.resume()
+        }
+        let session = PommeRecoveryOCRSession(deadlineQueue: timer, workerQueue: worker)
+        let calls = RecoveryClassificationCounter()
+        let task = Task {
+            try await session.run(timeout: 0.01, expected: .terminal) {
+                calls.increment()
+                return true
+            }
+        }
+        // Wait for reservation, so scheduler delay before task entry cannot
+        // accidentally move its deadline past our queue release.
+        var reserved = false
+        for _ in 0..<1_000 {
+            do { try session.checkAvailable() }
+            catch { reserved = true; break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(reserved)
+        try await Task.sleep(for: .milliseconds(50))
+        worker.resume()
+        workerResumed = true
+        await #expect(throws: PommeRecoveryVirtualizationPortError.observationTimedOut(.terminal)) {
+            try await task.value
+        }
+        #expect(calls.value == 0)
+        await #expect(throws: PommeRecoveryVirtualizationPortError.unprovenFrame) {
+            try await session.run(timeout: 1, expected: .terminal) { true }
+        }
+    }
+
     @Test("LanguageChooser activation dispatch clicks the selected English row without advancing")
     func activationTargetsSelectedEnglishRow() async throws {
         let backend = RecoveryActivationRecordingBackend()
