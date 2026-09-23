@@ -31,6 +31,7 @@ enum PommeAutoLoginReadbackTrace: String, CaseIterable, Sendable {
   case ownerPostWriteBuildStateMismatch, ownerPostWriteBuildStateUnavailable
   case ownerPreWriteUserDomainReachable, ownerPreWriteUserDomainNonzero, ownerPreWriteUserDomainUnavailable
   case ownerPreWriteGUIDomainReachable, ownerPreWriteGUIDomainNonzero, ownerPreWriteGUIDomainUnavailable
+  case ownerPreWriteBuildTypeString, ownerPreWriteBuildMissingDomain, ownerPreWriteBuildMissingPair
   case ownerPostWriteUserDomainReachable, ownerPostWriteUserDomainNonzero, ownerPostWriteUserDomainUnavailable
   case ownerPostWriteGUIDomainReachable, ownerPostWriteGUIDomainNonzero, ownerPostWriteGUIDomainUnavailable
 
@@ -1134,7 +1135,8 @@ struct PommeSecurityOwnerPreparation: Sendable {
     let existingBuild = try readOwnerStringPreference(
       domain: Self.setupAssistantPreferencesDomain,
       key: Self.lastSeenBuddyBuildVersionKey,
-      kind: .setupAssistant
+      kind: .setupAssistant,
+      tracePreWriteBuildType: true
     )
     let existingMiniBuddyLaunch = try readOwnerBoolPreference(
       domain: Self.loginWindowPreferencesDomain,
@@ -1215,10 +1217,12 @@ struct PommeSecurityOwnerPreparation: Sendable {
     domain: String,
     key: String,
     kind: PommeSecurityOwnerCommandKind,
-    timeout: TimeInterval = Self.commandTimeout
+    timeout: TimeInterval = Self.commandTimeout,
+    tracePreWriteBuildType: Bool = false
   ) throws -> String? {
     let result = try readOwnerPreference(
-      domain: domain, key: key, kind: kind, expectedType: .string, timeout: timeout)
+      domain: domain, key: key, kind: kind, expectedType: .string, timeout: timeout,
+      tracePreWriteBuildType: tracePreWriteBuildType)
     guard let result else { return nil }
     let value = result.trimmingCharacters(in: .whitespacesAndNewlines)
     guard Self.isValidAppleBuildVersion(value) else {
@@ -1248,7 +1252,8 @@ struct PommeSecurityOwnerPreparation: Sendable {
     key: String,
     kind: PommeSecurityOwnerCommandKind,
     expectedType: OwnerPreferenceType,
-    timeout: TimeInterval = Self.commandTimeout
+    timeout: TimeInterval = Self.commandTimeout,
+    tracePreWriteBuildType: Bool = false
   ) throws -> String? {
     let typeCommand = PommeSecurityOwnerPTYCommand(
       executable: "/usr/bin/sudo",
@@ -1268,15 +1273,19 @@ struct PommeSecurityOwnerPreparation: Sendable {
       else {
         throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
       }
+      if tracePreWriteBuildType { autoLoginTrace(.ownerPreWriteBuildTypeString) }
     case 1:
       // `defaults read-type` uses status 1 for a missing domain/key. stdout must
       // remain empty and the observed key-specific native diagnostic must be
       // present. The diagnostic itself is never retained or rendered.
       guard typeResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-        Self.isMissingOwnerPreferenceDiagnostic(
+        let missing = Self.missingOwnerPreferenceDiagnostic(
           typeResult.stderr, domain: domain, key: key)
       else {
         throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
+      }
+      if tracePreWriteBuildType {
+        autoLoginTrace(missing == .domain ? .ownerPreWriteBuildMissingDomain : .ownerPreWriteBuildMissingPair)
       }
       return nil
     default:
@@ -1298,14 +1307,6 @@ struct PommeSecurityOwnerPreparation: Sendable {
       throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
     }
     return result.stdout
-  }
-
-  private static func isMissingOwnerPreferenceDiagnostic(
-    _ output: String,
-    domain: String,
-    key: String
-  ) -> Bool {
-    missingOwnerPreferenceDiagnostic(output, domain: domain, key: key) != nil
   }
 
   private enum MissingOwnerPreferenceDiagnostic { case domain, pair }
