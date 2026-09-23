@@ -4602,7 +4602,40 @@ absent, public status showed stopped/no helper with unchanged UUID/resources/
 pin, and the archived signed executable matched the pin's SHA-256. Only
 clone-s was deleted, making its disk unrecoverable through Pomme. Final
 inventory again held twelve stopped VMs and no helpers. A read-only source
-review of the narrowed actor boundary remains in progress.
+review found no syscall, lock, loop, or `await` between `statusEntered` and
+the next missing `refreshEntered` marker: the code only extracts a UUID from
+the already-decoded job payload. Guest `Logger.notice` instrumentation and
+OS scheduling remain confounders. A timeout increase, retry, or transport fix
+is not justified by this evidence.
+
+#### Closed native write-domain stderr diagnostic
+
+The repeatable, separate first-owner `defaults write` status 1 still has no
+proven cause. The existing diagnostic reported only that the first stderr
+line was a timestamped `defaults` header; it did not classify the message
+after that header. Local `/usr/bin/defaults` format strings identify two
+specific domain-write failure messages. The candidate recognizes only exact
+forms for the *expected* Setup Assistant preference domain, with either a
+controlled timestamp header or a direct message, and emits the fixed
+`ownerWriteStderrWriteDomainFailed` label. Other domains, extra lines,
+unexpected suffixes, permission/service guesses, and arbitrary stderr keep
+the existing closed fallback. Raw stderr, owner identity, path, build value,
+and credential are not logged. The original one-shot write, status-1 error,
+post-failure probes, guarded reboot, and journal are unchanged. Even a live
+matching label would identify the native message class, not the underlying
+CFPreferences or session cause.
+
+The new regression failed before the classifier change (one new test
+function with four failing cases; 89 others passed) and the focused owner
+suite passed afterward: 90 functions / 242 executions, zero failures/skips,
+bundle `test_macos_2026-09-23T13-19-31-933Z_pid48172_b54dcc5d.xcresult`.
+The first integrated run passed 1,241 tests but two unrelated PTY timing
+tests failed under parallel load; both affected suites passed all 20
+functions in isolation. A fresh complete run passed 1,243 tests with zero
+failures/skips, bundle
+`test_macos_2026-09-23T13-23-22-843Z_pid48920_59ea4870.xcresult`.
+This is qualified for commit before a signed Release build and fresh-clone
+comparison; it is not a preference-write fix.
 
 ### macOS 27 pause/resume/restart repetition
 

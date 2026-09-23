@@ -17,6 +17,7 @@ enum PommeAutoLoginReadbackTrace: String, CaseIterable, Sendable {
   case ownerWriteStderrEmpty, ownerWriteStderrStartsSudo
   case ownerWriteStderrStartsDefaults, ownerWriteStderrOther
   case ownerWriteStderrMissingDomain, ownerWriteStderrMissingPair
+  case ownerWriteStderrWriteDomainFailed
   case ownerWriteHomeExpectedDirectory, ownerWriteHomeOtherOwner
   case ownerWriteHomeNotDirectory, ownerWriteHomeNotStatable, ownerWriteHomeProbeUnavailable
   case ownerPostWritePreferencesExpectedOwnerWriteSearchMode, ownerPostWritePreferencesOwnerModeRestricted
@@ -1420,6 +1421,28 @@ struct PommeSecurityOwnerPreparation: Sendable {
     case .domain: return .ownerWriteStderrMissingDomain
     case .pair: return .ownerWriteStderrMissingPair
     case nil: break
+    }
+    // These are native defaults format strings, with only the expected domain
+    // accepted. Extra text or lines stay unknown; this does not infer a cause.
+    let lines = stderr.split(whereSeparator: \.isNewline).map {
+      String($0).trimmingCharacters(in: .whitespacesAndNewlines)
+    }.filter { !$0.isEmpty }
+    let header = #"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ defaults\[\d+:\d+\]"#
+    var message: String?
+    if lines.count == 1 {
+      message = lines[0]
+      if let prefix = lines[0].range(of: "^" + header + " ", options: .regularExpression) {
+        message = String(lines[0][prefix.upperBound...])
+      }
+    } else if lines.count == 2,
+      lines[0].range(of: "^" + header + "$", options: .regularExpression) != nil
+    {
+      message = lines[1]
+    }
+    if message == "Could not write domain \(domain); exiting"
+      || message == "Failed to write domain \(domain)"
+    {
+      return .ownerWriteStderrWriteDomainFailed
     }
     let firstLine = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
       .split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
