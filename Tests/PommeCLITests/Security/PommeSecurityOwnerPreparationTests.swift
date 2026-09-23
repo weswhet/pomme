@@ -4,6 +4,54 @@ import Synchronization
 
 @Suite("Pomme normal guest owner preparation")
 struct PommeSecurityOwnerPreparationTests {
+  @Test("Initial build type classification reuses the existing read and preserves the write failure", arguments: ["domain", "pair", "known", "unchanged"])
+  func initialBuildTypeClassification(mode: String) async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    if mode == "known" { fixture.setupAssistantBuildPreference = "24A123" }
+    if mode == "unchanged" { fixture.setupAssistantBuildPreference = "25G83" }
+    fixture.setupAssistantBuildWriteExit = 1
+    fixture.miniBuddyLaunchWriteExit = 1
+    let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
+    let order = Mutex<[String]>([])
+    let typeReads = Mutex(0)
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID), freshnessRequirements: .verifiedFresh,
+      executeGuest: { request in
+        if request.path == "/usr/bin/sudo", request.arguments.contains("LastSeenBuddyBuildVersion") {
+          if request.arguments.contains("read-type") {
+            let first = typeReads.withLock { count in count += 1; return count == 1 }
+            if first {
+              order.withLock { $0.append("read-type") }
+              if mode == "domain" || mode == "pair" {
+                let message = mode == "domain" ? "Domain com.apple.SetupAssistant does not exist"
+                  : "The domain/default pair of (com.apple.SetupAssistant, LastSeenBuddyBuildVersion) does not exist"
+                return .init(exitCode: 1, signal: nil, stdout: Data(),
+                             stderr: Data(("2026-09-23 01:02:03.456 defaults[123:456]\n" + message + "\n").utf8),
+                             stdoutTruncated: false, stderrTruncated: false, exited: true)
+              }
+            }
+          }
+          if request.arguments.contains("write") { order.withLock { $0.append("write") } }
+        }
+        return try fixture.execute(request)
+      }, executePrivatePTY: fixture.executePTY,
+      autoLoginTrace: { event in
+        trace.withLock { $0.append(event) }
+        if event.rawValue.hasPrefix("ownerPreWriteBuild") { order.withLock { $0.append(event.rawValue) } }
+      })
+    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
+      try await preparation.configureLogin(password: "opaque-owner-secret")
+    }
+    let label = mode == "domain" ? "ownerPreWriteBuildMissingDomain"
+      : mode == "pair" ? "ownerPreWriteBuildMissingPair" : "ownerPreWriteBuildTypeString"
+    #expect(order.withLock { $0 } == ["read-type", label] + (mode == "unchanged" ? [] : ["write"]))
+    #expect(typeReads.withLock { $0 } == (mode == "unchanged" ? 1 : 2))
+    for value in ["com.apple.SetupAssistant", "LastSeenBuddyBuildVersion", "123:456", "24A123", "25G83", "opaque-owner-secret"] {
+      #expect(trace.withLock { $0.allSatisfy { !$0.message.contains(value) } })
+    }
+    #expect(!fixture.setupDone)
+  }
+
   @Test("Owner launchd observations are bounded, redacted, and preserve the failed write", arguments: [
     "present", "nonzero", "throw", "timeout", "truncated", "stderrTruncated", "oversize", "stderrOversize",
     "detached", "notExited", "signal", "missingExit", "invalidExit", "stderr",
@@ -769,7 +817,7 @@ struct PommeSecurityOwnerPreparationTests {
       .reconcileEntered, .nativeEntered, .nativeOff, .reconcileOff,
       .nativeEntered, .nativeExpectedOwner, .preferenceEntered, .preferenceMatch,
       .artifactEntered, .artifactMetadataEntered, .artifactValid,
-      .ownerPreWriteUserDomainNonzero, .ownerPreWriteGUIDomainNonzero,
+      .ownerPreWriteBuildMissingPair, .ownerPreWriteUserDomainNonzero, .ownerPreWriteGUIDomainNonzero,
       .ownerBuildPreferenceWriteEntered, .ownerMiniBuddyPreferenceWriteEntered,
       .ownerWriteStderrEmpty, .ownerWriteHomeExpectedDirectory,
       .reconcileEntered, .nativeEntered,

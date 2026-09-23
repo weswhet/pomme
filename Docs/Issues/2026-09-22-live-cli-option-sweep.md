@@ -4152,6 +4152,36 @@ Pomme. Inventory returned to twelve VMs, all stopped and internal, with both
 clone-l and clone-m absent. No external-drive or unrelated VM was touched.
 The first-write status-1 issue and independent desktop timeout remain open.
 
+The next candidate narrows the existing prewrite `defaults read-type` result
+without another guest command: its already-validated missing-domain versus
+missing-key-pair classification is currently collapsed to a missing value.
+Fixed, redacted labels at that read seam could distinguish a domain not yet
+initialized from the expected absent key before the native write. It must
+preserve the exact read/write command sequence, single write, original error,
+and owner receipt rules. If failure and reboot-success share the same label,
+this check too will be non-explanatory; neither label proves `cfprefsd`
+responsiveness. Focused tests and fresh signed/live comparison remain
+required before any production change is considered.
+
+The diagnostic-only candidate emits `ownerPreWriteBuildMissingDomain`,
+`ownerPreWriteBuildMissingPair`, or `ownerPreWriteBuildTypeString` at the
+initial, already-executed `defaults read-type` result. The exact native
+missing-domain/pair parser is reused; all other reads retain their existing
+semantics. `TypeString` proves only the native type check, not the value or
+write. No extra guest command, preference mutation, retry, timeout, error,
+phase receipt, or security decision is introduced. The focused owner suite
+passed 90 functions / 235 executions with zero failures or skips; bundle
+`test_macos_2026-09-23T10-22-51-403Z_pid12843_58368900.xcresult`.
+Tests cover exact missing-domain/pair syntax, a known string type, an
+unchanged value, one original failed write and error, trace order, exclusion
+of postfailure reads from the new labels, and no raw data leakage. The diff
+check passed. The fresh isolated full suite then passed 1,226 functions /
+1,860 executions, zero failures or skips; bundle
+`test_macos_2026-09-23T10-23-42-285Z_pid13020_51b161d9.xcresult`.
+The four existing `PommeCore.swift` compiler warnings remain unrelated. The
+candidate is qualified for a source/test/evidence commit before signed
+Release build and live comparison; it remains a diagnostic, not a fix.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
