@@ -4311,6 +4311,17 @@ preservation. Diff check passed. The fresh isolated full suite then passed
 The diagnostic is qualified for commit before signed build and fresh live
 comparison; it is not a fix.
 
+Candidate `e7aad7e` was committed before the canonical signed Release build.
+Build, Developer ID signature, exact entitlements, designated-requirement
+compatibility, signed artifact archive, and atomic installation passed.
+Fresh-login command resolution finds `/Users/wes/.local/bin/pomme`, reporting
+`e7aad7e` with SHA-256
+`904ee9392ca520b71013d4dd98d88b2e55b4cf2b4687ff1bc3880a98b0259fc6`.
+All 104 CLI contract checks passed. The build repeated existing PommeCore
+and GuestMDMEnrollment deprecation warnings outside this diagnostic. A new
+40 GB / 4 GB internal clone must test whether the failure reproduces and
+which decode/frame/handler boundary is last.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
