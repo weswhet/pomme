@@ -2843,6 +2843,17 @@ full suite then passed 1,202 functions, zero failures/skips
 (`test_macos_2026-09-23T03-26-27-989Z_pid31667_6a0d5680.xcresult`). The
 candidate is qualified for commit before a signed build and fresh live test.
 
+Candidate `52c0459` was committed before the canonical signed Release build.
+Signature, exact entitlements, designated-requirement compatibility, archive,
+and atomic-install checks passed. Fresh-login resolution reports
+`/Users/wes/.local/bin/pomme`, version `52c0459`, with SHA-256
+`bd658113512902da42834750f1512e81de12df126efb4b2c8b93b6613c15fa6f`.
+All 104 CLI contract checks passed. The completed prior fixture is stopped
+with journal `sipEnable/restorationComplete/previous`, original stopped and
+normal boot verified; its original `99a1edae…28359a` signed archive digest
+was independently checked. At 20 GiB free, one completed VM must be removed
+before another internal 40 GB guest can be created.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
