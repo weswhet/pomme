@@ -72,7 +72,8 @@ struct PommeSignalBoundaryTrace: Sendable {
 struct PommeDesktopStartBoundaryTrace: Sendable {
     enum Event: String, CaseIterable, Sendable {
         case exchangeAdmitted, writeCompleted, writeFailed, responseReceived, responseFailed
-        case requestAccepted, handlerEntered, performReturned, performFailed
+        case responseReadNoBytes, responseReadPartialFrame, responseReadCompleteFrame, responseReadStreamFrames
+        case requestDecoded, requestRejected, requestAccepted, handlerEntered, performReturned, performFailed
         case streamsEntered, streamsReturned, streamsFailed
         case streamWriteEntered, streamWritten, streamWriteFailed
         case responseWriteEntered, responseWritten, responseWriteFailed
@@ -451,6 +452,11 @@ enum PommeAgentDaemon {
                     continue
                 }
                 let request = try? PommeAgentProtocol.decode(line)
+                let normalScope = agent.role == .persistent && allowedOperation == nil && !terminalAuthority
+                let desktopStartTrace = normalScope && request.map(PommeDesktopStartBoundaryTrace.admits) == true
+                    ? PommeDesktopStartBoundaryTrace(sink: desktopStartTraceSink ?? PommeDesktopStartBoundaryTrace.guestLog)
+                    : nil
+                desktopStartTrace?.emit(.requestDecoded)
                 if let request,
                    request.kind == .request,
                    request.operation != "authenticate" {
@@ -470,8 +476,6 @@ enum PommeAgentDaemon {
                     }
                 }
                 var signalTrace: PommeSignalBoundaryTrace?
-                var desktopStartTrace: PommeDesktopStartBoundaryTrace?
-                let normalScope = agent.role == .persistent && allowedOperation == nil && !terminalAuthority
                 if normalScope, request?.kind == .request, request?.operation == "process.signal" {
                     // Fixed decoded/admission events contain no request data,
                     // including when the connection has not authenticated.
@@ -482,14 +486,8 @@ enum PommeAgentDaemon {
                 let response = await connection.receive(line) { request in
                     // receive invokes this handler only after authentication
                     // and credential/replay checks. Recovery never opts in.
-                    if normalScope, PommeDesktopStartBoundaryTrace.admits(request) {
-                        // Acceptance is after authentication, not a socket-read
-                        // or decoding timestamp.
-                        desktopStartTrace = PommeDesktopStartBoundaryTrace(
-                            sink: desktopStartTraceSink ?? PommeDesktopStartBoundaryTrace.guestLog)
-                        desktopStartTrace?.emit(.requestAccepted)
-                        desktopStartTrace?.emit(.handlerEntered)
-                    }
+                    desktopStartTrace?.emit(.requestAccepted)
+                    desktopStartTrace?.emit(.handlerEntered)
                     if normalScope, request.kind == .request, request.operation == "process.status" {
                         signalTrace = PommeSignalBoundaryTrace(
                             sink: signalTraceSink ?? PommeSignalBoundaryTrace.guestLog, isStatus: true)
@@ -509,6 +507,7 @@ enum PommeAgentDaemon {
                         throw error
                     }
                 }
+                if !handlerEntered { desktopStartTrace?.emit(.requestRejected) }
                 if signalTrace != nil, !handlerEntered {
                     let rejection: PommeSignalBoundaryTrace.Event
                     switch (try? decodeResponse(response))?.error?.code {

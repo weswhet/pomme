@@ -22,28 +22,49 @@ struct PommeAgentVSOCKWireTests {
         }
     }
 
-    @Test("Desktop start withholding its response preserves the exchange timeout", arguments: [false, true])
-    func desktopStartResponseBoundary(withhold: Bool) throws {
+    @Test("Desktop start response failure reports closed read progress", arguments: ["response", "empty", "partial", "stream", "mismatch"])
+    func desktopStartResponseBoundary(mode: String) throws {
+        let withhold = mode != "response"
         let trace = Mutex<[(PommeDesktopStartBoundaryTrace.Event, Double)]>([])
         let request = PommeAgentProtocol.Envelope.request(operation: "process.start", payload: .object([
             "path": .string("/bin/ps"), "arguments": .array([.string("-axo"), .string("uid=,comm=")])]))
         let finished = DispatchSemaphore(value: 0)
+        let ready = DispatchSemaphore(value: 0)
         try Self.withWire(desktopStartTraceSink: { event, elapsed in trace.withLock { $0.append((event, elapsed)) } }, peer: { descriptor in
+            if mode == "partial" { try Self.writeAll(Data("{\"version\":".utf8), to: descriptor) }
+            if mode == "stream" {
+                let stream = PommeAgentProtocol.Envelope(kind: .stream, requestID: request.requestID,
+                    operation: "process.stdout", payload: .object(["stream": .string("stdout")]))
+                try Self.writeAll(try PommeAgentProtocol.encode(stream), to: descriptor)
+            }
+            if mode == "mismatch" {
+                let other = PommeAgentProtocol.Envelope.request(operation: "process.start")
+                try Self.writeAll(try PommeAgentProtocol.encode(.response(to: other, result: .object([:]))), to: descriptor)
+            }
+            ready.signal()
             guard try Self.readEnvelope(from: descriptor) == request else { throw WireTestError.unexpectedRequest }
             if !withhold { try Self.writeAll(try PommeAgentProtocol.encode(.response(to: request, result: .object([:]))), to: descriptor) }
             guard finished.wait(timeout: .now() + .seconds(5)) == .success else { throw WireTestError.peerTimedOut }
         }) { wire in
             defer { finished.signal() }
+            try #require(ready.wait(timeout: .now() + .seconds(5)) == .success)
             do {
                 _ = try wire.exchange(try PommeAgentProtocol.encode(request), timeout: withhold ? 0.1 : 2)
                 #expect(!withhold)
             } catch RunnerError.guestAgentTimedOut(let operation) {
-                #expect(withhold)
+                #expect(withhold && mode != "mismatch")
                 #expect(operation == "Pomme agent exchange")
+            } catch PommeAgentProtocol.Error.invalidResponse {
+                #expect(mode == "mismatch")
             }
         }
         let events = trace.withLock { $0 }
-        #expect(events.map(\.0) == [.exchangeAdmitted, .writeCompleted, withhold ? .responseFailed : .responseReceived])
+        let expected: [PommeDesktopStartBoundaryTrace.Event] = withhold
+            ? [.exchangeAdmitted, .writeCompleted, .responseFailed,
+               mode == "partial" ? .responseReadPartialFrame : mode == "stream" ? .responseReadStreamFrames
+                   : mode == "mismatch" ? .responseReadCompleteFrame : .responseReadNoBytes]
+            : [.exchangeAdmitted, .writeCompleted, .responseReceived]
+        #expect(events.map(\.0) == expected)
         #expect(events.allSatisfy { $0.1.isFinite && $0.1 >= 0 })
         #expect(events.map(\.1) == events.map(\.1).sorted())
     }

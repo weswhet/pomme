@@ -3732,6 +3732,40 @@ comparison. Public inventory now shows twelve VMs, all stopped/no helper,
 and no clone-g; free internal space rose from 12 to 17 GiB. Its VM disk is
 not recoverable through Pomme. No external-drive or unrelated VM was touched.
 
+### Decoded-request and response-read diagnostic candidate
+
+The clone-g trace narrows the failed Aqua `process.start` to the host's
+response wait, but does not establish whether the normal guest daemon decoded
+that request. A read-only daemon audit found a plausible liveness hazard:
+the daemon serves one connection and request at a time, and guest stream and
+response writes use synchronous `Darwin.write` without a local deadline. A
+blocked write could prevent `serve` from returning and the guest from
+reconnecting after the host closes a timed-out session. The live trace does
+not prove that happened, and host socket close is not known to interrupt a
+blocked guest write reliably. No behavioral change follows from this audit.
+
+The next candidate adds a fixed guest `requestDecoded` marker immediately
+after decoding an exact desktop-proof start in the persistent normal role,
+before authentication and handler admission. A denied decoded request gets a
+fixed `requestRejected` marker. The host response-failure path records one
+closed read-progress category: no buffered bytes, a partial frame, a complete
+frame, or at least one validated correlated stream frame. These categories
+describe the local wire reader only; buffered bytes could predate this
+request, and the markers carry no request ID, payload, output, credential, or
+VM identity. No timeout, retry, cleanup, protocol, or security policy changes.
+Tests-first compilation failed on the missing diagnostic events. The focused
+XcodeBuildMCP run passed 27 tests / 59 executions with no failures or skips;
+bundle `test_macos_2026-09-23T08-06-24-636Z_pid86728_a008c25f.xcresult`.
+Coverage includes unauthenticated rejection, authenticated event order,
+Recovery exclusion, empty and partial reads, a correlated stream-only
+response, and a mismatched complete frame. This qualifies the candidate for
+the full suite, not yet for live inference. The isolated full XcodeBuildMCP
+suite then passed 1,217 test functions / 1,830 executions, with zero failures
+or skips; bundle
+`test_macos_2026-09-23T08-07-13-412Z_pid86946_f0d63c41.xcresult`.
+`git diff --check` passed. This source, test, and evidence checkpoint precedes
+the canonical signed Release build.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
