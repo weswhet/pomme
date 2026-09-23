@@ -2,6 +2,28 @@ import Darwin
 import Foundation
 import OSLog
 
+/// Connection-local fixed events; never includes frame contents or identities.
+struct PommeAgentServeLoopTrace: Sendable {
+    enum Event: String, CaseIterable, Sendable {
+        case serveEntered, serveExited, readEntered, readReturned, readClosed, readFailed
+        case frameReady, writeEntered, writeCompleted, writeFailed
+    }
+
+    typealias Sink = @Sendable (Event, Double) -> Void
+    private static let logger = Logger(subsystem: "com.github.weswhet.pomme", category: "guest-serve-loop")
+    private let started = ContinuousClock.now
+    let sink: Sink
+
+    func emit(_ event: Event) {
+        let elapsed = started.duration(to: .now).components
+        sink(event, Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15)
+    }
+
+    static func guestLog(_ event: Event, _ elapsed: Double) {
+        logger.notice("[DEBUG-guest-serve-loop-20260923] \(event.rawValue, privacy: .public) elapsedMs=\(elapsed, privacy: .public)")
+    }
+}
+
 /// Temporary closed-surface diagnostics. Elapsed times are local to one
 /// exchange, not a cross-host clock or a request identity.
 struct PommeSignalBoundaryTrace: Sendable {
@@ -406,9 +428,21 @@ enum PommeAgentDaemon {
         terminalAuthority: Bool = false,
         signalTraceSink: PommeSignalBoundaryTrace.Sink? = nil,
         desktopStartTraceSink: PommeDesktopStartBoundaryTrace.Sink? = nil,
+        serveLoopTraceSink: PommeAgentServeLoopTrace.Sink? = nil,
         oneShotCleanup: @escaping @Sendable () throws -> Void = {}
     ) async {
+        let normalScope = agent.role == .persistent && allowedOperation == nil && !terminalAuthority
+        let serveTrace = normalScope
+            ? PommeAgentServeLoopTrace(sink: serveLoopTraceSink ?? PommeAgentServeLoopTrace.guestLog) : nil
+        serveTrace?.emit(.serveEntered)
+        defer { serveTrace?.emit(.serveExited) }
         defer { connection.resetForReconnect() }
+        func writeFrame(_ data: Data) -> Bool {
+            serveTrace?.emit(.writeEntered)
+            let written = writeAll(descriptor: descriptor, data: data)
+            serveTrace?.emit(written ? .writeCompleted : .writeFailed)
+            return written
+        }
         var noSigPipe: Int32 = 1
         guard Darwin.setsockopt(
             descriptor,
@@ -420,13 +454,19 @@ enum PommeAgentDaemon {
         var buffer = Data(); var scratch = [UInt8](repeating: 0, count: 4096)
         var operationConsumed = false
         while true {
+            serveTrace?.emit(.readEntered)
             let count = Darwin.read(descriptor, &scratch, scratch.count)
-            guard count > 0 else { return }
+            serveTrace?.emit(.readReturned)
+            guard count > 0 else {
+                serveTrace?.emit(count == 0 ? .readClosed : .readFailed)
+                return
+            }
             let received = scratch.prefix(count)
             guard buffer.count + received.count <= PommeAgentProtocol.maximumFrameBytes else { return }
             buffer.append(contentsOf: received)
             while let newline = buffer.firstIndex(of: 0x0A) {
                 let line = Data(buffer[..<newline]); buffer.removeSubrange(...newline)
+                serveTrace?.emit(.frameReady)
                 guard !line.isEmpty, line.count < PommeAgentProtocol.maximumFrameBytes else { return }
                 if let envelope = try? PommeAgentProtocol.decode(line), envelope.kind == .stream {
                     guard !terminalAuthority, connection.permitsStream,
@@ -435,7 +475,7 @@ enum PommeAgentDaemon {
                     else { return }
                     for frame in frames {
                         guard let encoded = try? PommeAgentProtocol.encode(frame.envelope()),
-                              writeAll(descriptor: descriptor, data: encoded)
+                              writeFrame(encoded)
                         else { return }
                     }
                     // A stream mutation with no output still needs a
@@ -447,12 +487,11 @@ enum PommeAgentDaemon {
                         result: .object(["jobID": .string(jobID.uuidString.lowercased())])
                     )
                     guard let encoded = try? PommeAgentProtocol.encode(acknowledgement),
-                          writeAll(descriptor: descriptor, data: encoded)
+                          writeFrame(encoded)
                     else { return }
                     continue
                 }
                 let request = try? PommeAgentProtocol.decode(line)
-                let normalScope = agent.role == .persistent && allowedOperation == nil && !terminalAuthority
                 let desktopStartTrace = normalScope && request.map(PommeDesktopStartBoundaryTrace.admits) == true
                     ? PommeDesktopStartBoundaryTrace(sink: desktopStartTraceSink ?? PommeDesktopStartBoundaryTrace.guestLog)
                     : nil
@@ -471,7 +510,7 @@ enum PommeAgentDaemon {
                     guard permitted, !operationConsumed
                     else {
                         let response = await connection.receive(line) { _ in throw PommeAgentOperationError.unsupported }
-                        guard !response.isEmpty, writeAll(descriptor: descriptor, data: response) else { return }
+                        guard !response.isEmpty, writeFrame(response) else { return }
                         return
                     }
                 }
@@ -543,7 +582,7 @@ enum PommeAgentDaemon {
                         signalTrace?.emit(.guestStreamWriteEntered)
                         desktopStartTrace?.emit(.streamWriteEntered)
                         guard let encoded = try? PommeAgentProtocol.encode(frame.envelope()),
-                              writeAll(descriptor: descriptor, data: encoded)
+                              writeFrame(encoded)
                         else {
                             signalTrace?.emit(.guestStreamWriteFailed)
                             desktopStartTrace?.emit(.streamWriteFailed)
@@ -555,7 +594,7 @@ enum PommeAgentDaemon {
                 }
                 signalTrace?.emit(.guestResponseWriteEntered)
                 desktopStartTrace?.emit(.responseWriteEntered)
-                guard !response.isEmpty, writeAll(descriptor: descriptor, data: response) else {
+                guard !response.isEmpty, writeFrame(response) else {
                     signalTrace?.emit(.guestResponseWriteFailed)
                     desktopStartTrace?.emit(.responseWriteFailed)
                     return
