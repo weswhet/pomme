@@ -3198,6 +3198,43 @@ rewritten or deleted. This blocked the planned owner diagnostic live test;
 the framebuffer lock-order failure is being isolated before a public
 `create --resume` attempt.
 
+The exact public `create --resume` began at 05:23:22Z without editing the
+journal or pin. This second process completed Recovery navigation through the
+five-input language route, Terminal marker proof on attempt one, agent
+installation, and stopped-state restoration by about 05:25Z. The prior
+lock/queue cycle is therefore intermittent, not a permanently corrupt clone.
+Independent pre-owner status confirmed UUID
+`8d89b9ef-0e72-4949-8943-df782f1569d6`, 40 GB / 4 GB, stopped/no helper,
+creation-pinned `a058cd62…7db1d4` agent, and no security journal.
+
+First-owner SIP disable on that resumed clone began at 05:26:03Z. Initial
+native autologin was OFF. The owner was created and verified; the native
+setter proved expected owner, matching global preference, and valid artifact.
+The first build-preference write entered at 05:27:34Z and returned status 1
+with `defaults`-shaped stderr at 05:27:35Z. The existing home probe found
+the expected-owner directory. New bounded probes immediately afterward
+reported: Preferences directory owned by the expected UID with owner
+write/search mode bits; repeated `sudo -H` effective UID and HOME both
+matched the expected owner; an owner-UID `cfprefsd` process was present;
+and only the stock `_mbsetupuser` Setup Assistant process was observed. No
+numeric IDs, paths, modes, process list, or raw native stderr were retained
+in the trace. This weakens simple missing-path/mode/identity explanations,
+but the probes are post-failure and cannot establish ACL-effective access,
+`cfprefsd` responsiveness, or causal Setup Assistant contention.
+
+The existing single guarded reboot then verified the stock Setup Assistant
+owner, re-proved restrictions and setter context, and both preference writes
+plus Setup Assistant completion passed by 05:28:51Z. An Aqua proof timed out,
+but the desktop sequence progressed into authenticated Recovery. SIP disable
+completed with enforcement and normal-boot verification and stopped final
+state. The matching public SIP enable then passed Terminal marker proof,
+enforcement/runtime/normal-boot verification, and stopped restoration at
+05:37:22Z. Independent journal is `sipEnable/restorationComplete/previous`,
+original stopped, `normalBootVerified=true`; status confirms no helper, same
+UUID/pin, and all 13 VMs stopped/internal. The original SIP posture is
+restored. The native first-write cause and the separate framebuffer lock
+cycle remain open.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
