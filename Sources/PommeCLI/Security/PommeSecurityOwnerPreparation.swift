@@ -9,9 +9,11 @@ enum PommeAutoLoginReadbackTrace: String, CaseIterable, Sendable {
   case nativeSetupAssistantOwner, nativeOffAsOwner, nativeRootOwner
   case preferenceEntered, preferenceCommandFailed, preferenceEvidenceFailed
   case preferenceShapeRejected, preferenceMatch, preferenceMismatch
+  case preferenceExpectedOwnerCaseMismatch, preferenceSetupAssistantOwner, preferenceOffAsOwner, preferenceRootOwner
   case artifactEntered, artifactProbeCommandFailed, artifactProbeEvidenceFailed, artifactAbsent
   case artifactMetadataEntered, artifactMetadataCommandFailed, artifactMetadataEvidenceFailed
   case artifactValid, artifactInvalid
+  case ownerBuildPreferenceWriteEntered, ownerMiniBuddyPreferenceWriteEntered
 
   var message: String { "[DEBUG-autologin-readback-20260922] \(rawValue)" }
   static func log(_ event: Self) { PommeCore.log(event.message) }
@@ -1122,6 +1124,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
     )
 
     if existingBuild != buildVersion {
+      autoLoginTrace(.ownerBuildPreferenceWriteEntered)
       try writeOwnerPreference(
         domain: Self.setupAssistantPreferencesDomain,
         key: Self.lastSeenBuddyBuildVersionKey,
@@ -1138,6 +1141,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
     }
 
     if existingMiniBuddyLaunch != false {
+      autoLoginTrace(.ownerMiniBuddyPreferenceWriteEntered)
       try writeOwnerPreference(
         domain: Self.loginWindowPreferencesDomain,
         key: Self.miniBuddyLaunchKey,
@@ -2240,7 +2244,18 @@ struct PommeSecurityOwnerPreparation: Sendable {
       autoLoginTrace(.preferenceShapeRejected)
       throw PommeSecurityOwnerPreparationError.autoLoginVerificationFailed
     }
-    autoLoginTrace(value == identity.username ? .preferenceMatch : .preferenceMismatch)
+    if value == identity.username {
+      autoLoginTrace(.preferenceMatch)
+    } else if value.caseInsensitiveCompare(identity.username) == .orderedSame {
+      autoLoginTrace(.preferenceExpectedOwnerCaseMismatch)
+    } else {
+      switch value.lowercased() {
+      case "_mbsetupuser": autoLoginTrace(.preferenceSetupAssistantOwner)
+      case "off": autoLoginTrace(.preferenceOffAsOwner)
+      case "root": autoLoginTrace(.preferenceRootOwner)
+      default: autoLoginTrace(.preferenceMismatch)
+      }
+    }
     return value
   }
 

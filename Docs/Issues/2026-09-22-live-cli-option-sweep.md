@@ -2558,6 +2558,27 @@ VMs remain stopped/internal with 50 GiB free. No SIP-enable restoration is
 needed, and no inspection boot has altered this failure fixture. The evidence
 is committed before the next diagnostic refinement.
 
+The next temporary diagnostic distinguishes exact expected preference, a
+case-only expected-name mismatch, stock Setup Assistant, account-shaped OFF,
+root, and other values. Only closed enum labels are logged; parsing, returned
+values, strict comparison, and retry/mutation policy are unchanged. Two further
+fixed labels precede the actual owner build-preference and MiniBuddy-preference
+writes, distinguishing which write raises the existing status-1 error without
+recording values or command output. Tests cover both write failures and the
+real recovery adapter's unchanged rejection of inconsistent native/preference
+proofs. This is evidence collection, not another acceptance-policy change.
+
+Read-only review found no behavior/security change in this refinement. The
+native status and defaults reads are separate commands with no atomic snapshot;
+the observed mismatch alone does not identify a stale backing value. Focused
+owner/workflow tests passed 109 functions / 1,900 invocations over ten runs:
+`test_macos_2026-09-23T00-35-25-803Z_pid93995_2508dd62.xcresult`.
+The full isolated suite passed 1,198 functions / 1,711 invocations, with no
+failures or skips:
+`test_macos_2026-09-23T00-36-42-431Z_pid95267_29bbc804.xcresult`.
+All 21 installer checks passed. Source/tests/evidence are committed before
+the next canonical signed Release build and fresh live comparison.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
