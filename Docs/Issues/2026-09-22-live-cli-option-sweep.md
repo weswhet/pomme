@@ -3368,6 +3368,16 @@ full suite passed 1,208 functions / 1,767 executions, zero failures/skips
 signed build and a fresh-clone reproduction are required before interpreting
 the new live label.
 
+Candidate `a91e31a` was committed before the canonical signed Release build.
+Exact Developer ID signature, entitlements, designated-requirement
+compatibility, archive, and atomic install checks passed. Fresh-login
+resolution points to `/Users/wes/.local/bin/pomme`, reporting `a91e31a`,
+SHA-256 `5ab511071695c9028470a0e0d9d6ab97becb145c11566e07fd83a6422aec7983`.
+All 104 CLI contract checks passed. Four pre-existing `PommeCore.swift`
+compiler warnings remain outside this diagnostic. Live validation needs a
+new 40 GB / 4 GB template clone because clone-c has already completed owner
+preparation.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
