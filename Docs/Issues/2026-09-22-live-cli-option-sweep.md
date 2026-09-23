@@ -3301,8 +3301,35 @@ stopped with no helpers and all under the internal Pomme VM root. This is a
 live pass through the previously hanging creation phase plus two separate
 read-only Recovery runs; it reduces confidence in recurrence of that lock
 cycle but does not prove every intermittent frame/lifecycle hang eliminated.
-Clone-c remains as the stopped, pre-owner fixture for the separate unresolved
-first-owner preference-write investigation.
+Clone-c was retained stopped for the separate first-owner preference-write
+investigation described next.
+
+The first-owner SIP-disable run on clone-c began at 06:00:14Z with its newly
+signed creation pin and no prior security journal. Native automatic login was
+OFF; owner creation, verification, and setter readback passed. At 06:01:41Z,
+the first `LastSeenBuddyBuildVersion` write again returned status 1 with a
+`defaults`-shaped stderr prefix. Post-failure labels again found the expected
+owner home and Preferences directory mode, expected `sudo -H` UID/HOME, an
+owner-UID `cfprefsd` process, and only stock Setup Assistant. The existing
+single guarded reboot made both preference writes and Setup Assistant
+completion pass by 06:02:50Z. This is another independent reproduction of the
+first-write boundary; these non-atomic observations still do not establish
+CFPreferences responsiveness, effective ACL access, or the exact native error.
+
+Normal desktop proof later timed out at the Aqua stage and the console probe
+failed with `agentOtherTimeout` at 06:03:59Z. The public operation exited 1,
+retaining `sipDisable/autologinIntent`; status confirmed stopped/no helper.
+The exact public same-operation resume then revalidated owner/login state,
+passed Recovery Terminal proof after 594 cumulative captures, verified SIP
+disabled after a normal boot, and restored stopped state. Matching public
+`sip enable` passed authenticated Recovery, enforcement/runtime/normal-boot
+verification, and stopped restoration at 06:13:30Z. Independent journal is
+`sipEnable/restorationComplete/previous` with `normalBootVerified=true`;
+status confirms the same UUID/pin, stopped/no helper, and inventory has all
+13 VMs stopped under the internal root. SIP is restored to its original
+enabled posture. The native first-write failure and intermittent Aqua/console
+transport failure remain separate open issues; neither was fixed by the
+framebuffer registration change.
 
 ### macOS 27 pause/resume/restart repetition
 
