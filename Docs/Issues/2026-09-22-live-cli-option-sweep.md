@@ -4004,6 +4004,38 @@ Clone-j's VM disk is not recoverable through Pomme. No external-drive or
 unrelated VM was touched. The actor-side trace is live-validated as a
 diagnostic, but the specific actor/status stall did not recur in this run.
 
+One more bounded fresh-clone comparison used the unchanged signed `dde2cfc`
+build. Internal `pomme-agent-ownerloop-clone26-20260922k` passed the same
+40 GB / 4 GB template dry run and creation, with UUID
+`88cbf746-9489-47bb-afa0-7257df08373e`, plan digest
+`f8c84382e3ee6c14f5b60d747fee47f31912b0944d0144f67e26bce87dcc3f90`,
+and pinned agent digest `615101af…da3428`. The first-owner SIP-disable run
+began at 09:22:08Z. The first build-preference write again returned status 1
+and left the target key absent; the guarded reboot recovered, owner
+completion and Setup Assistant passed, and desktop verification began.
+
+Aqua emitted `normal-agent-aqua-timedOut` at 09:25:51Z with an established
+job and termination requested, but subsequent desktop proof continued and
+all sampled exact-start exchanges received responses. No status/transport
+stall was seen. Authenticated Recovery disabled SIP, and normal-boot
+enforcement verified the disabled configuration; the operation exited zero
+with stopped final state at 09:29:13Z. A separate explicit SIP-enable
+operation then exited zero at 09:33:23Z with enabled configuration verified
+after a normal boot and the VM stopped. These outcomes do not show that the
+intermittent actor/status stall is fixed, nor that the separate Aqua deadline
+is harmless in every run.
+
+Independent public `sip status` passed authenticated Recovery marker proof
+on attempt two, reporting verified `sipEnabled=true`, `sipDisabled=false`,
+complete cleanup, and final-state verification. Clone-k was checked
+stopped/no helper with unchanged UUID and agent pin, whose archived signed
+executable still matched its SHA-256. The exact disposable clone was then
+deleted. Inventory returned to twelve VMs, all stopped/no helper, with no
+clone-k; internal free space rose from 13 to 18 GiB. Its VM disk is not
+recoverable through Pomme. No external-drive or unrelated VM was touched.
+This comparison did not reproduce the clone-i actor/status gap, so no
+production transport or status fix is claimed.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
