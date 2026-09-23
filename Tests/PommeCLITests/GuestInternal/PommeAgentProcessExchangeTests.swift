@@ -12,6 +12,15 @@ struct PommeAgentProcessExchangeTests: Sendable {
     @Test("Real daemon foreground timeout signal integration characterization", .serialized, arguments: 0..<20)
     func foregroundTimeoutSignalCharacterization(iteration: Int) async throws {
         _ = iteration
+        try await runForegroundTimeoutSignalCharacterization(crossLogicalDeadlineAtStatusWriteEntry: false)
+    }
+
+    @Test("Logical foreground deadline crosses at status-response write entry before one signal and a healthy next command")
+    func logicalForegroundDeadlineCrossesAtStatusWriteEntry() async throws {
+        try await runForegroundTimeoutSignalCharacterization(crossLogicalDeadlineAtStatusWriteEntry: true)
+    }
+
+    private func runForegroundTimeoutSignalCharacterization(crossLogicalDeadlineAtStatusWriteEntry: Bool) async throws {
         let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64))
         let trace = Mutex<[PommeSignalBoundaryTrace.Event]>([])
         let job = Mutex<String?>(nil)
@@ -19,13 +28,21 @@ struct PommeAgentProcessExchangeTests: Sendable {
         let operations = Mutex<[String]>([])
         let observed = Mutex<(stdout: Bool, stderr: Bool)>((false, false))
         let clock = Mutex(ContinuousClock.now)
+        let crossed = Mutex(false)
+        let crossedStatusReturned = Mutex(false)
+        let nextJob = Mutex<String?>(nil)
         let observationDeadline = ContinuousClock.now.advanced(by: .seconds(30))
         do {
             let result = try await withDaemon(agent: agent, signalTraceSink: { event, _ in
                 trace.withLock { $0.append(event) }
+                if crossLogicalDeadlineAtStatusWriteEntry, event == .guestStatusResponseWriteEntered,
+                   observed.withLock({ $0.stdout && $0.stderr }), !crossed.withLock({ $0 }) {
+                    clock.withLock { $0 = $0.advanced(by: .seconds(2)) }
+                    crossed.withLock { $0 = true }
+                }
             }) { context in
                 try await authenticate(using: context.wire)
-                return try await PommeForegroundExecution.run(
+                let primary = try await PommeForegroundExecution.run(
                     payload: .object([
                         "path": .string("/bin/sh"),
                         "arguments": .array([.string("-c"), .string("printf ready-out; printf ready-err >&2; exec /bin/sleep 60")])
@@ -45,8 +62,12 @@ struct PommeAgentProcessExchangeTests: Sendable {
                         try #require(reply.response.ok == true)
                         if operation == "process.status" {
                             try #require(value.objectValue?["exited"] == .bool(false))
+                            if crossLogicalDeadlineAtStatusWriteEntry, crossed.withLock({ $0 }) {
+                                crossedStatusReturned.withLock { $0 = true }
+                            }
                         }
                         if operation == "process.signal" {
+                            if crossLogicalDeadlineAtStatusWriteEntry { try #require(crossedStatusReturned.withLock { $0 }) }
                             #expect(payload.objectValue?["signal"] == .integer(Int64(SIGTERM)))
                         }
                         return PommeAgentCorrelatedResult(requestID: request.requestID, result: value, streamFrames: reply.streams)
@@ -63,11 +84,14 @@ struct PommeAgentProcessExchangeTests: Sendable {
                         return reply.streams
                     },
                     pollTiming: .init(now: { clock.withLock { $0 } }, sleep: { _ in
-                        // Freeze the logical deadline until a real status has
-                        // delivered both channels. No response is delayed or
-                        // withheld; this does not reproduce the live timeout.
+                        // Wait for returned output on both channels, then
+                        // cross the logical deadline either here after status
+                        // returns, or at the next status-response write entry.
+                        // No physical write is delayed and no wire timeout is
+                        // induced; neither case reproduces the live timeout.
                         let ready = observed.withLock { $0.stdout && $0.stderr }
-                        if ready { clock.withLock { $0 = $0.advanced(by: .seconds(2)) } }
+                        if crossLogicalDeadlineAtStatusWriteEntry, crossed.withLock({ $0 }) { return }
+                        if ready, !crossLogicalDeadlineAtStatusWriteEntry { clock.withLock { $0 = $0.advanced(by: .seconds(2)) } }
                         else {
                             try #require(ContinuousClock.now < observationDeadline)
                             try await Task.sleep(for: .milliseconds(25))
@@ -82,6 +106,36 @@ struct PommeAgentProcessExchangeTests: Sendable {
                         }
                     }
                 )
+                if crossLogicalDeadlineAtStatusWriteEntry {
+                    try #require(crossed.withLock { $0 })
+                    let id = try #require(job.withLock { $0 })
+                    let cleaned = try await finishSignalTraceChild(agent: agent, jobID: id, terminate: false)
+                    try #require(cleaned)
+                    // Same authenticated wire, no reconnect or new daemon.
+                    let next = try await PommeForegroundExecution.run(
+                        payload: .object(["path": .string("/usr/bin/id"), "arguments": .array([.string("-u")])]),
+                        timeout: 5,
+                        perform: { operation, payload in
+                            let request = PommeAgentProtocol.Envelope.request(operation: operation, payload: payload)
+                            let reply = try await exchange(request, using: context.wire, timeout: 5)
+                            let value = try #require(reply.response.result)
+                            if operation == "process.start" {
+                                nextJob.withLock { $0 = value.objectValue?["jobID"]?.stringValue }
+                            }
+                            try #require(reply.response.ok == true)
+                            return .init(requestID: request.requestID, result: value, streamFrames: reply.streams)
+                        }, sendStream: { id, stream, data in
+                            let request = try PommeAgentJobStreamFrame(
+                                jobID: id, frame: .init(requestID: UUID(), stream: stream, data: data)).envelope()
+                            let reply = try await exchange(request, using: context.wire, timeout: 5)
+                            try #require(reply.response.ok == true)
+                            return reply.streams
+                        })
+                    try #require(next.result.objectValue?["exited"] == .bool(true))
+                    try #require(next.result.objectValue?["exitCode"] == .integer(0))
+                    try #require(next.result.objectValue?["outputComplete"] == .bool(true))
+                }
+                return primary
             }
             let values = try #require(result.result.objectValue)
             #expect(values["timedOut"] == .bool(true))
@@ -96,7 +150,12 @@ struct PommeAgentProcessExchangeTests: Sendable {
             #expect(calls.contains("process.status"))
             #expect(calls.last == "process.signal")
             #expect(observed.withLock { $0.stdout && $0.stderr })
-            let allEvents = trace.withLock { $0 }
+            // Ignore the later successful command's status trace only after
+            // the first signal response has completed.
+            let allEvents = trace.withLock { events in
+                guard let end = events.firstIndex(of: .guestResponseWritten) else { return events }
+                return Array(events[...end])
+            }
             let statusEvents = allEvents.filter { $0.rawValue.hasPrefix("guestStatus") }
             #expect(statusEvents.filter { $0 == .guestStatusHandlerEntered }.count == calls.filter { $0 == "process.status" }.count)
             #expect(statusEvents.filter { $0 == .guestStatusResponseWritten }.count == calls.filter { $0 == "process.status" }.count)
@@ -113,6 +172,12 @@ struct PommeAgentProcessExchangeTests: Sendable {
             let cleaned = try await finishSignalTraceChild(agent: agent, jobID: id, terminate: false)
             try #require(cleaned)
         } catch {
+            if let id = nextJob.withLock({ $0 }) {
+                do {
+                    let cleaned = try await finishSignalTraceChild(agent: agent, jobID: id, terminate: true)
+                    #expect(cleaned, "Next-command failure must reap and drain its exact child")
+                } catch { Issue.record(error, "Next-command cleanup failed") }
+            }
             if let id = job.withLock({ $0 }) {
                 do {
                     let cleaned = try await finishSignalTraceChild(agent: agent, jobID: id, terminate: true)

@@ -5,6 +5,39 @@ import Synchronization
 
 @Suite("Pomme agent VSOCK wire")
 struct PommeAgentVSOCKWireTests {
+    @Test("A late status response cannot complete a subsequent signal exchange", arguments: [false, true])
+    func lateStatusResponseRejectsSignal(operationMismatchOnly: Bool) throws {
+        let status = PommeAgentProtocol.Envelope.request(operation: "process.status")
+        let signal = PommeAgentProtocol.Envelope.request(operation: "process.signal")
+        let ready = DispatchSemaphore(value: 0)
+        let statusTimedOut = DispatchSemaphore(value: 0)
+        try Self.withWire(peer: { descriptor in
+            ready.signal()
+            guard try Self.readEnvelope(from: descriptor) == status else { throw WireTestError.unexpectedRequest }
+            guard statusTimedOut.wait(timeout: .now() + .seconds(5)) == .success else { throw WireTestError.peerTimedOut }
+            // Normal late-response case has the old ID. The companion case
+            // isolates operation validation by using the next request's ID.
+            let late = PommeAgentProtocol.Envelope(
+                kind: .response, requestID: operationMismatchOnly ? signal.requestID : status.requestID,
+                operation: status.operation, ok: true, result: .object([:]))
+            try Self.writeAll(try PommeAgentProtocol.encode(late), to: descriptor)
+            guard try Self.readEnvelope(from: descriptor) == signal else { throw WireTestError.unexpectedRequest }
+        }) { wire in
+            defer { statusTimedOut.signal() }
+            try #require(ready.wait(timeout: .now() + .seconds(5)) == .success)
+            do {
+                _ = try wire.exchange(try PommeAgentProtocol.encode(status), timeout: 0.05)
+                Issue.record("Status without a response must time out")
+            } catch RunnerError.guestAgentTimedOut { }
+            statusTimedOut.signal()
+            #expect(throws: PommeAgentProtocol.Error.invalidResponse) {
+                try wire.exchange(try PommeAgentProtocol.encode(signal), timeout: 5)
+            }
+            // The raw wire rejects correlation; coordinator invalidation is
+            // a separate contract, so this test does not require auto-close.
+        }
+    }
+
     @Test("Signal exchange requires its response even after a correlated exit stream", arguments: ["response", "silent", "exitOnly"])
     func signalResponseDeadlineCharacterization(mode: String) throws {
         let trace = Mutex<[(PommeSignalBoundaryTrace.Event, Double)]>([])

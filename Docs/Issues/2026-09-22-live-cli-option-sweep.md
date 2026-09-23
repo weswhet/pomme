@@ -2659,6 +2659,54 @@ stop began at 00:56:44Z with `stopMethod=guest-stopped`. Independent checks at
 target UUID, startup volume, plan, guest pin, resources, and retained security
 journal. No persistent credential, pin, or journal was manually rewritten.
 
+The next scoped compatibility check resumes the earlier stock-owner failure
+fixture `pomme-agent-autologinclass26-20260922a`. Preflight at 01:02:53Z
+confirmed its original UUID `d2f51376-1e6a-4b6a-b365-01c4fee36b22`, startup
+volume `6c1dea0c-1cf0-46c9-a8b9-9543d059a61f`, plan `9a7cf73b…fab2ce`,
+40 GB / 4 GB resources, stopped/no helper state, and original `2085cd8e…1b3286`
+guest pin. Its retained transaction is still `sipDisable` / `autologinIntent` /
+`previous`, with no normal-boot verification. The installed host remains signed
+`01cab9f` / `348f6003…6d1511b`. The exact matching public resume request began
+at 01:03:03Z; no pin or journal is manually reset. A successful resume must be
+followed by SIP enable and stopped-state verification. This is older-pinned-guest
+resume qualification, not a recreation of first-owner timing.
+
+The retained-fixture resume passed. Its initial native read was OFF, and the
+setter again proved the expected native owner, matching preference, and valid
+artifact at 01:04:09Z. Both owner-preference writes completed, followed by
+owner-completion and Setup Assistant receipts. The first desktop probe timed
+out at 01:05:18Z with `terminationRequested=true`; its host signal response
+arrived in 1,312.213292 ms. Unlike the fresh fixture's later console failure,
+this run subsequently passed desktop proof and entered authenticated Recovery
+at 01:05:46Z. Recovery navigation, second-attempt marker proof, mutation, and
+normal-boot verification succeeded. The public result reported disabled SIP,
+verified enforcement, and restored stopped state. Independent status confirmed
+the same UUID and original guest pin with no helper. This is successful
+retained-transaction compatibility, not a first-owner or signal-latency fix.
+The log follower was stopped; matching SIP enable began at 01:10:00Z to restore
+the fixture's original security configuration.
+
+The matching public SIP-enable request finished at 01:13:57Z with verified
+enabled enforcement, normal-boot verification, and `finalState=stopped`.
+Independent status at 02:45:48Z confirmed no helper, the unchanged VM UUID,
+and the original `2085cd8e…1b3286` agent pin. No persistent credential or
+security journal was manually changed. The earlier disable and matching enable
+therefore left this retained compatibility fixture stopped with SIP enabled.
+
+Two test-only characterizations cover the missing ordering boundaries. The
+real daemon test advances an injected logical foreground deadline at the next
+status-response write entry after both output channels were observed, then
+requires the correlated status response before exactly one foreground TERM,
+exact-job exit/EOF cleanup, and a successful next command on the same wire.
+The wire test times out status first, releases its late frame, and rejects that
+frame as the subsequent signal response for either stale request ID or wrong
+operation. The logical clock test does not delay a physical write; the raw wire
+test does not exercise the coordinator's connection invalidation. Their two
+focused suites passed 23 functions / 510 repeated runs, no failures or skips
+(`test_macos_2026-09-23T02-47-05-745Z_pid23166_a2dcb732.xcresult`). Neither
+test explains the multi-second live signal response. The live preference write
+status-1 failure remains a separate open issue.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
