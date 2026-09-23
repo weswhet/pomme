@@ -35,7 +35,7 @@ struct PommeAgentProcessExchangeTests: Sendable {
             let payload: JSONValue = .object(["path": .string("/bin/ps"), "arguments": .array([.string("-axo"), .string("uid=,comm=")])])
             let rejected = try await exchange(.request(operation: "process.start", payload: payload), using: context.wire)
             #expect(rejected.response.ok == false)
-            #expect(trace.withLock { $0.isEmpty })
+            #expect(trace.withLock { Array($0.prefix(2)) } == [.requestDecoded, .requestRejected])
             try await authenticate(using: context.wire)
             let reply = try await exchange(.request(operation: "process.start", payload: payload), using: context.wire)
             try #require(reply.response.ok == true)
@@ -48,9 +48,12 @@ struct PommeAgentProcessExchangeTests: Sendable {
             }
         }
         let events = trace.withLock { $0 }
-        #expect(Array(events.prefix(5)) == [.requestAccepted, .handlerEntered, .performReturned, .streamsEntered, .streamsReturned])
+        #expect(Array(events.prefix(10)) == [
+            .requestDecoded, .requestRejected, .responseWriteEntered, .responseWritten,
+            .requestDecoded, .requestAccepted, .handlerEntered, .performReturned, .streamsEntered, .streamsReturned
+        ])
         #expect(Array(events.suffix(2)) == [.responseWriteEntered, .responseWritten])
-        let writes = Array(events.dropFirst(5).dropLast(2))
+        let writes = Array(events.dropFirst(10).dropLast(2))
         #expect(writes.count.isMultiple(of: 2))
         for (index, event) in writes.enumerated() {
             #expect(event == (index.isMultiple(of: 2) ? .streamWriteEntered : .streamWritten))

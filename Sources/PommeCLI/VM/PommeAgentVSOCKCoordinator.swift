@@ -590,6 +590,8 @@ final class PommeAgentVSOCKWire: @unchecked Sendable {
                 ? PommeDesktopStartBoundaryTrace(sink: desktopStartTraceSink) : nil
             desktopTrace?.emit(.exchangeAdmitted)
             var desktopFailure = PommeDesktopStartBoundaryTrace.Event.writeFailed
+            var readState = PommeDesktopStartBoundaryTrace.Event.responseReadNoBytes
+            var receivedStreamFrame = false
             var failureEvent = PommeSignalBoundaryTrace.Event.hostWriteFailed
             do {
                 var noSigPipe: Int32 = 1
@@ -603,13 +605,14 @@ final class PommeAgentVSOCKWire: @unchecked Sendable {
                 var delivered = Data()
                 var receivedTerminalFrame = false
                 while !receivedTerminalFrame {
-                    let line = try readLine(deadline: deadline)
+                    let line = try readLine(deadline: deadline, readState: &readState)
                     let envelope = try PommeAgentProtocol.decode(line)
                     guard envelope.requestID == requestEnvelope.requestID else {
                         throw PommeAgentProtocol.Error.invalidResponse
                     }
                     switch envelope.kind {
                     case .stream:
+                        receivedStreamFrame = true
                         try append(line, to: &delivered)
                     case .response:
                         guard envelope.operation == requestEnvelope.operation else {
@@ -629,6 +632,12 @@ final class PommeAgentVSOCKWire: @unchecked Sendable {
             } catch {
                 trace?.emit(failureEvent)
                 desktopTrace?.emit(desktopFailure)
+                if desktopFailure == .responseFailed {
+                    // A validated correlated stream takes precedence over a
+                    // later partial frame. No payload, identifiers, or counts
+                    // escape through this closed diagnostic surface.
+                    desktopTrace?.emit(receivedStreamFrame ? .responseReadStreamFrames : readState)
+                }
                 throw error
             }
         }
@@ -654,15 +663,19 @@ final class PommeAgentVSOCKWire: @unchecked Sendable {
         }
     }
 
-    private func readLine(deadline: Date) throws -> Data {
+    private func readLine(deadline: Date, readState: inout PommeDesktopStartBoundaryTrace.Event) throws -> Data {
         while true {
             if let newline = buffered.firstIndex(of: 0x0A) {
+                readState = .responseReadCompleteFrame
                 let line = Data(buffered[..<newline])
                 buffered.removeSubrange(...newline)
                 guard !line.contains(0x0D) else { throw PommeAgentProtocol.Error.malformedFrame }
                 guard line.count < PommeAgentProtocol.maximumFrameBytes else { throw PommeAgentProtocol.Error.frameTooLarge }
                 return line
             }
+            // Includes bytes already buffered by an earlier socket read;
+            // this describes available wire data, not its request ownership.
+            if !buffered.isEmpty { readState = .responseReadPartialFrame }
             guard buffered.count < PommeAgentProtocol.maximumFrameBytes else { throw PommeAgentProtocol.Error.frameTooLarge }
             try wait(events: Int16(POLLIN), deadline: deadline)
             var bytes = [UInt8](repeating: 0, count: min(4_096, PommeAgentProtocol.maximumFrameBytes - buffered.count))
