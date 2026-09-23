@@ -4115,6 +4115,43 @@ matched its pinned SHA-256. The exact disposable clone was deleted. Its VM
 disk is not recoverable through Pomme; no external or unrelated VM was
 touched. A new clean clone is needed to test the status-1 preference path.
 
+Fresh internal `pomme-agent-ownerloop-clone26-20260922m` passed the same
+unprovisioned-template dry run and creation with 40 GB / 4 GB, UUID
+`0c728a3b-6736-4a55-809c-4b607d723d55`, plan digest
+`f95ce093caf846370d2dc0a8d7405f567d32e100b9c9e4675cc8922aeb52d437`,
+and exact pinned signed digest `efff5855…cda71ece6`. All twelve prior VMs
+were stopped and internal. The first SIP-disable attempt began at 10:05:32Z
+and passed the stock Setup Assistant handoff. At 10:07:00–03Z, before the
+first build-preference write, the user domain was `Reachable` and the GUI
+domain `Nonzero`; the unchanged write returned status 1 with generic
+`defaults`-shaped stderr. Immediate postfailure probes again found user
+`Reachable`, GUI `Nonzero`, expected Preferences owner/write/search mode,
+expected UID/HOME, owner `cfprefsd` present, stock-only Setup Assistant, and
+the target preference missing. The two domain prints added bounded timing
+before the write but did not suppress this failure.
+
+The existing single guarded normal reboot recovered. At 10:08:06Z, the same
+two prewrite domain labels (`Reachable` / `Nonzero`) preceded a successful
+build-preference write; MiniBuddy write and Setup Assistant completion also
+passed. The same labels also preceded clone-l's successful write. Thus the
+coarse `launchctl print` exit/completeness classifications do not distinguish
+failure from success; in particular, GUI-domain `Nonzero` cannot be used as
+a readiness gate or a cause claim. These observations do not rule out a
+transient CFPreferences service or other session condition hidden by this
+probe. No preference retry or security-policy change is justified.
+
+The subsequent desktop proof separately timed out on Aqua and then console
+agent transport, retained the pre-mutation SIP transaction, and restored
+stopped/no helper. Independent public `sip status` passed authenticated
+Recovery marker proof and reported verified `sipEnabled=true`,
+`sipDisabled=false`, complete cleanup, and final-state verification. The
+clone's UUID, plan, 40 GB / 4 GB resources, and signed pin were unchanged;
+the archived executable matched the exact pinned SHA-256. The stopped/no-
+helper disposable clone was deleted, so its VM disk is not recoverable through
+Pomme. Inventory returned to twelve VMs, all stopped and internal, with both
+clone-l and clone-m absent. No external-drive or unrelated VM was touched.
+The first-write status-1 issue and independent desktop timeout remain open.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
