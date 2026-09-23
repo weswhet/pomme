@@ -3235,6 +3235,36 @@ UUID/pin, and all 13 VMs stopped/internal. The original SIP posture is
 restored. The native first-write cause and the separate framebuffer lock
 cycle remain open.
 
+### Retained gen2 framebuffer observer lock-cycle candidate
+
+The clone-b creation hang above supplied a host sample: a private frame-update
+callback was blocked on the VNC presenter's unfair lock while the host's
+same-display `ensureFramebufferObserver` path synchronously called
+`associateVirtualMachine` and waited on the Virtualization accessor-manager
+queue. That is strong evidence for a lock/queue cycle, though the sample does
+not prove every intermittent hang takes the same path. The subsequent public
+`create --resume` succeeded without changing the journal, showing this is not
+permanent clone corruption.
+
+The candidate keeps the existing observer association for repeated captures
+of the same gen2 display instead of detaching, invalidating, and re-associating
+it. It renders the retained *live* IOSurface immediately, not a cached CGImage;
+source-generation validation discards a render if the presenter is replaced.
+First binding, changed displays, and gen1 retain their prior registration
+behavior. A missing surface still waits for a bounded callback and fails closed;
+this does not assert that an unannounced IOSurface replacement can be detected
+without a new callback.
+
+The new action-planning test failed against the old registration path (23 pass,
+one fail; `test_macos_2026-09-23T05-43-10-971Z_pid57160_bf2b5923.xcresult`).
+Focused tests then passed 25 functions / 27 invocations, covering retained
+registration, live pixel changes, source replacement during render, old-source
+callback rejection, and bounded no-surface behavior
+(`test_macos_2026-09-23T05-46-39-307Z_pid57777_ac8b86ca.xcresult`). The full
+suite passed 1,208 functions / 1,757 executions with zero failures or skips
+(`test_macos_2026-09-23T05-47-42-196Z_pid57979_b0f791dc.xcresult`). This
+qualifies a signed build; the native deadlock still needs live validation.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
