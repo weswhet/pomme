@@ -3660,6 +3660,58 @@ resolves `/Users/wes/.local/bin/pomme`; it reports `ad11333` and SHA-256
 All 104 CLI contract checks passed. This is still diagnostic-only; live
 first-owner reproduction is the next validation step.
 
+Fresh internal `pomme-agent-ownerloop-clone26-20260922g` passed the same
+40 GB / 4 GB template dry run and creation, with Recovery marker proof on
+attempt two and stopped/no-helper result. Its UUID is
+`7600e969-2b71-4a64-99c1-ad91371be6de`, plan digest
+`4af0fac46107f7947766c333d2e392ed524dbba023fdcae8998302a1143876c5`,
+and pinned new signed agent digest `f0bd7a92…5fd48`. The first-owner SIP-disable
+run began at 07:44:08Z with no intervening guest probe. It failed before
+owner completion because the native Setup Assistant Aqua session could not be
+verified during handoff, retaining `sipDisable/autologinIntent/previous` and
+restoring stopped/no helper. This earlier, distinct failure neither validates
+nor refutes the new transport trace; no start-exchange failure marker was
+observed on that run.
+
+A guarded public resume of the same transaction began at 07:47:04Z. It
+re-proved owner and login state, passed both preference writes and Setup
+Assistant completion by 07:48:16Z, then entered normal-desktop verification
+at 07:48:33Z. A private fixed-tag-only follower retained 76 closed helper
+markers across the subsequent boot. Several exact desktop starts completed;
+their response times rose from single-digit milliseconds to 249, 1,481,
+623, and 1,171 ms. At 07:49:10Z the next Aqua `process.start` exchange was
+admitted and its host request write completed in **0.058375 ms**. At
+07:49:15Z it emitted `responseFailed elapsedMs=5001.1345`, followed by the
+helper `boundary=start elapsedMs=5001 jobEstablished=false pollCount=0
+errorKind=agentTimeout`; the public cause was `stage=aqua,
+kind=agentOtherTimeout`. No replay or guessed job cleanup occurred. The
+command exited 1 and restored stopped/no helper with the journal still at
+`sipDisable/autologinIntent/previous`, before SIP mutation.
+
+After that failure, a separate normal inspection boot connected the exact
+pinned agent. A bounded guest Unified Logging query for 00:49:07–00:49:20
+local time (07:49:07–07:49:20Z) returned exit zero, complete and untruncated
+output but **no authenticated desktop-start boundary event**. Earlier
+successful starts had persisted ordered accept, handler, stream, and response
+write events through 00:49:01 local. A second complete, untruncated query
+for the existing signal/status boundary category found 116 events in the
+00:49:00–00:49:20 window; the last persisted event was
+`guestStatusStreamWritten` at 00:49:10.046 local with elapsed 0.635875 ms,
+without a matching later `guestStatusResponseWriteEntered` in that window.
+The fixed guest labels show no raw request, output, identity, or credential.
+These absences are consistent with a stalled or lost guest exchange after a
+prior status stream frame, but persisted-log loss, session transition, and
+cross-host clock alignment remain possible. They do not prove that the guest
+never received the start request or that its response write blocked.
+
+The inspection boot stopped gracefully. An independent public `sip status`
+passed authenticated Recovery marker proof on attempt two, reported verified
+`sipEnabled=true`, `sipDisabled=false`, complete cleanup, and final-state
+verification. A final bounded status-log inspection boot also stopped
+gracefully. Public inventory shows thirteen internal VMs, all stopped/no
+helper; clone-g remains at 40 GB / 4 GB with unchanged UUID, plan, agent pin,
+and retained pre-mutation journal. The transport root cause remains open.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
