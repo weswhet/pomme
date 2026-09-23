@@ -3543,6 +3543,29 @@ All 104 CLI contract checks passed. Four pre-existing PommeCore compiler
 warnings remain unrelated. The installed binary is diagnostic-only; no live
 owner workflow has been resumed on it yet.
 
+The retained internal `pomme-agent-ownerloop-clone26-20260922e` resumed its
+exact `sipDisable/autologinIntent/previous` transaction at 07:05:28Z on the
+new signed host CLI while keeping its archived `e45159a6…ff8c977` guest pin.
+Owner completion and Setup Assistant passed; the normal-desktop proof passed
+at 07:07:02Z without another transport failure or diagnostic marker. This is
+a non-reproduction under resumed-owner timing, not a transport fix. Authenticated
+Recovery passed Terminal marker proof on attempt two; SIP disable completed
+with normal-boot, runtime, enforcement, and final-state checks true, leaving
+the VM stopped/no helper. The matching guarded SIP enable then passed its own
+Recovery marker proof and the same checks, restoring the original enabled
+state and stopped state. The journal closed at
+`sipEnable/restorationComplete/previous`, with `normalBootVerified=true`.
+
+An independent public `sip status` in authenticated Recovery returned
+`sipEnabled=true`, `sipDisabled=false`, `verified=true`, full cleanup, and
+`finalStateVerified=true`. Public status separately confirmed the exact UUID
+`3e171384-4d95-4127-894c-dff4ba896ecd` stopped with no helper and unchanged
+40 GB / 4 GB resources. After checking its signed agent archive, the explicit
+disposable clone was deleted to reclaim internal space. Public inventory now
+shows twelve VMs, all stopped, none with a helper, and no clone-e entry;
+internal free space rose from 13 to 19 GiB. Its VM disk is not recoverable
+through Pomme. No external-drive VM or other retained VM was touched.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
