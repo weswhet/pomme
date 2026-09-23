@@ -270,6 +270,44 @@ struct PommeRecoveryProfileSelectorTests {
         #expect(input.committedInputCount == 5)
     }
 
+    @Test("the experimental direct Terminal route accepts Utilities without Language Chooser")
+    func directTerminalUtilitiesBranch() throws {
+        var input = try PommeRecoveryProfileSelector.inputForAttempt(for: experimentalEvidence)
+        #expect(input.route == .directTerminal)
+        let trace = input.route.eventTrace
+
+        for event in trace.prefix(2) {
+            let key = try input.authorize(
+                preEventFrames: [event.preEventFrame, event.preEventFrame]
+            )
+            try input.commit(
+                .init(key: key, deliveredEventCount: 1),
+                postEventFrames: [event.postEventFrame, event.postEventFrame]
+            )
+        }
+
+        let key = try input.authorize(
+            preEventFrames: [.startupOptionsActivated, .startupOptionsActivated]
+        )
+        #expect(key == .return)
+        try input.commit(
+            .init(key: key, deliveredEventCount: 1),
+            postEventFrames: [.recoveryUtilities, .recoveryUtilities]
+        )
+        #expect(input.committedInputCount == 3)
+
+        let terminalKey = try input.authorize(
+            preEventFrames: [.recoveryUtilities, .recoveryUtilities]
+        )
+        #expect(terminalKey == .shiftCommandT)
+        try input.commit(
+            .init(key: terminalKey, deliveredEventCount: 1),
+            postEventFrames: [.terminal, .terminal]
+        )
+        #expect(input.isComplete)
+        #expect(input.committedInputCount == 4)
+    }
+
     @Test("the direct Terminal route rejects wrong pre and post frames")
     func directTerminalRouteRejectsWrongFrames() throws {
         var preInput = PommeTahoeReviewedInput(route: .directTerminal)
