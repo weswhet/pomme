@@ -3532,6 +3532,17 @@ functions / 1,822 executions, zero failures or skips:
 `test_macos_2026-09-23T07-03-37-193Z_pid73329_211427e6.xcresult`.
 Signed live validation follows after committing this candidate.
 
+Candidate `39fadf0` was committed before the canonical signed Release build.
+The Developer ID signature, exact entitlements, Hardened Runtime,
+designated-requirement compatibility, pinned-agent preservation, and atomic
+installation checks passed. The installed CLI reports `39fadf0`, resolves in
+a fresh login shell to `/Users/wes/.local/bin/pomme`, and has SHA-256
+`85083e56fa2b8f91d5f05e5c21c2a09e15a183b37e4294860bb918940f658b75`.
+The prior `e45159a6…ff8c977` agent remains archived for the retained clone.
+All 104 CLI contract checks passed. Four pre-existing PommeCore compiler
+warnings remain unrelated. The installed binary is diagnostic-only; no live
+owner workflow has been resumed on it yet.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
