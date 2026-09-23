@@ -4646,6 +4646,40 @@ Fresh-login resolution finds `/Users/wes/.local/bin/pomme`, reporting
 All 104 installed-CLI contract checks passed. The prior signed agent archive
 was retained. A fresh same-resource clone is the live validation gate.
 
+Fresh internal-drive `pomme-agent-ownerloop-clone26-20260923t` was created
+from the same unprovisioned macOS 26.6.2/25G83 template with explicit 40 GB
+disk / 4 GB RAM and `--boot none`. Its UUID was
+`a5c51a96-9990-46d5-89c3-03201dfbc738`, creation plan digest
+`1c4a410e057cec5893866b45cdfc2871c2cdb44c316b47e8514d3ac9d9c076ba`,
+and creation-pinned signed agent digest exactly
+`c37725440b0e4c9793d051c1cf9418edebb6ef56cd556b0b31fdb052ba36812a`.
+The initial owner `defaults write` again exited 1 at 13:31:05Z. The new
+closed diagnostic reported `ownerWriteStderrWriteDomainFailed` for the
+expected Setup Assistant domain, while the strict post-failure read found
+the build preference absent. Expected owner UID/HOME/preferences metadata and
+owner `cfprefsd` were present, but those probes do not prove service readiness
+or the underlying reason for the native write-domain failure. One guarded
+reboot made the same build and MiniBuddy writes succeed at 13:32:10–12Z;
+Setup Assistant finish and the normal desktop verification then passed.
+
+The live workflow entered authenticated Recovery and completed `sip disable`.
+An independent `sip status --final-state stopped` at 13:39Z verified
+`sipDisabled=true`, `sipEnabled=false`, all six cleanup fields true, and the
+stopped final state. `sip enable` then configured SIP enabled, verified the
+configuration after a normal boot, and restored the stopped state at 13:43Z.
+A separate authenticated `sip status --final-state stopped` at 13:45Z
+verified `sipEnabled=true`, `sipDisabled=false`, all six cleanup fields true,
+and the stopped final state. Public status confirmed no helper and the same
+UUID, resources, and pin; the archived signed agent SHA-256 matched that pin.
+Only clone-t was deleted, making its disk unrecoverable through Pomme. Final
+inventory held the other twelve internal VMs stopped with no helpers.
+
+The new stderr classification is live-verified and narrows the native
+failure message to an exact domain-write rejection. It does **not** fix or
+explain the first-write failure, nor close the separate intermittent guest
+transport stall reproduced by clone-s. No write/retry/journal behavior was
+changed by this diagnostic release.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
