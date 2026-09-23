@@ -2715,6 +2715,40 @@ CLI reports `5c1a3c7` and SHA-256
 `c18de44fd7c28caeef9aab90ab7d1f119969796619f13847b22927a04f78ff1f`.
 This rebuild contains no further production behavior change after `01cab9f`.
 
+A read-only normal boot of the retained first-write failure fixture
+`pomme-agent-preferenceclass26-20260922a` checked guest unified-log events in
+the exact 00:46:40–00:46:52Z failure window. A bounded in-guest classifier
+returned only the log header (`total=1`) and zero `sudo`/`defaults`, permission,
+missing-file, write-failure, or directory-change matches. The command exited
+zero with complete output. There is no persisted system-log explanation for
+the write status 1 in that window. Graceful stop and independent status
+confirmed the unchanged UUID/pin and no helper. The next diagnostic must
+classify the failing command's own already-collected stderr at its result
+boundary; no raw stderr or account name should enter product diagnostics.
+
+The next diagnostic observes the existing first owner-preference write result.
+If that bounded native command returns nonzero, the host emits one fixed label:
+empty stderr, stderr beginning `sudo:`, stderr beginning `defaults:` or a native
+`defaults[...]` log header, or other stderr. The original status and failure
+path are unchanged. The trace never includes the message, account, preference
+value, or credential. It labels the observed prefix, not a proven error source.
+The existing write-entry label identifies build versus MiniBuddy; the new
+result label identifies the stderr shape after that entry. Synthetic tests
+exercise all five shapes and assert no injected message enters a trace.
+
+Before emission was added, the owner suite failed precisely at the missing
+classification after `ownerBuildPreferenceWriteEntered`: 81 functions passed,
+one new parameterized function failed
+(`test_macos_2026-09-23T02-52-37-834Z_pid24735_52367f85.xcresult`). The
+initial green candidate passed the new function but failed two prior exact
+trace assertions, which were updated to include the new fixed label. The
+focused owner/workflow suites then passed 110 functions / 1,950 repeated runs
+(`test_macos_2026-09-23T02-55-25-013Z_pid25232_facc0ab2.xcresult`). The
+full suite passed 1,201 functions, zero failures/skips
+(`test_macos_2026-09-23T02-56-03-970Z_pid25334_701370ea.xcresult`). This
+qualifies the diagnostic for commit and a signed build; it has not yet
+identified the native cause of the live status-1 write.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
