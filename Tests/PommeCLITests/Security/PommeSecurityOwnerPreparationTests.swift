@@ -400,6 +400,8 @@ struct PommeSecurityOwnerPreparationTests {
     "empty", "sudo", "defaultsLog", "defaultsPlain", "other",
     "domain", "domainPeriod", "domainHeader", "pair", "pairPeriod", "pairHeader",
     "wrongDomain", "wrongPairDomain", "wrongKey", "extraLine", "malformedHeader",
+    "writeDomain", "writeDomainHeader", "writeDomainInline", "failedDomain",
+    "writeWrongDomain", "writeExtraLine", "writeSensitiveSuffix",
   ])
   func ownerPreferenceWriteStderrClassification(mode: String) async throws {
     let fixture = OwnerPreparationFixture(existingOwner: true)
@@ -408,7 +410,24 @@ struct PommeSecurityOwnerPreparationTests {
     let domainMessage = "Domain com.apple.SetupAssistant does not exist"
     let pairMessage = "The domain/default pair of (com.apple.SetupAssistant, LastSeenBuddyBuildVersion) does not exist"
     let header = "2026-09-23 00:46:47.123 defaults[123:456]"
+    let writeMessage = "Could not write domain com.apple.SetupAssistant; exiting"
     switch mode {
+    case "writeDomain", "writeDomainHeader", "writeDomainInline":
+      stderr = (mode == "writeDomainHeader" ? header + "\n"
+        : mode == "writeDomainInline" ? header + " " : "") + writeMessage
+      expected = .ownerWriteStderrWriteDomainFailed
+    case "failedDomain":
+      stderr = "Failed to write domain com.apple.SetupAssistant"
+      expected = .ownerWriteStderrWriteDomainFailed
+    case "writeWrongDomain":
+      stderr = writeMessage.replacingOccurrences(of: "com.apple.SetupAssistant", with: "/Users/private-synthetic-sentinel")
+      expected = .ownerWriteStderrOther
+    case "writeExtraLine":
+      stderr = header + "\n" + writeMessage + "\nprivate-synthetic-sentinel"
+      expected = .ownerWriteStderrStartsDefaults
+    case "writeSensitiveSuffix":
+      stderr = writeMessage + " private-synthetic-sentinel"
+      expected = .ownerWriteStderrOther
     case "empty": stderr = ""; expected = .ownerWriteStderrEmpty
     case "sudo": stderr = "sudo: private-synthetic-sentinel\n"; expected = .ownerWriteStderrStartsSudo
     case "defaultsLog":
