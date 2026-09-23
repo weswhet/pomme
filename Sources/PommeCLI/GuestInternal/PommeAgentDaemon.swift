@@ -483,8 +483,10 @@ enum PommeAgentDaemon {
         oneShotCleanup: @escaping @Sendable () throws -> Void = {}
     ) async {
         let normalScope = agent.role == .persistent && allowedOperation == nil && !terminalAuthority
+        // Temporary guest logging is opt-in: the default sinks must not add
+        // OSLog observer latency to authenticated normal-agent exchanges.
         let serveTrace = normalScope
-            ? PommeAgentServeLoopTrace(sink: serveLoopTraceSink ?? PommeAgentServeLoopTrace.guestLog) : nil
+            ? PommeAgentServeLoopTrace(sink: serveLoopTraceSink ?? { _, _ in }) : nil
         serveTrace?.emit(.serveEntered)
         defer { serveTrace?.emit(.serveExited) }
         defer { connection.resetForReconnect() }
@@ -550,7 +552,7 @@ enum PommeAgentDaemon {
                 }
                 let request = decoded
                 let desktopStartTrace = normalScope && request.map(PommeDesktopStartBoundaryTrace.admits) == true
-                    ? PommeDesktopStartBoundaryTrace(sink: desktopStartTraceSink ?? PommeDesktopStartBoundaryTrace.guestLog)
+                    ? PommeDesktopStartBoundaryTrace(sink: desktopStartTraceSink ?? { _, _ in })
                     : nil
                 desktopStartTrace?.emit(.requestDecoded)
                 if let request,
@@ -575,7 +577,7 @@ enum PommeAgentDaemon {
                 if normalScope, request?.kind == .request, request?.operation == "process.signal" {
                     // Fixed decoded/admission events contain no request data,
                     // including when the connection has not authenticated.
-                    signalTrace = PommeSignalBoundaryTrace(sink: signalTraceSink ?? PommeSignalBoundaryTrace.guestLog)
+                    signalTrace = PommeSignalBoundaryTrace(sink: signalTraceSink ?? { _, _ in })
                     signalTrace?.emit(.guestSignalDecoded)
                 }
                 var handlerEntered = false
@@ -586,7 +588,7 @@ enum PommeAgentDaemon {
                     desktopStartTrace?.emit(.handlerEntered)
                     if normalScope, request.kind == .request, request.operation == "process.status" {
                         signalTrace = PommeSignalBoundaryTrace(
-                            sink: signalTraceSink ?? PommeSignalBoundaryTrace.guestLog, isStatus: true)
+                            sink: signalTraceSink ?? { _, _ in }, isStatus: true)
                     }
                     handlerEntered = true
                     let isStart = request.kind == .request && request.operation == "process.start"

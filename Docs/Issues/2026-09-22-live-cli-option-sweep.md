@@ -4723,6 +4723,28 @@ the same UUID, plan, resources, and pin. This validates the native-built host
 CLI against a retained guest but does not resolve the separate first-owner,
 transport, or owner-credential deletion observations.
 
+#### Quiet guest-trace diagnostic candidate
+
+The clone-s `process.status` stall ended at a guest actor-boundary notice:
+`statusEntered` was persisted, while the next notice before the small UUID
+parse returned was not. This is not proof that UUID parsing blocked: the
+temporary guest trace itself calls `Logger.notice` synchronously on several
+serve-loop, handler, start, and status boundaries. It could perturb scheduling
+or lose a later marker. The candidate replaces six production default/fallback
+guest trace sinks with no-op sinks while retaining every explicit injected
+test sink and the diagnostic `guestLog` functions for a separate build. Host
+wire traces remain enabled. No protocol response, timeout, retry, credential,
+process ownership, cleanup, or security rule changes.
+
+Native `xcodebuild test` passed the focused guest-exchange suite with 27 test
+functions / 62 executions, zero failures/skips (result
+`pomme-quiet-guest-native-20260923.xcresult`). The full native offline suite
+passed 1,243 functions / 1,900 executions with zero failures/skips or runtime
+warnings (`pomme-quiet-guest-native-full-20260923.xcresult`). This qualifies
+the diagnostic candidate for a signed Release and fresh-clone comparison; it
+does not establish that logging caused the intermittent transport stall or
+that the stall is fixed.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
