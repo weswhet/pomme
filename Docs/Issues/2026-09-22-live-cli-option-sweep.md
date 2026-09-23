@@ -4691,6 +4691,38 @@ status confirmed no helper. Public `delete --force` then refused with
 intact; no manual Keychain change or bypass was attempted. This is a separate
 deletion/credential observation, not a transport or preference-write result.
 
+### Native Xcode build-driver migration
+
+At the user's direction, commit `2af1634` removed the Pomme build/test
+dependency on the former wrapper and updated active instructions and historical
+command examples to native Xcode tooling. The signed local build now resolves
+`xcodebuild` through `xcrun`; its Developer ID identity, Release/arm64 build,
+Hardened Runtime, fixed identifier, timestamp, exact Virtualization entitlement,
+designated-requirement continuity, agent archive, and atomic install guards are
+unchanged. The offline installer regression passed all 23 checks, and the
+native `xcodebuild test` guest-exchange suite passed 27 functions / 62
+executions with no failures or skips (result
+`Test-pomme-2026.09.23_08-09-58--0700.xcresult`).
+
+The native signed Release build succeeded and installed to
+`/Users/wes/.local/bin/pomme`. Fresh-login resolution found that path;
+`--version` reported `2af1634`, and the installed SHA-256 was
+`ab07dec6fc7c1a84b8ce5b6cb6599cffafb85c6f7b83ef2505833e0d40942142`.
+The script verified its signature, exact entitlement, designated-requirement
+compatibility with the prior installed CLI, archived both signed agents, and
+all 104 installed-CLI contracts passed.
+
+Live smoke verification used the existing internal macOS 27.0/26A428
+`pomme-agent-ownerproof-20260922a` at its unchanged 40 GB / 4 GB settings.
+Before start it was stopped/no helper, and the archived creation-pinned agent
+matched `011eea30cd2a4f48164332e062f05ecd8dd70417b30ad05603befa3495ce42f2`.
+The new host CLI started normal macOS, authenticated that exact pinned agent,
+and completed `/usr/bin/true` with exit 0. Graceful stop reported
+`stopMethod=guest-stopped`; independent status restored stopped/no helper with
+the same UUID, plan, resources, and pin. This validates the native-built host
+CLI against a retained guest but does not resolve the separate first-owner,
+transport, or owner-credential deletion observations.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
