@@ -2631,6 +2631,34 @@ and pin, and retained `sipDisable` / `autologinIntent` / `previous` journal.
 No SIP-enable restoration is needed. This signal/transport failure remains
 open; the successful login recovery is not claimed as a complete SIP-cycle fix.
 
+After committing that outcome, a scoped inspection boot began at 00:51:12Z
+on the same fixture and authenticated the unchanged pinned normal agent.
+Guest Unified Logging queries emitted only the fixed trace label, event enum,
+elapsed time, and timestamp. The failure boot retained 363 closed status events
+between 00:48:22.843Z and 00:48:48.200Z. Its final persisted exchange recorded
+handler entry, perform return, stream collection, and response-write entry
+(1.005875 ms), but no matching response-written event. Earlier status exchanges
+had substantial delays, including an observed 1,087.17775 ms response. This
+narrows the final persisted boundary; it does not prove the write blocked or
+that subsequent log entries were never emitted.
+
+A bounded `/bin/sleep 10` control with a one-second foreground timeout at
+00:53:46Z returned expected exit 124 and `terminationRequested=true`. Its host
+signal write completed in 0.197042 ms and response in 1.673458 ms. The complete
+guest signal trace contained seven events, from decoded request to written
+response at 0.847958 ms, with no stream frame during that exchange. This is
+signal-path calibration, not child-reaping proof. An initial narrower filter
+selected only `guestSignal*` names; the corrected filter excludes `guestStatus*`
+and includes the generic signal-handler event names. The complete failure-window
+query and corrected signal query found no persisted signal events for 00:48:48Z.
+That absence remains compatible with lost log entries across the failed boot.
+
+The signal follower was stopped, no security operation was resumed, and graceful
+stop began at 00:56:44Z with `stopMethod=guest-stopped`. Independent checks at
+00:57:27Z confirmed all thirteen internal VMs stopped/no helpers and unchanged
+target UUID, startup volume, plan, guest pin, resources, and retained security
+journal. No persistent credential, pin, or journal was manually rewritten.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
