@@ -511,7 +511,7 @@ private final class PommeVirtualizationVSOCKTransport: NSObject, PommeAgentVSOCK
     }
 
     func install(port: UInt32, accept: @escaping @Sendable (any PommeAgentVSOCKConnection) -> Void) throws {
-        let delegate = PommeVirtualizationVSOCKListenerDelegate(accept: accept)
+        let delegate = PommeVirtualizationVSOCKListenerDelegate(normalScope: port == PommeAgentPort.persistentNormal, accept: accept)
         let listener = VZVirtioSocketListener()
         listener.delegate = delegate
         lock.withLock {
@@ -535,11 +535,15 @@ private final class PommeVirtualizationVSOCKTransport: NSObject, PommeAgentVSOCK
 
 private final class PommeVirtualizationVSOCKListenerDelegate: NSObject, VZVirtioSocketListenerDelegate, @unchecked Sendable {
     private let accept: @Sendable (any PommeAgentVSOCKConnection) -> Void
+    private let normalScope: Bool
 
-    init(accept: @escaping @Sendable (any PommeAgentVSOCKConnection) -> Void) { self.accept = accept }
+    init(normalScope: Bool, accept: @escaping @Sendable (any PommeAgentVSOCKConnection) -> Void) {
+        self.normalScope = normalScope
+        self.accept = accept
+    }
 
     func listener(_ listener: VZVirtioSocketListener, shouldAcceptNewConnection connection: VZVirtioSocketConnection, from socketDevice: VZVirtioSocketDevice) -> Bool {
-        accept(PommeVirtualizationVSOCKConnection(connection: connection))
+        accept(PommeVirtualizationVSOCKConnection(connection: connection, normalScope: normalScope))
         return true
     }
 }
@@ -548,9 +552,9 @@ private final class PommeVirtualizationVSOCKConnection: @unchecked Sendable, Pom
     private let connection: VZVirtioSocketConnection
     private let wire: PommeAgentVSOCKWire
 
-    init(connection: VZVirtioSocketConnection) {
+    init(connection: VZVirtioSocketConnection, normalScope: Bool) {
         self.connection = connection
-        wire = .init(fileDescriptor: connection.fileDescriptor)
+        wire = .init(fileDescriptor: connection.fileDescriptor, normalScope: normalScope)
     }
 
     func exchange(_ request: Data, timeout: TimeInterval) async throws -> Data {
@@ -568,12 +572,17 @@ final class PommeAgentVSOCKWire: @unchecked Sendable {
     private var buffered = Data()
     private let signalTraceSink: PommeSignalBoundaryTrace.Sink
     private let desktopStartTraceSink: PommeDesktopStartBoundaryTrace.Sink
+    private let statusTraceSink: PommeStatusWireTrace.Sink
+    private let normalScope: Bool
 
     init(fileDescriptor: Int32, signalTraceSink: PommeSignalBoundaryTrace.Sink? = nil,
-         desktopStartTraceSink: PommeDesktopStartBoundaryTrace.Sink? = nil) {
+         desktopStartTraceSink: PommeDesktopStartBoundaryTrace.Sink? = nil,
+         statusTraceSink: PommeStatusWireTrace.Sink? = nil, normalScope: Bool = true) {
         self.fileDescriptor = fileDescriptor
         self.signalTraceSink = signalTraceSink ?? PommeSignalBoundaryTrace.hostLog
         self.desktopStartTraceSink = desktopStartTraceSink ?? PommeDesktopStartBoundaryTrace.hostLog
+        self.statusTraceSink = statusTraceSink ?? PommeStatusWireTrace.hostLog
+        self.normalScope = normalScope
     }
 
     func exchange(_ request: Data, timeout: TimeInterval) throws -> Data {
@@ -589,6 +598,9 @@ final class PommeAgentVSOCKWire: @unchecked Sendable {
             let desktopTrace = PommeDesktopStartBoundaryTrace.admits(requestEnvelope)
                 ? PommeDesktopStartBoundaryTrace(sink: desktopStartTraceSink) : nil
             desktopTrace?.emit(.exchangeAdmitted)
+            let statusTrace = normalScope && requestEnvelope.kind == .request && requestEnvelope.operation == "process.status"
+                ? PommeStatusWireTrace(sink: statusTraceSink) : nil
+            statusTrace?.emit(.exchangeAdmitted)
             var desktopFailure = PommeDesktopStartBoundaryTrace.Event.writeFailed
             var readState = PommeDesktopStartBoundaryTrace.Event.responseReadNoBytes
             var receivedStreamFrame = false
@@ -600,6 +612,7 @@ final class PommeAgentVSOCKWire: @unchecked Sendable {
                 try writeAll(request, deadline: deadline)
                 trace?.emit(.hostWriteCompleted)
                 desktopTrace?.emit(.writeCompleted)
+                statusTrace?.emit(.writeCompleted)
                 desktopFailure = .responseFailed
                 failureEvent = .hostResponseFailed
                 var delivered = Data()
@@ -621,6 +634,7 @@ final class PommeAgentVSOCKWire: @unchecked Sendable {
                         try append(line, to: &delivered)
                         trace?.emit(.hostResponseReceived)
                         desktopTrace?.emit(.responseReceived)
+                        statusTrace?.emit(.responseReceived)
                         receivedTerminalFrame = true
                     case .request: throw PommeAgentProtocol.Error.invalidResponse
                     }
@@ -632,11 +646,13 @@ final class PommeAgentVSOCKWire: @unchecked Sendable {
             } catch {
                 trace?.emit(failureEvent)
                 desktopTrace?.emit(desktopFailure)
+                statusTrace?.emit(desktopFailure)
                 if desktopFailure == .responseFailed {
                     // A validated correlated stream takes precedence over a
                     // later partial frame. No payload, identifiers, or counts
                     // escape through this closed diagnostic surface.
                     desktopTrace?.emit(receivedStreamFrame ? .responseReadStreamFrames : readState)
+                    statusTrace?.emit(receivedStreamFrame ? .responseReadStreamFrames : readState)
                 }
                 throw error
             }
