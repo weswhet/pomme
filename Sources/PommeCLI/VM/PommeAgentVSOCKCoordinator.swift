@@ -567,10 +567,13 @@ final class PommeAgentVSOCKWire: @unchecked Sendable {
     private let lock = NSLock()
     private var buffered = Data()
     private let signalTraceSink: PommeSignalBoundaryTrace.Sink
+    private let desktopStartTraceSink: PommeDesktopStartBoundaryTrace.Sink
 
-    init(fileDescriptor: Int32, signalTraceSink: PommeSignalBoundaryTrace.Sink? = nil) {
+    init(fileDescriptor: Int32, signalTraceSink: PommeSignalBoundaryTrace.Sink? = nil,
+         desktopStartTraceSink: PommeDesktopStartBoundaryTrace.Sink? = nil) {
         self.fileDescriptor = fileDescriptor
         self.signalTraceSink = signalTraceSink ?? PommeSignalBoundaryTrace.hostLog
+        self.desktopStartTraceSink = desktopStartTraceSink ?? PommeDesktopStartBoundaryTrace.hostLog
     }
 
     func exchange(_ request: Data, timeout: TimeInterval) throws -> Data {
@@ -583,6 +586,10 @@ final class PommeAgentVSOCKWire: @unchecked Sendable {
             let trace = requestEnvelope.kind == .request && requestEnvelope.operation == "process.signal"
                 ? PommeSignalBoundaryTrace(sink: signalTraceSink) : nil
             trace?.emit(.hostExchangeAdmitted)
+            let desktopTrace = PommeDesktopStartBoundaryTrace.admits(requestEnvelope)
+                ? PommeDesktopStartBoundaryTrace(sink: desktopStartTraceSink) : nil
+            desktopTrace?.emit(.exchangeAdmitted)
+            var desktopFailure = PommeDesktopStartBoundaryTrace.Event.writeFailed
             var failureEvent = PommeSignalBoundaryTrace.Event.hostWriteFailed
             do {
                 var noSigPipe: Int32 = 1
@@ -590,6 +597,8 @@ final class PommeAgentVSOCKWire: @unchecked Sendable {
                                         socklen_t(MemoryLayout<Int32>.size)) == 0 else { try throwPOSIX("vsock setsockopt") }
                 try writeAll(request, deadline: deadline)
                 trace?.emit(.hostWriteCompleted)
+                desktopTrace?.emit(.writeCompleted)
+                desktopFailure = .responseFailed
                 failureEvent = .hostResponseFailed
                 var delivered = Data()
                 var receivedTerminalFrame = false
@@ -608,6 +617,7 @@ final class PommeAgentVSOCKWire: @unchecked Sendable {
                         }
                         try append(line, to: &delivered)
                         trace?.emit(.hostResponseReceived)
+                        desktopTrace?.emit(.responseReceived)
                         receivedTerminalFrame = true
                     case .request: throw PommeAgentProtocol.Error.invalidResponse
                     }
@@ -618,6 +628,7 @@ final class PommeAgentVSOCKWire: @unchecked Sendable {
                 return delivered
             } catch {
                 trace?.emit(failureEvent)
+                desktopTrace?.emit(desktopFailure)
                 throw error
             }
         }

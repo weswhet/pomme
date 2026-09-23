@@ -3625,6 +3625,32 @@ Public inventory now shows twelve VMs, all stopped/no helper, no clone-f;
 internal free space rose from 16 to 19 GiB. Its VM disk is not recoverable
 through Pomme. No external-drive VM or unrelated VM was removed.
 
+The paired diagnostic candidate now emits the temporary
+`[DEBUG-desktop-start-boundary-20260923]` tag only for an exact desktop
+`process.start` request. The host VSOCK wire marks exchange admission,
+request-write completion/failure, and correlated response receipt/failure.
+The authenticated persistent guest marks request acceptance, handler return
+or failure, stream collection and frame-write boundaries, and response-write
+entry/completion/failure. Each record has a fixed event name and local elapsed
+time only; host and guest clocks are not compared as if synchronized. Recovery,
+unauthenticated requests, ordinary process starts, and altered desktop
+payloads do not opt in. No error propagation, timeout, retry, process cleanup,
+or security decision changes; an uncertain start is never replayed. A missing
+guest event may still reflect log loss rather than absence of guest activity.
+
+The focused XcodeBuildMCP wire and real-daemon suites passed 27 test functions
+/ 56 executions with zero failures or skips:
+`test_macos_2026-09-23T07-37-15-520Z_pid80370_0a5c4280.xcresult`.
+They cover exact gates, a peer withholding a response while preserving the
+original timeout, authenticated guest event ordering, unauthenticated silence,
+Recovery exclusion, and existing signal/status behavior. An initial focused
+run found a test cleanup mistake (`process.wait` requires a detached job),
+which was corrected using the existing foreground-child cleanup helper; it
+did not expose a production failure. The full XcodeBuildMCP suite passed
+1,217 test functions / 1,827 executions, zero failures or skips:
+`test_macos_2026-09-23T07-38-14-260Z_pid80612_51dbdf74.xcresult`.
+The candidate still needs a signed Release build and fresh internal live test.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns

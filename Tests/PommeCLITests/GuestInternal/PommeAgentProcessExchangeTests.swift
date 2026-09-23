@@ -9,6 +9,54 @@ import Synchronization
 /// cross-test concurrency.
 @Suite("Pomme agent process exchanges", .serialized)
 struct PommeAgentProcessExchangeTests: Sendable {
+    @Test("Recovery desktop start does not opt into normal boundary diagnostics")
+    func recoveryExcludesDesktopStartBoundaries() async throws {
+        let trace = Mutex<[PommeDesktopStartBoundaryTrace.Event]>([])
+        let agent = try PommeAgent(role: .recovery, executableSHA256: String(repeating: "a", count: 64))
+        try await withDaemon(agent: agent, desktopStartTraceSink: { event, _ in trace.withLock { $0.append(event) } }) { context in
+            try await authenticate(using: context.wire)
+            let reply = try await exchange(.request(operation: "process.start", payload: .object([
+                "path": .string("/bin/ps"), "arguments": .array([.string("-axo"), .string("uid=,comm=")])])), using: context.wire)
+            if let jobID = reply.response.result?.objectValue?["jobID"]?.stringValue {
+                if !reply.streams.contains(where: { $0.frame.stream == .exit }) {
+                    let cleaned = try await finishSignalTraceChild(agent: agent, jobID: jobID, terminate: false)
+                    #expect(cleaned)
+                }
+            }
+        }
+        #expect(trace.withLock { $0.isEmpty })
+    }
+
+    @Test("Authenticated normal desktop start emits ordered closed guest boundaries")
+    func desktopStartBoundaries() async throws {
+        let trace = Mutex<[PommeDesktopStartBoundaryTrace.Event]>([])
+        let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64))
+        try await withDaemon(agent: agent, desktopStartTraceSink: { event, _ in trace.withLock { $0.append(event) } }) { context in
+            let payload: JSONValue = .object(["path": .string("/bin/ps"), "arguments": .array([.string("-axo"), .string("uid=,comm=")])])
+            let rejected = try await exchange(.request(operation: "process.start", payload: payload), using: context.wire)
+            #expect(rejected.response.ok == false)
+            #expect(trace.withLock { $0.isEmpty })
+            try await authenticate(using: context.wire)
+            let reply = try await exchange(.request(operation: "process.start", payload: payload), using: context.wire)
+            try #require(reply.response.ok == true)
+            let jobID = try #require(reply.response.result?.objectValue?["jobID"]?.stringValue)
+            // An exit stream proves reaping; otherwise drain the short-lived
+            // child before closing the daemon fixture.
+            if !reply.streams.contains(where: { $0.frame.stream == .exit }) {
+                let cleaned = try await finishSignalTraceChild(agent: agent, jobID: jobID, terminate: false)
+                #expect(cleaned)
+            }
+        }
+        let events = trace.withLock { $0 }
+        #expect(Array(events.prefix(5)) == [.requestAccepted, .handlerEntered, .performReturned, .streamsEntered, .streamsReturned])
+        #expect(Array(events.suffix(2)) == [.responseWriteEntered, .responseWritten])
+        let writes = Array(events.dropFirst(5).dropLast(2))
+        #expect(writes.count.isMultiple(of: 2))
+        for (index, event) in writes.enumerated() {
+            #expect(event == (index.isMultiple(of: 2) ? .streamWriteEntered : .streamWritten))
+        }
+    }
+
     @Test("Real daemon foreground timeout signal integration characterization", .serialized, arguments: 0..<20)
     func foregroundTimeoutSignalCharacterization(iteration: Int) async throws {
         _ = iteration
@@ -890,6 +938,7 @@ struct PommeAgentProcessExchangeTests: Sendable {
         agent suppliedAgent: PommeAgent? = nil,
         beforeServing: (@Sendable () async -> Void)? = nil,
         signalTraceSink: PommeSignalBoundaryTrace.Sink? = nil,
+        desktopStartTraceSink: PommeDesktopStartBoundaryTrace.Sink? = nil,
         body: @Sendable (DaemonContext) async throws -> R
     ) async throws -> R {
         var sockets: [Int32] = [-1, -1]
@@ -916,7 +965,8 @@ struct PommeAgentProcessExchangeTests: Sendable {
                 connection: connection,
                 agent: agent,
                 allowedOperation: nil,
-                signalTraceSink: signalTraceSink
+                signalTraceSink: signalTraceSink,
+                desktopStartTraceSink: desktopStartTraceSink
             )
         }
 

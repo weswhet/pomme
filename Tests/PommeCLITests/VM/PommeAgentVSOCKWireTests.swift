@@ -5,6 +5,49 @@ import Synchronization
 
 @Suite("Pomme agent VSOCK wire")
 struct PommeAgentVSOCKWireTests {
+    @Test("Desktop start boundary gate requires the exact request and proof payload")
+    func desktopStartGate() {
+        let payload: [String: JSONValue] = ["path": .string("/bin/ps"), "arguments": .array([.string("-axo"), .string("uid=,comm=")])]
+        #expect(PommeDesktopStartBoundaryTrace.admits(.request(operation: "process.start", payload: .object(payload))))
+        for key in ["path", "arguments", "environment", "detached"] {
+            var changed = payload
+            changed[key] = key == "detached" ? .bool(true) : .string("altered")
+            #expect(!PommeDesktopStartBoundaryTrace.admits(.request(operation: "process.start", payload: .object(changed))))
+        }
+        #expect(!PommeDesktopStartBoundaryTrace.admits(.request(operation: "process.status", payload: .object(payload))))
+        #expect(!PommeDesktopStartBoundaryTrace.admits(.init(kind: .stream, requestID: UUID(), operation: "process.start", payload: .object(payload))))
+        for event in PommeDesktopStartBoundaryTrace.Event.allCases {
+            #expect(PommeDesktopStartBoundaryTrace.message(event, elapsedMilliseconds: 1.25)
+                == "[DEBUG-desktop-start-boundary-20260923] \(event.rawValue) elapsedMs=1.25")
+        }
+    }
+
+    @Test("Desktop start withholding its response preserves the exchange timeout", arguments: [false, true])
+    func desktopStartResponseBoundary(withhold: Bool) throws {
+        let trace = Mutex<[(PommeDesktopStartBoundaryTrace.Event, Double)]>([])
+        let request = PommeAgentProtocol.Envelope.request(operation: "process.start", payload: .object([
+            "path": .string("/bin/ps"), "arguments": .array([.string("-axo"), .string("uid=,comm=")])]))
+        let finished = DispatchSemaphore(value: 0)
+        try Self.withWire(desktopStartTraceSink: { event, elapsed in trace.withLock { $0.append((event, elapsed)) } }, peer: { descriptor in
+            guard try Self.readEnvelope(from: descriptor) == request else { throw WireTestError.unexpectedRequest }
+            if !withhold { try Self.writeAll(try PommeAgentProtocol.encode(.response(to: request, result: .object([:]))), to: descriptor) }
+            guard finished.wait(timeout: .now() + .seconds(5)) == .success else { throw WireTestError.peerTimedOut }
+        }) { wire in
+            defer { finished.signal() }
+            do {
+                _ = try wire.exchange(try PommeAgentProtocol.encode(request), timeout: withhold ? 0.1 : 2)
+                #expect(!withhold)
+            } catch RunnerError.guestAgentTimedOut(let operation) {
+                #expect(withhold)
+                #expect(operation == "Pomme agent exchange")
+            }
+        }
+        let events = trace.withLock { $0 }
+        #expect(events.map(\.0) == [.exchangeAdmitted, .writeCompleted, withhold ? .responseFailed : .responseReceived])
+        #expect(events.allSatisfy { $0.1.isFinite && $0.1 >= 0 })
+        #expect(events.map(\.1) == events.map(\.1).sorted())
+    }
+
     @Test("A late status response cannot complete a subsequent signal exchange", arguments: [false, true])
     func lateStatusResponseRejectsSignal(operationMismatchOnly: Bool) throws {
         let status = PommeAgentProtocol.Envelope.request(operation: "process.status")
@@ -339,13 +382,15 @@ struct PommeAgentVSOCKWireTests {
 
     private static func withWire<T>(
         signalTraceSink: PommeSignalBoundaryTrace.Sink? = nil,
+        desktopStartTraceSink: PommeDesktopStartBoundaryTrace.Sink? = nil,
         peer operation: @escaping @Sendable (Int32) throws -> Void,
         _ body: (PommeAgentVSOCKWire) throws -> T
     ) throws -> T {
         let sockets = try makeSocketPair()
         let peer = PeerThread(fileDescriptor: sockets.peer)
         peer.start { try operation(sockets.peer) }
-        let wire = PommeAgentVSOCKWire(fileDescriptor: sockets.client, signalTraceSink: signalTraceSink)
+        let wire = PommeAgentVSOCKWire(fileDescriptor: sockets.client, signalTraceSink: signalTraceSink,
+                                       desktopStartTraceSink: desktopStartTraceSink)
         do {
             let value = try body(wire)
             try peer.join()

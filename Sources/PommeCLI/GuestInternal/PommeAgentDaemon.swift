@@ -68,6 +68,44 @@ struct PommeSignalBoundaryTrace: Sendable {
     }
 }
 
+/// Closed desktop-start events with elapsed time local to this exchange.
+struct PommeDesktopStartBoundaryTrace: Sendable {
+    enum Event: String, CaseIterable, Sendable {
+        case exchangeAdmitted, writeCompleted, writeFailed, responseReceived, responseFailed
+        case requestAccepted, handlerEntered, performReturned, performFailed
+        case streamsEntered, streamsReturned, streamsFailed
+        case streamWriteEntered, streamWritten, streamWriteFailed
+        case responseWriteEntered, responseWritten, responseWriteFailed
+    }
+
+    typealias Sink = @Sendable (Event, Double) -> Void
+    private static let logger = Logger(subsystem: "com.github.weswhet.pomme", category: "desktop-start-boundary")
+    private let started = ContinuousClock.now
+    let sink: Sink
+
+    static func admits(_ request: PommeAgentProtocol.Envelope) -> Bool {
+        request.kind == .request && request.operation == "process.start"
+            && request.payload.objectValue.map(PommeForegroundExecution.isDesktopProofPayload) == true
+    }
+
+    func emit(_ event: Event) {
+        let elapsed = started.duration(to: .now).components
+        sink(event, Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15)
+    }
+
+    static func message(_ event: Event, elapsedMilliseconds: Double) -> String {
+        "[DEBUG-desktop-start-boundary-20260923] \(event.rawValue) elapsedMs=\(elapsedMilliseconds)"
+    }
+
+    static func guestLog(_ event: Event, _ elapsed: Double) {
+        logger.notice("\(message(event, elapsedMilliseconds: elapsed), privacy: .public)")
+    }
+
+    static func hostLog(_ event: Event, _ elapsed: Double) {
+        PommeCore.log(message(event, elapsedMilliseconds: elapsed))
+    }
+}
+
 /// Guest-side entrypoint for the launchd daemon.  The host publishes the
 /// VSOCK service; this process uses the same guest-to-host connection shape as
 /// the baseline runtime and never exposes an unauthenticated listening port.
@@ -366,6 +404,7 @@ enum PommeAgentDaemon {
         allowedOperation: String? = nil,
         terminalAuthority: Bool = false,
         signalTraceSink: PommeSignalBoundaryTrace.Sink? = nil,
+        desktopStartTraceSink: PommeDesktopStartBoundaryTrace.Sink? = nil,
         oneShotCleanup: @escaping @Sendable () throws -> Void = {}
     ) async {
         defer { connection.resetForReconnect() }
@@ -431,6 +470,7 @@ enum PommeAgentDaemon {
                     }
                 }
                 var signalTrace: PommeSignalBoundaryTrace?
+                var desktopStartTrace: PommeDesktopStartBoundaryTrace?
                 let normalScope = agent.role == .persistent && allowedOperation == nil && !terminalAuthority
                 if normalScope, request?.kind == .request, request?.operation == "process.signal" {
                     // Fixed decoded/admission events contain no request data,
@@ -442,6 +482,14 @@ enum PommeAgentDaemon {
                 let response = await connection.receive(line) { request in
                     // receive invokes this handler only after authentication
                     // and credential/replay checks. Recovery never opts in.
+                    if normalScope, PommeDesktopStartBoundaryTrace.admits(request) {
+                        // Acceptance is after authentication, not a socket-read
+                        // or decoding timestamp.
+                        desktopStartTrace = PommeDesktopStartBoundaryTrace(
+                            sink: desktopStartTraceSink ?? PommeDesktopStartBoundaryTrace.guestLog)
+                        desktopStartTrace?.emit(.requestAccepted)
+                        desktopStartTrace?.emit(.handlerEntered)
+                    }
                     if normalScope, request.kind == .request, request.operation == "process.status" {
                         signalTrace = PommeSignalBoundaryTrace(
                             sink: signalTraceSink ?? PommeSignalBoundaryTrace.guestLog, isStatus: true)
@@ -450,10 +498,12 @@ enum PommeAgentDaemon {
                     signalTrace?.emit(.guestHandlerEntered)
                     do {
                         let result = try await agent.performAsynchronously(request)
+                        desktopStartTrace?.emit(.performReturned)
                         signalTrace?.emit(.guestPerformReturned)
                         if allowedOperation != nil && !terminalAuthority { try oneShotCleanup() }
                         return result
                     } catch {
+                        desktopStartTrace?.emit(.performFailed)
                         signalTrace?.emit(.guestPerformFailed)
                         if allowedOperation != nil && !terminalAuthority { try? oneShotCleanup() }
                         throw error
@@ -481,30 +531,38 @@ enum PommeAgentDaemon {
                    responseEnvelope.ok == true,
                    let jobID = processJobID(request: request, response: responseEnvelope) {
                     signalTrace?.emit(.guestStreamsEntered)
+                    desktopStartTrace?.emit(.streamsEntered)
                     let events = try? await processEvents(
                         request: request,
                         jobID: jobID,
                         agent: agent
                     )
                     signalTrace?.emit(events == nil ? .guestStreamsFailed : .guestStreamsReturned)
+                    desktopStartTrace?.emit(events == nil ? .streamsFailed : .streamsReturned)
                     for event in events ?? [] {
                         let frame = PommeAgentJobStreamFrame(jobID: jobID, frame: event)
                         signalTrace?.emit(.guestStreamWriteEntered)
+                        desktopStartTrace?.emit(.streamWriteEntered)
                         guard let encoded = try? PommeAgentProtocol.encode(frame.envelope()),
                               writeAll(descriptor: descriptor, data: encoded)
                         else {
                             signalTrace?.emit(.guestStreamWriteFailed)
+                            desktopStartTrace?.emit(.streamWriteFailed)
                             return
                         }
                         signalTrace?.emit(.guestStreamWritten)
+                        desktopStartTrace?.emit(.streamWritten)
                     }
                 }
                 signalTrace?.emit(.guestResponseWriteEntered)
+                desktopStartTrace?.emit(.responseWriteEntered)
                 guard !response.isEmpty, writeAll(descriptor: descriptor, data: response) else {
                     signalTrace?.emit(.guestResponseWriteFailed)
+                    desktopStartTrace?.emit(.responseWriteFailed)
                     return
                 }
                 signalTrace?.emit(.guestResponseWritten)
+                desktopStartTrace?.emit(.responseWritten)
                 if let request,
                    request.kind == .request,
                    request.operation != "authenticate",
