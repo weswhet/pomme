@@ -3014,6 +3014,20 @@ status after failure was stopped/no helper with the same UUID and agent pin.
 The retained journal is `sipDisable/autologinIntent/previous`, original run
 state stopped, `normalBootVerified=false`; Recovery SIP has not been mutated.
 
+One exact public resume began at 04:14:51Z. The owner evidence, verified
+automatic-login readback, and normal desktop proof passed by 04:16:31Z;
+this retry did not reproduce the process-list transport failure either.
+Recovery started at 04:17:02Z. Navigation later reported an observation
+timeout at 04:22:20Z with `expected=languageEnglish` and
+`lastObserved=recoveryUtilities`, then returned the retained-operation error
+at 04:22:50Z. The journal remains `sipDisable/securityMutationIntent/previous`,
+original run state stopped and `normalBootVerified=false`; public status is
+stopped/no helper with unchanged UUID and pinned agent digest. The timeout
+occurred before Terminal/security-command evidence, so a matching SIP-enable
+operation has **not** been run. The retained transaction must be resumed or
+resolved through the public workflow; this is a separate Recovery navigation
+observation issue, not evidence that the desktop classifier found a cause.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
