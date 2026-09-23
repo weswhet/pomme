@@ -4553,6 +4553,57 @@ intermittent normal-agent transport timeout, first owner preference-write
 failure, abrupt-signal cleanup gap, and possibility of an in-process Vision
 thread remaining blocked after a bounded caller timeout remain open.
 
+#### Normal-agent transport reproduction under the signed OCR build
+
+The guest serve-loop markers requested for the transport investigation were
+already present in signed `771b061` (introduced with the earlier normal-agent
+trace), with fixed event labels, monotonic local elapsed times, and strict
+normal persistent-agent scope. No duplicate code change or rebuild was needed.
+
+Fresh internal `pomme-agent-ownerloop-clone26-20260923s` was created from the
+same unprovisioned macOS 26.6.2/25G83 template at 40 GB / 4 GB and stopped
+final state, with UUID `7dbe37a2-4d98-47de-ac28-ac3681640ac4`, plan
+`b0eabe18f6b452a1023a71df5aa718f61fa27c95b2731be902462ff9b7b62c63`,
+and exact pinned signed agent digest `e7f7ee02…d210563`. A disposable SIP
+disable workflow started at 12:57:12Z to exercise first-owner desktop proof.
+The first build-preference write again returned status 1, despite the native
+expected owner and `MissingPair` / user-domain `Reachable` / GUI-domain
+`Nonzero` prewrite labels. Its guarded reboot made the build and MiniBuddy
+writes succeed, and Setup Assistant completion passed. No SIP mutation had
+been submitted at this stage.
+
+At 13:00:29Z normal desktop verification reproduced
+`normal-agent-ps-transport` with typed cause `agentOtherTimeout`. The retained
+operation restored the VM stopped/no helper. The helper log's final normal
+`process.status` exchange shows host admission at 13:00:24Z, write completion
+after 0.067708 ms, then `responseFailed` after 5005.634 ms with
+`responseReadNoBytes`. Earlier status exchanges on this same helper received
+responses, often below a second.
+
+An independent normal inspection boot connected the exact pinned agent and
+queried complete, untruncated guest Unified Logging for the original daemon
+PID 316 in 06:00:22–06:00:40 PDT (13:00:22–13:00:40Z). It wrote the prior
+desktop-start response at 06:00:22.906, entered a read, and received the next
+frame at 06:00:24.844. Decode returned at 06:00:25.007 with `decodedStatus`;
+the authenticated handler and actor emitted `guestStatusHandlerEntered`,
+`actorAdmitted`, and `statusEntered` at the same time. No subsequent status,
+stream-publication, write, or serve-loop marker from that original PID was
+persisted through 06:00:32. This rules out an observed host write failure,
+guest ingress wait, and frame decode stall for this exchange. It places the
+last observed progress before the actor's `refreshEntered` marker, but missing
+OSLog events or scheduling delay prevent a claim that the small `jobID`
+payload parse itself blocked. It remains a diagnostic reproduction, not a
+transport fix or justification for increasing the five-second deadline.
+
+Authenticated independent `sip status --final-state stopped` then returned
+`sipEnabled=true`, `sipDisabled=false`, `verified=true`, all six cleanup fields
+true, and verified stopped final state. The exact request staging root was
+absent, public status showed stopped/no helper with unchanged UUID/resources/
+pin, and the archived signed executable matched the pin's SHA-256. Only
+clone-s was deleted, making its disk unrecoverable through Pomme. Final
+inventory again held twelve stopped VMs and no helpers. A read-only source
+review of the narrowed actor boundary remains in progress.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
