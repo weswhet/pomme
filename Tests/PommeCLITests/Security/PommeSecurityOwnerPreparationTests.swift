@@ -191,13 +191,18 @@ struct PommeSecurityOwnerPreparationTests {
     #expect(fixture.setupDone == false)
   }
 
-  @Test("Owner preference write failure emits only a closed stderr prefix classification", arguments: [
+  @Test("Owner preference write failure emits only a closed stderr classification", arguments: [
     "empty", "sudo", "defaultsLog", "defaultsPlain", "other",
+    "domain", "domainPeriod", "domainHeader", "pair", "pairPeriod", "pairHeader",
+    "wrongDomain", "wrongPairDomain", "wrongKey", "extraLine", "malformedHeader",
   ])
   func ownerPreferenceWriteStderrClassification(mode: String) async throws {
     let fixture = OwnerPreparationFixture(existingOwner: true)
     let stderr: String
     let expected: PommeAutoLoginReadbackTrace
+    let domainMessage = "Domain com.apple.SetupAssistant does not exist"
+    let pairMessage = "The domain/default pair of (com.apple.SetupAssistant, LastSeenBuddyBuildVersion) does not exist"
+    let header = "2026-09-23 00:46:47.123 defaults[123:456]"
     switch mode {
     case "empty": stderr = ""; expected = .ownerWriteStderrEmpty
     case "sudo": stderr = "sudo: private-synthetic-sentinel\n"; expected = .ownerWriteStderrStartsSudo
@@ -205,9 +210,31 @@ struct PommeSecurityOwnerPreparationTests {
       stderr = "2026-09-23 00:46:47.123 defaults[123:456] private-synthetic-sentinel\n"
       expected = .ownerWriteStderrStartsDefaults
     case "defaultsPlain": stderr = "defaults: private-synthetic-sentinel\n"; expected = .ownerWriteStderrStartsDefaults
+    case "domain", "domainPeriod", "domainHeader":
+      stderr = (mode == "domainHeader" ? header + "\n" : "") + domainMessage + (mode == "domainPeriod" ? "." : "")
+      expected = .ownerWriteStderrMissingDomain
+    case "pair", "pairPeriod", "pairHeader":
+      stderr = (mode == "pairHeader" ? header + "\n" : "") + pairMessage + (mode == "pairPeriod" ? "." : "")
+      expected = .ownerWriteStderrMissingPair
+    case "wrongDomain":
+      stderr = domainMessage.replacingOccurrences(of: "com.apple.SetupAssistant", with: "private-synthetic-sentinel")
+      expected = .ownerWriteStderrOther
+    case "wrongKey":
+      stderr = pairMessage.replacingOccurrences(of: "LastSeenBuddyBuildVersion", with: "private-synthetic-sentinel")
+      expected = .ownerWriteStderrOther
+    case "wrongPairDomain":
+      stderr = pairMessage.replacingOccurrences(of: "com.apple.SetupAssistant", with: "private-synthetic-sentinel")
+      expected = .ownerWriteStderrOther
+    case "extraLine":
+      stderr = header + "\n" + pairMessage + "\nprivate-synthetic-sentinel"
+      expected = .ownerWriteStderrStartsDefaults
+    case "malformedHeader":
+      stderr = header + " trailing\n" + domainMessage
+      expected = .ownerWriteStderrStartsDefaults
     default: stderr = "private-synthetic-sentinel\n"; expected = .ownerWriteStderrOther
     }
     let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
+    let writeAttempts = Mutex(0)
     let preparation = PommeSecurityOwnerPreparation(
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
@@ -216,6 +243,7 @@ struct PommeSecurityOwnerPreparationTests {
           request.arguments.contains("write"),
           request.arguments.contains("com.apple.SetupAssistant")
         {
+          writeAttempts.withLock { $0 += 1 }
           return GuestCommandResult(
             exitCode: 1, signal: nil, stdout: Data(), stderr: Data(stderr.utf8),
             stdoutTruncated: false, stderrTruncated: false, exited: true)
@@ -235,6 +263,10 @@ struct PommeSecurityOwnerPreparationTests {
     #expect(events.filter { $0 == .ownerMiniBuddyPreferenceWriteEntered }.isEmpty)
     #expect(events.allSatisfy { !$0.message.contains("private-synthetic-sentinel") })
     #expect(fixture.setupDone == false)
+    #expect(writeAttempts.withLock { $0 } == 1)
+    for privateValue in ["com.apple.SetupAssistant", "LastSeenBuddyBuildVersion", "123:456", "opaque-owner-secret"] {
+      #expect(events.allSatisfy { !$0.message.contains(privateValue) })
+    }
   }
 
   @Test("Owner preference write diagnostics identify only the failing closed domain", arguments: [true, false])
