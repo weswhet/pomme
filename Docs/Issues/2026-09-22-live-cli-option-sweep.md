@@ -4397,6 +4397,16 @@ diagnostic is qualified for commit before signed Release build and live
 comparison; it is not a transport fix, and logging itself may perturb
 timing.
 
+Candidate `8adf5f6` was committed before the canonical signed Release build.
+The Developer ID signature, exact entitlements, designated-requirement
+compatibility, signed agent archive, and atomic installation checks passed.
+Fresh-login resolution finds `/Users/wes/.local/bin/pomme`, reporting
+`8adf5f6` with SHA-256
+`c8783955eea28c49362ef9b5366e2a5bed0220d02db2c272e54928e5539ef2af`.
+All 104 CLI contract checks passed. The next gate is a fresh same-resource
+internal clone, correlating host `process.status` wire timing with guest
+publication and any desktop transport failure.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
