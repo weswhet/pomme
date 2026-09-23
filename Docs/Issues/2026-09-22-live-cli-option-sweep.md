@@ -2707,6 +2707,14 @@ focused suites passed 23 functions / 510 repeated runs, no failures or skips
 test explains the multi-second live signal response. The live preference write
 status-1 failure remains a separate open issue.
 
+Characterization and fixture evidence was committed as `5c1a3c7` before the
+canonical signed Release build. Build, signature, entitlements, designated
+requirement compatibility, archive, and atomic installation checks passed.
+Fresh-login resolution points to `/Users/wes/.local/bin/pomme`; the installed
+CLI reports `5c1a3c7` and SHA-256
+`c18de44fd7c28caeef9aab90ab7d1f119969796619f13847b22927a04f78ff1f`.
+This rebuild contains no further production behavior change after `01cab9f`.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
