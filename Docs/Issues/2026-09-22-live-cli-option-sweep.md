@@ -3773,6 +3773,57 @@ finds `/Users/wes/.local/bin/pomme`; it reports `9cac88a` and has SHA-256
 `c7a847b5b2211686473f5826b1ac91914c823ae0480eed96b37883ccc3c687da`.
 All 104 CLI contract checks passed. No VM has yet been run on this candidate.
 
+Fresh internal `pomme-agent-ownerloop-clone26-20260922h` passed the same
+template dry run and creation with a 40 GB disk, 4 GB memory, and `--boot
+none`. Its UUID is `685c3b62-49e7-4831-8a6a-6f8968ec4dee`, plan digest
+`fee9e3ac01184e005516c1c252ffd670de842150ef4b908393df3e18bd101492`,
+and pinned agent digest `c7a847b5…ccc3c687da`. All twelve preexisting
+internal VMs were stopped/no helper; no external-drive VM was accessed.
+The first-owner SIP-disable run began at 08:12:41Z with a fixed-tag helper
+follower active. The first owner build-preference write again returned status
+1 with a generic `defaults` stderr and the target key absent in the
+post-failure probe. The guarded normal reboot recovered: owner verification,
+both preference writes, Setup Assistant completion, and automatic-login
+restart all proceeded. This reproduces the separate unresolved preference
+observation; it is not evidence for the later transport timeout.
+
+At 08:16:08Z the console-stage desktop `process.start` was admitted; the
+host request write completed in 0.136959 ms. At 08:16:13Z the response wait
+failed after 5,001.225667 ms, followed by `responseReadNoBytes` and helper
+`boundary=start elapsedMs=5001 jobEstablished=false pollCount=0
+errorKind=agentTimeout`. Public cause was `stage=console,
+kind=agentOtherTimeout`. No process start was retried or guessed job
+cleanup attempted. The command exited 1, retained the
+`sipDisable/autologinIntent/previous` pre-mutation journal, and restored
+stopped/no helper. This read category means the host saw no buffered response
+bytes in that exchange; it does not prove the guest never received the
+request.
+
+A separate normal inspection boot connected the exact pinned guest agent.
+The complete, untruncated guest Unified Logging query for 01:16:03–01:16:20
+local (08:16:03–08:16:20Z) contained no desktop-start boundary events.
+A wider complete, untruncated query showed 120 earlier desktop-start events,
+ending with a 01:15:55.450 local `requestDecoded` and ordered
+`requestAccepted`, handler, perform, streams, and `responseWritten` at
+01:15:58.953 local. A complete, untruncated signal/status boundary query
+for 01:15:55–01:16:20 local returned no events. The absence of a decoded
+event for the failed start, alongside prior persisted guest events, is
+consistent with a delivery, read/decode, or daemon-service gap. It is not
+conclusive: guest log persistence, host/guest clock alignment, and untraced
+operations remain possible. The inspection boot stopped gracefully.
+
+Independent public `sip status` passed authenticated Recovery marker proof on
+attempt two and reported verified `sipEnabled=true`, `sipDisabled=false`,
+complete cleanup, and final-state verification. The clone was checked
+stopped/no helper with its unchanged UUID and pinned digest; the exact signed
+artifact remained in the archive with a matching SHA-256. It was then
+deleted to reclaim internal space. Inventory returned to twelve VMs, all
+stopped/no helper, with no clone-h; available internal space rose from 12 to
+16 GiB. Clone-h's VM disk is not recoverable through Pomme. No external-drive
+or unrelated VM was touched. The transport cause remains unresolved; this
+candidate only refines the failed exchange to host response-read/no-bytes and
+no persisted guest decoded-start event.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
