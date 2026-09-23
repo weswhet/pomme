@@ -3378,6 +3378,39 @@ compiler warnings remain outside this diagnostic. Live validation needs a
 new 40 GB / 4 GB template clone because clone-c has already completed owner
 preparation.
 
+Clone-c was deleted through the public CLI only after its SIP-enable journal
+showed restoration complete, status was stopped/no helper, and its signed
+creation-pinned agent remained archived. Its VM disk is not recoverable. A
+fresh internal `pomme-agent-ownerloop-clone26-20260922d` passed the same
+40 GB / 4 GB template dry run and actual create; Recovery navigation reached
+Terminal after 593 captures, marker proof passed on attempt two, and creation
+finished stopped. It pins the new signed `5ab51107…42aec7983` artifact, UUID
+`6ba7853a-d053-4748-b804-c16577bb4abc`.
+
+The first-owner SIP-disable run began at 06:24:31Z. Native auto-login started
+OFF; owner creation and setter readback passed. The first build-preference
+write returned status 1 at 06:25:55Z, and the new exact classifier still
+reported `ownerWriteStderrStartsDefaults`, not either missing-domain/pair
+label. The home, Preferences mode, sudo UID/HOME, cfprefsd presence, and
+stock-only Setup Assistant labels matched clone-c. The guarded reboot then
+found native auto-login naming the expected owner but the global preference
+naming Setup Assistant; reconciliation correctly rejected before SIP mutation,
+retaining `sipDisable/autologinIntent` and restoring stopped state.
+
+The exact public resume observed native auto-login OFF on the next boot,
+re-established matching setter artifacts, and both preference writes plus
+Setup Assistant completion passed. Desktop Aqua then timed out and the
+console transport returned `agentOtherTimeout` at 06:28:42Z, again retaining
+the transaction and restoring stopped/no helper. No SIP mutation was reached.
+A separate public `sip status` entered authenticated Recovery, proved its
+Terminal marker after 589 cumulative captures, and returned verified
+`sipEnabled=true`, `sipDisabled=false`, `finalStateVerified=true`, complete
+cleanup, and stopped state. The retained owner journal has not been rewritten
+or mistaken for a completed mutation. This live run narrows the initial
+native message away from the two known missing-preference forms; its exact
+cause remains unknown. The preference/Setup Assistant mismatch and repeated
+Aqua/console transport failures are distinct open first-owner blockers.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
