@@ -4867,8 +4867,15 @@ struct PommeCore {
                 )
             }
             if isBufferedForeground(operation) {
-                return try await foregroundControlResponse(operation, runtime: runtime) { frames in
-                    try sendControlFrames(frames, through: stream)
+                do {
+                    return try await foregroundControlResponse(operation, runtime: runtime) { frames in
+                        try sendControlFrames(frames, through: stream)
+                    }
+                } catch {
+                    if let diagnostic = desktopTransportFailureObject(error, payload: operation.payload) {
+                        return try jsonLine(diagnostic)
+                    }
+                    throw error
                 }
             }
             let result = try await runtime.performGuestOperationCorrelated(operation.operation, payload: operation.payload)
@@ -5252,6 +5259,23 @@ struct PommeCore {
             onFrames: onFrames
         )
         return try foregroundResultJSON(result)
+    }
+
+    /// Preserve the existing helper failure envelope while adding a closed
+    /// cause only for exact desktop-proof commands. No error text is logged.
+    static func desktopTransportFailureObject(
+        _ error: Error,
+        payload: JSONValue?
+    ) -> [String: Any]? {
+        guard let object = payload?.objectValue,
+              PommeForegroundExecution.isDesktopProofPayload(object)
+        else { return nil }
+        return [
+            "ok": false,
+            "error": error.localizedDescription,
+            "hostExitCode": 1,
+            "desktopTransportCause": PommeSecurityNormalAgent.transportCause(for: error).rawValue,
+        ]
     }
 
     static func foregroundResultJSON(_ result: PommeAgentCorrelatedResult) throws -> String {
