@@ -2976,6 +2976,44 @@ confirmed the same UUID/pin, stopped/no helper. Inventory confirms all 13 VMs
 stopped/internal. A fresh first-owner or bounded failure reproduction remains
 necessary to classify the intermittent `normal-agent-ps-transport` cause.
 
+To reproduce the first-desktop failure on new host `a7df129`, capacity
+preflight deleted only the completed, stopped/no-helper
+`pomme-agent-homeclass26-20260922a` after checking its
+`sipEnable/restorationComplete/previous` journal and exact archived signed
+agent digest `bd658113…15fa6f`. Public inventory confirmed the name absent
+and all 12 remaining VMs stopped/internal. Free internal space rose from 17
+to 44 GiB. Its VM disk cannot be recovered through this operation; the
+recorded evidence and signed archive remain. A dry run admitted fresh
+`pomme-agent-desktopcause26-20260922a` with the same local macOS
+26.6.2/25G83 image, explicit 40 GB disk / 4 GB RAM, and `--boot none`.
+Experimental profile warning is retained. Creation began at 04:02:54Z.
+
+Fresh creation completed with stopped final state by 04:09Z. Restore reached
+100% at 04:06:36Z, Recovery Terminal at 04:08:03Z, and exact marker proof on
+attempt two at 04:08:06Z. Independent status confirmed UUID
+`35025292-6f89-40c2-98ec-82c733d6ff7b`, startup volume
+`d28b5444-cfc0-455b-aef0-30f2d6eddb86`, immutable plan
+`f514fdb02389487590328264151cad75b54cdb956ca1c79de723c4ddd01c31ad`,
+40 GB / 4 GB, stopped/no helper, and guest agent pinned to exact new signed
+host digest `a9ec6ce0…039dd`. No security journal existed before the first
+owner `sip disable --force --final-state previous` began at 04:09:17Z. No
+standalone guest probe ran between creation and that workflow.
+
+The fresh first-owner SIP-disable attempt again found the native owner OFF at
+04:09:43Z. The guarded setter verified native owner, global preference, and
+artifact by 04:10:40Z. The initial per-user build write entered at 04:10:42Z,
+failed with `defaults`-shaped stderr, and its bounded post-failure stat found
+the expected owner's home as a directory. The single stock-Setup-Assistant
+reboot retry verified the owner at 04:11:33Z; both preference writes and the
+completion receipts passed by 04:11:52Z. The workflow reached the normal
+desktop, but at 04:12:51Z the Aqua proof reported
+`normal-agent-aqua-timedOut` with `exited=false`, `outputComplete=false`, and
+`terminationRequested=true`. It failed before process-list proof, so this run
+does not classify the earlier `normal-agent-ps-transport` failure. Public
+status after failure was stopped/no helper with the same UUID and agent pin.
+The retained journal is `sipDisable/autologinIntent/previous`, original run
+state stopped, `normalBootVerified=false`; Recovery SIP has not been mutated.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
