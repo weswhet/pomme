@@ -12,7 +12,7 @@ observations are recorded below; historical rows retain their original status.
 | CLI discovery omissions / `agent-help` output ambiguity | Fixed in `e0f6544`; signed CLI contract and live compatibility checks passed. |
 | macOS 27 inactive Language Chooser / framebuffer replay | Guarded activation and replay-policy fixes validated; complete SIP/AMFI status workflows passed. |
 | Recovery Terminal marker recognition | Bounded prompt-punctuation and word-encoding/output-separation fixes validated; not a claim of universal OCR reliability. |
-| macOS 26 first-owner desktop readiness / cleanup | Same-job cleanup-verified retry and pinned reconnect adapter implemented. Three fresh signed-candidate SIP cycles passed, including a live Aqua timeout recovered after instrumentation cleanup; original intermittent signal delay and earlier console transport failure remain unexplained. Later readback failures identify stock Setup Assistant automatic-login ownership after the preference-recovery reboot. Narrow retry candidate `96edcf2` has red/green tests and a signed build, but its first live run instead rejected expected native owner plus mismatched loginwindow preference; the new branch remains live-unqualified. Failure fixtures are retained. |
+| macOS 26 first-owner desktop readiness / cleanup | Same-job cleanup-verified retry and pinned reconnect adapter implemented. Three fresh signed-candidate SIP cycles passed. Narrow post-preference-restart recovery `96edcf2` passed its stock-Setup-Assistant branch live in diagnostic build `01cab9f`, including exact context, setter readback, owner preferences, and Setup Assistant completion. That run then reproduced Aqua timeout (signal response about 4.1 s) and console-transport failure before SIP mutation. Expected-native-owner plus mismatched preference is separately unresolved. Failure fixtures and temporary diagnostics are retained; the overall issue remains open. |
 | macOS 27 creation `ownerProof` | Open; subsequent internal-drive baselines passed, including fresh creation with the exact original `ffc41a7` host, without a targeted fix. |
 | macOS 26 creation `verifyNormalAgent` / slow first boot | Open historical failure; subsequent internal-drive creations passed, including a fresh original-`ffc41a7` run with first-attempt verification receipts, without establishing its cause. |
 | macOS 27 restart after pause/resume | Open; two earlier internal-drive sequences plus ten-cycle runs with both current `a3852a5` and original `ffc41a7` hosts passed without reproducing the missing helper. |
@@ -2578,6 +2578,58 @@ failures or skips:
 `test_macos_2026-09-23T00-36-42-431Z_pid95267_29bbc804.xcresult`.
 All 21 installer checks passed. Source/tests/evidence are committed before
 the next canonical signed Release build and fresh live comparison.
+
+Diagnostic commit `01cab9f` built and installed through the canonical signed
+Release workflow at 00:37:35Z. Signature/entitlement/designated-requirement/
+archive/install checks, fresh login-shell resolution/version, and all 104 CLI
+contract checks passed. Installed SHA-256:
+`348f60031c84e53df6696247ed3afb843a1868f758792bee2f59b716f6d1511b`.
+With all twelve existing VMs stopped/internal, 50 GiB free, and no target-name
+collision, dry-run preflight passed for fresh
+`pomme-agent-preferenceclass26-20260922a`. Direct creation began at 00:38:27Z
+using the same internal macOS 26.6.2/25G83 image and explicit 40 GB / 4 GB /
+`--boot none`. No additional VM was deleted for this comparison.
+
+Restore reached 100% at 00:42:33Z. Recovery Terminal and marker proof passed
+at 00:44:02Z and 00:44:05Z (attempt two), with no OCR stall or resume. Creation
+completed stopped by 00:45:04Z. Independent preflight confirmed VM UUID
+`61c61913-df6b-42d5-aef0-bc06bc09ac81`, startup volume
+`1e6d33eb-253c-4a74-9d44-1acea467d497`, immutable plan
+`10d6f4906cd029126119b8ab8e9b6341bd64b3b3e348aafbd89c38cb4db34c05`,
+the exact `348f6003…6d1511b` pin, unchanged 40 GB / 4 GB resources, and no
+security journal. First-owner SIP disable began at 00:45:21Z with a fixed-tag
+helper follower and no intervening guest probe or manual account change.
+
+Initial native state was OFF. After handoff, the first setter verified expected
+native owner, matching preference, and artifact metadata at 00:46:45–46Z.
+The new `ownerBuildPreferenceWriteEntered` label at 00:46:47Z immediately
+preceded owner-completion status 1 and the existing reboot. No MiniBuddy write
+label preceded this failure. Thus this run identifies the first build-preference
+write as the failed command; it does not establish why that write failed.
+Existing home checks prove directory-service metadata, not filesystem existence.
+
+At 00:47:08Z, post-reboot same-owner verification passed and native status
+classified as Setup Assistant. The new bounded branch was actually exercised:
+fresh-owner verification and login restrictions passed again, the exact Setup
+Assistant context authorized the second setter at 00:47:40Z without Language
+Chooser handoff, and all three post-setter proofs passed at 00:47:42–43Z.
+Both owner-preference writes were entered at 00:47:44Z, owner completion
+received its receipt at 00:47:46Z, and Setup Assistant completion passed at
+00:47:50Z. This is positive live evidence for that narrowly scoped branch,
+not resolution of the separate expected-native-owner/preference mismatch.
+
+The subsequent normal reboot reached desktop verification at 00:48:20Z.
+Aqua verification timed out; host signal tracing recorded admission at
+00:48:48Z, completed write at 0.356459 ms, and response at 00:48:52Z after
+4,117.48925 ms. The typed Aqua timeout retained `exited=false`,
+`outputComplete=false`, `terminationRequested=true`. At 00:48:59Z the next
+console check failed with `normal-agent-console-transport`. The workflow then
+restored its original stopped state and exited 1 before SIP mutation. The
+fixed-tag follower was stopped; independent checks at 00:50:10Z confirmed all
+thirteen internal VMs stopped/no helper, 26 GiB free, unchanged target identity
+and pin, and retained `sipDisable` / `autologinIntent` / `previous` journal.
+No SIP-enable restoration is needed. This signal/transport failure remains
+open; the successful login recovery is not claimed as a complete SIP-cycle fix.
 
 ### macOS 27 pause/resume/restart repetition
 
