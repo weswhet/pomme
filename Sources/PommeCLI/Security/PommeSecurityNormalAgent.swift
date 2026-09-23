@@ -37,6 +37,14 @@ enum PommeSecurityNormalAgentFailureReason: String, CaseIterable, Sendable {
   case transport
 }
 
+/// Closed helper-side cause for a failed desktop foreground exchange. This is
+/// diagnostic only; it never authorizes a retry or changes the proof result.
+enum PommeSecurityDesktopTransportCause: String, CaseIterable, Sendable {
+  case agentStartTimeout, agentStatusTimeout, agentSignalTimeout, agentOtherTimeout
+  case agentDisconnected, agentUnavailable, agentRejected, agentProtocol
+  case foregroundDeadline, foregroundState, controlResponse, posix, cancelled, other
+}
+
 struct PommeSecurityNormalAgentDiagnostic: Error, Equatable, LocalizedError, Sendable {
   let stage: PommeSecurityNormalAgentProofStage
   let reason: PommeSecurityNormalAgentFailureReason
@@ -688,6 +696,12 @@ struct PommeSecurityNormalAgent: Sendable {
       return result
     case .failure(let diagnostic):
       Self.log(diagnostic, vmName: reference.displayName)
+      if diagnostic.reason == .transport,
+        let cause = Self.transportCause(in: response) {
+        PommeCore.log(
+          "Normal desktop transport cause: stage=\(proofStage.rawValue), kind=\(cause.rawValue).",
+          vmName: reference.displayName)
+      }
       if diagnostic.reason == .timedOut {
         PommeCore.log(
           Self.timeoutStateSummary(for: response, stage: proofStage),
@@ -773,6 +787,46 @@ struct PommeSecurityNormalAgent: Sendable {
     stage: PommeSecurityNormalAgentProofStage
   ) -> PommeSecurityNormalAgentDiagnostic {
     .init(stage: stage, reason: .transport)
+  }
+
+  /// The helper still returns its existing CLI error message;
+  /// only its allowlisted cause code is admitted to desktop diagnostics.
+  static func transportCause(in response: [String: Any]) -> PommeSecurityDesktopTransportCause? {
+    guard response["ok"] as? Bool == false,
+      response["result"] == nil,
+      let raw = response["desktopTransportCause"] as? String
+    else { return nil }
+    return PommeSecurityDesktopTransportCause(rawValue: raw)
+  }
+
+  static func transportCause(for error: Error) -> PommeSecurityDesktopTransportCause {
+    if let error = error as? RunnerError {
+      switch error {
+      case .guestAgentTimedOut(let operation):
+        switch operation {
+        case "process.start": return .agentStartTimeout
+        case "process.status": return .agentStatusTimeout
+        case "process.signal": return .agentSignalTimeout
+        default: return .agentOtherTimeout
+        }
+      case .guestAgentDisconnected: return .agentDisconnected
+      case .guestAgentUnavailable, .guestAgentConnecting: return .agentUnavailable
+      case .guestAgentError: return .agentRejected
+      case .guestAgentProtocol: return .agentProtocol
+      case .invalidControlResponse: return .controlResponse
+      case .posix: return .posix
+      default: return .other
+      }
+    }
+    if error is PommeAgentProtocol.Error { return .agentProtocol }
+    if let error = error as? PommeForegroundExecution.Error {
+      switch error {
+      case .deadlineReached: return .foregroundDeadline
+      default: return .foregroundState
+      }
+    }
+    if error is CancellationError { return .cancelled }
+    return .other
   }
 
 

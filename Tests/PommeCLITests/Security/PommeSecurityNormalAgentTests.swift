@@ -576,6 +576,50 @@ struct PommeSecurityNormalAgentTests {
     #expect(!responseDescription.contains("/private/secret"))
   }
 
+  @Test("Exact desktop helper failures carry only an allowlisted transport cause", arguments: [
+    "startTimeout", "statusTimeout", "signalTimeout", "disconnected",
+    "protocol", "foregroundDeadline", "agentRejected", "other",
+  ])
+  func desktopTransportCauseIsClosed(mode: String) throws {
+    let error: Error
+    let expected: PommeSecurityDesktopTransportCause
+    switch mode {
+    case "startTimeout":
+      error = RunnerError.guestAgentTimedOut("process.start"); expected = .agentStartTimeout
+    case "statusTimeout":
+      error = RunnerError.guestAgentTimedOut("process.status"); expected = .agentStatusTimeout
+    case "signalTimeout":
+      error = RunnerError.guestAgentTimedOut("process.signal"); expected = .agentSignalTimeout
+    case "disconnected":
+      error = RunnerError.guestAgentDisconnected; expected = .agentDisconnected
+    case "protocol":
+      error = PommeAgentProtocol.Error.invalidResponse; expected = .agentProtocol
+    case "foregroundDeadline":
+      error = PommeForegroundExecution.Error.deadlineReached; expected = .foregroundDeadline
+    case "agentRejected":
+      error = RunnerError.guestAgentError("private-synthetic-sentinel"); expected = .agentRejected
+    default:
+      error = CocoaError(.fileReadUnknown); expected = .other
+    }
+    let payload = JSONValue.object([
+      "path": .string("/bin/ps"),
+      "arguments": .array([.string("-axo"), .string("uid=,comm=")]),
+    ])
+    let failure = try #require(PommeCore.desktopTransportFailureObject(error, payload: payload))
+    #expect(failure["ok"] as? Bool == false)
+    #expect(failure["hostExitCode"] as? Int == 1)
+    #expect(PommeSecurityNormalAgent.transportCause(in: failure) == expected)
+    #expect(PommeSecurityNormalAgent.diagnostic(for: failure, stage: .processList)?.code == "normal-agent-ps-transport")
+    #expect(!expected.rawValue.contains("private-synthetic-sentinel"))
+
+    var untrusted = failure
+    untrusted["desktopTransportCause"] = "private-synthetic-sentinel"
+    #expect(PommeSecurityNormalAgent.transportCause(in: untrusted) == nil)
+    #expect(PommeCore.desktopTransportFailureObject(error, payload: .object([
+      "path": .string("/bin/ls"), "arguments": .array([]),
+    ])) == nil)
+  }
+
   @Test("Rejects malformed or non-output stream frames")
   func rejectsMalformedFrames() {
     var malformed = response(exitCode: Int64(0))

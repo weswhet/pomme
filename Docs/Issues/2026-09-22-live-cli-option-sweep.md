@@ -2921,6 +2921,33 @@ All 13 VMs are stopped/internal. The home probe is live-qualified as a
 diagnostic near the failing write, while the underlying native `defaults`
 status-1 cause and first-run desktop transport failure remain unresolved.
 
+Investigation now turns to the separate `normal-agent-ps-transport` failure.
+The outer verifier's existing closed diagnostic intentionally treats a helper
+`ok:false` response as transport and ignores its free-text error. The helper's
+foreground catch previously returned only that text and a host exit code;
+the `ps` stage therefore could not distinguish agent timeout, disconnect,
+protocol rejection, foreground state, or a control response failure. The
+candidate adds an allowlisted `desktopTransportCause` to the same failure
+envelope only for exact console, Aqua, or process-list proof payloads. The
+outer verifier logs only the parsed fixed label with the proof stage; it still
+rejects the failed response and never logs the free-text error. General
+foreground commands keep their prior response shape. The classifier has
+distinct labels for start/status/signal agent timeouts, disconnect, agent
+unavailable/rejected/protocol, foreground deadline/state, control response,
+POSIX, cancellation, and other errors. It is diagnostic, not a retry or a
+desktop proof relaxation.
+
+Focused desktop/foreground control suites passed 42 functions with zero
+failures/skips (`test_macos_2026-09-23T03-55-24-126Z_pid36450_1f448af0.xcresult`).
+Tests cover representative typed errors, exact desktop payload gating, the
+unchanged `normal-agent-ps-transport` failure, and rejection of an untrusted
+cause string. The first full suite had one source-vocabulary guard failure
+from a new comment; all behavioral tests passed. The comment was reworded
+without changing code behavior. The next full suite passed 1,203 functions,
+zero failures/skips (`test_macos_2026-09-23T03-57-27-668Z_pid36966_dbacdfa5.xcresult`).
+This qualifies the diagnostic for commit and a signed Release/live comparison;
+it has not yet identified the live desktop transport cause.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
