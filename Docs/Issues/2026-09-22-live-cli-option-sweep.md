@@ -3163,6 +3163,17 @@ The full suite passed 1,206 functions, zero failures/skips
 qualifies a diagnostic build and a second template clone; it does not yet
 explain or fix the native `defaults` failure.
 
+Candidate `fb796cd` was committed before the canonical signed Release build.
+Signature, exact entitlements, designated-requirement compatibility, archive,
+and atomic-install checks passed. Fresh-login resolution points to
+`/Users/wes/.local/bin/pomme`, reporting `fb796cd`, SHA-256
+`a058cd62557c8996a88828781178723f5f14638dad6a6d751978c823577db1d4`.
+All 104 CLI contract checks passed. The next template clone will pin the new
+signed guest digest; previous VM journals and pins were not rewritten. The
+Release build also repeated four pre-existing compiler warnings in
+`PommeCore.swift` (three unused replacement results and one image-send
+isolation warning); those are outside this diagnostic change.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
