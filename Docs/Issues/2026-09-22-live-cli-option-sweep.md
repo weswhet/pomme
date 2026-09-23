@@ -2854,6 +2854,53 @@ normal boot verified; its original `99a1edae…28359a` signed archive digest
 was independently checked. At 20 GiB free, one completed VM must be removed
 before another internal 40 GB guest can be created.
 
+Capacity recovery deleted only the completed, stopped/no-helper
+`pomme-agent-writeclass26-20260922a` (UUID
+`01f87450-18d3-4f35-9114-25a7c0c0edbf`) after checking its
+`sipEnable/restorationComplete/previous` journal and exact retained signed
+agent artifact `99a1edae…28359a`. Public inventory confirms that exact name
+absent and all 12 remaining VMs stopped/internal. Free internal space rose
+from 20 to 46 GiB. The VM disk cannot be recovered through this operation;
+its evidence and signed agent archive remain. The next dry run accepted only
+fresh `pomme-agent-homeclass26-20260922a` with the same local macOS
+26.6.2/25G83 image, explicit 40 GB disk / 4 GB RAM, and stopped final state.
+Its experimental profile warning remains. Creation began at 03:28:57Z.
+
+Fresh creation completed with stopped final state by 03:34Z. Restore reached
+100% at 03:32:41Z, Recovery Terminal at 03:34:07Z, and the exact marker passed
+on attempt one at 03:34:10Z. New VM UUID
+`c63f6dbc-3096-481d-bcd4-bd4451a32c6d`, startup volume
+`a193c3b0-49ec-403f-8d92-f07b4cbf423c`, plan
+`6de3396ec1e035e6599af4a04f46c1374bf2e1e0461c7d326ccaec612cbdd70b`,
+40 GB / 4 GB, and pinned signed agent
+`bd658113512902da42834750f1512e81de12df126efb4b2c8b93b6613c15fa6f`
+were independently confirmed. No security journal existed before the first
+owner SIP-disable command began at 03:35:17Z. No standalone guest probe ran
+between creation and that workflow.
+
+This first-owner run reproduced the preference failure at 03:36:49Z. Initial
+native autologin was OFF; the setter proved the expected native owner,
+matching global preference, and valid artifact metadata. The first
+`ownerBuildPreferenceWriteEntered` was followed by
+`ownerWriteStderrStartsDefaults` and **`ownerWriteHomeExpectedDirectory`**.
+The bounded home probe therefore found a directory owned by the verified
+owner UID immediately after the nonzero write. It is a near-failure
+observation, not an atomic pre-write filesystem snapshot; a directory could
+have appeared between the write and probe. It weakens the missing-home
+hypothesis and still does not identify why `defaults` returned status 1.
+
+After the existing single reboot, the native owner and global preference
+matched without a second setter. Both per-user preference writes and the
+owner-completion receipt succeeded by 03:37:15Z; Setup Assistant completion
+passed at 03:37:36Z. Desktop verification later failed with
+`normal-agent-ps-transport` at 03:38:37Z, before authenticated Recovery or SIP
+mutation. The command exited 1 and restored stopped state. Independent status
+confirmed the unchanged UUID, startup volume, plan, pinned agent, and no
+helper; the retained journal remains `sipDisable` / `autologinIntent` /
+`previous`, original stopped, `normalBootVerified=false`. All 13 VMs are
+stopped/internal. The matching public resume can test whether desktop
+transport succeeds on a later normal boot without replaying owner creation.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
