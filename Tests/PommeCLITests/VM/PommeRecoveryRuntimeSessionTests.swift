@@ -272,14 +272,14 @@ struct PommeRecoveryRuntimeSessionTests {
         }
     }
 
-    @Test("Incomplete cleanup never produces Recovery cleanup evidence")
-    func cleanupMismatchFailsClosed() async throws {
+    @Test("Incomplete frame cleanup never produces Recovery cleanup evidence", arguments: [false, true])
+    func cleanupMismatchFailsClosed(physicalCleanupComplete: Bool) async throws {
         let fixture = try RuntimeFixture(port: .bootstrap)
         let vmConfiguration = VZVirtualMachineConfiguration()
         try fixture.configuration.apply(to: vmConfiguration)
         let transport = RecoveryRuntimeTransport()
         let coordinator = PommeAgentVSOCKCoordinator(transport: transport, secretProvider: { _ in String(repeating: "a", count: 64) })
-        let calls = RuntimeCalls(cleanupComplete: false)
+        let calls = RuntimeCalls(cleanupComplete: physicalCleanupComplete, sensitiveFramesCleared: false)
         let root = try PommeRecoveryRuntimeRootPort(
             configuration: fixture.configuration,
             coordinator: coordinator,
@@ -372,6 +372,7 @@ private final class RuntimeCalls: @unchecked Sendable {
     private let lock = NSLock()
     private let isHelperAlive: Bool
     private let isCleanupComplete: Bool
+    private let areSensitiveFramesCleared: Bool
     private let identityChecks: BoolSequence
     private let bootChecks: BoolSequence
     private let attachmentChecks: BoolSequence
@@ -389,10 +390,12 @@ private final class RuntimeCalls: @unchecked Sendable {
     init(
         helperAlive: Bool = true,
         cleanupComplete: Bool = true,
+        sensitiveFramesCleared: Bool = true,
         failure: RecoveryProofFailure? = nil
     ) {
         isHelperAlive = helperAlive && failure != .helper
         isCleanupComplete = cleanupComplete
+        areSensitiveFramesCleared = sensitiveFramesCleared
         identityChecks = .init(values: failure == .identity ? [true, false] : [true, true])
         bootChecks = .init(values: failure == .boot ? [false] : [true])
         attachmentChecks = .init(values: failure == .attachment ? [true, false] : [true, true])
@@ -424,7 +427,7 @@ private final class RuntimeCalls: @unchecked Sendable {
                     shareDetached: self.isCleanupComplete,
                     helperStoppedAndReaped: self.isCleanupComplete,
                     stagingArtifactsRemoved: self.isCleanupComplete,
-                    sensitiveFramesCleared: self.isCleanupComplete,
+                    sensitiveFramesCleared: self.isCleanupComplete && self.areSensitiveFramesCleared,
                     unknownStateRejected: self.isCleanupComplete
                 )
             }

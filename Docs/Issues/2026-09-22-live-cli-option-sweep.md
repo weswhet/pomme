@@ -4459,6 +4459,59 @@ OCR operation needs a genuinely bounded/cancellable classification boundary
 and a never-returning-classifier regression; abrupt termination also needs
 an operator-safe route to the validated request-staging cleanup routine.
 
+#### Bounded Recovery OCR candidate — 2026-09-23
+
+The clone-q hang showed that a navigation deadline outside synchronous Vision
+OCR does not bound the caller. The candidate places both Recovery frame
+classification and Terminal marker recognition behind one session-scoped,
+single-flight OCR gate. A monotonic deadline or cancellation closes the gate,
+returns to the Recovery transaction, and permanently rejects later OCR from
+that session. A delayed timer cannot allow a worker result after the deadline
+to authorize input; a worker queued until after the deadline skips OCR. A
+timed-out Vision call may still occupy one host thread until Apple Vision
+returns. The gate does not join it, create retries, or clear a recognizer lock
+that worker may hold. This is a bound on the transaction's waiting path, not
+proof that an arbitrary synchronous Vision call terminates; process-isolated
+OCR would be needed for that stronger guarantee.
+
+Cleanup evidence now asks the terminal port whether OCR is idle and
+unpoisoned. If a worker was abandoned, VM stop/reap and request-staging
+removal are still attempted, but `sensitiveFramesCleared` is false and the
+transaction fails closed rather than claiming that captured pixels held by
+the worker were released. This can prevent requested final-state restoration
+after a real OCR timeout; independent public VM-state verification is then
+required. It does not fix SIGTERM/SIGKILL bypass of ordinary teardown or
+provide a public cleanup command for orphaned staging.
+
+Focused red controls failed as intended: the old inline classifier exceeded
+the five-second test bound; allowing late worker completion accepted a frame
+after the deadline when timer delivery was suspended; and removing the
+worker-entry deadline check let a queued worker start OCR after expiry. The
+restored candidate passed 22 focused OCR tests, including cancellation,
+sticky abandonment, late results, worker admission, and frame-clearance
+proof. The runtime cleanup suite passed 11 functions / 16 executions,
+including failure when only sensitive-frame proof is false. The isolated
+full suite passed 1,240 tests, zero failures/skips; result bundle
+`test_macos_2026-09-23T12-33-07-071Z_pid38538_6837c680.xcresult`.
+The preceding full run had one contention-sensitive new test fail before it
+even admitted an OCR worker; the test now uses its injected readiness clock
+to isolate the OCR deadline. Existing unrelated compiler warnings remain.
+Review also found that ordinary Recovery terminal admission constructs the
+same OCR port. That admission now retains the port across failure cleanup and
+requires its frame-clearance proof. It still attempts staging, token, and
+bootstrap-share cleanup if the proof is false, and surfaces the existing
+`cleanupFailed` result rather than claiming complete cleanup. The new focused
+aggregation regression failed before this check and passed afterward (three
+functions / four executions, bundle
+`test_macos_2026-09-23T12-40-55-974Z_pid40284_75d033e3.xcresult`).
+An integrated run with this additional path passed 1,242 tests but failed one
+existing, unrelated TUI PTY timing expectation (`driverFailureUnblocksRead`:
+`Restore source` transcript timeout rather than the injected failure). Its
+isolated three-function suite passed on repeat. A fresh complete run then
+passed all 1,243 tests with zero failures/skips; bundle
+`test_macos_2026-09-23T12-43-16-099Z_pid40952_87ab3680.xcresult`.
+This candidate has not yet had a signed build or live Recovery validation.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns

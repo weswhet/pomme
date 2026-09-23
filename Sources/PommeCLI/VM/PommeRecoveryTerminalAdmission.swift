@@ -211,6 +211,7 @@ actor PommeRecoveryTerminalAdmission {
     private let executableResolver: @Sendable () throws -> URL
     private var phase: Phase = .idle
     private var staging: PommeRecoveryStaging?
+    private var terminal: PommeRecoveryVirtualizationKeyboardPort?
     private var debugScreenshotRecorder: PommeRecoveryNavigationScreenshotRecorder?
 
     init(
@@ -305,6 +306,7 @@ actor PommeRecoveryTerminalAdmission {
                 timeout: Constants.defaultRecoveryAgentTimeout,
                 screenshotRecorder: debugScreenshotRecorder
             )
+            self.terminal = terminal
             let disposition = await interaction.driveToTerminalAndLaunch(
                 using: terminal,
                 capabilityProbes: bootstrap.terminalPlan.capabilityProbes,
@@ -335,23 +337,34 @@ actor PommeRecoveryTerminalAdmission {
 
     func cleanup() async -> Bool {
         guard phase != .cleaned else { return true }
-        var complete = true
-        if let staging {
-            do {
+        let framesCleared = await terminal?.sensitiveFramesCleared() ?? true
+        let complete = Self.performCleanup(
+            sensitiveFramesCleared: framesCleared,
+            clearStaging: {
+                guard let staging else { return }
                 try staging.clearShare(from: vm, on: queue)
                 try staging.removeHostArtifacts()
                 self.staging = nil
-            } catch {
-                complete = false
-            }
-        }
-        state.clear()
-        do {
-            try bootstrapShare.removeHostRoot()
-        } catch {
-            complete = false
-        }
+            },
+            clearState: { state.clear() },
+            removeBootstrap: { try bootstrapShare.removeHostRoot() }
+        )
         phase = complete ? .cleaned : .failed
+        return complete
+    }
+
+    /// An abandoned OCR worker can retain sensitive frames. That missing
+    /// proof must not prevent the remaining cleanup operations from running.
+    nonisolated static func performCleanup(
+        sensitiveFramesCleared: Bool,
+        clearStaging: () throws -> Void,
+        clearState: () -> Void,
+        removeBootstrap: () throws -> Void
+    ) -> Bool {
+        var complete = sensitiveFramesCleared
+        do { try clearStaging() } catch { complete = false }
+        clearState()
+        do { try removeBootstrap() } catch { complete = false }
         return complete
     }
 

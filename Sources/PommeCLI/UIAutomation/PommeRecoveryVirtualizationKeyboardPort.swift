@@ -1,6 +1,168 @@
 import CoreGraphics
 import Foundation
 
+/// Vision is synchronous and cannot be joined safely at a deadline. One
+/// unstructured worker may outlive its caller; a timeout or cancellation closes
+/// this session permanently, so abandoned work can never accumulate or authorize
+/// input later. Only closed results cross this boundary.
+final class PommeRecoveryOCRSession: @unchecked Sendable {
+  private let lock = NSLock()
+  private var active = false
+  private var poisoned = false
+  private let deadlineQueue: DispatchQueue
+  private let workerQueue: DispatchQueue
+
+  init(
+    deadlineQueue: DispatchQueue = .global(qos: .userInitiated),
+    workerQueue: DispatchQueue = .global(qos: .userInitiated)
+  ) {
+    self.deadlineQueue = deadlineQueue
+    self.workerQueue = workerQueue
+  }
+
+  func checkAvailable() throws {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !active, !poisoned else {
+      throw PommeRecoveryVirtualizationPortError.unprovenFrame
+    }
+  }
+
+  /// A poisoned session cannot prove that an abandoned worker or its queued
+  /// closure released captured pixels. Keep this conservative proof sticky,
+  /// even when a late result subsequently arrives.
+  var hasAbandonedOCRWork: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return poisoned
+  }
+
+  var sensitiveFramesCleared: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return !active && !poisoned
+  }
+
+  func clearIfIdle(_ clear: () -> Void) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !active, !poisoned else { return }
+    clear()
+  }
+
+  func run<Value: Sendable>(
+    timeout: TimeInterval,
+    expected: PommeRecoveryFrame,
+    operation: @escaping @Sendable () throws -> Value
+  ) async throws -> Value {
+    guard timeout.isFinite, timeout > 0 else {
+      throw PommeRecoveryVirtualizationPortError.observationTimedOut(expected)
+    }
+    let deadline = DispatchTime.now() + timeout
+    let gate = try reserve(Value.self, deadline: deadline, expected: expected)
+    return try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        gate.install(continuation)
+        let timer = DispatchWorkItem {
+          gate.finish(.failure(PommeRecoveryVirtualizationPortError.observationTimedOut(expected)), poison: true)
+        }
+        gate.installTimer(timer)
+        deadlineQueue.asyncAfter(deadline: deadline, execute: timer)
+        workerQueue.async {
+          guard gate.beginWorker() else { return }
+          let savedErrno = errno
+          defer { errno = savedErrno }
+          gate.finish(Result { try operation() }, poison: false)
+        }
+      }
+    } onCancel: {
+      gate.finish(.failure(CancellationError()), poison: true)
+    }
+  }
+
+  private func reserve<Value: Sendable>(
+    _ type: Value.Type, deadline: DispatchTime, expected: PommeRecoveryFrame
+  ) throws -> OCRGate<Value> {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !active, !poisoned else {
+      throw PommeRecoveryVirtualizationPortError.unprovenFrame
+    }
+    active = true
+    return OCRGate(deadline: deadline, expected: expected) { [self] poison in
+      lock.lock()
+      poisoned = poisoned || poison
+      active = false
+      lock.unlock()
+    }
+  }
+}
+
+private final class OCRGate<Value: Sendable>: @unchecked Sendable {
+  private let lock = NSLock()
+  private var result: Result<Value, Error>?
+  private var continuation: CheckedContinuation<Value, Error>?
+  private var timer: DispatchWorkItem?
+  private let release: @Sendable (Bool) -> Void
+  private let deadline: DispatchTime
+  private let expected: PommeRecoveryFrame
+
+  init(
+    deadline: DispatchTime,
+    expected: PommeRecoveryFrame,
+    release: @escaping @Sendable (Bool) -> Void
+  ) {
+    self.deadline = deadline
+    self.expected = expected
+    self.release = release
+  }
+
+  func beginWorker() -> Bool {
+    lock.lock()
+    guard result == nil else { lock.unlock(); return false }
+    let expired = DispatchTime.now() >= deadline
+    lock.unlock()
+    if expired {
+      finish(.failure(PommeRecoveryVirtualizationPortError.observationTimedOut(expected)), poison: true)
+    }
+    return !expired
+  }
+
+  func install(_ continuation: CheckedContinuation<Value, Error>) {
+    lock.lock()
+    let completed = result
+    if completed == nil { self.continuation = continuation }
+    lock.unlock()
+    if let completed { continuation.resume(with: completed) }
+  }
+
+  func installTimer(_ timer: DispatchWorkItem) {
+    lock.lock()
+    if result == nil { self.timer = timer } else { timer.cancel() }
+    lock.unlock()
+  }
+
+  func finish(_ result: Result<Value, Error>, poison: Bool) {
+    lock.lock()
+    guard self.result == nil else { lock.unlock(); return }
+    // Timer delivery can be delayed by scheduler load. A worker that returns
+    // after the absolute monotonic deadline must never authorize input.
+    let expired = !poison && DispatchTime.now() >= deadline
+    let completion: Result<Value, Error> = expired
+      ? .failure(PommeRecoveryVirtualizationPortError.observationTimedOut(expected))
+      : result
+    self.result = completion
+    let continuation = self.continuation
+    self.continuation = nil
+    timer?.cancel()
+    timer = nil
+    // Publish sticky poison before the caller can begin cleanup or another call.
+    release(poison || expired)
+    lock.unlock()
+    continuation?.resume(with: completion)
+  }
+}
+
 /// A framebuffer capture retains only the image long enough for one
 /// classification. The digest is used as an in-memory cache key so OCR is not
 /// repeated for identical frames; no image or OCR text leaves this module.
@@ -57,6 +219,7 @@ actor PommeRecoveryObservationReadiness {
   private let classify: Classify
   private let sleep: Sleep
   private let clock: Clock
+  private let ocrSession: PommeRecoveryOCRSession
   private let pollNanoseconds: UInt64
   /// Minimum spacing between OCR classifications of a still-changing screen
   /// within one checkpoint. Region OCR is cached, so a short cool-down keeps
@@ -79,12 +242,14 @@ actor PommeRecoveryObservationReadiness {
       try await Task.sleep(nanoseconds: nanoseconds)
     },
     clock: @escaping Clock = Date.init,
-    pollNanoseconds: UInt64 = 100_000_000
+    pollNanoseconds: UInt64 = 100_000_000,
+    ocrSession: PommeRecoveryOCRSession = .init()
   ) {
     self.capture = capture
     self.classify = classify
     self.sleep = sleep
     self.clock = clock
+    self.ocrSession = ocrSession
     self.pollNanoseconds = max(1, pollNanoseconds)
   }
 
@@ -141,6 +306,7 @@ actor PommeRecoveryObservationReadiness {
     context: PommeRecoveryFrameClassificationContext,
     timeout: TimeInterval
   ) async throws -> [PommeRecoveryFrame] {
+    try ocrSession.checkAvailable()
     guard !isObserving else {
       throw PommeRecoveryVirtualizationPortError.unprovenFrame
     }
@@ -194,7 +360,11 @@ actor PommeRecoveryObservationReadiness {
         } else if stableCaptureCount >= 2,
           lastClassificationAt.map({ clock().timeIntervalSince($0) >= Self.classificationCooldown }) ?? true
         {
-          let classified = try classify(captured, context)
+          let classified = try await ocrSession.run(
+            timeout: deadline.timeIntervalSince(clock()), expected: acceptedFrames[0]
+          ) { [classify] in
+            try classify(captured, context)
+          }
           lastObservedFrame = classified
           lastClassificationAt = clock()
           if classifications.count >= 128,
@@ -271,6 +441,7 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
   private let timeout: TimeInterval
   private let recognizer: SettingsAIOCRRecognizer
   private let regionalRecognizer: PommeRecoveryNavigationRecognizer
+  private let ocrSession: PommeRecoveryOCRSession
   private let readiness: PommeRecoveryObservationReadiness
   private let metrics: PommeRecoveryPerformanceMetrics
   private let log: @Sendable (String) -> Void
@@ -316,6 +487,8 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
       }
     )
     self.regionalRecognizer = regionalRecognizer
+    let ocrSession = PommeRecoveryOCRSession()
+    self.ocrSession = ocrSession
     self.readiness = .init(
       capture: { timeout in
         let captureStart = PommeRecoveryPerformanceMetrics.now()
@@ -355,7 +528,8 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
         let waitStart = PommeRecoveryPerformanceMetrics.now()
         defer { metrics.record(.wait, since: waitStart) }
         try await Task.sleep(nanoseconds: nanoseconds)
-      }
+      },
+      ocrSession: ocrSession
     )
   }
 
@@ -484,7 +658,11 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
 
   func clearRecoveryObservations() async {
     await readiness.clear()
-    regionalRecognizer.clear()
+    ocrSession.clearIfIdle { regionalRecognizer.clear() }
+  }
+
+  func sensitiveFramesCleared() -> Bool {
+    ocrSession.sensitiveFramesCleared
   }
 
   func reportRecoveryPerformance(phase: PommeRecoveryPerformancePhase) async {
@@ -547,6 +725,8 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
   private func recognizesTerminalMarker(
     _ marker: String
   ) async throws -> RecoveryTerminalMarkerProofDiagnostic {
+    try ocrSession.checkAvailable()
+    let deadline = Date().addingTimeInterval(timeout)
     let captureStart = PommeRecoveryPerformanceMetrics.now()
     let image: CGImage
     do {
@@ -556,13 +736,20 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
       throw error
     }
     metrics.record(.capture, since: captureStart)
-    let lines = try recognizer.recognizeRecoveryTerminalMarker(
-      image: image,
-      displaySize: VirtualizationPrivateHeadlessBackend.displaySize,
-      marker: marker
-    )
-    let observation = RecoveryUIObservation(lines: lines)
-    return observation.terminalMarkerProofDiagnostic(marker)
+    let captured = try PommeRecoveryFrameCapture(image: image)
+    return try await ocrSession.run(
+      timeout: deadline.timeIntervalSinceNow, expected: .terminal
+    ) { [recognizer] in
+      guard let image = captured.image else {
+        throw PommeRecoveryVirtualizationPortError.unprovenFrame
+      }
+      let lines = try recognizer.recognizeRecoveryTerminalMarker(
+        image: image,
+        displaySize: VirtualizationPrivateHeadlessBackend.displaySize,
+        marker: marker
+      )
+      return RecoveryUIObservation(lines: lines).terminalMarkerProofDiagnostic(marker)
+    }
   }
 
   private func sleep(_ nanoseconds: UInt64) async throws {
