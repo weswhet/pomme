@@ -27,6 +27,8 @@ enum PommeAutoLoginReadbackTrace: String, CaseIterable, Sendable {
   case ownerPostWriteCFPrefsPresent, ownerPostWriteCFPrefsAbsent, ownerPostWriteCFPrefsUnavailable
   case ownerPostWriteSetupAssistantStockOnly, ownerPostWriteSetupAssistantOwnerOnly, ownerPostWriteSetupAssistantBoth
   case ownerPostWriteSetupAssistantAbsent, ownerPostWriteSetupAssistantUnavailable
+  case ownerPostWriteBuildStateCommitted, ownerPostWriteBuildStateMissing
+  case ownerPostWriteBuildStateMismatch, ownerPostWriteBuildStateUnavailable
 
   var message: String { "[DEBUG-autologin-readback-20260922] \(rawValue)" }
   static func log(_ event: Self) { PommeCore.log(event.message) }
@@ -1207,10 +1209,11 @@ struct PommeSecurityOwnerPreparation: Sendable {
   private func readOwnerStringPreference(
     domain: String,
     key: String,
-    kind: PommeSecurityOwnerCommandKind
+    kind: PommeSecurityOwnerCommandKind,
+    timeout: TimeInterval = Self.commandTimeout
   ) throws -> String? {
     let result = try readOwnerPreference(
-      domain: domain, key: key, kind: kind, expectedType: .string)
+      domain: domain, key: key, kind: kind, expectedType: .string, timeout: timeout)
     guard let result else { return nil }
     let value = result.trimmingCharacters(in: .whitespacesAndNewlines)
     guard Self.isValidAppleBuildVersion(value) else {
@@ -1239,7 +1242,8 @@ struct PommeSecurityOwnerPreparation: Sendable {
     domain: String,
     key: String,
     kind: PommeSecurityOwnerCommandKind,
-    expectedType: OwnerPreferenceType
+    expectedType: OwnerPreferenceType,
+    timeout: TimeInterval = Self.commandTimeout
   ) throws -> String? {
     let typeCommand = PommeSecurityOwnerPTYCommand(
       executable: "/usr/bin/sudo",
@@ -1247,7 +1251,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
         "-n", "-H", "-u", identity.username,
         "/usr/bin/defaults", "read-type", domain, key,
       ])
-    let typeResult = try execute(typeCommand)
+    let typeResult = try execute(typeCommand, timeout: timeout)
     guard typeResult.output.utf8.count <= Self.ownerPreferenceOutputLimit else {
       throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
     }
@@ -1281,7 +1285,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
         "-n", "-H", "-u", identity.username,
         "/usr/bin/defaults", "read", domain, key,
       ])
-    let result = try execute(readCommand)
+    let result = try execute(readCommand, timeout: timeout)
     guard result.output.utf8.count <= Self.ownerPreferenceOutputLimit,
       result.exitCode == 0,
       result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1346,6 +1350,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
         key == Self.lastSeenBuddyBuildVersionKey
       {
         probeContextAfterFailedOwnerBuildWrite(ownerUID: ownerUID)
+        probeBuildStateAfterFailedWrite(expectedValue: value)
       }
       throw PommeSecurityOwnerPreparationError.commandFailed(
         .ownerCompletion, exitCode: Int(result.exitCode))
@@ -1353,6 +1358,25 @@ struct PommeSecurityOwnerPreparation: Sendable {
     guard result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
       result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     else { throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed }
+  }
+
+  /// Post-failure evidence is non-atomic. Even this read may initialize CFPreferences;
+  /// it describes observed state only and never authorizes accepting the failed write.
+  private func probeBuildStateAfterFailedWrite(expectedValue: String) {
+    let event: PommeAutoLoginReadbackTrace
+    do {
+      if let value = try readOwnerStringPreference(
+        domain: Self.setupAssistantPreferencesDomain,
+        key: Self.lastSeenBuddyBuildVersionKey, kind: .ownerCompletion, timeout: 5)
+      {
+        event = value == expectedValue ? .ownerPostWriteBuildStateCommitted : .ownerPostWriteBuildStateMismatch
+      } else {
+        event = .ownerPostWriteBuildStateMissing
+      }
+    } catch {
+      event = .ownerPostWriteBuildStateUnavailable
+    }
+    autoLoginTrace(event)
   }
 
   /// Diagnostic only: recognize exact bounded messages, then classify the first line. The
@@ -2653,7 +2677,9 @@ struct PommeSecurityOwnerPreparation: Sendable {
     return result.stdout
   }
 
-  private func execute(_ command: PommeSecurityOwnerPTYCommand) throws -> (
+  private func execute(
+    _ command: PommeSecurityOwnerPTYCommand, timeout: TimeInterval = Self.commandTimeout
+  ) throws -> (
     exitCode: Int32,
     output: String,
     stdout: String,
@@ -2662,7 +2688,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
     let request = GuestCommandRequest(
       path: command.executable,
       arguments: command.arguments,
-      timeout: Self.commandTimeout
+      timeout: timeout
     )
     let result: GuestCommandResult
     do {
