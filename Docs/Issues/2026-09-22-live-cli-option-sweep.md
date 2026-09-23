@@ -3331,6 +3331,17 @@ enabled posture. The native first-write failure and intermittent Aqua/console
 transport failure remain separate open issues; neither was fixed by the
 framebuffer registration change.
 
+A later read-only normal start queried retained guest unified logs for the
+13-second failed-write window and an 11-second successful post-reboot window,
+filtering to `cfprefsd` and `defaults` and emitting aggregate counts only.
+Both queries completed without truncation. The failed window had 101 lines,
+with 81 containing “connection” and 60 “invalid”; the successful window had
+116 lines, with 81 “connection” and 31 “invalid”. Neither had an explicit
+error/failed/denied match. These generic terms are present in both windows
+and do **not** establish an XPC failure or cause. No raw guest log lines were
+retained or copied into the issue log. The VM was gracefully stopped again
+with `stopMethod=guest-stopped`.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
