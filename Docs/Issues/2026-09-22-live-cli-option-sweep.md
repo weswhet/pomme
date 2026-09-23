@@ -2749,6 +2749,16 @@ full suite passed 1,201 functions, zero failures/skips
 qualifies the diagnostic for commit and a signed build; it has not yet
 identified the native cause of the live status-1 write.
 
+Diagnostic candidate `e04d54c` was committed before the canonical signed
+Release build. Signature, exact entitlements, designated-requirement
+compatibility, archive, and atomic-install checks passed; fresh-login
+resolution points to `/Users/wes/.local/bin/pomme`, version `e04d54c`,
+SHA-256 `99a1edaec08dba12da5bd0cafe499aab00985bd163c7f955a95aff3f2728359a`.
+All 104 CLI contract and 21 offline installer checks passed. The signed guest
+artifact is preserved in the append-only store. A fresh internal macOS 26
+guest will pin this digest so its first owner transaction can emit the new
+classification if the native write fails again.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
