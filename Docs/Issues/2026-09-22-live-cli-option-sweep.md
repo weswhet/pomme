@@ -3265,6 +3265,16 @@ suite passed 1,208 functions / 1,757 executions with zero failures or skips
 (`test_macos_2026-09-23T05-47-42-196Z_pid57979_b0f791dc.xcresult`). This
 qualifies a signed build; the native deadlock still needs live validation.
 
+Candidate `fdd65ed` was committed before the canonical signed Release build.
+The exact Developer ID signature, entitlement, designated-requirement
+compatibility, agent archive, and atomic install checks passed. A fresh login
+resolves `/Users/wes/.local/bin/pomme`; it reports `fdd65ed` with SHA-256
+`6cfbd318fcad050d6043495e0033751858396932e21fad52faf8e8a11640af49`.
+All 104 CLI contract checks passed. Six unrelated compiler warnings remain
+(four in `PommeCore.swift`, two deprecated initializer calls in
+`SettingsAIPlanner.swift`). Live validation follows on an internal 40 GB /
+4 GB clone with its original SIP posture already restored.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
