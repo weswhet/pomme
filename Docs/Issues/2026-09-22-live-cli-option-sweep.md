@@ -3824,6 +3824,36 @@ or unrelated VM was touched. The transport cause remains unresolved; this
 candidate only refines the failed exchange to host response-read/no-bytes and
 no persisted guest decoded-start event.
 
+### Guest serve-loop diagnostic candidate
+
+The clone-h result motivates one more boundary probe before changing
+transport behavior. The guest daemon serves one connection serially, and
+untraced operations may have occupied that loop between the preceding
+successful desktop response and the timed-out start. A separate
+persistent-normal-role-only diagnostic is proposed at daemon serve entry and
+exit, socket read entry/result, complete frame extraction, and guest socket
+write entry/result. Events contain fixed labels and local elapsed time only;
+they carry no operation, payload, frame size, request ID, output, credential,
+VM identity, or raw error. Recovery, terminal, and operation-limited sessions
+remain silent. This could distinguish a prior blocked guest write from a
+guest read waiting for ingress, but missing persisted logs still cannot prove
+that no guest activity occurred. No deadline, retry, reconnect, or protocol
+change is justified by the current evidence.
+
+The focused guest process-exchange suite passed 18 test functions / 45
+executions with zero failures or skips; bundle
+`test_macos_2026-09-23T08-30-08-948Z_pid91495_4a805ae5.xcresult`.
+Tests cover normal authentication followed by a generic non-desktop health
+request, ordered read/frame/write events without assuming a fixed count of
+stream-socket reads, and silence for Recovery, terminal, and
+operation-limited scopes. The existing desktop exchange tests also passed.
+`git diff --check` passed. The isolated full XcodeBuildMCP suite also passed
+1,219 test functions / 1,834 executions, zero
+failures or skips; bundle
+`test_macos_2026-09-23T08-30-52-742Z_pid91674_103c965d.xcresult`.
+The diagnostic candidate is qualified for a source/test/evidence commit
+before the canonical signed Release build and live comparison.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns

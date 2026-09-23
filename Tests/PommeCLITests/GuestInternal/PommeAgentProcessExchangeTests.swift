@@ -9,6 +9,47 @@ import Synchronization
 /// cross-test concurrency.
 @Suite("Pomme agent process exchanges", .serialized)
 struct PommeAgentProcessExchangeTests: Sendable {
+    @Test("Normal serve loop traces authentication and a generic request in order")
+    func serveLoopBoundaries() async throws {
+        let trace = Mutex<[(PommeAgentServeLoopTrace.Event, Double)]>([])
+        try await withDaemon(serveLoopTraceSink: { event, elapsed in
+            trace.withLock { $0.append((event, elapsed)) }
+        }) { context in
+            try await authenticate(using: context.wire)
+            let reply = try await exchange(.request(operation: "agent.health", payload: .object([:])), using: context.wire)
+            #expect(reply.response.ok == true)
+        }
+        let samples = trace.withLock { $0 }
+        let events = samples.map(\.0)
+        // Stream socket reads may split a frame. Assert frame/write ordering
+        // independently from the number of read syscalls.
+        #expect(events.filter { $0 != .readEntered && $0 != .readReturned } == [
+            .serveEntered, .frameReady, .writeEntered, .writeCompleted,
+            .frameReady, .writeEntered, .writeCompleted, .readClosed, .serveExited
+        ])
+        let reads = events.filter { $0 == .readEntered || $0 == .readReturned }
+        #expect(reads.count >= 6 && reads.count.isMultiple(of: 2))
+        for (index, event) in reads.enumerated() {
+            #expect(event == (index.isMultiple(of: 2) ? .readEntered : .readReturned))
+        }
+        #expect(samples.allSatisfy { $0.1 >= 0 })
+        #expect(zip(samples, samples.dropFirst()).allSatisfy { $0.1 <= $1.1 })
+    }
+
+    @Test("Recovery, terminal, and operation-limited serve loops are silent", arguments: 0..<3)
+    func serveLoopExcludesRestrictedRoles(scope: Int) async throws {
+        let trace = Mutex<[PommeAgentServeLoopTrace.Event]>([])
+        let agent = try PommeAgent(role: scope == 0 ? .recovery : .persistent, executableSHA256: String(repeating: "a", count: 64))
+        try await withDaemon(agent: agent, allowedOperation: scope == 2 ? "agent.health" : nil,
+                             terminalAuthority: scope == 1,
+                             serveLoopTraceSink: { event, _ in trace.withLock { $0.append(event) } }) { context in
+            try await authenticate(using: context.wire)
+            let reply = try await exchange(.request(operation: "agent.health", payload: .object([:])), using: context.wire)
+            #expect(reply.response.ok == true)
+        }
+        #expect(trace.withLock { $0.isEmpty })
+    }
+
     @Test("Recovery desktop start does not opt into normal boundary diagnostics")
     func recoveryExcludesDesktopStartBoundaries() async throws {
         let trace = Mutex<[PommeDesktopStartBoundaryTrace.Event]>([])
@@ -942,6 +983,9 @@ struct PommeAgentProcessExchangeTests: Sendable {
         beforeServing: (@Sendable () async -> Void)? = nil,
         signalTraceSink: PommeSignalBoundaryTrace.Sink? = nil,
         desktopStartTraceSink: PommeDesktopStartBoundaryTrace.Sink? = nil,
+        allowedOperation: String? = nil,
+        terminalAuthority: Bool = false,
+        serveLoopTraceSink: PommeAgentServeLoopTrace.Sink? = nil,
         body: @Sendable (DaemonContext) async throws -> R
     ) async throws -> R {
         var sockets: [Int32] = [-1, -1]
@@ -967,9 +1011,11 @@ struct PommeAgentProcessExchangeTests: Sendable {
                 descriptor: server,
                 connection: connection,
                 agent: agent,
-                allowedOperation: nil,
+                allowedOperation: allowedOperation,
+                terminalAuthority: terminalAuthority,
                 signalTraceSink: signalTraceSink,
-                desktopStartTraceSink: desktopStartTraceSink
+                desktopStartTraceSink: desktopStartTraceSink,
+                serveLoopTraceSink: serveLoopTraceSink
             )
         }
 
