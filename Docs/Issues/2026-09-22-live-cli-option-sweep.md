@@ -3945,6 +3945,13 @@ The one-off lease failure is not represented as fixed. The actor candidate is
 qualified for a source/test/evidence commit before the canonical signed
 Release build and live comparison.
 
+Candidate `dde2cfc` was committed before the canonical signed Release build.
+Build, signature, exact entitlements, designated-requirement compatibility,
+artifact archive, and atomic install checks passed. Fresh-login resolution
+finds `/Users/wes/.local/bin/pomme`; it reports `dde2cfc` with SHA-256
+`615101afcc28f10f71e186baf71bb3a30edbae1f17088fc291563edb10da3428`.
+All 104 CLI contract checks passed. Actor-side live evidence is pending.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
