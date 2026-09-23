@@ -9,6 +9,83 @@ import Synchronization
 /// cross-test concurrency.
 @Suite("Pomme agent process exchanges", .serialized)
 struct PommeAgentProcessExchangeTests: Sendable {
+    @Test("Decoded frame classifications expose only closed operation classes")
+    func decodedClassifications() {
+        let operations = ["authenticate", "process.start", "process.status", "process.signal", "process.wait", "process.output", "private-unknown-operation"]
+        let expected: [PommeAgentServeLoopTrace.Event] = [.decodedAuthenticate, .decodedStart, .decodedStatus, .decodedSignal, .decodedWait, .decodedOutput, .decodedOtherRequest]
+        for (operation, event) in zip(operations, expected) {
+            let frame = PommeAgentProtocol.Envelope.request(operation: operation, payload: .object(["password": .string("private-value")]))
+            #expect(PommeAgentServeLoopTrace.classification(frame) == event)
+            #expect(!event.rawValue.contains("private"))
+        }
+        #expect(PommeAgentServeLoopTrace.classification(nil) == .decodedInvalid)
+        #expect(PommeAgentServeLoopTrace.classification(.init(kind: .response, operation: "process.start")) == .decodedInvalid)
+        #expect(PommeAgentServeLoopTrace.classification(.init(kind: .stream, operation: "private-stream")) == .decodedStream)
+    }
+
+    @Test("Malformed frame records decode failure before closed invalid classification")
+    func malformedFrameDecodeBoundaries() async throws {
+        let events = Mutex<[PommeAgentServeLoopTrace.Event]>([])
+        try await withDaemon(serveLoopTraceSink: { event, _ in events.withLock { $0.append(event) } }) { context in
+            let data = Data("{private-invalid-json}\n".utf8)
+            let written = data.withUnsafeBytes { Darwin.write(context.clientDescriptor, $0.baseAddress, $0.count) }
+            #expect(written == data.count)
+        }
+        #expect(events.withLock { $0.filter { [.frameReady, .decodeEntered, .decodeReturned, .decodeFailed, .decodedInvalid].contains($0) } }
+                == [.frameReady, .decodeEntered, .decodeFailed, .decodedInvalid])
+    }
+
+    @Test("Aqua and generic shell starts cross generic boundaries while preserving exact desktop admission", arguments: [true, false])
+    func aquaStartBoundaries(aqua: Bool) async throws {
+        let events = Mutex<[String]>([])
+        let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64),
+                                  startTraceSink: { event, _ in events.withLock { $0.append(event.rawValue) } })
+        let request = try #require(PommeSecurityNormalAgent.aquaSessionProofRequest(uniqueID: 501))
+        let frame = PommeAgentProtocol.Envelope.request(operation: "process.start", payload: .object([
+            "path": .string(request.path), "arguments": .array((aqua ? request.arguments : ["-c", "exit 0"]).map(JSONValue.string))
+        ]))
+        #expect(PommeDesktopStartBoundaryTrace.admits(frame) == aqua)
+        try await withDaemon(agent: agent,
+                             desktopStartTraceSink: { _, _ in if !aqua { events.withLock { $0.append("unexpectedDesktop") } } },
+                             serveLoopTraceSink: { event, _ in events.withLock { $0.append(event.rawValue) } }) { context in
+            try await authenticate(using: context.wire)
+            events.withLock { $0.removeAll() }
+            let reply = try await exchange(frame, using: context.wire)
+            let jobID = try #require(reply.response.result?.objectValue?["jobID"]?.stringValue)
+            let cleaned = try await finishSignalTraceChild(agent: agent, jobID: jobID, terminate: false)
+            #expect(cleaned)
+        }
+        let boundaries = events.withLock { $0.filter { $0.hasPrefix("start") || $0.hasPrefix("spawn") || $0.hasPrefix("actor") || $0.hasPrefix("decoded") || $0 == "unexpectedDesktop" } }
+        #expect(boundaries == ["decodedStart", "startHandlerEntered", "actorAdmitted", "startEntered", "spawnEntered", "spawnReturned", "actorReturned", "startHandlerReturned"])
+    }
+
+    @Test("Generic start tracing excludes restricted actors", arguments: ["recovery", "terminal", "other"])
+    func startTraceExclusions(mode: String) async throws {
+        let events = Mutex<[PommeAgentStartTrace.Event]>([])
+        let agent = try PommeAgent(role: mode == "recovery" ? .recovery : .persistent,
+                                  executableSHA256: String(repeating: "a", count: 64),
+                                  authority: mode == "terminal" ? .recoveryTerminal : .standard,
+                                  startTraceSink: { event, _ in events.withLock { $0.append(event) } })
+        _ = try? await agent.performAsynchronously(.request(operation: mode == "other" ? "agent.health" : "process.start"))
+        #expect(events.withLock { $0.isEmpty })
+    }
+
+    @Test("Generic start failures retain boundaries and trace sinks preserve errno")
+    func startTraceFailure() async throws {
+        let events = Mutex<[PommeAgentStartTrace.Event]>([])
+        let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64),
+                                  startTraceSink: { event, _ in events.withLock { $0.append(event) } })
+        _ = try? await agent.performAsynchronously(.request(operation: "process.start"))
+        #expect(events.withLock { $0 } == [.actorAdmitted, .startEntered, .actorFailed])
+        let saved = errno
+        defer { errno = saved }
+        errno = EINTR
+        PommeAgentStartTrace(sink: { _, _ in errno = EIO }).emit(.spawnReturned)
+        #expect(errno == EINTR)
+        PommeAgentServeLoopTrace(sink: { _, _ in errno = EIO }).emit(.decodedStart)
+        #expect(errno == EINTR)
+    }
+
     @Test("Actor status boundaries repeat in order through authenticated PTY exchanges")
     func actorStatusBoundaries() async throws {
         let trace = Mutex<[(PommeAgentStatusTrace.Event, Double)]>([])
@@ -82,8 +159,8 @@ struct PommeAgentProcessExchangeTests: Sendable {
         // Stream socket reads may split a frame. Assert frame/write ordering
         // independently from the number of read syscalls.
         #expect(events.filter { $0 != .readEntered && $0 != .readReturned } == [
-            .serveEntered, .frameReady, .writeEntered, .writeCompleted,
-            .frameReady, .writeEntered, .writeCompleted, .readClosed, .serveExited
+            .serveEntered, .frameReady, .decodeEntered, .decodeReturned, .decodedAuthenticate, .writeEntered, .writeCompleted,
+            .frameReady, .decodeEntered, .decodeReturned, .decodedOtherRequest, .writeEntered, .writeCompleted, .readClosed, .serveExited
         ])
         let reads = events.filter { $0 == .readEntered || $0 == .readReturned }
         #expect(reads.count >= 6 && reads.count.isMultiple(of: 2))

@@ -4279,6 +4279,38 @@ unrelated VM was touched. The next diagnostic must classify the generic
 frame/handler at the last `frameReady`; the existing actor-status probe did
 not reproduce the earlier clone-i actor gap.
 
+The next diagnostic candidate brackets frame decoding, classifies the
+decoded frame only by closed operation family (including generic
+`process.start`, status, wait, stream, and other), then marks generic
+process-start handler and actor
+admission/return boundaries. The existing exact desktop-start trace also
+admits the Aqua `/bin/sh` proof; its absence after clone-o's last frame
+could mean the decoder did not return, a different frame was received, or
+logging was lost. All
+new events must be restricted to the persistent normal agent and carry no
+path, arguments, request or job ID, payload, output, credentials, VM
+identity, or raw errors. They must leave guest operation, wire response,
+timeouts, and retries unchanged. Added logging can perturb timing; a later
+live comparison must check whether the original failure still reproduces.
+No transport fix is proposed before the received operation and blocking
+boundary are known.
+
+The candidate reuses a single frame decode and emits fixed `decodeEntered`,
+`decodeReturned`/`decodeFailed`, then a closed class label. Generic
+`process.start` receives additional normal-role handler, actor-admission,
+start, and spawn boundaries. The existing exact desktop-start admission,
+including Aqua, remains unchanged. All events preserve `errno` and exclude
+payloads and identities. The focused guest process-exchange suite passed
+26 functions / 59 executions, zero failures/skips; bundle
+`test_macos_2026-09-23T11-02-49-946Z_pid20237_b0470f34.xcresult`.
+It covers Aqua and generic shell starts, malformed decoding, closed class
+labels, ordered boundaries, restricted-role exclusion, and trace sink errno
+preservation. Diff check passed. The fresh isolated full suite then passed
+1,231 functions / 1,868 executions, zero failures or skips; bundle
+`test_macos_2026-09-23T11-03-40-297Z_pid20426_eee1a70b.xcresult`.
+The diagnostic is qualified for commit before signed build and fresh live
+comparison; it is not a fix.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns

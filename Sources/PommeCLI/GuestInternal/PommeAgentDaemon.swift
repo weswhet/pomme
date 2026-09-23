@@ -7,6 +7,25 @@ struct PommeAgentServeLoopTrace: Sendable {
     enum Event: String, CaseIterable, Sendable {
         case serveEntered, serveExited, readEntered, readReturned, readClosed, readFailed
         case frameReady, writeEntered, writeCompleted, writeFailed
+        case decodedAuthenticate, decodedStart, decodedStatus, decodedSignal, decodedWait, decodedOutput
+        case decodedOtherRequest, decodedStream, decodedInvalid
+        case decodeEntered, decodeReturned, decodeFailed
+        case startHandlerEntered, startHandlerReturned, startHandlerFailed
+    }
+
+    static func classification(_ frame: PommeAgentProtocol.Envelope?) -> Event {
+        guard let frame else { return .decodedInvalid }
+        if frame.kind == .stream { return .decodedStream }
+        guard frame.kind == .request else { return .decodedInvalid }
+        switch frame.operation {
+        case "authenticate": return .decodedAuthenticate
+        case "process.start": return .decodedStart
+        case "process.status": return .decodedStatus
+        case "process.signal": return .decodedSignal
+        case "process.wait": return .decodedWait
+        case "process.output": return .decodedOutput
+        default: return .decodedOtherRequest
+        }
     }
 
     typealias Sink = @Sendable (Event, Double) -> Void
@@ -15,6 +34,8 @@ struct PommeAgentServeLoopTrace: Sendable {
     let sink: Sink
 
     func emit(_ event: Event) {
+        let savedErrno = errno
+        defer { errno = savedErrno }
         let elapsed = started.duration(to: .now).components
         sink(event, Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15)
     }
@@ -468,7 +489,13 @@ enum PommeAgentDaemon {
                 let line = Data(buffer[..<newline]); buffer.removeSubrange(...newline)
                 serveTrace?.emit(.frameReady)
                 guard !line.isEmpty, line.count < PommeAgentProtocol.maximumFrameBytes else { return }
-                if let envelope = try? PommeAgentProtocol.decode(line), envelope.kind == .stream {
+                // One fixed classification before authentication/actor admission.
+                // Logging adds observer latency; absence is not proof of a stall.
+                serveTrace?.emit(.decodeEntered)
+                let decoded = try? PommeAgentProtocol.decode(line)
+                serveTrace?.emit(decoded == nil ? .decodeFailed : .decodeReturned)
+                serveTrace?.emit(PommeAgentServeLoopTrace.classification(decoded))
+                if let envelope = decoded, envelope.kind == .stream {
                     guard !terminalAuthority, connection.permitsStream,
                           let jobID = streamJobID(envelope),
                           let frames = try? await routeStream(envelope, agent: agent)
@@ -491,7 +518,7 @@ enum PommeAgentDaemon {
                     else { return }
                     continue
                 }
-                let request = try? PommeAgentProtocol.decode(line)
+                let request = decoded
                 let desktopStartTrace = normalScope && request.map(PommeDesktopStartBoundaryTrace.admits) == true
                     ? PommeDesktopStartBoundaryTrace(sink: desktopStartTraceSink ?? PommeDesktopStartBoundaryTrace.guestLog)
                     : nil
@@ -532,14 +559,18 @@ enum PommeAgentDaemon {
                             sink: signalTraceSink ?? PommeSignalBoundaryTrace.guestLog, isStatus: true)
                     }
                     handlerEntered = true
+                    let isStart = request.kind == .request && request.operation == "process.start"
+                    if isStart { serveTrace?.emit(.startHandlerEntered) }
                     signalTrace?.emit(.guestHandlerEntered)
                     do {
                         let result = try await agent.performAsynchronously(request)
+                        if isStart { serveTrace?.emit(.startHandlerReturned) }
                         desktopStartTrace?.emit(.performReturned)
                         signalTrace?.emit(.guestPerformReturned)
                         if allowedOperation != nil && !terminalAuthority { try oneShotCleanup() }
                         return result
                     } catch {
+                        if isStart { serveTrace?.emit(.startHandlerFailed) }
                         desktopStartTrace?.emit(.performFailed)
                         signalTrace?.emit(.guestPerformFailed)
                         if allowedOperation != nil && !terminalAuthority { try? oneShotCleanup() }

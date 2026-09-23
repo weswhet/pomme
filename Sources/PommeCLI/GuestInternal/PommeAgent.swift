@@ -28,6 +28,29 @@ struct PommeAgentStatusTrace: Sendable {
     }
 }
 
+/// Fixed normal-agent start boundaries. Logging can perturb scheduling; these
+/// events locate observed progress, not a definitive diagnosis of missing logs.
+struct PommeAgentStartTrace: Sendable {
+    enum Event: String, CaseIterable, Sendable {
+        case actorAdmitted, actorReturned, actorFailed, startEntered, spawnEntered, spawnReturned
+    }
+    typealias Sink = @Sendable (Event, Double) -> Void
+    private static let logger = Logger(subsystem: "com.github.weswhet.pomme", category: "actor-start-boundary")
+    private let started = ContinuousClock.now
+    let sink: Sink
+
+    func emit(_ event: Event) {
+        let savedErrno = errno
+        defer { errno = savedErrno }
+        let elapsed = started.duration(to: .now).components
+        sink(event, Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15)
+    }
+
+    static func guestLog(_ event: Event, _ elapsed: Double) {
+        logger.notice("[DEBUG-actor-start-boundary-20260923] \(event.rawValue, privacy: .public) elapsedMs=\(elapsed, privacy: .public)")
+    }
+}
+
 enum PommeAgentRole: String, Sendable { case persistent, recovery }
 enum PommeAgentAuthority: Sendable { case standard, recoveryTerminal }
 
@@ -150,6 +173,7 @@ actor PommeAgent {
     private let ownerCredential: PommeGuestOwnerCredentialReader
     private let terminalService: PommeTerminalService
     private let statusTraceSink: PommeAgentStatusTrace.Sink
+    private let startTraceSink: PommeAgentStartTrace.Sink
 
     init(role: PommeAgentRole, executableSHA256: String, journalPath: String = PommeAgentInstall.journal,
          executablePath: String = PommeAgentInstall.executable,
@@ -160,7 +184,8 @@ actor PommeAgent {
          ownerCredential: PommeGuestOwnerCredentialReader = .init(),
          recoveredJournal: PommeAgentUpdateJournal? = nil,
          authority: PommeAgentAuthority = .standard,
-         statusTraceSink: @escaping PommeAgentStatusTrace.Sink = PommeAgentStatusTrace.guestLog) throws {
+         statusTraceSink: @escaping PommeAgentStatusTrace.Sink = PommeAgentStatusTrace.guestLog,
+         startTraceSink: @escaping PommeAgentStartTrace.Sink = PommeAgentStartTrace.guestLog) throws {
         guard executableSHA256.count == 64, executableSHA256.allSatisfy(\.isHexDigit) else {
             throw PommeAgentProtocol.Error.invalidRequest
         }
@@ -169,6 +194,7 @@ actor PommeAgent {
         self.recoverySecurity = recoverySecurity
         self.ownerCredential = ownerCredential
         self.statusTraceSink = statusTraceSink
+        self.startTraceSink = startTraceSink
         let terminalSpoolRoot = URL(fileURLWithPath: journalPath)
             .deletingLastPathComponent()
             .appendingPathComponent("terminal-spool", isDirectory: true)
@@ -191,7 +217,7 @@ actor PommeAgent {
         for job in jobs.values { [job.ptyMaster, job.stdin, job.stdout, job.stderr].compactMap { $0 }.forEach { _ = Darwin.close($0) } }
     }
 
-    func perform(_ request: PommeAgentProtocol.Envelope, statusTrace: PommeAgentStatusTrace? = nil) throws -> JSONValue {
+    func perform(_ request: PommeAgentProtocol.Envelope, statusTrace: PommeAgentStatusTrace? = nil, startTrace: PommeAgentStartTrace? = nil) throws -> JSONValue {
         if authority == .recoveryTerminal {
             guard role == .recovery else { throw PommeAgentOperationError.invalid }
             switch request.operation {
@@ -281,7 +307,7 @@ actor PommeAgent {
         case PommeGuestOwnerCredentialReader.operation:
             guard role == .persistent else { throw PommeAgentOperationError.invalid }
             return try ownerCredential.read(payload: request.payload)
-        case "process.start": return try start(request.payload)
+        case "process.start": return try start(request.payload, trace: startTrace)
         case "process.status": return try status(request.payload, trace: statusTrace)
         case "process.signal": return try signal(request.payload)
         case "process.list": return try list(request.payload)
@@ -312,6 +338,9 @@ actor PommeAgent {
     /// uses this entry point so ordinary synchronous in-process operation
     /// seams remain usable for file and process tests.
     func performAsynchronously(_ request: PommeAgentProtocol.Envelope) async throws -> JSONValue {
+        let startTrace = role == .persistent && authority == .standard && request.kind == .request && request.operation == "process.start"
+            ? PommeAgentStartTrace(sink: startTraceSink) : nil
+        startTrace?.emit(.actorAdmitted)
         let statusTrace = role == .persistent && authority == .standard && request.operation == "process.status"
             ? PommeAgentStatusTrace(sink: statusTraceSink) : nil
         statusTrace?.emit(.actorAdmitted)
@@ -333,10 +362,18 @@ actor PommeAgent {
             guard !activationPending else { throw PommeAgentOperationError.activationPending }
             return try await wait(request.payload)
         }
-        return try perform(request, statusTrace: statusTrace)
+        do {
+            let result = try perform(request, statusTrace: statusTrace, startTrace: startTrace)
+            startTrace?.emit(.actorReturned)
+            return result
+        } catch {
+            startTrace?.emit(.actorFailed)
+            throw error
+        }
     }
 
-    private func start(_ payload: JSONValue) throws -> JSONValue {
+    private func start(_ payload: JSONValue, trace: PommeAgentStartTrace? = nil) throws -> JSONValue {
+        trace?.emit(.startEntered)
         let object = try object(payload)
         let path = try string(object, "path")
         let arguments = try strings(object["arguments"])
@@ -345,6 +382,7 @@ actor PommeAgent {
         let detached = try strictBoolean(object["detached"])
         guard !(pty && detached) else { throw PommeAgentOperationError.invalid }
         let options = try PommeProcess.Options(payload: object, pty: pty)
+        trace?.emit(.spawnEntered)
         let launched = try PommeProcess.spawn(
             path: path,
             arguments: arguments,
@@ -352,6 +390,7 @@ actor PommeAgent {
             pty: pty,
             options: options
         )
+        trace?.emit(.spawnReturned)
         let job = Job(id: UUID(), pid: launched.pid, startedAt: Date(), exited: false, status: nil, ptyMaster: launched.ptyMaster, stdin: launched.stdin, stdout: launched.stdout, stderr: launched.stderr, outputEOF: [], detached: detached, stdoutLog: Data(), stderrLog: Data(), stdoutLogTruncated: false, stderrLogTruncated: false, stdoutBytes: 0, stderrBytes: 0)
         jobs[job.id] = job
         observeExit(for: job)
