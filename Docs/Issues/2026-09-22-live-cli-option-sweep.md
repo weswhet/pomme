@@ -3712,6 +3712,26 @@ gracefully. Public inventory shows thirteen internal VMs, all stopped/no
 helper; clone-g remains at 40 GB / 4 GB with unchanged UUID, plan, agent pin,
 and retained pre-mutation journal. The transport root cause remains open.
 
+Read-only review of the paired trace confirms the host timeout was in the
+response wait, after `writeAll` completed; the foreground caller had no
+validated job ID and must not retry that start. Guest `requestAccepted` is
+emitted only inside the authenticated handler, so its absence cannot separate
+socket ingress, pre-handler authentication/connection handling, and logging
+loss. The final persisted `guestStatusStreamWritten` has no request identity
+or cross-host clock correlation to the failed Aqua start; it is not proof of
+a blocked response write. The smallest remaining diagnostic is a fixed guest
+marker immediately after an exact desktop start frame is decoded, before
+authentication admission, plus a closed host response-read state (no bytes,
+partial frame, or completed stream frames). No timeout increase or replay is
+justified by the current evidence.
+
+The exact clone-g target was checked stopped/no helper with its original
+independently verified SIP-enabled state and archived signed agent digest.
+It was then deleted to recover internal space for a future same-resource
+comparison. Public inventory now shows twelve VMs, all stopped/no helper,
+and no clone-g; free internal space rose from 12 to 17 GiB. Its VM disk is
+not recoverable through Pomme. No external-drive or unrelated VM was touched.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
