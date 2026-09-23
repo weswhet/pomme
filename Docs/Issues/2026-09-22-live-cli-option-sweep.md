@@ -4512,6 +4512,15 @@ passed all 1,243 tests with zero failures/skips; bundle
 `test_macos_2026-09-23T12-43-16-099Z_pid40952_87ab3680.xcresult`.
 This candidate has not yet had a signed build or live Recovery validation.
 
+Candidate `771b061` was committed before the canonical signed Release build.
+The Developer ID signature, exact entitlements, designated-requirement
+compatibility, signed agent archive, and atomic installation checks passed.
+Fresh-login resolution finds `/Users/wes/.local/bin/pomme`, reporting
+`771b061` with SHA-256
+`e7f7ee0291e1c9e60fad44bbe8e2ea7c6d606694f3fb595e2cd8eae83d210563`.
+All 104 installed-CLI contract checks passed. The prior signed agent archive
+was retained. Live Recovery validation remains the next gate.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
