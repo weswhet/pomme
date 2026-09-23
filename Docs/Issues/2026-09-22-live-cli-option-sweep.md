@@ -3854,6 +3854,14 @@ failures or skips; bundle
 The diagnostic candidate is qualified for a source/test/evidence commit
 before the canonical signed Release build and live comparison.
 
+Candidate `e9ca7d1` was committed before the canonical signed Release build.
+Build, signature, exact entitlements, designated-requirement compatibility,
+artifact archive, and atomic install checks passed. Fresh-login resolution
+finds `/Users/wes/.local/bin/pomme`; it reports `e9ca7d1` with SHA-256
+`658412b3d634fe94d2f788b9bdb7dcf834268fd23f75bfe9ac5241a9bc0cbbdd`.
+All 104 CLI contract checks passed. The guest diagnostic still requires a
+fresh same-resource live comparison.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
