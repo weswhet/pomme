@@ -3174,6 +3174,30 @@ Release build also repeated four pre-existing compiler warnings in
 `PommeCore.swift` (three unused replacement results and one image-send
 isolation warning); those are outside this diagnostic change.
 
+The second internal template clone dry run admitted the same 40 GB / 4 GB,
+stopped, unprovisioned 26.6.2/25G83 plan. Actual creation of
+`pomme-agent-ownerloop-clone26-20260922b` began at 05:10:26Z, pinned to the
+new signed `a058cd62…7db1d4` agent. Recovery bootstrap reached
+`navigationStarted` immediately but produced no later milestone. At roughly
+ten minutes the exact live host CLI process still had its durable create
+journal at `installRecoveryAgent` intent and no receipt. A one-second host
+sample showed a frame-update callback waiting on the private VNC presenter's
+unfair lock while `ensureFramebufferObserver` synchronously associated the
+presenter and waited on the Virtualization accessor-manager queue. This is
+evidence of a lock/queue cycle in frame-observer association, not a Recovery
+screen-classification timeout or an owner-write result. No owner or SIP
+workflow ran on this clone. The sample remains a private temporary host
+diagnostic; its raw stack was not copied into this document.
+
+The exact still-live PID was rechecked, then given SIGINT at about 05:21Z.
+The public command exited 130; independent status found the clone stopped,
+no helper, UUID `8d89b9ef-0e72-4949-8943-df782f1569d6`, and unchanged
+creation pin. Its durable journal still ends with
+`installRecoveryAgent` intent, attempt one. It has not been manually
+rewritten or deleted. This blocked the planned owner diagnostic live test;
+the framebuffer lock-order failure is being isolated before a public
+`create --resume` attempt.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
