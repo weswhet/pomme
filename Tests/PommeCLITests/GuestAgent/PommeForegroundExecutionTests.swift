@@ -5,6 +5,115 @@ import Synchronization
 
 @Suite("Pomme foreground execution")
 struct PommeForegroundExecutionTests {
+    @Test("Desktop diagnostics require exact probe payloads", arguments: ["console", "aqua", "ps"], ["exact", "user", "environment", "stdinDataBase64", "attachStdin", "pty", "cwd", "arguments", "path", "unknown"])
+    func desktopDiagnosticPayloadGate(stage: String, variant: String) async throws {
+        let request: GuestCommandRequest
+        switch stage {
+        case "console": request = .init(path: "/usr/bin/stat", arguments: ["-f", "%Su:%u", "/dev/console"], timeout: 15)
+        case "ps": request = .init(path: "/bin/ps", arguments: ["-axo", "uid=,comm="], timeout: 15)
+        default: request = try #require(PommeSecurityNormalAgent.aquaSessionProofRequest(uniqueID: 501))
+        }
+        var payload = try #require(JSONValue(any: request.agentPayload()).objectValue)
+        if variant != "exact" {
+            payload[variant] = .string("private-value")
+            if variant == "stdinDataBase64" { payload[variant] = .string("") }
+            if variant == "pty" || variant == "attachStdin" { payload[variant] = .bool(false) }
+        }
+        let diagnosticPayload = JSONValue.object(payload)
+        let messages = Mutex<[String]>([])
+        await PommeCore.withLogSink({ line in messages.withLock { $0.append(line) } }) {
+            do {
+                _ = try await PommeForegroundExecution.run(
+                    payload: diagnosticPayload, timeout: 15,
+                    perform: { _, _ in throw RunnerError.guestAgentTimedOut("Pomme agent exchange") },
+                    sendStream: { _, _, _ in Issue.record("No stream after failed start"); return [] })
+                Issue.record("Expected timeout")
+            } catch { }
+        }
+        let lines = messages.withLock { $0 }
+        #expect(lines.count == (variant == "exact" ? 1 : 0))
+        #expect(lines.allSatisfy { $0.contains("errorKind=agentTimeout") && !$0.contains("private-value") && !$0.contains("Pomme agent exchange") })
+    }
+
+    @Test("Desktop transport start failures are closed and opt-in", arguments: [true, false])
+    func desktopTransportStartDiagnostic(exact: Bool) async throws {
+        let messages = Mutex<[String]>([])
+        let payload = exact ? try aquaPayload() : .object(["path": .string("/private/do-not-log")])
+        try await PommeCore.withLogSink({ line in messages.withLock { $0.append(line) } }) {
+            do {
+                _ = try await PommeForegroundExecution.run(
+                    payload: payload, timeout: 15,
+                    perform: { _, _ in throw RunnerError.guestAgentTimedOut("private-secret") },
+                    sendStream: { _, _, _ in Issue.record("No stream after failed start"); return [] })
+                Issue.record("Expected original transport error")
+            } catch RunnerError.guestAgentTimedOut(let operation) {
+                #expect(operation == "private-secret")
+            }
+        }
+        let lines = messages.withLock { $0 }
+        if exact {
+            let line = try #require(lines.first)
+            #expect(lines.count == 1)
+            #expect(line.contains("[DEBUG-desktop-transport-20260923] side=helper boundary=start "))
+            #expect(line.contains("jobEstablished=false pollCount=0 errorKind=agentTimeout"))
+            #expect(line.contains("elapsedMs="))
+            #expect(line.contains("private") == false)
+        } else { #expect(lines.isEmpty) }
+    }
+
+    @Test("Desktop transport phases preserve original errors and single cleanup", arguments: ["startValidation", "eof", "status", "statusValidation", "frameAccept", "terminalValidation", "signal"])
+    func desktopTransportPhaseDiagnostic(phase: String) async throws {
+        let messages = Mutex<[String]>([])
+        let operations = Mutex<[String]>([])
+        let payload = try aquaPayload()
+        try await PommeCore.withLogSink({ line in messages.withLock { $0.append(line) } }) {
+            do {
+                _ = try await PommeForegroundExecution.run(
+                    payload: payload, timeout: 15,
+                    perform: { operation, _ in
+                        operations.withLock { $0.append(operation) }
+                        if operation == "process.start" {
+                            return correlated(requestID: startRequestID,
+                                result: phase == "startValidation" ? .object([:]) : started(), frames: [])
+                        }
+                        if operation == "process.signal" {
+                            if phase == "signal" { throw RunnerError.guestAgentError("private-signal") }
+                            return correlated(requestID: UUID(), result: .object([:]), frames: [])
+                        }
+                        if phase == "status" || phase == "signal" { throw RunnerError.guestAgentTimedOut("private-original") }
+                        if phase == "statusValidation" {
+                            return correlated(requestID: UUID(), result: .object([:]), frames: [])
+                        }
+                        return correlated(requestID: UUID(),
+                            result: status(exited: true, exitCode: phase == "terminalValidation" ? nil : 0),
+                            frames: [frame(jobID: jobID, stream: .exit)])
+                    }, sendStream: { _, _, _ in
+                        if phase == "eof" { throw RunnerError.guestAgentTimedOut("private-original") }
+                        return []
+                    }, onFrames: { _ in
+                        if phase == "frameAccept" { throw RunnerError.guestAgentTimedOut("private-original") }
+                    })
+                Issue.record("Expected original error")
+            } catch RunnerError.guestAgentTimedOut(let value) {
+                #expect(["eof", "status", "frameAccept", "signal"].contains(phase))
+                #expect(value == "private-original")
+            } catch let error as PommeForegroundExecution.Error {
+                #expect(["startValidation", "statusValidation", "terminalValidation"].contains(phase))
+                #expect(error == .invalidCompletion)
+            }
+        }
+        let lines = messages.withLock { $0 }
+        #expect(lines.count == (phase == "signal" ? 2 : 1))
+        let line = try #require(lines.last)
+        #expect(line.contains("boundary=\(phase) "))
+        #expect(line.contains("jobEstablished=\(phase != "startValidation")"))
+        #expect(line.contains("pollCount=\(["startValidation", "eof"].contains(phase) ? 0 : 1)"))
+        #expect(lines.allSatisfy { $0.contains("private") == false && $0.contains(jobID.uuidString.lowercased()) == false })
+        let calls = operations.withLock { $0 }
+        #expect(calls.filter { $0 == "process.start" }.count == 1)
+        #expect(calls.filter { $0 == "process.signal" }.count == (phase == "startValidation" ? 0 : 1))
+    }
+
     @Test("Failed foreground start preserves its error without sending input", arguments: [true, false])
     func failedStartPreservesError(exact: Bool) async throws {
         let payload = exact ? try aquaPayload() : .object(["path": .string("/private/do-not-log")])
