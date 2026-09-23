@@ -2901,6 +2901,26 @@ helper; the retained journal remains `sipDisable` / `autologinIntent` /
 stopped/internal. The matching public resume can test whether desktop
 transport succeeds on a later normal boot without replaying owner creation.
 
+The exact matching public resume began at 03:40:07Z. Its readback found the
+expected native owner, matching global preference, and valid artifact;
+owner-completion and Setup Assistant receipts passed without another setter
+or write. Desktop verification passed at 03:41:56Z and authenticated Recovery
+was entered. Terminal and marker proofs passed; SIP disable returned success
+at 03:44:59Z with enforcement and normal-boot verification, stopped final
+state. Independent status confirmed the same UUID and pinned agent with no
+helper. This later successful desktop check does not explain the first run's
+`normal-agent-ps-transport` failure. Matching SIP enable began at 03:45:13Z
+to restore the original security configuration.
+
+SIP enable finished successfully after normal-boot verification and restored
+stopped state at 03:48Z. Independent public status confirmed unchanged UUID,
+startup volume, immutable plan, 40 GB / 4 GB resources, original pinned agent,
+and no helper. The security journal now records `sipEnable` /
+`restorationComplete` / `previous`, original stopped, normal boot verified.
+All 13 VMs are stopped/internal. The home probe is live-qualified as a
+diagnostic near the failing write, while the underlying native `defaults`
+status-1 cause and first-run desktop transport failure remain unresolved.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
