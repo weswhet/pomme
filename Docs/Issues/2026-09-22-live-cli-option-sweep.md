@@ -4225,6 +4225,60 @@ Inventory returned to twelve VMs, all stopped and internal, with clone-n
 absent. No external-drive or unrelated VM was touched. No preference write,
 retry, desktop transport, or security-policy fix is claimed.
 
+### Desktop transport guest-log capture on a fresh clone
+
+The existing exact desktop-start VSOCK wire and desktop-cleanup integration
+suites passed 13 functions / 21 executions, zero failures/skips; bundle
+`test_macos_2026-09-23T10-42-28-953Z_pid17051_8702c090.xcresult`.
+The wire fixture deterministically withholds a response after the exact
+desktop start request, proving that the host classifies no response bytes and
+times out. It uses an artificial peer, so it cannot explain why a live guest
+fails to respond. The guest daemon serves one connection serially, and the
+prior clone-i status marker was before actor admission. No fast, deterministic
+live-cause reproducer currently exists; a fake stalled handler would only
+characterize the serial-loop consequence. This live comparison therefore
+reuses the existing signed `65e8a17` trace without a transport change.
+
+Fresh internal `pomme-agent-ownerloop-clone26-20260922o` passed the same
+unprovisioned-template dry run and creation at 40 GB / 4 GB, with UUID
+`d49569a7-4d15-4476-8db9-eb4b2e6d0fd8`, plan digest
+`f770961e02f13aec03572d45853578760d69dd15db24973d8d98022ab55a1901`,
+and pinned signed agent digest `bd4d93e8…d632d966d`. All twelve prior VMs
+were stopped and internal. SIP disable began at 10:45:50Z. The first owner
+build write again failed status 1 with `MissingPair`, user domain `Reachable`,
+GUI domain `Nonzero`, and the target key missing postfailure; the guarded
+normal reboot made the same write succeed with the same prewrite labels.
+Setup Assistant completion passed. At 10:49:13Z, the Aqua desktop proof
+instead failed with `normal-agent-aqua-transport`, typed cause
+`agentOtherTimeout`, before any Recovery/SIP mutation. Restoration left the
+retained pre-mutation transaction and the VM stopped/no helper.
+
+A separate normal inspection boot connected the exact pinned agent. Complete,
+untruncated guest Unified Logging queries for 03:49:00–03:49:30 local
+(10:49:00–10:49:30Z) show the original daemon's actor-status operations
+continuing through 03:49:08.738; the last status operation returned its
+result and response. The guest serve loop then recorded `readReturned` and
+`frameReady` at 03:49:08.859, with no later serve-loop write, read, or exit
+event through 03:49:30 from that process. There was no later persisted
+status-handler or exact desktop-start marker in the queried window, and no
+`pomme` crash-report file was found. This narrows the observed gap to an
+unclassified received frame/handler after the last successful status, not to
+a demonstrated actor-status stall. The received operation is not identified
+by the current fixed-label trace; OSLog loss and host/guest clock alignment
+remain caveats. No retry, timeout, or transport fix is justified. The
+inspection boot was stopped gracefully.
+
+Independent public `sip status` passed authenticated Recovery marker proof
+and reported verified `sipEnabled=true`, `sipDisabled=false`, complete cleanup,
+and final-state verification. The clone was checked stopped/no helper with
+unchanged UUID, plan, 40 GB / 4 GB resources, and agent pin; the archived
+signed executable matched that exact SHA-256. The disposable clone was
+deleted, so its VM disk is not recoverable through Pomme. Inventory returned
+to twelve VMs, all stopped and internal, with clone-o absent. No external or
+unrelated VM was touched. The next diagnostic must classify the generic
+frame/handler at the last `frameReady`; the existing actor-status probe did
+not reproduce the earlier clone-i actor gap.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
