@@ -14,6 +14,8 @@ enum PommeAutoLoginReadbackTrace: String, CaseIterable, Sendable {
   case artifactMetadataEntered, artifactMetadataCommandFailed, artifactMetadataEvidenceFailed
   case artifactValid, artifactInvalid
   case ownerBuildPreferenceWriteEntered, ownerMiniBuddyPreferenceWriteEntered
+  case ownerWriteStderrEmpty, ownerWriteStderrStartsSudo
+  case ownerWriteStderrStartsDefaults, ownerWriteStderrOther
 
   var message: String { "[DEBUG-autologin-readback-20260922] \(rawValue)" }
   static func log(_ event: Self) { PommeCore.log(event.message) }
@@ -1321,12 +1323,27 @@ struct PommeSecurityOwnerPreparation: Sendable {
       throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
     }
     guard result.exitCode == 0 else {
+      autoLoginTrace(Self.classifyOwnerWriteStderr(result.stderr))
       throw PommeSecurityOwnerPreparationError.commandFailed(
         .ownerCompletion, exitCode: Int(result.exitCode))
     }
     guard result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
       result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     else { throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed }
+  }
+
+  /// Diagnostic only: classify the already-bounded first stderr line. The
+  /// native message and owner identity never enter the trace or error.
+  private static func classifyOwnerWriteStderr(_ stderr: String) -> PommeAutoLoginReadbackTrace {
+    let firstLine = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+      .split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+    if firstLine.isEmpty { return .ownerWriteStderrEmpty }
+    if firstLine.hasPrefix("sudo:") { return .ownerWriteStderrStartsSudo }
+    if firstLine.hasPrefix("defaults:") || firstLine.range(
+      of: #"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ defaults\[\d+:\d+\]"#,
+      options: .regularExpression
+    ) != nil { return .ownerWriteStderrStartsDefaults }
+    return .ownerWriteStderrOther
   }
 
   private static func isValidAppleBuildVersion(_ value: String) -> Bool {

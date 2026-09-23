@@ -4,6 +4,51 @@ import Synchronization
 
 @Suite("Pomme normal guest owner preparation")
 struct PommeSecurityOwnerPreparationTests {
+  @Test("Owner preference write failure emits only a closed stderr prefix classification", arguments: [
+    "empty", "sudo", "defaultsLog", "defaultsPlain", "other",
+  ])
+  func ownerPreferenceWriteStderrClassification(mode: String) async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    let stderr: String
+    let expected: PommeAutoLoginReadbackTrace
+    switch mode {
+    case "empty": stderr = ""; expected = .ownerWriteStderrEmpty
+    case "sudo": stderr = "sudo: private-synthetic-sentinel\n"; expected = .ownerWriteStderrStartsSudo
+    case "defaultsLog":
+      stderr = "2026-09-23 00:46:47.123 defaults[123:456] private-synthetic-sentinel\n"
+      expected = .ownerWriteStderrStartsDefaults
+    case "defaultsPlain": stderr = "defaults: private-synthetic-sentinel\n"; expected = .ownerWriteStderrStartsDefaults
+    default: stderr = "private-synthetic-sentinel\n"; expected = .ownerWriteStderrOther
+    }
+    let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: { request in
+        if request.path == "/usr/bin/sudo",
+          request.arguments.contains("write"),
+          request.arguments.contains("com.apple.SetupAssistant")
+        {
+          return GuestCommandResult(
+            exitCode: 1, signal: nil, stdout: Data(), stderr: Data(stderr.utf8),
+            stdoutTruncated: false, stderrTruncated: false, exited: true)
+        }
+        return try fixture.execute(request)
+      }, executePrivatePTY: fixture.executePTY,
+      autoLoginTrace: { event in trace.withLock { $0.append(event) } }
+    )
+    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
+      try await preparation.configureLogin(password: "opaque-owner-secret")
+    }
+    let events = trace.withLock { $0 }
+    #expect(events.contains(expected))
+    #expect(events.filter { $0.rawValue.hasPrefix("ownerWriteStderr") } == [expected])
+    #expect(events.last == expected)
+    #expect(events.filter { $0 == .ownerMiniBuddyPreferenceWriteEntered }.isEmpty)
+    #expect(events.allSatisfy { !$0.message.contains("private-synthetic-sentinel") })
+    #expect(fixture.setupDone == false)
+  }
+
   @Test("Owner preference write diagnostics identify only the failing closed domain", arguments: [true, false])
   func ownerPreferenceWriteTrace(buildFails: Bool) async throws {
     let fixture = OwnerPreparationFixture(existingOwner: true)
@@ -20,7 +65,8 @@ struct PommeSecurityOwnerPreparationTests {
       try await preparation.configureLogin(password: "opaque-owner-secret")
     }
     let events = trace.withLock { $0 }
-    #expect(events.last == (buildFails ? .ownerBuildPreferenceWriteEntered : .ownerMiniBuddyPreferenceWriteEntered))
+    #expect(events.last == .ownerWriteStderrEmpty)
+    #expect(events.dropLast().last == (buildFails ? .ownerBuildPreferenceWriteEntered : .ownerMiniBuddyPreferenceWriteEntered))
     #expect(events.filter { $0 == .ownerBuildPreferenceWriteEntered }.count == 1)
     #expect(events.filter { $0 == .ownerMiniBuddyPreferenceWriteEntered }.count == (buildFails ? 0 : 1))
     #expect(fixture.setupDone == false)
@@ -344,6 +390,7 @@ struct PommeSecurityOwnerPreparationTests {
       .nativeEntered, .nativeExpectedOwner, .preferenceEntered, .preferenceMatch,
       .artifactEntered, .artifactMetadataEntered, .artifactValid,
       .ownerBuildPreferenceWriteEntered, .ownerMiniBuddyPreferenceWriteEntered,
+      .ownerWriteStderrEmpty,
       .reconcileEntered, .nativeEntered,
     ] + preferencePrefix + [rejection, .reconcileRejected])
     #expect(fixture.setupDone == false)
