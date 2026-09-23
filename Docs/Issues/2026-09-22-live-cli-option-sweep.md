@@ -4322,6 +4322,51 @@ and GuestMDMEnrollment deprecation warnings outside this diagnostic. A new
 40 GB / 4 GB internal clone must test whether the failure reproduces and
 which decode/frame/handler boundary is last.
 
+Fresh internal `pomme-agent-ownerloop-clone26-20260922p` was created from the
+same unprovisioned macOS 26.6.2 template at 40 GB / 4 GB, with VM UUID
+`6cb554c0-86c2-45ce-a5a4-77d3997a5c3d`, plan digest
+`273f409fb92cc5b28479a8809ff50485dda06330004330b7dd6062eddb9dac60`,
+and exact pinned signed agent digest `904ee939…98b0259fc6`. Twelve prior VMs
+were stopped and internal. SIP disable began at 11:09:23Z. The first owner
+build-preference write again failed status 1 after `MissingPair`, user domain
+`Reachable`, and GUI domain `Nonzero` observations. Its guarded reboot left
+Setup Assistant completion unrecorded. Resuming the *same retained operation*
+at 11:11:22Z made the build and MiniBuddy writes succeed; Setup Assistant
+completion passed. Neither first failure nor resumed success changed the
+coarse prewrite classifications.
+
+The normal desktop proof then failed at `ps` transport with typed cause
+`agentOtherTimeout` at 11:13:02Z, before any SIP mutation. This is a live
+reproduction under the newly traced signed agent, though at `ps` rather than
+clone-o's Aqua stage. Restoration left the transaction retained and the VM
+stopped. A separate normal inspection boot connected the exact pinned agent.
+Complete, untruncated, exit-zero guest Unified Logging queries for
+04:12:57–04:13:35 local (11:12:57–11:13:35Z) identify the original daemon
+PID 316 and the last exchange: `readReturned` / `frameReady` / `decodeEntered`
+/ `decodeReturned` / `decodedStatus` at 04:12:58.604. The status actor was
+admitted; `waitid` and refresh returned immediately. `statusResultEntered`
+at 04:12:58.605 returned 3.641 seconds later at 04:13:02.246, then
+`guestStatusStreamsEntered` at 04:13:02.248 returned at 04:13:03.730. No
+later original-PID diagnostic marker was persisted through 04:13:35. Thus
+this run does **not** support a decoder or actor-admission stall, and its
+status actor did eventually return. It does not establish whether output
+publication blocked: the host reported the timeout near the last guest
+events and began VM restoration; host/guest clock alignment and OSLog loss
+remain caveats. `agentOtherTimeout` also names the coordinator's generic
+exchange timeout, not a confirmed `process.status`-specific deadline. No
+response, timeout, retry, or security-policy fix follows from this trace.
+
+Independent public `sip status` used authenticated Recovery and reported
+verified `sipEnabled=true`, `sipDisabled=false`, complete cleanup, and
+final-state verification. The inspection boot was gracefully stopped. Public
+status then confirmed clone-p stopped with no helper, unchanged UUID, plan,
+40 GB / 4 GB resources, and agent pin; the archived signed executable's
+SHA-256 matched that pin. Only this disposable clone was deleted; its VM
+disk is unrecoverable through Pomme. Inventory returned to twelve stopped
+VMs with clone-p absent. The next discriminating evidence needs correlated
+host exchange timing and the guest status stream/response publication
+boundary, ideally before host restoration can cut observation short.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
