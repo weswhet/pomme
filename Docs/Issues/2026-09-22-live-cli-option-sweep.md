@@ -3275,6 +3275,35 @@ All 104 CLI contract checks passed. Six unrelated compiler warnings remain
 `SettingsAIPlanner.swift`). Live validation follows on an internal 40 GB /
 4 GB clone with its original SIP posture already restored.
 
+Live validation first reused stopped clone-b without changing its
+creation-pinned agent. Two sequential public `sip status --debug` runs entered
+Recovery and completed authenticated Terminal proofs and verified SIP enabled.
+The first recorded 593 cumulative framebuffer captures, the second 611; both
+reported `finalStateVerified=true`, complete cleanup, and returned the same
+UUID `8d89b9ef-0e72-4949-8943-df782f1569d6` to stopped/no helper. Neither
+encountered the prior lock stall.
+
+With only 16 GiB free, clone-b was then deleted through the public CLI after
+confirming its completed SIP-enable journal, restored state, and archived
+creation-pinned signed agent. The exact bundle is absent; its VM disk is not
+recoverable. The archive remains, and free space rose to about 20 GiB. No
+external-drive VM was touched.
+
+A fresh `pomme-agent-ownerloop-clone26-20260922c` then passed the same
+40 GB / 4 GB template-clone dry run and actual public creation on the internal
+drive. Its Recovery navigation reached Terminal after 588 captures, marker
+proof passed on attempt two, installation completed, and public creation
+returned success/stopped. The clone pins the newly signed
+`6cfbd318…a11640af49` guest artifact, UUID
+`a972f530-c3e7-45e5-bdd5-364ce3c1fa9b`. Independent status confirms
+stopped/no helper and the same resource settings. Inventory finds 13 VMs, all
+stopped with no helpers and all under the internal Pomme VM root. This is a
+live pass through the previously hanging creation phase plus two separate
+read-only Recovery runs; it reduces confidence in recurrence of that lock
+cycle but does not prove every intermittent frame/lifecycle hang eliminated.
+Clone-c remains as the stopped, pre-owner fixture for the separate unresolved
+first-owner preference-write investigation.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
