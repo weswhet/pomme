@@ -2819,6 +2819,30 @@ on a status-1 write without retaining the stderr text. The guarded single
 restart successfully completed the fresh-owner workflow, but the native
 write's underlying failure and the Aqua timeout remain open.
 
+The next diagnostic candidate samples the owner's home metadata **only after**
+the native per-user preference write returns nonzero. A single read-only
+`/usr/bin/stat -f "%u:%HT" /Users/<verified-owner>` has a five-second
+execution bound. Its output is parsed in memory into fixed labels: expected
+UID directory, other UID directory, non-directory, not statable, or probe
+unavailable. No path, numeric UID, stderr text, or account value enters the
+trace. The original write error, recovery admission, and retry count remain
+unchanged even if the probe fails. A result is close to the failed write in
+time but is not an atomic snapshot of the write itself.
+
+A new test injects all five metadata outcomes at the real post-write seam and
+requires exactly one probe and the unchanged owner-completion status-1 error.
+After correcting an overly broad test intercept, the suite went red at zero
+home probes while all 82 prior functions passed
+(`test_macos_2026-09-23T03-21-36-041Z_pid30855_88e786f5.xcresult`). The
+first implementation exposed a parser assumption about `Regular File` having
+a space, corrected with a colon-delimited stat format. The existing fixture's
+catch-all stat response was then made specific for the new owner-home request.
+The final focused owner/workflow run passed 111 functions / 2,000 repeated
+runs (`test_macos_2026-09-23T03-25-47-972Z_pid31519_7c2db09a.xcresult`). A
+full suite then passed 1,202 functions, zero failures/skips
+(`test_macos_2026-09-23T03-26-27-989Z_pid31667_6a0d5680.xcresult`). The
+candidate is qualified for commit before a signed build and fresh live test.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns

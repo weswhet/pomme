@@ -16,6 +16,8 @@ enum PommeAutoLoginReadbackTrace: String, CaseIterable, Sendable {
   case ownerBuildPreferenceWriteEntered, ownerMiniBuddyPreferenceWriteEntered
   case ownerWriteStderrEmpty, ownerWriteStderrStartsSudo
   case ownerWriteStderrStartsDefaults, ownerWriteStderrOther
+  case ownerWriteHomeExpectedDirectory, ownerWriteHomeOtherOwner
+  case ownerWriteHomeNotDirectory, ownerWriteHomeNotStatable, ownerWriteHomeProbeUnavailable
 
   var message: String { "[DEBUG-autologin-readback-20260922] \(rawValue)" }
   static func log(_ event: Self) { PommeCore.log(event.message) }
@@ -1131,7 +1133,8 @@ struct PommeSecurityOwnerPreparation: Sendable {
         domain: Self.setupAssistantPreferencesDomain,
         key: Self.lastSeenBuddyBuildVersionKey,
         type: .string,
-        value: buildVersion
+        value: buildVersion,
+        ownerUID: verification.uniqueID
       )
       guard
         try readOwnerStringPreference(
@@ -1148,7 +1151,8 @@ struct PommeSecurityOwnerPreparation: Sendable {
         domain: Self.loginWindowPreferencesDomain,
         key: Self.miniBuddyLaunchKey,
         type: .boolean,
-        value: "false"
+        value: "false",
+        ownerUID: verification.uniqueID
       )
       guard
         try readOwnerBoolPreference(
@@ -1309,7 +1313,8 @@ struct PommeSecurityOwnerPreparation: Sendable {
     domain: String,
     key: String,
     type: OwnerPreferenceType,
-    value: String
+    value: String,
+    ownerUID: UInt32
   ) throws {
     let command = PommeSecurityOwnerPTYCommand(
       executable: "/usr/bin/sudo",
@@ -1324,6 +1329,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
     }
     guard result.exitCode == 0 else {
       autoLoginTrace(Self.classifyOwnerWriteStderr(result.stderr))
+      autoLoginTrace(probeOwnerHomeAfterFailedWrite(ownerUID: ownerUID))
       throw PommeSecurityOwnerPreparationError.commandFailed(
         .ownerCompletion, exitCode: Int(result.exitCode))
     }
@@ -1344,6 +1350,35 @@ struct PommeSecurityOwnerPreparation: Sendable {
       options: .regularExpression
     ) != nil { return .ownerWriteStderrStartsDefaults }
     return .ownerWriteStderrOther
+  }
+
+  /// Read-only evidence at the failed write boundary. This cannot authorize
+  /// a retry or change the original native command failure.
+  private func probeOwnerHomeAfterFailedWrite(ownerUID: UInt32) -> PommeAutoLoginReadbackTrace {
+    let result: GuestCommandResult
+    do {
+      result = try executeGuest(.init(
+        path: "/usr/bin/stat",
+        arguments: ["-f", "%u:%HT", "/Users/\(identity.username)"],
+        timeout: 5
+      ))
+    } catch { return .ownerWriteHomeProbeUnavailable }
+    guard !result.detached, result.exited, !result.timedOut,
+      result.signal == nil, !result.stdoutTruncated, !result.stderrTruncated,
+      let exitCode = result.exitCode
+    else { return .ownerWriteHomeProbeUnavailable }
+    if exitCode == 1 { return .ownerWriteHomeNotStatable }
+    guard exitCode == 0, result.stdout.count <= 64, result.stderr.isEmpty else {
+      return .ownerWriteHomeProbeUnavailable
+    }
+    let fields = String(decoding: result.stdout, as: UTF8.self)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .split(separator: ":", maxSplits: 1, omittingEmptySubsequences: true)
+    guard fields.count == 2, let actualUID = UInt32(fields[0]) else {
+      return .ownerWriteHomeProbeUnavailable
+    }
+    guard fields[1] == "Directory" else { return .ownerWriteHomeNotDirectory }
+    return actualUID == ownerUID ? .ownerWriteHomeExpectedDirectory : .ownerWriteHomeOtherOwner
   }
 
   private static func isValidAppleBuildVersion(_ value: String) -> Bool {
