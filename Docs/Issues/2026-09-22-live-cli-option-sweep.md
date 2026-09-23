@@ -4188,8 +4188,42 @@ compatibility, signed artifact archive, and atomic install checks passed.
 Fresh-login resolution finds `/Users/wes/.local/bin/pomme`; it reports
 `65e8a17` with SHA-256
 `bd4d93e8c6966db5857af54fdce545af9afdb070e534a2bd8e81791d632d966d`.
-All 104 CLI contract checks passed. Live initial-read classification is
-pending on a fresh same-resource internal clone.
+All 104 CLI contract checks passed. The next gate was live initial-read
+classification on a fresh same-resource internal clone.
+
+Fresh internal `pomme-agent-ownerloop-clone26-20260922n` passed the same
+unprovisioned-template dry run and creation at 40 GB / 4 GB. Its UUID was
+`8c942541-8ad1-4cac-a942-848228e2b6d5`, plan digest
+`6a0243188aabf59d68ab902e105fe8249d8be4c5fabbe340ee9c556fa7423185`,
+and exact pinned signed agent digest `bd4d93e8…d632d966d`. All twelve
+preexisting VMs were stopped and internal. The first SIP-disable workflow
+began at 10:29:24Z and passed the stock Setup Assistant handoff.
+
+At 10:30:48–51Z the existing prewrite `defaults read-type` classified the
+build preference as `ownerPreWriteBuildMissingPair`, not missing domain.
+The user-domain and GUI-domain labels were again `Reachable` / `Nonzero`.
+The unchanged first build-preference write returned status 1 with generic
+`defaults`-shaped stderr; postfailure checks found the target key still
+missing, expected UID/HOME and Preferences metadata, owner `cfprefsd`
+present, and stock-only Setup Assistant. The guarded normal reboot then
+reached owner completion at 10:31:55Z: the prewrite classification was
+again `MissingPair`, the domain labels again `Reachable` / `Nonzero`, and
+the same write succeeded. MiniBuddy write and Setup Assistant completion
+also passed. Thus neither a missing domain nor these coarse launchd-domain
+observations distinguish failure from success. The domain existed before
+the failed write; the root cause of native status 1 remains unknown.
+
+The subsequent desktop proof separately failed at `ps` agent transport,
+retained the pre-mutation SIP transaction, and restored stopped/no helper.
+Independent public `sip status` passed authenticated Recovery marker proof
+and reported verified `sipEnabled=true`, `sipDisabled=false`, complete
+cleanup, and final-state verification. The clone was checked stopped/no
+helper with unchanged UUID, plan, 40 GB / 4 GB resources, and signed pin;
+the archived executable matched its exact pinned SHA-256. The disposable
+clone was deleted, making its VM disk unrecoverable through Pomme.
+Inventory returned to twelve VMs, all stopped and internal, with clone-n
+absent. No external-drive or unrelated VM was touched. No preference write,
+retry, desktop transport, or security-policy fix is claimed.
 
 ### macOS 27 pause/resume/restart repetition
 
