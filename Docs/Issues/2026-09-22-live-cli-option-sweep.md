@@ -4521,6 +4521,38 @@ Fresh-login resolution finds `/Users/wes/.local/bin/pomme`, reporting
 All 104 installed-CLI contract checks passed. The prior signed agent archive
 was retained. Live Recovery validation remains the next gate.
 
+Fresh same-resource internal `pomme-agent-ownerloop-clone26-20260923r` was
+created from the same unprovisioned macOS 26.6.2/25G83 template at explicit
+40 GB / 4 GB and stopped final state. Creation navigated Recovery, proved
+Terminal on the first marker attempt, installed the exact signed agent digest
+`e7f7ee02…d210563`, and returned success at 12:48Z. The VM UUID was
+`ab09020a-52c1-4fd5-8cf3-65ed8a40f20a`, plan digest
+`2310a00b14b595ef3236fe038f0c1c3cda9d05f5e4bd8e563bd3d1e0c0d34f97`.
+Independent public status confirmed stopped/no helper and unchanged resources
+and pin before the next operation.
+
+Read-only `sip status --debug` began at 12:49:14Z. It passed the same
+five-input Recovery navigation, Terminal marker proof on attempt one, and
+launcher submission, then returned exit zero with authenticated,
+request-bound, credential-consumed `sip.status`: `sipEnabled=true`,
+`sipDisabled=false`, `verified=true`. It reported all six cleanup fields true,
+including `sensitiveFramesCleared`, and `finalState=previous` with
+`finalStateVerified=true`. The exact request staging root for request
+`cef79930-8af9-00b6-3be2-d455d5d07f00` was absent afterward. Independent
+public status again showed stopped/no helper, matching the original VM UUID,
+plan, 40 GB / 4 GB resources, and pinned digest. This run **did not reproduce**
+the prior Apple Vision hang; it validates the normal live path, while the
+blocked-worker deadline and abandoned-frame cleanup behavior are established
+by the red/green tests, not this successful run.
+
+The archived signed agent executable matched the creation pin's SHA-256.
+With SIP enabled and the clone stopped/no helper, only this disposable clone
+was deleted; its VM disk is unrecoverable through Pomme. Final inventory is
+twelve stopped VMs, no running helpers, and clone-r absent. The separate
+intermittent normal-agent transport timeout, first owner preference-write
+failure, abrupt-signal cleanup gap, and possibility of an in-process Vision
+thread remaining blocked after a bounded caller timeout remain open.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
