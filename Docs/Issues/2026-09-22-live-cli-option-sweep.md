@@ -4637,6 +4637,15 @@ failures/skips, bundle
 This is qualified for commit before a signed Release build and fresh-clone
 comparison; it is not a preference-write fix.
 
+Candidate `576887c` was committed before the canonical signed Release build.
+Developer ID signature, exact entitlements, designated-requirement
+compatibility, signed agent archive, and atomic installation checks passed.
+Fresh-login resolution finds `/Users/wes/.local/bin/pomme`, reporting
+`576887c` with SHA-256
+`c37725440b0e4c9793d051c1cf9418edebb6ef56cd556b0b31fdb052ba36812a`.
+All 104 installed-CLI contract checks passed. The prior signed agent archive
+was retained. A fresh same-resource clone is the live validation gate.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
