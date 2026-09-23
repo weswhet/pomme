@@ -3047,6 +3047,15 @@ The full suite passed 1,204 functions, zero failures/skips
 This qualifies the candidate for commit and a signed Release/live resume;
 the live branch is not yet validated.
 
+Candidate `e5584da` was committed before canonical signed Release build.
+Signature, exact entitlements, designated-requirement compatibility, archive,
+and atomic-install checks passed. The fresh-login CLI resolves to
+`/Users/wes/.local/bin/pomme`, reports `e5584da`, and has SHA-256
+`c8e5233f5abef16beb4d8efbb5bc8c7bca9531e30214c4bf0377a8017e89b2c3`.
+All 104 CLI contract checks passed. The retained guest agent remains pinned
+to its original `a9ec6ce0…039dd` signed bytes; this host-only route change
+does not rewrite that pin or the journal.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
