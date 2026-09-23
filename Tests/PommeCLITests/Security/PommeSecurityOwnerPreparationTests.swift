@@ -4,6 +4,64 @@ import Synchronization
 
 @Suite("Pomme normal guest owner preparation")
 struct PommeSecurityOwnerPreparationTests {
+  @Test("A failed owner preference write classifies only the nearby home metadata", arguments: [
+    "expected", "otherOwner", "notDirectory", "notStatable", "unavailable",
+  ])
+  func ownerPreferenceFailureHomeProbe(mode: String) async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
+    let statCalls = Mutex(0)
+    let expected: PommeAutoLoginReadbackTrace
+    switch mode {
+    case "expected": expected = .ownerWriteHomeExpectedDirectory
+    case "otherOwner": expected = .ownerWriteHomeOtherOwner
+    case "notDirectory": expected = .ownerWriteHomeNotDirectory
+    case "notStatable": expected = .ownerWriteHomeNotStatable
+    default: expected = .ownerWriteHomeProbeUnavailable
+    }
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: { request in
+        if request.path == "/usr/bin/sudo",
+          request.arguments.contains("write"),
+          request.arguments.contains("com.apple.SetupAssistant")
+        {
+          return .init(exitCode: 1, signal: nil, stdout: Data(),
+                       stderr: Data("defaults: private-synthetic-sentinel\n".utf8),
+                       stdoutTruncated: false, stderrTruncated: false, exited: true)
+        }
+        if request.path == "/usr/bin/stat", request.arguments.last == "/Users/pomme" {
+          #expect(request.arguments == ["-f", "%u:%HT", "/Users/pomme"])
+          statCalls.withLock { $0 += 1 }
+          if mode == "unavailable" { throw CocoaError(.fileReadUnknown) }
+          let output: String
+          switch mode {
+          case "expected": output = "501:Directory\n"
+          case "otherOwner": output = "502:Directory\n"
+          case "notDirectory": output = "501:Regular File\n"
+          default: output = ""
+          }
+          return .init(exitCode: mode == "notStatable" ? 1 : 0, signal: nil,
+                       stdout: Data(output.utf8), stderr: Data(),
+                       stdoutTruncated: false, stderrTruncated: false, exited: true)
+        }
+        return try fixture.execute(request)
+      }, executePrivatePTY: fixture.executePTY,
+      autoLoginTrace: { event in trace.withLock { $0.append(event) } }
+    )
+    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
+      try await preparation.configureLogin(password: "opaque-owner-secret")
+    }
+    let events = trace.withLock { $0 }
+    #expect(statCalls.withLock { $0 } == 1)
+    #expect(events.contains(.ownerWriteStderrStartsDefaults))
+    #expect(events.filter { $0.rawValue.hasPrefix("ownerWriteHome") } == [expected])
+    #expect(events.last == expected)
+    #expect(events.allSatisfy { !$0.message.contains("private-synthetic-sentinel") })
+    #expect(fixture.setupDone == false)
+  }
+
   @Test("Owner preference write failure emits only a closed stderr prefix classification", arguments: [
     "empty", "sudo", "defaultsLog", "defaultsPlain", "other",
   ])
@@ -43,7 +101,8 @@ struct PommeSecurityOwnerPreparationTests {
     let events = trace.withLock { $0 }
     #expect(events.contains(expected))
     #expect(events.filter { $0.rawValue.hasPrefix("ownerWriteStderr") } == [expected])
-    #expect(events.last == expected)
+    #expect(events.dropLast().last == expected)
+    #expect(events.last == .ownerWriteHomeExpectedDirectory)
     #expect(events.filter { $0 == .ownerMiniBuddyPreferenceWriteEntered }.isEmpty)
     #expect(events.allSatisfy { !$0.message.contains("private-synthetic-sentinel") })
     #expect(fixture.setupDone == false)
@@ -65,8 +124,11 @@ struct PommeSecurityOwnerPreparationTests {
       try await preparation.configureLogin(password: "opaque-owner-secret")
     }
     let events = trace.withLock { $0 }
-    #expect(events.last == .ownerWriteStderrEmpty)
-    #expect(events.dropLast().last == (buildFails ? .ownerBuildPreferenceWriteEntered : .ownerMiniBuddyPreferenceWriteEntered))
+    #expect(events.last == .ownerWriteHomeExpectedDirectory)
+    #expect(Array(events.suffix(3)) == [
+      buildFails ? .ownerBuildPreferenceWriteEntered : .ownerMiniBuddyPreferenceWriteEntered,
+      .ownerWriteStderrEmpty, .ownerWriteHomeExpectedDirectory,
+    ])
     #expect(events.filter { $0 == .ownerBuildPreferenceWriteEntered }.count == 1)
     #expect(events.filter { $0 == .ownerMiniBuddyPreferenceWriteEntered }.count == (buildFails ? 0 : 1))
     #expect(fixture.setupDone == false)
@@ -390,7 +452,7 @@ struct PommeSecurityOwnerPreparationTests {
       .nativeEntered, .nativeExpectedOwner, .preferenceEntered, .preferenceMatch,
       .artifactEntered, .artifactMetadataEntered, .artifactValid,
       .ownerBuildPreferenceWriteEntered, .ownerMiniBuddyPreferenceWriteEntered,
-      .ownerWriteStderrEmpty,
+      .ownerWriteStderrEmpty, .ownerWriteHomeExpectedDirectory,
       .reconcileEntered, .nativeEntered,
     ] + preferencePrefix + [rejection, .reconcileRejected])
     #expect(fixture.setupDone == false)
@@ -3008,6 +3070,10 @@ private final class OwnerPreparationFixture: @unchecked Sendable {
       default:
         response = (1, "")
       }
+    } else if request.path == "/usr/bin/stat",
+      request.arguments == ["-f", "%u:%HT", "/Users/pomme"]
+    {
+      response = (0, "501:Directory\n")
     } else if request.path == "/usr/bin/stat" {
       response = (0, autoLoginArtifactMetadataValue)
     } else {
