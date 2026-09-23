@@ -2948,6 +2948,16 @@ zero failures/skips (`test_macos_2026-09-23T03-57-27-668Z_pid36966_dbacdfa5.xcre
 This qualifies the diagnostic for commit and a signed Release/live comparison;
 it has not yet identified the live desktop transport cause.
 
+Diagnostic candidate `a7df129` was committed before the canonical signed
+Release build. Signature, exact entitlements, designated-requirement
+compatibility, archive, and atomic-install checks passed. Fresh-login
+resolution points to `/Users/wes/.local/bin/pomme`, reporting `a7df129`,
+SHA-256 `a9ec6ce0ec113f4e2a0aa4aa1f08f50368454e16103f3c15533091f0b89039dd`.
+All 104 CLI contract checks passed. This diagnostic is in the newly built host
+helper and does not require changing an existing VM's creation-pinned guest
+agent. The restored internal 40 GB / 4 GB home-class fixture can therefore
+exercise the new helper on a normal boot without another VM creation.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
