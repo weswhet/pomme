@@ -2759,6 +2759,66 @@ artifact is preserved in the append-only store. A fresh internal macOS 26
 guest will pin this digest so its first owner transaction can emit the new
 classification if the native write fails again.
 
+Capacity preflight found 20 GiB free, insufficient for a new 40 GB guest.
+Only the completed retained compatibility fixture
+`pomme-agent-autologinclass26-20260922a` was deleted. Immediately before
+deletion, public status confirmed stopped/no helper, UUID
+`d2f51376-1e6a-4b6a-b365-01c4fee36b22`, original `2085cd8e…1b3286` pin,
+and 40 GB / 4 GB resources. Its signed artifact digest was verified in the
+append-only archive. Its security journal recorded `sipEnable` /
+`restorationComplete` / `previous`, original stopped, normal boot verified.
+Public delete succeeded; inventory then confirmed the exact name absent and
+all 12 retained VMs stopped/internal. Free space rose to 48 GiB. The deleted
+VM disk cannot be recovered through this operation; recorded evidence and
+signed archives remain.
+
+A fresh `pomme-agent-writeclass26-20260922a` dry run qualified the internal
+regular-file macOS 26.6.2/25G83 restore image, 40 GB disk, 4 GB RAM, and
+`--boot none`. The profile remains experimental. Actual creation began at
+02:59:16Z with no target-name collision and no edits to retained VM pins,
+credentials, or journals.
+
+Fresh creation succeeded with stopped final state by 03:05Z, after restore
+reached 100% at 03:02:59Z, Recovery Terminal proof at 03:04:52Z, and exact
+marker proof on attempt one. Its UUID is
+`01f87450-18d3-4f35-9114-25a7c0c0edbf`, startup volume
+`6fb8c09f-72f6-4624-bdb1-bbd57f8f3f97`, immutable plan
+`bcd8c8a04e97d73fa7b87e396a23b56813a43a1761294fdf754c918f4e419494`,
+and creation-pinned signed agent digest exactly matches installed
+`99a1edae…28359a`. Independent status confirmed stopped/no helper and 40 GB /
+4 GB; there was no security journal before the first owner workflow began at
+03:06:03Z. No standalone guest probe ran before that workflow.
+
+The fresh first-owner run reproduced the same first preference-write failure.
+Initial native autologin was OFF; the setter's native expected-owner status,
+global preference match, and artifact metadata proof all passed at 03:07:30Z.
+`ownerBuildPreferenceWriteEntered` appeared at 03:07:32Z, immediately followed
+by **`ownerWriteStderrStartsDefaults`** at 03:07:33Z and owner-completion status
+1. No MiniBuddy write was attempted before that failure. The fixed label means
+only that the first stderr line begins with the native `defaults` diagnostic
+header or `defaults:`; it does not expose or prove the underlying message or
+cause. The existing single restart then verified the same owner, found stock
+Setup Assistant autologin, re-proved restrictions and exact context, and
+successfully repeated the native setter. Both owner-preference writes and
+owner-completion receipt passed at 03:08:31–33Z; Setup Assistant completion
+passed at 03:08:36Z. The first Aqua desktop probe timed out at 03:09:40Z with
+`terminationRequested=true`, but the workflow progressed into authenticated
+Recovery. SIP disable returned success at 03:13:11Z with enforcement and
+normal-boot verification, stopped final state. Independent status confirmed
+the original UUID/pin and no helper. Matching SIP enable began at 03:13:48Z
+to restore the fixture's original security configuration.
+
+SIP enable finished at 03:17:20Z with enabled enforcement, normal-boot
+verification, and stopped final state. Independent status confirms the same
+UUID, startup volume, immutable plan, 40 GB / 4 GB resources, original
+`99a1edae…28359a` pin, and no helper. The security journal records
+`sipEnable` / `restorationComplete` / `previous`, original stopped, normal boot
+verified. Inventory confirms all 13 VMs stopped and internal. The first-write
+diagnostic is live-verified: it distinguishes native `defaults` stderr shape
+on a status-1 write without retaining the stderr text. The guarded single
+restart successfully completed the fresh-owner workflow, but the native
+write's underlying failure and the Aqua timeout remain open.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
