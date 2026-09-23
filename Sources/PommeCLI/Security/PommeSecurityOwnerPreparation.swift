@@ -466,6 +466,11 @@ struct PommeSecurityOwnerSetupAssistantContext: Equatable, Sendable {
 /// never starts/stops a VM, chooses a guest transport, writes host state, or
 /// performs display/OCR input.
 struct PommeSecurityOwnerPreparation: Sendable {
+  enum LoginAttempt: Equatable, Sendable {
+    case initial
+    case afterPreferenceRestart
+  }
+
   typealias GuestCommandExecutor = @Sendable (GuestCommandRequest) throws -> GuestCommandResult
   typealias PrivatePTYExecutor =
     @Sendable (PommeSecurityOwnerPTYCommand, String) async throws -> Int32
@@ -510,6 +515,12 @@ struct PommeSecurityOwnerPreparation: Sendable {
   private enum AutoLoginStatus: Equatable {
     case enabled(username: String)
     case disabled
+  }
+
+  private enum AutoLoginReconciliation: Equatable {
+    case configured
+    case disabled
+    case setupAssistantRecovery
   }
 
   private enum OwnerPreferenceType: Equatable {
@@ -950,7 +961,10 @@ struct PommeSecurityOwnerPreparation: Sendable {
   /// Verifies native syntax support, rejects FileVault/managed restrictions,
   /// sets autologin through private PTY, verifies loginwindow, and finishes
   /// Setup Assistant only after owner checks have succeeded.
-  func configureLogin(password: String) async throws -> PommeSecurityOwnerLoginConfiguration {
+  func configureLogin(
+    password: String,
+    attempt: LoginAttempt = .initial
+  ) async throws -> PommeSecurityOwnerLoginConfiguration {
     try identity.validate()
     let freshOwner =
       freshnessRequirements.creationOwnershipVerified
@@ -961,9 +975,10 @@ struct PommeSecurityOwnerPreparation: Sendable {
     // fresh owner still re-authenticates its canonical account before its
     // per-user completion preferences are touched.
     try phase(.globalAutoLoginReadback, .intent)
-    let alreadyConfigured = try reconcileConfiguredAutoLogin()
+    let reconciliation = try reconcileConfiguredAutoLogin(
+      allowSetupAssistantRecovery: freshOwner && attempt == .afterPreferenceRestart)
     try phase(.globalAutoLoginReadback, .receipt)
-    if alreadyConfigured {
+    if reconciliation == .configured {
       let restrictions = try verifiedLoginRestrictions()
       if freshOwner {
         guard !password.isEmpty else {
@@ -996,7 +1011,9 @@ struct PommeSecurityOwnerPreparation: Sendable {
     do {
       context = try discoverSetupAssistantContext()
     } catch PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable {
-      guard !setupAssistantAlreadyComplete else {
+      // The restart exception requires a currently proven stock Aqua context;
+      // it never creates that authorization through Language Chooser handoff.
+      guard reconciliation != .setupAssistantRecovery, !setupAssistantAlreadyComplete else {
         throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
       }
       context = try await handoffLanguageChooserToSetupAssistant()
@@ -1049,21 +1066,29 @@ struct PommeSecurityOwnerPreparation: Sendable {
   /// Reads the complete native automatic-login proof without mutating. A
   /// positive proof requires the native account-bearing status, the loginwindow
   /// preference, and root-owned 0600 artifact metadata to agree exactly.
-  /// `OFF` is the only state that permits the fresh Setup Assistant path.
-  private func reconcileConfiguredAutoLogin() throws -> Bool {
+  /// `OFF` permits the ordinary Setup Assistant path. Only an explicitly
+  /// restarted fresh-owner preference attempt may instead recover the stock
+  /// Setup Assistant owner, with mandatory exact context and no Language Chooser handoff.
+  private func reconcileConfiguredAutoLogin(
+    allowSetupAssistantRecovery: Bool
+  ) throws -> AutoLoginReconciliation {
     autoLoginTrace(.reconcileEntered)
     do {
       switch try readAutoLoginStatus() {
       case .enabled(let username):
+        if allowSetupAssistantRecovery, username == Self.setupAssistantRecordName,
+          username.caseInsensitiveCompare(identity.username) != .orderedSame {
+          return .setupAssistantRecovery
+        }
         guard username.caseInsensitiveCompare(identity.username) == .orderedSame,
           try autoLoginUser() == identity.username
         else { throw PommeSecurityOwnerPreparationError.autoLoginVerificationFailed }
         try verifyAutoLoginArtifact()
         autoLoginTrace(.reconcileConfigured)
-        return true
+        return .configured
       case .disabled:
         autoLoginTrace(.reconcileOff)
-        return false
+        return .disabled
       }
     } catch {
       autoLoginTrace(.reconcileRejected)

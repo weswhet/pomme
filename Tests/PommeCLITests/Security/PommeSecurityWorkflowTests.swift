@@ -124,7 +124,9 @@ struct PommeSecurityWorkflowTests {
             recordVerification: { value in
                 trace.recorded(value)
             },
-            configureLogin: {
+            configureLogin: { attempt in
+                trace.attempt(attempt)
+                #expect(trace.events == (attempt == .initial ? [] : [.configure, .restart, .verify, .record]))
                 if trace.configureAttempt() == 1 {
                     throw PommeSecurityOwnerPreparationError.commandFailed(
                         .ownerCompletion, exitCode: 1)
@@ -136,6 +138,7 @@ struct PommeSecurityWorkflowTests {
 
         #expect(trace.events == [.configure, .restart, .verify, .record, .configure])
         #expect(trace.recordedVerifications == [verification])
+        #expect(trace.attempts == [.initial, .afterPreferenceRestart])
     }
 
     @Test("Fresh-owner preference completion bounds a second initialization failure")
@@ -155,7 +158,7 @@ struct PommeSecurityWorkflowTests {
             recordVerification: { value in
                 trace.recorded(value)
             },
-            configureLogin: {
+            configureLogin: { _ in
                 _ = trace.configureAttempt()
                 throw expected
             }
@@ -169,6 +172,39 @@ struct PommeSecurityWorkflowTests {
         }
         #expect(trace.events == [.configure, .restart, .verify, .record, .configure])
         #expect(trace.recordedVerifications == [verification])
+    }
+
+    @Test("Restart attempt is not issued before authentication, verification, and durable record succeed", arguments: ["restart", "verify", "record"])
+    func freshOwnerPreferenceAttemptAdmission(failure: String) async throws {
+        let trace = FreshOwnerPreferenceRecoveryTrace()
+        let verification = freshOwnerVerification()
+        let expected = PommeSecurityOwnerPreparationError.phaseCallbackFailed
+        let recovery = PommeSecurityFreshOwnerPreferenceRecovery(
+            restartAndAuthenticate: {
+                trace.record(.restart)
+                if failure == "restart" { throw expected }
+            },
+            verifyOwner: {
+                trace.record(.verify)
+                if failure == "verify" { throw expected }
+                return verification
+            },
+            recordVerification: { _ in
+                trace.record(.record)
+                throw expected
+            },
+            configureLogin: { attempt in
+                trace.attempt(attempt)
+                trace.record(.configure)
+                throw PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)
+            }
+        )
+        await #expect(throws: expected) { try await recovery.run(initialVerification: verification) }
+        #expect(trace.attempts == [.initial])
+        let events: [FreshOwnerPreferenceRecoveryTrace.Event] = failure == "restart"
+            ? [.configure, .restart] : failure == "verify"
+            ? [.configure, .restart, .verify] : [.configure, .restart, .verify, .record]
+        #expect(trace.events == events)
     }
 
     @Test("Non-owner-completion failures do not restart the VM")
@@ -187,7 +223,7 @@ struct PommeSecurityWorkflowTests {
             recordVerification: { value in
                 trace.recorded(value)
             },
-            configureLogin: {
+            configureLogin: { _ in
                 trace.record(.configure)
                 throw expected
             }
@@ -220,7 +256,7 @@ struct PommeSecurityWorkflowTests {
             recordVerification: { value in
                 trace.recorded(value)
             },
-            configureLogin: {
+            configureLogin: { _ in
                 trace.record(.configure)
                 throw PommeSecurityOwnerPreparationError.commandFailed(
                     .ownerCompletion, exitCode: 1)
@@ -1432,6 +1468,13 @@ private final class FreshOwnerPreferenceRecoveryTrace: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [Event] = []
     private var verificationValues: [PommeSecurityOwnerVerification] = []
+    private var attemptValues: [PommeSecurityOwnerPreparation.LoginAttempt] = []
+
+    var attempts: [PommeSecurityOwnerPreparation.LoginAttempt] { lock.withLock { attemptValues } }
+
+    func attempt(_ value: PommeSecurityOwnerPreparation.LoginAttempt) {
+        lock.withLock { attemptValues.append(value) }
+    }
 
     var events: [Event] {
         lock.withLock { values }

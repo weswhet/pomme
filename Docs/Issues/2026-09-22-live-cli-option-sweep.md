@@ -12,7 +12,7 @@ observations are recorded below; historical rows retain their original status.
 | CLI discovery omissions / `agent-help` output ambiguity | Fixed in `e0f6544`; signed CLI contract and live compatibility checks passed. |
 | macOS 27 inactive Language Chooser / framebuffer replay | Guarded activation and replay-policy fixes validated; complete SIP/AMFI status workflows passed. |
 | Recovery Terminal marker recognition | Bounded prompt-punctuation and word-encoding/output-separation fixes validated; not a claim of universal OCR reliability. |
-| macOS 26 first-owner desktop readiness / cleanup | Same-job cleanup-verified retry and pinned reconnect adapter implemented. Three fresh signed-candidate SIP cycles passed, including a live Aqua timeout recovered after instrumentation cleanup; original intermittent signal delay and earlier console transport failure remain unexplained. A fresh diagnostic run at 22:40:58Z failed earlier, at automatic-login readback after the first-owner reboot retry; that stopped fixture is retained. |
+| macOS 26 first-owner desktop readiness / cleanup | Same-job cleanup-verified retry and pinned reconnect adapter implemented. Three fresh signed-candidate SIP cycles passed, including a live Aqua timeout recovered after instrumentation cleanup; original intermittent signal delay and earlier console transport failure remain unexplained. Later readback failures identify stock Setup Assistant automatic-login ownership after the preference-recovery reboot. A narrowly gated retry candidate has red/green regression evidence; signed/live qualification is pending, and stopped failure fixtures are retained. |
 | macOS 27 creation `ownerProof` | Open; subsequent internal-drive baselines passed, including fresh creation with the exact original `ffc41a7` host, without a targeted fix. |
 | macOS 26 creation `verifyNormalAgent` / slow first boot | Open historical failure; subsequent internal-drive creations passed, including a fresh original-`ffc41a7` run with first-attempt verification receipts, without establishing its cause. |
 | macOS 27 restart after pause/resume | Open; two earlier internal-drive sequences plus ten-cycle runs with both current `a3852a5` and original `ffc41a7` hosts passed without reproducing the missing helper. |
@@ -2435,6 +2435,60 @@ manual state change. The next candidate must retain arbitrary-owner rejection
 and prove the existing fresh-owner/password/restriction/Setup Assistant session
 checks before any native setter; a stock account name alone cannot authorize
 another mutation.
+
+The next candidate narrows recovery to this observed transition. The existing
+preference-recovery adapter will distinguish its initial attempt from its one
+post-restart attempt, passing the latter only after the exact owner-completion
+status-1 error, successful restart/authentication, same-owner GeneratedUID
+verification, and durable verification receipt. Only that attempt plus verified
+fresh-owner evidence may take the stock Setup Assistant account through the
+existing credential, owner, restriction, native-support, and exact Aqua-session
+checks. This state is not a positive automatic-login proof. It requires another
+native setter and unchanged expected-owner/preference/artifact readback; no
+Language Chooser fallback is permitted for this special case. Initial calls,
+nonfresh workflows, and arbitrary/root/account-shaped-OFF owners remain rejected.
+The upstream reason for the preference-write status 1 remains unknown.
+
+The real recovery-adapter regression is red before production changes. The
+owner-preparation suite at 00:05:17Z on September 23 passed its 78 existing
+functions and failed the new five-case function at the existing early native
+readback rejection, before a second setter. Cases cover successful recovery,
+invalid Setup Assistant context, and each unchanged post-setter proof.
+Bundle: `test_macos_2026-09-23T00-05-17-028Z_pid88420_6a7f373f.xcresult`.
+An earlier function-only filter selected zero tests and is not qualification.
+All 21 isolated local installer regressions passed. No VM has been operated
+or deleted during this candidate's regression setup.
+
+At 00:06:37Z, capacity recovery deleted only the completed, stopped
+`pomme-agent-owner26-20260922i` fixture, UUID
+`4c39e416-4ab5-48b9-aaf4-fef22d553158`. Preflight independently confirmed no
+helper and a `sipEnable` / `restorationComplete` / `previous` journal with
+normal-boot verification. Its original failure and successful resume/SIP cycle
+are recorded above. Public deletion permanently removed its 25 GiB disk; the
+VM cannot be recovered through that operation. The exact signed guest archive
+`d64e754e120fef42698b6688f79925396d84b6c9d77298123628adabd52e274a`
+was verified and retained. Free internal space increased from 49 to 74 GiB;
+all eleven remaining VMs are stopped/internal. The three latest readback/signal
+failure fixtures and original comparison baselines were preserved.
+
+The typed-attempt candidate passed 108 owner/workflow functions / 1,760
+invocations over ten repetitions, with the existing four Core warnings:
+`test_macos_2026-09-23T00-08-54-414Z_pid88994_0273d245.xcresult`.
+Read-only review found no blocking correctness/security issue. The first full
+run passed 1,196 functions and failed only the existing prohibited-vocabulary
+source scan because the new explanatory comment used a banned historical
+alternate-path word. Bundle:
+`test_macos_2026-09-23T00-09-58-622Z_pid89374_1cdd8871.xcresult`.
+That comment is being reworded; the source-scan assertion and behavior remain
+unchanged. A complete rerun is required before commit/build.
+
+After the comment-only correction, the complete suite passed all 1,197
+functions / 1,697 invocations, with no failures or skips:
+`test_macos_2026-09-23T00-10-58-498Z_pid89748_16c8848a.xcresult`.
+The candidate and evidence are committed before the canonical signed Release
+build. Live qualification will use another direct macOS 26.6.2/25G83 restore
+with identical internal-drive 40 GB / 4 GB resources; existing creation pins,
+credentials, and failure journals will not be rewritten to exercise the fix.
 
 ### macOS 27 pause/resume/restart repetition
 

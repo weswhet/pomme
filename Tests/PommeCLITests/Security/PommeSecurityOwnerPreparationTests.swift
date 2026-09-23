@@ -4,6 +4,137 @@ import Synchronization
 
 @Suite("Pomme normal guest owner preparation")
 struct PommeSecurityOwnerPreparationTests {
+  @Test("Stock Setup Assistant autologin after preference restart requires a fully verified setter retry", arguments: [
+    "success", "invalidContext", "postStatus", "postPreference", "postArtifact",
+  ])
+  func stockSetupOwnerAfterPreferenceRestart(mode: String) async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    fixture.autoLoginStatusOutput = "Automatic login is OFF.\n"
+    fixture.miniBuddyLaunchWriteExit = 1
+    let restarts = Mutex(0)
+    let completionReceipts = Mutex(0)
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: { request in
+        let secondSetter = fixture.ptyCommands.filter { $0.arguments.contains("-autologin") }.count == 2
+        if secondSetter {
+          var replacement: String?
+          var exitCode = 0
+          if mode == "postStatus", request.path == "/usr/sbin/sysadminctl",
+             request.arguments == ["-autologin", "status"] {
+            replacement = "Automatic login user: _mbsetupuser\n"
+          } else if mode == "postPreference", request.path == "/usr/bin/defaults",
+                    request.arguments.last == "autoLoginUser" {
+            replacement = "other-owner\n"
+          } else if mode == "postArtifact", request.path == "/bin/test",
+                    request.arguments == ["-f", "/etc/kcpassword"] {
+            replacement = ""; exitCode = 1
+          }
+          if let replacement {
+            return GuestCommandResult(
+              exitCode: exitCode, signal: nil, stdout: Data(replacement.utf8), stderr: Data(),
+              stdoutTruncated: false, stderrTruncated: false, exited: true)
+          }
+        }
+        return try fixture.execute(request)
+      },
+      executePrivatePTY: fixture.executePTY,
+      reportPhase: { phase, event in
+        if phase == .ownerCompletion, event == .receipt { completionReceipts.withLock { $0 += 1 } }
+      }
+    )
+    let initial = try await preparation.verifyOwner(password: "opaque-owner-secret")
+    let recovery = PommeSecurityFreshOwnerPreferenceRecovery(
+      restartAndAuthenticate: {
+        restarts.withLock { $0 += 1 }
+        fixture.miniBuddyLaunchWriteExit = 0
+        fixture.autoLoginStatusOutput = "Automatic login user: _mbsetupuser\n"
+        if mode == "invalidContext" { fixture.setupAssistantProcessUID = 501 }
+      },
+      verifyOwner: { try await preparation.verifyOwner(password: "opaque-owner-secret") },
+      recordVerification: { _ in },
+      configureLogin: { attempt in
+        _ = try await preparation.configureLogin(password: "opaque-owner-secret", attempt: attempt)
+      }
+    )
+    if mode == "success" {
+      try await recovery.run(initialVerification: initial)
+      #expect(fixture.setupDone)
+      #expect(fixture.miniBuddyLaunchPreference == false)
+    } else {
+      let expected: PommeSecurityOwnerPreparationError = mode == "invalidContext"
+        ? .setupAssistantContextUnavailable : .autoLoginVerificationFailed
+      await #expect(throws: expected) { try await recovery.run(initialVerification: initial) }
+      #expect(fixture.setupDone == false)
+      #expect(fixture.miniBuddyLaunchPreference == nil)
+    }
+    #expect(restarts.withLock { $0 } == 1)
+    #expect(fixture.ptyCommands.filter { $0.arguments.contains("-autologin") }.count == (mode == "invalidContext" ? 1 : 2))
+    #expect(fixture.guestPaths.contains("/usr/sbin/languagesetup") == false)
+    #expect(completionReceipts.withLock { $0 } == (mode == "success" ? 1 : 0))
+  }
+
+  @Test("Stock Setup Assistant retry remains gated by attempt, freshness, identity, policy, and exact context", arguments: [
+    "freshInitial", "nonfreshInitial", "nonfreshRetry", "otherOwner", "rootOwner", "offOwner", "malformed",
+    "credential", "owner", "restricted", "unsupported", "contextUID", "contextPath", "contextDuplicate",
+    "contextStale", "contextSession", "contextAudit", "languageChooser", "completedContext",
+  ])
+  func stockSetupOwnerRetryGates(mode: String) async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    fixture.autoLoginStatusOutput = "Automatic login user: _mbsetupuser\n"
+    switch mode {
+    case "otherOwner": fixture.autoLoginStatusOutput = "Automatic login user: other-owner\n"
+    case "rootOwner": fixture.autoLoginStatusOutput = "Automatic login user: root\n"
+    case "offOwner": fixture.autoLoginStatusOutput = "Automatic login user: OFF\n"
+    case "malformed": fixture.autoLoginStatusOutput = "malformed\n"
+    case "owner": fixture.customHome = "/var/empty"
+    case "restricted": fixture.fileVaultEnabled = true
+    case "contextUID", "completedContext": fixture.setupAssistantProcessUID = 501
+    case "contextPath": fixture.setupAssistantProcessPath = "/usr/bin/other"
+    case "contextDuplicate": fixture.setupAssistantDuplicateProcess = true
+    case "contextStale": fixture.setupAssistantStaleRecheck = true
+    case "contextSession": fixture.setupAssistantManagerName = "Background"
+    case "contextAudit": fixture.setupAssistantAuditSessionID = 0
+    case "languageChooser": fixture.useLanguageChooser = true
+    default: break
+    }
+    if mode == "completedContext" { fixture.setupDone = true }
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: mode.hasPrefix("nonfresh") ? .unverified : .verifiedFresh,
+      executeGuest: { request in
+        if mode == "unsupported", request.path == "/usr/sbin/sysadminctl", request.arguments == ["-help"] {
+          return .init(exitCode: 0, signal: nil, stdout: Data(), stderr: Data(),
+                       stdoutTruncated: false, stderrTruncated: false, exited: true)
+        }
+        return try fixture.execute(request)
+      }, executePrivatePTY: fixture.executePTY
+    )
+    let expected: PommeSecurityOwnerPreparationError
+    switch mode {
+    case "credential": expected = .credentialRequired
+    case "owner": expected = .ownerVerificationFailed
+    case "restricted": expected = .loginRestricted
+    case "unsupported": expected = .autoLoginUnsupported
+    case "contextUID", "contextPath", "contextDuplicate", "contextStale", "contextSession", "contextAudit", "languageChooser", "completedContext":
+      expected = .setupAssistantContextUnavailable
+    default: expected = .autoLoginVerificationFailed
+    }
+    await #expect(throws: expected) {
+      if mode.hasSuffix("Initial") {
+        _ = try await preparation.configureLogin(password: "opaque-owner-secret")
+      } else {
+        _ = try await preparation.configureLogin(
+          password: mode == "credential" ? "" : "opaque-owner-secret", attempt: .afterPreferenceRestart)
+      }
+    }
+    #expect(fixture.ptyCommands.contains { $0.arguments.contains("-autologin") } == false)
+    #expect(fixture.guestPaths.contains("/usr/sbin/languagesetup") == false)
+    #expect(fixture.miniBuddyLaunchPreference == nil)
+    #expect(fixture.setupDone == (mode == "completedContext"))
+  }
+
   @Test("Temporary readback trace follows real reconciliation without retaining native data", arguments: [
     "valid", "off", "shape", "empty", "lines", "otherOwner", "nativeCommand", "nativeEvidence",
     "missingPreference", "preferenceShape", "preferenceMismatch", "missingArtifact",
@@ -104,7 +235,7 @@ struct PommeSecurityOwnerPreparationTests {
   }
 
   @Test("Real preference recovery rejects changed post-restart native status before completion", arguments: [
-    "malformed", "otherOwner", "setupOwner", "offOwner", "rootOwner",
+    "malformed", "otherOwner", "offOwner", "rootOwner",
   ])
   func autoLoginReadbackTraceAfterPreferenceRecovery(mode: String) async throws {
     let fixture = OwnerPreparationFixture(existingOwner: true)
@@ -125,7 +256,6 @@ struct PommeSecurityOwnerPreparationTests {
         fixture.miniBuddyLaunchWriteExit = 0
         switch mode {
         case "otherOwner": fixture.autoLoginStatusOutput = "Automatic login user: private-other-owner\n"
-        case "setupOwner": fixture.autoLoginStatusOutput = "Automatic login user: _MBSETUPUSER\n"
         case "offOwner": fixture.autoLoginStatusOutput = "Automatic login user: OFF\n"
         case "rootOwner": fixture.autoLoginStatusOutput = "Automatic login user: root\n"
         default: fixture.autoLoginStatusOutput = "private-post-restart-malformed-status\n"
@@ -133,7 +263,9 @@ struct PommeSecurityOwnerPreparationTests {
       },
       verifyOwner: { try await preparation.verifyOwner(password: "opaque-owner-secret") },
       recordVerification: { _ in },
-      configureLogin: { _ = try await preparation.configureLogin(password: "opaque-owner-secret") }
+      configureLogin: { attempt in
+        _ = try await preparation.configureLogin(password: "opaque-owner-secret", attempt: attempt)
+      }
     )
     await #expect(throws: PommeSecurityOwnerPreparationError.autoLoginVerificationFailed) {
       try await recovery.run(initialVerification: initial)
@@ -142,7 +274,6 @@ struct PommeSecurityOwnerPreparationTests {
     let rejection: PommeAutoLoginReadbackTrace
     switch mode {
     case "otherOwner": rejection = .nativeOtherOwner
-    case "setupOwner": rejection = .nativeSetupAssistantOwner
     case "offOwner": rejection = .nativeOffAsOwner
     case "rootOwner": rejection = .nativeRootOwner
     default: rejection = .nativeShapeRejected

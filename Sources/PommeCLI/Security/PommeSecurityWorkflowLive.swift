@@ -294,7 +294,7 @@ struct PommeSecurityFreshOwnerPreferenceRecovery: Sendable {
   typealias RestartAndAuthenticate = @Sendable () async throws -> Void
   typealias VerifyOwner = @Sendable () async throws -> PommeSecurityOwnerVerification
   typealias RecordVerification = @Sendable (PommeSecurityOwnerVerification) throws -> Void
-  typealias ConfigureLogin = @Sendable () async throws -> Void
+  typealias ConfigureLogin = @Sendable (PommeSecurityOwnerPreparation.LoginAttempt) async throws -> Void
 
   let restartAndAuthenticate: RestartAndAuthenticate
   let verifyOwner: VerifyOwner
@@ -303,7 +303,7 @@ struct PommeSecurityFreshOwnerPreferenceRecovery: Sendable {
 
   func run(initialVerification: PommeSecurityOwnerVerification) async throws {
     do {
-      try await configureLogin()
+      try await configureLogin(.initial)
       return
     } catch {
       guard Self.isRetryable(error) else { throw error }
@@ -317,7 +317,7 @@ struct PommeSecurityFreshOwnerPreferenceRecovery: Sendable {
       throw PommeSecurityWorkflowJournalError.immutableRequestMismatch
     }
     try recordVerification(retryVerification)
-    try await configureLogin()
+    try await configureLogin(.afterPreferenceRestart)
   }
 
   static func isRetryable(_ error: Error) -> Bool {
@@ -589,8 +589,8 @@ private struct PommeSecurityLiveOwnerPreparation: Sendable {
         recordVerification: { retryVerification in
           try recordVerification(retryVerification, progress: progress)
         },
-        configureLogin: {
-          _ = try await helper.configureLogin(password: credential.password)
+        configureLogin: { attempt in
+          _ = try await helper.configureLogin(password: credential.password, attempt: attempt)
         }
       )
       try await preferenceRecovery.run(initialVerification: verified)
