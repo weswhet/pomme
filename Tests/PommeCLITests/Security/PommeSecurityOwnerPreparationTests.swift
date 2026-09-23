@@ -4,6 +4,29 @@ import Synchronization
 
 @Suite("Pomme normal guest owner preparation")
 struct PommeSecurityOwnerPreparationTests {
+  @Test("Owner preference write diagnostics identify only the failing closed domain", arguments: [true, false])
+  func ownerPreferenceWriteTrace(buildFails: Bool) async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    if buildFails { fixture.setupAssistantBuildWriteExit = 1 }
+    else { fixture.miniBuddyLaunchWriteExit = 1 }
+    let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: fixture.execute, executePrivatePTY: fixture.executePTY,
+      autoLoginTrace: { event in trace.withLock { $0.append(event) } }
+    )
+    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
+      try await preparation.configureLogin(password: "opaque-owner-secret")
+    }
+    let events = trace.withLock { $0 }
+    #expect(events.last == (buildFails ? .ownerBuildPreferenceWriteEntered : .ownerMiniBuddyPreferenceWriteEntered))
+    #expect(events.filter { $0 == .ownerBuildPreferenceWriteEntered }.count == 1)
+    #expect(events.filter { $0 == .ownerMiniBuddyPreferenceWriteEntered }.count == (buildFails ? 0 : 1))
+    #expect(fixture.setupDone == false)
+    #expect(fixture.miniBuddyLaunchPreference == nil)
+  }
+
   @Test("Stock Setup Assistant autologin after preference restart requires a fully verified setter retry", arguments: [
     "success", "invalidContext", "postStatus", "postPreference", "postArtifact",
   ])
@@ -140,6 +163,8 @@ struct PommeSecurityOwnerPreparationTests {
     "missingPreference", "preferenceShape", "preferenceMismatch", "missingArtifact",
     "metadataCommand", "metadataInvalid",
     "expectedUppercase", "setupOwner", "setupOwnerUppercase", "offOwner", "offOwnerUppercase", "rootOwner",
+    "preferenceCase", "preferenceSetup", "preferenceSetupUppercase", "preferenceOff", "preferenceOffUppercase",
+    "preferenceRoot", "preferenceRootUppercase",
   ])
   func autoLoginReadbackTraceBranches(mode: String) async throws {
     let fixture = OwnerPreparationFixture(existingOwner: true)
@@ -171,6 +196,13 @@ struct PommeSecurityOwnerPreparationTests {
           case "missingPreference": output = "private-defaults-diagnostic"; exitCode = 1
           case "preferenceShape": output = "private-value\nprivate-second-line"
           case "preferenceMismatch": output = "private-other-owner"
+          case "preferenceCase": output = "POMME"
+          case "preferenceSetup": output = "_mbsetupuser"
+          case "preferenceSetupUppercase": output = "_MBSETUPUSER"
+          case "preferenceOff": output = "off"
+          case "preferenceOffUppercase": output = "OFF"
+          case "preferenceRoot": output = "root"
+          case "preferenceRootUppercase": output = "ROOT"
           default: break
           }
         } else if request.path == "/bin/test", request.arguments == ["-f", "/etc/kcpassword"], mode == "missingArtifact" {
@@ -213,6 +245,10 @@ struct PommeSecurityOwnerPreparationTests {
       case "missingPreference": expected = preference + [.preferenceCommandFailed, .reconcileRejected]
       case "preferenceShape": expected = preference + [.preferenceShapeRejected, .reconcileRejected]
       case "preferenceMismatch": expected = preference + [.preferenceMismatch, .reconcileRejected]
+      case "preferenceCase": expected = preference + [.preferenceExpectedOwnerCaseMismatch, .reconcileRejected]
+      case "preferenceSetup", "preferenceSetupUppercase": expected = preference + [.preferenceSetupAssistantOwner, .reconcileRejected]
+      case "preferenceOff", "preferenceOffUppercase": expected = preference + [.preferenceOffAsOwner, .reconcileRejected]
+      case "preferenceRoot", "preferenceRootUppercase": expected = preference + [.preferenceRootOwner, .reconcileRejected]
       case "missingArtifact": expected = preference + [.preferenceMatch, .artifactEntered, .artifactAbsent, .reconcileRejected]
       case "metadataCommand": expected = preference + [.preferenceMatch, .artifactEntered, .artifactMetadataEntered, .artifactMetadataCommandFailed, .reconcileRejected]
       case "metadataInvalid": expected = preference + [.preferenceMatch, .artifactEntered, .artifactMetadataEntered, .artifactInvalid, .reconcileRejected]
@@ -236,6 +272,7 @@ struct PommeSecurityOwnerPreparationTests {
 
   @Test("Real preference recovery rejects changed post-restart native status before completion", arguments: [
     "malformed", "otherOwner", "offOwner", "rootOwner",
+    "preferenceCase", "preferenceSetup", "preferenceOff", "preferenceRoot", "preferenceOther",
   ])
   func autoLoginReadbackTraceAfterPreferenceRecovery(mode: String) async throws {
     let fixture = OwnerPreparationFixture(existingOwner: true)
@@ -246,7 +283,22 @@ struct PommeSecurityOwnerPreparationTests {
     let preparation = PommeSecurityOwnerPreparation(
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
-      executeGuest: fixture.execute, executePrivatePTY: fixture.executePTY,
+      executeGuest: { request in
+        if restartCount.withLock({ $0 }) == 1, mode.hasPrefix("preference"),
+           request.path == "/usr/bin/defaults", request.arguments.last == "autoLoginUser" {
+          let value: String
+          switch mode {
+          case "preferenceCase": value = "POMME"
+          case "preferenceSetup": value = "_MBSETUPUSER"
+          case "preferenceOff": value = "OFF"
+          case "preferenceRoot": value = "ROOT"
+          default: value = "private-other-owner"
+          }
+          return .init(exitCode: 0, signal: nil, stdout: Data(value.utf8), stderr: Data(),
+                       stdoutTruncated: false, stderrTruncated: false, exited: true)
+        }
+        return try fixture.execute(request)
+      }, executePrivatePTY: fixture.executePTY,
       autoLoginTrace: { event in trace.withLock { $0.append(event) } }
     )
     let initial = try await preparation.verifyOwner(password: "opaque-owner-secret")
@@ -258,6 +310,8 @@ struct PommeSecurityOwnerPreparationTests {
         case "otherOwner": fixture.autoLoginStatusOutput = "Automatic login user: private-other-owner\n"
         case "offOwner": fixture.autoLoginStatusOutput = "Automatic login user: OFF\n"
         case "rootOwner": fixture.autoLoginStatusOutput = "Automatic login user: root\n"
+        case "preferenceCase", "preferenceSetup", "preferenceOff", "preferenceRoot", "preferenceOther":
+          fixture.autoLoginStatusOutput = "Automatic login user: pomme\n"
         default: fixture.autoLoginStatusOutput = "private-post-restart-malformed-status\n"
         }
       },
@@ -276,14 +330,22 @@ struct PommeSecurityOwnerPreparationTests {
     case "otherOwner": rejection = .nativeOtherOwner
     case "offOwner": rejection = .nativeOffAsOwner
     case "rootOwner": rejection = .nativeRootOwner
+    case "preferenceCase": rejection = .preferenceExpectedOwnerCaseMismatch
+    case "preferenceSetup": rejection = .preferenceSetupAssistantOwner
+    case "preferenceOff": rejection = .preferenceOffAsOwner
+    case "preferenceRoot": rejection = .preferenceRootOwner
+    case "preferenceOther": rejection = .preferenceMismatch
     default: rejection = .nativeShapeRejected
     }
+    let preferencePrefix: [PommeAutoLoginReadbackTrace] = mode.hasPrefix("preference")
+      ? [.nativeExpectedOwner, .preferenceEntered] : []
     #expect(trace.withLock { $0 } == [
       .reconcileEntered, .nativeEntered, .nativeOff, .reconcileOff,
       .nativeEntered, .nativeExpectedOwner, .preferenceEntered, .preferenceMatch,
       .artifactEntered, .artifactMetadataEntered, .artifactValid,
-      .reconcileEntered, .nativeEntered, rejection, .reconcileRejected,
-    ])
+      .ownerBuildPreferenceWriteEntered, .ownerMiniBuddyPreferenceWriteEntered,
+      .reconcileEntered, .nativeEntered,
+    ] + preferencePrefix + [rejection, .reconcileRejected])
     #expect(fixture.setupDone == false)
     #expect(fixture.miniBuddyLaunchPreference == nil)
     #expect(fixture.ptyCommands.filter { $0.arguments.contains("-autologin") }.count == 1)
