@@ -3862,6 +3862,54 @@ finds `/Users/wes/.local/bin/pomme`; it reports `e9ca7d1` with SHA-256
 All 104 CLI contract checks passed. The guest diagnostic still requires a
 fresh same-resource live comparison.
 
+Fresh internal `pomme-agent-ownerloop-clone26-20260922i` passed the same
+40 GB / 4 GB template dry run and creation, with UUID
+`47e1a1f6-3b44-4881-9255-c40c7bd0bc0a`, plan digest
+`3ef2bc434a82d5af93677cdabff5d52f6d1cabd2a811d626f3fe4c1c130e0327`,
+and exact pinned new agent digest `658412b3…bc0cbbdd`. All preexisting VMs
+were stopped and internal. First-owner SIP disable began at 08:35:48Z. The
+first owner build-preference write again returned status 1, with the target
+key absent after failure. The guarded normal reboot then reached a distinct
+automatic-login readback failure before owner completion, leaving the
+retained pre-mutation transaction and stopped/no-helper VM. A matching public
+resume of that same operation/final state began at 08:37:52Z; owner writes,
+Setup Assistant completion, and normal restart then passed.
+
+The resumed normal desktop check reached Aqua. Its start had a validated job
+ID, but the foreground proof reached its 15-second checkpoint deadline at
+08:39:53Z after 29 polls, with termination requested. A subsequent console
+`process.start` at 08:39:56Z wrote its host request in 0.101333 ms, then
+timed out at 08:40:01Z after 5,001.172208 ms with `responseReadNoBytes` and
+`jobEstablished=false`. Public cause was `stage=console,
+kind=agentOtherTimeout`; the workflow restored stopped/no helper and retained
+the `sipDisable/autologinIntent/previous` journal before SIP mutation. The
+Aqua foreground deadline and console transport timeout are separate events.
+
+A separate normal inspection boot connected the exact pinned guest agent.
+Complete, untruncated guest Unified Logging queries show successful earlier
+status exchanges through 01:39:53.332 local (08:39:53.332Z). At
+01:39:53.413, the guest serve loop emitted `readReturned` and `frameReady`,
+and the existing signal boundary emitted `guestStatusHandlerEntered`. Through
+01:40:30 there is no later event from that original guest process: no
+`guestStatusPerformReturned`, write entry/result, next read, or serve exit.
+Thus the old daemon appears occupied inside that status handler before the
+host's later console start. This is stronger evidence for a guest handler
+stall than for a prior blocked guest socket write. The events still have no
+request identity or exact cross-host clock correlation, and persisted-log
+loss remains possible; the exact blocking function and cause are not yet
+established. No retry or deadline change follows from this trace.
+
+The inspection boot stopped gracefully. Independent public `sip status`
+passed authenticated Recovery marker proof on attempt two and reported
+verified `sipEnabled=true`, `sipDisabled=false`, complete cleanup, and
+final-state verification. Clone-i was checked stopped/no helper with its
+unchanged UUID and agent pin, whose archived signed executable still matched
+its SHA-256. The exact clone was then deleted. Public inventory returned to
+twelve VMs, all stopped/no helper, with no clone-i; internal free space rose
+from 13 to 19 GiB. The clone's VM disk is not recoverable through Pomme. No
+external-drive or unrelated VM was touched. The status-handler stall is now
+the primary target for code-path analysis; no production fix is claimed.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
