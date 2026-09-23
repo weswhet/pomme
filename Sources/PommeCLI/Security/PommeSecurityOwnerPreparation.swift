@@ -18,6 +18,14 @@ enum PommeAutoLoginReadbackTrace: String, CaseIterable, Sendable {
   case ownerWriteStderrStartsDefaults, ownerWriteStderrOther
   case ownerWriteHomeExpectedDirectory, ownerWriteHomeOtherOwner
   case ownerWriteHomeNotDirectory, ownerWriteHomeNotStatable, ownerWriteHomeProbeUnavailable
+  case ownerPostWritePreferencesExpectedOwnerWriteSearchMode, ownerPostWritePreferencesOwnerModeRestricted
+  case ownerPostWritePreferencesOtherOwner, ownerPostWritePreferencesNotDirectory
+  case ownerPostWritePreferencesNotStatable, ownerPostWritePreferencesUnavailable
+  case ownerPostWriteUIDExpected, ownerPostWriteUIDMismatch, ownerPostWriteUIDUnavailable
+  case ownerPostWriteHOMEExpected, ownerPostWriteHOMEMismatch, ownerPostWriteHOMEUnavailable
+  case ownerPostWriteCFPrefsPresent, ownerPostWriteCFPrefsAbsent, ownerPostWriteCFPrefsUnavailable
+  case ownerPostWriteSetupAssistantStockOnly, ownerPostWriteSetupAssistantOwnerOnly, ownerPostWriteSetupAssistantBoth
+  case ownerPostWriteSetupAssistantAbsent, ownerPostWriteSetupAssistantUnavailable
 
   var message: String { "[DEBUG-autologin-readback-20260922] \(rawValue)" }
   static func log(_ event: Self) { PommeCore.log(event.message) }
@@ -1330,6 +1338,11 @@ struct PommeSecurityOwnerPreparation: Sendable {
     guard result.exitCode == 0 else {
       autoLoginTrace(Self.classifyOwnerWriteStderr(result.stderr))
       autoLoginTrace(probeOwnerHomeAfterFailedWrite(ownerUID: ownerUID))
+      if result.exitCode == 1, domain == Self.setupAssistantPreferencesDomain,
+        key == Self.lastSeenBuddyBuildVersionKey
+      {
+        probeContextAfterFailedOwnerBuildWrite(ownerUID: ownerUID)
+      }
       throw PommeSecurityOwnerPreparationError.commandFailed(
         .ownerCompletion, exitCode: Int(result.exitCode))
     }
@@ -1379,6 +1392,93 @@ struct PommeSecurityOwnerPreparation: Sendable {
     }
     guard fields[1] == "Directory" else { return .ownerWriteHomeNotDirectory }
     return actualUID == ownerUID ? .ownerWriteHomeExpectedDirectory : .ownerWriteHomeOtherOwner
+  }
+
+  /// These observations occur after the failed write and are not atomic with it.
+  /// Mode bits do not prove ACL-effective access; process presence is not readiness.
+  /// Probes never write preferences, authorize a retry, or replace the original error.
+  private func probeContextAfterFailedOwnerBuildWrite(ownerUID: UInt32) {
+    let home = "/Users/\(identity.username)"
+    let metadata = postWriteProbe(
+      path: "/usr/bin/stat", arguments: ["-f", "%u:%HT:%Lp", "\(home)/Library/Preferences"],
+      limit: 128, allowNotStatable: true)
+    let metadataEvent: PommeAutoLoginReadbackTrace
+    if let metadata, metadata.exitCode == 1 {
+      metadataEvent = .ownerPostWritePreferencesNotStatable
+    } else if let metadata,
+      let fields = String(data: metadata.stdout, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        .split(separator: ":", omittingEmptySubsequences: false),
+      fields.count == 3, let uid = UInt32(fields[0]),
+      let mode = UInt16(fields[2], radix: 8), mode <= 0o7777
+    {
+      if fields[1] != "Directory" { metadataEvent = .ownerPostWritePreferencesNotDirectory }
+      else if uid != ownerUID { metadataEvent = .ownerPostWritePreferencesOtherOwner }
+      else if mode & 0o300 == 0o300 { metadataEvent = .ownerPostWritePreferencesExpectedOwnerWriteSearchMode }
+      else { metadataEvent = .ownerPostWritePreferencesOwnerModeRestricted }
+    } else { metadataEvent = .ownerPostWritePreferencesUnavailable }
+    autoLoginTrace(metadataEvent)
+
+    let sudo = ["-n", "-H", "-u", identity.username]
+    if let result = postWriteProbe(path: "/usr/bin/sudo", arguments: sudo + ["/usr/bin/id", "-u"], limit: 32),
+      let text = String(data: result.stdout, encoding: .utf8),
+      let uid = UInt32(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    {
+      autoLoginTrace(uid == ownerUID ? .ownerPostWriteUIDExpected : .ownerPostWriteUIDMismatch)
+    } else { autoLoginTrace(.ownerPostWriteUIDUnavailable) }
+    if let result = postWriteProbe(path: "/usr/bin/sudo", arguments: sudo + ["/usr/bin/printenv", "HOME"], limit: 1024),
+      let text = String(data: result.stdout, encoding: .utf8),
+      text.hasSuffix("\n"), !text.dropLast().contains(where: { $0.isNewline || $0 == "\0" })
+    {
+      autoLoginTrace(text == home + "\n" ? .ownerPostWriteHOMEExpected : .ownerPostWriteHOMEMismatch)
+    } else { autoLoginTrace(.ownerPostWriteHOMEUnavailable) }
+
+    // A single snapshot keeps both process-presence observations contemporaneous.
+    guard let result = postWriteProbe(path: "/bin/ps", arguments: ["-axo", "uid=,comm="], limit: 65536),
+      let text = String(data: result.stdout, encoding: .utf8),
+      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    else {
+      autoLoginTrace(.ownerPostWriteCFPrefsUnavailable)
+      autoLoginTrace(.ownerPostWriteSetupAssistantUnavailable)
+      return
+    }
+    var hasCFPrefs = false
+    var hasStockSetupAssistant = false
+    var hasOwnerSetupAssistant = false
+    var hasOtherSetupAssistant = false
+    for line in text.split(whereSeparator: \.isNewline) {
+      let fields = line.split(maxSplits: 1, whereSeparator: \.isWhitespace)
+      guard fields.count == 2, let uid = UInt32(fields[0]) else {
+        autoLoginTrace(.ownerPostWriteCFPrefsUnavailable)
+        autoLoginTrace(.ownerPostWriteSetupAssistantUnavailable)
+        return
+      }
+      let path = fields[1].trimmingCharacters(in: .whitespaces)
+      hasCFPrefs = hasCFPrefs || (uid == ownerUID && path == "/usr/sbin/cfprefsd")
+      if path == Self.setupAssistantExecutablePath {
+        if uid == ownerUID { hasOwnerSetupAssistant = true }
+        else if uid == Self.setupAssistantUID { hasStockSetupAssistant = true }
+        else { hasOtherSetupAssistant = true }
+      }
+    }
+    autoLoginTrace(hasCFPrefs ? .ownerPostWriteCFPrefsPresent : .ownerPostWriteCFPrefsAbsent)
+    if hasOtherSetupAssistant { autoLoginTrace(.ownerPostWriteSetupAssistantUnavailable) }
+    else if hasStockSetupAssistant && hasOwnerSetupAssistant { autoLoginTrace(.ownerPostWriteSetupAssistantBoth) }
+    else if hasStockSetupAssistant { autoLoginTrace(.ownerPostWriteSetupAssistantStockOnly) }
+    else if hasOwnerSetupAssistant { autoLoginTrace(.ownerPostWriteSetupAssistantOwnerOnly) }
+    else { autoLoginTrace(.ownerPostWriteSetupAssistantAbsent) }
+  }
+
+  private func postWriteProbe(
+    path: String, arguments: [String], limit: Int, allowNotStatable: Bool = false
+  ) -> GuestCommandResult? {
+    guard let result = try? executeGuest(.init(path: path, arguments: arguments, timeout: 5)),
+      !result.detached, result.exited, !result.timedOut, result.signal == nil,
+      !result.stdoutTruncated, !result.stderrTruncated,
+      result.stdout.count <= limit, result.stderr.count <= 1024
+    else { return nil }
+    if allowNotStatable, result.exitCode == 1 { return result }
+    guard result.exitCode == 0, result.stderr.isEmpty else { return nil }
+    return result
   }
 
   private static func isValidAppleBuildVersion(_ value: String) -> Bool {

@@ -3135,6 +3135,34 @@ unrecoverable, but the pristine unprovisioned template and evidence remain.
 Inventory confirms 12 stopped/internal VMs, clone name absent, and 21 GiB
 free for the next copy-on-write clone.
 
+The next diagnostic candidate remains gated to the exact first
+`LastSeenBuddyBuildVersion` write returning status 1. After that completed
+native failure, four best-effort read-only guest commands classify only fixed
+labels: owner `Library/Preferences` directory metadata and owner write/search
+mode bits; repeated `sudo -n -H -u` effective UID and HOME context; and a
+single process snapshot for owner `cfprefsd` presence and the exact stock or
+owner Setup Assistant executable. No raw stderr, UID, HOME, path, mode, PID,
+or process list enters the trace. Each request has a five-second bound;
+failed, oversized, malformed, signalled, or incomplete results become
+`Unavailable`. These post-failure facts are non-atomic, mode bits do not prove
+ACL-effective access, and process presence does not prove service readiness.
+They cannot change the original error, authorize a retry, or affect SIP and
+journal rules. Successful writes, MiniBuddy failures, and other write exit
+statuses do not run the new probes.
+
+The correct-seam test first failed with the new probe expectations against
+unchanged production (84 passed, one new test failed;
+`test_macos_2026-09-23T05-01-09-766Z_pid48855_cd1e4a50.xcresult`). A refinement
+that distinguishes stock from owner Setup Assistant also failed before its
+implementation (84 passed, one failed;
+`test_macos_2026-09-23T05-05-06-846Z_pid49533_073e545f.xcresult`). Final
+focused owner-preparation tests passed 85 functions / 192 runs, zero
+failures/skips (`test_macos_2026-09-23T05-05-51-824Z_pid49695_ddd674ab.xcresult`).
+The full suite passed 1,206 functions, zero failures/skips
+(`test_macos_2026-09-23T05-07-23-415Z_pid49938_d9d3088b.xcresult`). This
+qualifies a diagnostic build and a second template clone; it does not yet
+explain or fix the native `defaults` failure.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns

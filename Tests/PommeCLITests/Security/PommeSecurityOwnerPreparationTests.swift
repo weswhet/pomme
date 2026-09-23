@@ -4,6 +4,135 @@ import Synchronization
 
 @Suite("Pomme normal guest owner preparation")
 struct PommeSecurityOwnerPreparationTests {
+  @Test("Failed owner writes collect bounded read-only context without replacing the failure", arguments: [
+    "expected", "mismatch", "unavailable", "truncated", "timeout", "malformed",
+    "oversize", "statusTwo", "signal", "detached", "notExited", "invalidUTF8", "stderr",
+    "preferencesRestricted", "preferencesNotDirectory", "preferencesNotStatable",
+    "processOwner", "processBoth", "processUnknownUID",
+  ])
+  func failedOwnerWriteContext(mode: String) async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    fixture.setupAssistantBuildWriteExit = 1
+    let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
+    let probes = Mutex<[String]>([])
+    let failedWrite = Mutex(false)
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: { request in
+        if request.path == "/usr/bin/sudo", request.arguments.contains("write"),
+          request.arguments.contains("LastSeenBuddyBuildVersion")
+        {
+          failedWrite.withLock { $0 = true }
+          return try fixture.execute(request)
+        }
+        guard failedWrite.withLock({ $0 }) else { return try fixture.execute(request) }
+        let label: String
+        let good: String
+        let other: String
+        if request.path == "/usr/bin/stat", request.arguments.last == "/Users/pomme/Library/Preferences" {
+          #expect(request.arguments == ["-f", "%u:%HT:%Lp", "/Users/pomme/Library/Preferences"])
+          label = "Preferences"; good = "501:Directory:700\n"; other = "502:Directory:700\n"
+        } else if request.path == "/usr/bin/sudo", request.arguments.suffix(2) == ["/usr/bin/id", "-u"] {
+          #expect(request.arguments == ["-n", "-H", "-u", "pomme", "/usr/bin/id", "-u"])
+          label = "UID"; good = "501\n"; other = "0\n"
+        } else if request.path == "/usr/bin/sudo", request.arguments.suffix(2) == ["/usr/bin/printenv", "HOME"] {
+          #expect(request.arguments == ["-n", "-H", "-u", "pomme", "/usr/bin/printenv", "HOME"])
+          label = "HOME"; good = "/Users/pomme\n"; other = "/private-synthetic-sentinel\n"
+        } else if request.path == "/bin/ps" {
+          #expect(request.arguments == ["-axo", "uid=,comm="])
+          label = "Processes"
+          good = "501 /usr/sbin/cfprefsd\n248 /System/Library/CoreServices/Setup Assistant.app/Contents/MacOS/Setup Assistant\n"
+          other = "0 /usr/sbin/cfprefsd\n501 /private-synthetic-sentinel/Setup Assistant\n"
+        } else { return try fixture.execute(request) }
+        #expect(request.timeout == 5)
+        probes.withLock { $0.append(label) }
+        if mode == "unavailable" { throw CocoaError(.fileReadUnknown) }
+        var output = mode == "malformed" ? "private-synthetic-sentinel\n" : mode == "mismatch" ? other : good
+        if mode == "oversize" { output = String(repeating: "x", count: 65537) }
+        if label == "Preferences", mode == "preferencesRestricted" { output = "501:Directory:500\n" }
+        if label == "Preferences", mode == "preferencesNotDirectory" { output = "501:Regular File:700\n" }
+        if label == "Processes" {
+          let setup = "/System/Library/CoreServices/Setup Assistant.app/Contents/MacOS/Setup Assistant"
+          if mode == "processOwner" { output = "501 /usr/sbin/cfprefsd\n501 \(setup)\n" }
+          if mode == "processBoth" { output = good + "501 \(setup)\n" }
+          if mode == "processUnknownUID" { output = "501 /usr/sbin/cfprefsd\n502 \(setup)\n" }
+        }
+        let notStatable = label == "Preferences" && mode == "preferencesNotStatable"
+        return .init(exitCode: mode == "statusTwo" ? 2 : notStatable ? 1 : 0,
+                     signal: mode == "signal" ? 9 : nil,
+                     stdout: mode == "invalidUTF8" ? Data([255]) : Data(output.utf8),
+                     stderr: mode == "stderr" ? Data("private-synthetic-sentinel".utf8) : Data(),
+                     stdoutTruncated: mode == "truncated", stderrTruncated: false,
+                     timedOut: mode == "timeout", detached: mode == "detached", exited: mode != "notExited")
+      }, executePrivatePTY: fixture.executePTY,
+      autoLoginTrace: { event in trace.withLock { $0.append(event) } }
+    )
+    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
+      try await preparation.configureLogin(password: "opaque-owner-secret")
+    }
+    #expect(probes.withLock { $0 } == ["Preferences", "UID", "HOME", "Processes"])
+    let labels = trace.withLock { $0.map(\.rawValue).filter { $0.hasPrefix("ownerPostWrite") } }
+    if mode == "expected" || mode.hasPrefix("preferences") || mode.hasPrefix("process") {
+      let metadata: String
+      switch mode {
+      case "preferencesRestricted": metadata = "ownerPostWritePreferencesOwnerModeRestricted"
+      case "preferencesNotDirectory": metadata = "ownerPostWritePreferencesNotDirectory"
+      case "preferencesNotStatable": metadata = "ownerPostWritePreferencesNotStatable"
+      default: metadata = "ownerPostWritePreferencesExpectedOwnerWriteSearchMode"
+      }
+      let setup: String
+      switch mode {
+      case "processOwner": setup = "ownerPostWriteSetupAssistantOwnerOnly"
+      case "processBoth": setup = "ownerPostWriteSetupAssistantBoth"
+      case "processUnknownUID": setup = "ownerPostWriteSetupAssistantUnavailable"
+      default: setup = "ownerPostWriteSetupAssistantStockOnly"
+      }
+      #expect(labels == [metadata, "ownerPostWriteUIDExpected",
+                         "ownerPostWriteHOMEExpected", "ownerPostWriteCFPrefsPresent", setup])
+    } else if mode == "mismatch" {
+      #expect(labels == ["ownerPostWritePreferencesOtherOwner", "ownerPostWriteUIDMismatch",
+                         "ownerPostWriteHOMEMismatch", "ownerPostWriteCFPrefsAbsent", "ownerPostWriteSetupAssistantAbsent"])
+    } else if mode == "malformed" {
+      #expect(labels == ["ownerPostWritePreferencesUnavailable", "ownerPostWriteUIDUnavailable",
+                         "ownerPostWriteHOMEMismatch", "ownerPostWriteCFPrefsUnavailable", "ownerPostWriteSetupAssistantUnavailable"])
+    } else {
+      #expect(labels.count == 5)
+      #expect(labels.allSatisfy { $0.hasSuffix("Unavailable") })
+    }
+    #expect(labels.allSatisfy { !$0.contains("private-synthetic-sentinel") })
+    #expect(fixture.setupDone == false)
+  }
+
+  @Test("Post-write probes do not run for other write outcomes", arguments: ["success", "miniBuddy", "statusTwo"])
+  func postWriteProbeAdmission(mode: String) async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    if mode == "miniBuddy" { fixture.miniBuddyLaunchWriteExit = 1 }
+    if mode == "statusTwo" { fixture.setupAssistantBuildWriteExit = 2 }
+    let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: { request in
+        #expect(request.arguments.last != "/Users/pomme/Library/Preferences")
+        #expect(!request.arguments.contains("/usr/bin/printenv"))
+        #expect(!request.arguments.contains("/usr/bin/id") || request.path != "/usr/bin/sudo")
+        return try fixture.execute(request)
+      }, executePrivatePTY: fixture.executePTY,
+      autoLoginTrace: { event in trace.withLock { $0.append(event) } }
+    )
+    if mode == "success" {
+      _ = try await preparation.configureLogin(password: "opaque-owner-secret")
+    } else {
+      await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(
+        .ownerCompletion, exitCode: mode == "statusTwo" ? 2 : 1))
+      {
+        try await preparation.configureLogin(password: "opaque-owner-secret")
+      }
+    }
+    #expect(trace.withLock { $0.allSatisfy { !$0.rawValue.hasPrefix("ownerPostWrite") } })
+  }
+
   @Test("A failed owner preference write classifies only the nearby home metadata", arguments: [
     "expected", "otherOwner", "notDirectory", "notStatable", "unavailable",
   ])
@@ -53,7 +182,7 @@ struct PommeSecurityOwnerPreparationTests {
     await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
       try await preparation.configureLogin(password: "opaque-owner-secret")
     }
-    let events = trace.withLock { $0 }
+    let events = trace.withLock { $0.filter { !$0.rawValue.hasPrefix("ownerPostWrite") } }
     #expect(statCalls.withLock { $0 } == 1)
     #expect(events.contains(.ownerWriteStderrStartsDefaults))
     #expect(events.filter { $0.rawValue.hasPrefix("ownerWriteHome") } == [expected])
@@ -98,7 +227,7 @@ struct PommeSecurityOwnerPreparationTests {
     await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
       try await preparation.configureLogin(password: "opaque-owner-secret")
     }
-    let events = trace.withLock { $0 }
+    let events = trace.withLock { $0.filter { !$0.rawValue.hasPrefix("ownerPostWrite") } }
     #expect(events.contains(expected))
     #expect(events.filter { $0.rawValue.hasPrefix("ownerWriteStderr") } == [expected])
     #expect(events.dropLast().last == expected)
@@ -123,7 +252,7 @@ struct PommeSecurityOwnerPreparationTests {
     await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
       try await preparation.configureLogin(password: "opaque-owner-secret")
     }
-    let events = trace.withLock { $0 }
+    let events = trace.withLock { $0.filter { !$0.rawValue.hasPrefix("ownerPostWrite") } }
     #expect(events.last == .ownerWriteHomeExpectedDirectory)
     #expect(Array(events.suffix(3)) == [
       buildFails ? .ownerBuildPreferenceWriteEntered : .ownerMiniBuddyPreferenceWriteEntered,
