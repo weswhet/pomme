@@ -3028,6 +3028,25 @@ operation has **not** been run. The retained transaction must be resumed or
 resolved through the public workflow; this is a separate Recovery navigation
 observation issue, not evidence that the desktop classifier found a cause.
 
+The exact experimental 26.6.2/25G83 profile selects the direct Terminal
+route. That route required Language Chooser after Options Return even when
+two stable classified frames showed Recovery Utilities. The existing optional
+language branch on a different experimental route provided a bounded pattern.
+The candidate accepts stable `recoveryUtilities` as an alternate post-event
+frame for that one Return and jumps directly to its existing Terminal event;
+the English Language Chooser path and its Return remain required when that
+screen appears. It does not accept unknown/mixed frames, change image
+classification, skip pre-input proof, or alter SIP/AMFI mutation and journal
+rules. A new exact-route branch test failed before the change with
+`unexpectedPostEventFrame` (17 passed, one failed;
+`test_macos_2026-09-23T04-26-14-561Z_pid42030_0ce0eeb0.xcresult`).
+Afterward the route and adjacent keyboard-port suites passed 34 tests with
+zero failures/skips (`test_macos_2026-09-23T04-26-53-380Z_pid42186_09ba6115.xcresult`).
+The full suite passed 1,204 functions, zero failures/skips
+(`test_macos_2026-09-23T04-27-27-014Z_pid42297_0507f286.xcresult`).
+This qualifies the candidate for commit and a signed Release/live resume;
+the live branch is not yet validated.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns

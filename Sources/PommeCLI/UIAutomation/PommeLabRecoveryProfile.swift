@@ -280,7 +280,9 @@ enum PommeRecoveryNavigationRoute: Equatable, Sendable {
             return [
                 .init(preEventFrame: .startupOptions, key: .right, postEventFrame: .startupIntermediate),
                 .init(preEventFrame: .startupIntermediate, key: .right, postEventFrame: .startupOptionsActivated),
-                .init(preEventFrame: .startupOptionsActivated, key: .return, postEventFrame: .languageEnglish),
+                .init(preEventFrame: .startupOptionsActivated, key: .return,
+                      postEventFrame: .languageEnglish,
+                      alternatePostEventFrame: .recoveryUtilities, alternateNextEventIndex: 4),
                 .init(preEventFrame: .languageEnglish, key: .return, postEventFrame: .recoveryUtilities),
                 .init(preEventFrame: .recoveryUtilities, key: .shiftCommandT, postEventFrame: .terminal),
             ]
