@@ -4407,6 +4407,58 @@ All 104 CLI contract checks passed. The next gate is a fresh same-resource
 internal clone, correlating host `process.status` wire timing with guest
 publication and any desktop transport failure.
 
+Fresh internal `pomme-agent-ownerloop-clone26-20260922q` was created from the
+same unprovisioned macOS 26.6.2 template at 40 GB / 4 GB, with VM UUID
+`c27bdb33-f518-44fb-940d-4dba00a9b184`, plan digest
+`a9fcc37e0b2051a3df4ae099e59281f969ab6c8ddf43b885831925d8a2f5ca54`,
+and exact pinned signed agent digest `c8783955…28e5539ef2af`. Twelve prior
+VMs were stopped. SIP disable began at 11:36:31Z. The first owner build write
+again failed status 1 with `MissingPair`, user domain `Reachable`, and GUI
+domain `Nonzero`; the guarded reboot made the same writes succeed under the
+same coarse prewrite labels. Setup Assistant completion passed. At
+11:40:15Z the first desktop verification failed instead with
+`normal-agent-aqua-timedOut`, a foreground command deadline with
+`terminationRequested=true`, **not** a transport timeout. The retained
+operation was restored stopped. Resuming that same operation at 11:41:03Z
+passed desktop verification and then completed SIP disable in authenticated
+Recovery, with normal-boot verification and final stopped state. Thus this
+clone did not reproduce the intermittent transport failure; the new status
+wire trace was observed on successful normal-agent exchanges in the helper
+log, including admission, write completion, and correlated response. No
+five-second timeout change or transport fix was made.
+
+The disposable clone's SIP was explicitly re-enabled, with normal-boot
+configuration and enforcement verification, ending stopped at 11:49:41Z.
+An additional independent public `sip status` Recovery read then exposed a
+**separate open Recovery automation failure**: after the Terminal screenshot
+at 11:51:36Z it made no further milestone for over 14 minutes. A one-second
+process sample placed every sample inside synchronous Apple Vision text
+recognition called by Recovery frame classification. The nominal navigation
+deadline is checked outside that synchronous call and cannot preempt it.
+The sample and milestone order show this read had not submitted the Recovery
+launcher or SIP operation. Targeted SIGTERM of only that hung CLI process
+was necessary; it skipped ordinary session teardown and left one exact
+owner-private request staging root containing an expired one-shot credential.
+No credential content was inspected. Public status then showed stopped/no
+helper; normal boot connected the exact pinned agent, and authenticated
+`/usr/bin/csrutil status` returned exit zero, complete untruncated output,
+and `System Integrity Protection status: enabled.` The inspection boot was
+stopped gracefully. Because no public orphan-cleanup command exists, a
+temporary, exact-root, single-test invocation of the existing
+`PommeRecoveryStaging.cleanupRoot` inode/ownership-validated routine removed
+only this request's staging artifacts; the test passed and its code was
+removed afterward. The root's absence was checked. This is evidence and
+cleanup, not a fix for the OCR hang or abrupt-exit cleanup gap.
+
+Final public status confirmed clone-q stopped/no helper with unchanged UUID,
+plan, 40 GB / 4 GB resources, and agent pin. The archived signed executable
+matched that pin's SHA-256. Only clone-q was deleted, making its VM disk
+unrecoverable through Pomme; inventory returned to twelve stopped VMs with
+the clone absent. The transport root cause remains unconfirmed. The Recovery
+OCR operation needs a genuinely bounded/cancellable classification boundary
+and a never-returning-classifier regression; abrupt termination also needs
+an operator-safe route to the validated request-staging cleanup routine.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
