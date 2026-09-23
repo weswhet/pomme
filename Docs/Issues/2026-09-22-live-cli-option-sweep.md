@@ -3411,6 +3411,16 @@ native message away from the two known missing-preference forms; its exact
 cause remains unknown. The preference/Setup Assistant mismatch and repeated
 Aqua/console transport failures are distinct open first-owner blockers.
 
+After the independent verified SIP-enabled result and stopped/no-helper
+status, clone-d was deleted through the public CLI. Its exact bundle is absent
+and its VM disk is not recoverable; its `5ab51107…42aec7983` signed agent
+artifact remains archived. No external-drive VM was touched. The next
+candidate is a read-only post-write target-state probe, not an automatic
+same-boot write retry: the present generic `.ownerCompletion` status-1 retry
+admission also covers MiniBuddy failures, and `defaults read` itself could
+initialize CFPreferences after the original failure. Any probe result must
+therefore stay observational and preserve the original error and journal.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
