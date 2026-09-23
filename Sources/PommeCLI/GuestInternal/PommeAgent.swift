@@ -184,8 +184,8 @@ actor PommeAgent {
          ownerCredential: PommeGuestOwnerCredentialReader = .init(),
          recoveredJournal: PommeAgentUpdateJournal? = nil,
          authority: PommeAgentAuthority = .standard,
-         statusTraceSink: @escaping PommeAgentStatusTrace.Sink = PommeAgentStatusTrace.guestLog,
-         startTraceSink: @escaping PommeAgentStartTrace.Sink = PommeAgentStartTrace.guestLog) throws {
+         statusTraceSink: @escaping PommeAgentStatusTrace.Sink = { _, _ in },
+         startTraceSink: @escaping PommeAgentStartTrace.Sink = { _, _ in }) throws {
         guard executableSHA256.count == 64, executableSHA256.allSatisfy(\.isHexDigit) else {
             throw PommeAgentProtocol.Error.invalidRequest
         }
