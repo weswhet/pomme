@@ -107,8 +107,10 @@ status and the output-end frame.
   `e1890913cc76afc0b4140195773fe6517b0f519af942456c1bb710cff45bf738`.
 - All 22 CLI integration checks passed against that installed executable.
 
+Current native command equivalents (the results above are historical):
+
 ```sh
-rtk xcodebuildmcp macos test --project-path pomme.xcodeproj --scheme pomme --configuration Debug --derived-data-path /tmp/pomme-public-pty --extra-args=-only-testing:PommeCLITests/PommePublicPTYRelayTests -only-testing:PommeCLITests/PommePublicPTYTerminalBridgeTests -only-testing:PommeCLITests/PommeAgentProcessExchangeTests -only-testing:PommeCLITests/PommeAgentPTYTests -only-testing:PommeCLITests/PommeAgentTests -only-testing:PommeCLITests/PommePrivatePTYRunnerTests -only-testing:PommeCLITests/PommeForegroundControlTests -only-testing:PommeCLITests/ControlWireTests --output text --verbose
+rtk proxy xcodebuild test CODE_SIGNING_ALLOWED=NO -destination 'platform=macOS' -project pomme.xcodeproj -scheme pomme -configuration Debug -derivedDataPath /tmp/pomme-public-pty -only-testing:PommeCLITests/PommePublicPTYRelayTests -only-testing:PommeCLITests/PommePublicPTYTerminalBridgeTests -only-testing:PommeCLITests/PommeAgentProcessExchangeTests -only-testing:PommeCLITests/PommeAgentPTYTests -only-testing:PommeCLITests/PommeAgentTests -only-testing:PommeCLITests/PommePrivatePTYRunnerTests -only-testing:PommeCLITests/PommeForegroundControlTests -only-testing:PommeCLITests/ControlWireTests
 rtk proxy bash Scripts/build-local.sh
 rtk proxy bash Tests/PommeCLIIntegrationTests.sh --runner /Users/wes/.local/bin/pomme --no-build
 ```

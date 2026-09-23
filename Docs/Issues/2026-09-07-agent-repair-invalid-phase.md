@@ -64,8 +64,8 @@ The separate retained-security-transaction issue remains tracked in
 - Regression tests exercise completed, unsupported, interrupted, repairable,
   retry, and invalid journal histories through the production eligibility
   function. No existing VM or real Pomme credential was used for these tests.
-- `rtk xcodebuildmcp macos test --project-path /Users/wes/dev/pomme/pomme.xcodeproj --scheme pomme --configuration Debug --derived-data-path /Users/wes/Library/Developer/XcodeBuildMCP/workspaces/pomme-repair-tests/DerivedData --extra-args '-only-testing:PommeCLITests/PommeProvisioningTests' --verbose --output text`
-  — 12 tests passed, 0 failed, 0 skipped (including parameterized runs).
-- Result bundle: `~/Library/Developer/XcodeBuildMCP/workspaces/pomme-64d67e0299b1/result-bundles/test_macos_2026-09-08T14-17-58-253Z_pid42116_f26c8618.xcresult`.
+- Current native equivalent of the historical test invocation: `rtk proxy xcodebuild test CODE_SIGNING_ALLOWED=NO -destination 'platform=macOS' -project /Users/wes/dev/pomme/pomme.xcodeproj -scheme pomme -configuration Debug -derivedDataPath /tmp/pomme-repair-tests '-only-testing:PommeCLITests/PommeProvisioningTests'`
+  — historical result: 12 tests passed, 0 failed, 0 skipped (including parameterized runs).
+- Result bundle: `test_macos_2026-09-08T14-17-58-253Z_pid42116_f26c8618.xcresult`.
 - Live Recovery installation was not rerun: this change only classifies the
   journal before the existing Recovery effect.

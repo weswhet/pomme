@@ -302,10 +302,11 @@ image updates.
 ### 7.3 Integration harness cannot find the binary
 
 `Tests/PommeCLIIntegrationTests.sh:39` expected `appPath` at the JSON top level;
-XcodeBuildMCP now emits `schemaVersion: 2` with it under
+the former build wrapper emitted `schemaVersion: 2` with it under
 `data.artifacts.appPath`. Exit 66, 0 of 88 checks ran. Fixed by reading
 `data.artifacts` first with a fallback. **Local only** — CI passes
-`--runner … --no-build` and bypasses the parse.
+`--runner … --no-build` and bypasses the parse. This is historical wrapper
+behavior; the current harness uses native Xcode tooling.
 
 ### 7.4 `agent repair` dropped the failure code
 
@@ -686,7 +687,7 @@ Superclass forwarding still retains the needed IOSurface before the
 validation limits described above.
 
 The canonical signed Release build/signature checks passed. A focused suite
-run through XcodeBuildMCP reported **22 passed, 0 failed**, with result bundle:
+run through Xcode reported **22 passed, 0 failed**, with result bundle:
 
 ```
 test_macos_2026-09-20T05-57-17-276Z_pid54226_8a4563fa.xcresult

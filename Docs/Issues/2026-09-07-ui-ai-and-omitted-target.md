@@ -69,7 +69,7 @@ The AI bridge is still unavailable. `tools --format json` and VM capability outp
 
 ## Validation
 
-- XcodeBuildMCP: all 13 tests passed across `UIUtilityCommandTests`, `PommeUICapabilitiesTests`, and `PommeUIControlRoutingTests`, covering positional resolution, ambiguity, option bounds, capability discovery, pre-lookup rejection, and direct UI routing.
+- Xcode: all 13 tests passed across `UIUtilityCommandTests`, `PommeUICapabilitiesTests`, and `PommeUIControlRoutingTests`, covering positional resolution, ambiguity, option bounds, capability discovery, pre-lookup rejection, and direct UI routing.
 - All 47 public CLI integration checks passed. New checks cover omitted key/sequence targets, ambiguous sequences, machine-readable discovery, help, and suggest/step/loop rejection with every originally reported valid option and no screenshot output effects.
 - Canonical signed Release build and installation passed signature, exact entitlement, and designated-requirement checks. Fresh login shell resolves `/Users/wes/.local/bin/pomme`; SHA-256 is `f667e8f8d793d6ef1f4f2296ad6346c26654a8f6b8ac0d4aff6d0eae40d58fab`.
 - No live VM input was needed for this host parser/capability change. These checks do not claim an operational AI accessibility bridge.

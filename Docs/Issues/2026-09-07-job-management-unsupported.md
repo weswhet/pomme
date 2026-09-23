@@ -71,15 +71,17 @@ an unresolved agent update still rejects ordinary process operations.
 
 ## Verification
 
-An expanded XcodeBuildMCP Debug run passed 42 tests, with no failures or skips,
+An expanded Xcode Debug run passed 42 tests, with no failures or skips,
 across `PommeAgentProcessExchangeTests`, `PommeGuestJobWaitTests`,
 `PommeAgentTests`, `ControlWireTests`, and `PommeAgentExecutionOptionsTests`.
 After the final activation-gate fix, the 25-test jobs, host-wait, and agent subset
 passed again, including the extended recovered-journal regression.
 
+Current native command equivalents (the results above are historical):
+
 ```text
-rtk xcodebuildmcp macos test --project-path pomme.xcodeproj --scheme pomme --configuration Debug --derived-data-path /tmp/pomme-jobs-debug-final --extra-args=-only-testing:PommeCLITests/PommeAgentProcessExchangeTests -only-testing:PommeCLITests/PommeGuestJobWaitTests -only-testing:PommeCLITests/PommeAgentTests -only-testing:PommeCLITests/ControlWireTests -only-testing:PommeCLITests/PommeAgentExecutionOptionsTests --output text --verbose
-rtk xcodebuildmcp macos test --project-path pomme.xcodeproj --scheme pomme --configuration Debug --derived-data-path /tmp/pomme-jobs-activation --extra-args=-only-testing:PommeCLITests/PommeAgentTests -only-testing:PommeCLITests/PommeAgentProcessExchangeTests -only-testing:PommeCLITests/PommeGuestJobWaitTests --output text --verbose
+rtk proxy xcodebuild test CODE_SIGNING_ALLOWED=NO -destination 'platform=macOS' -project pomme.xcodeproj -scheme pomme -configuration Debug -derivedDataPath /tmp/pomme-jobs-debug-final -only-testing:PommeCLITests/PommeAgentProcessExchangeTests -only-testing:PommeCLITests/PommeGuestJobWaitTests -only-testing:PommeCLITests/PommeAgentTests -only-testing:PommeCLITests/ControlWireTests -only-testing:PommeCLITests/PommeAgentExecutionOptionsTests
+rtk proxy xcodebuild test CODE_SIGNING_ALLOWED=NO -destination 'platform=macOS' -project pomme.xcodeproj -scheme pomme -configuration Debug -derivedDataPath /tmp/pomme-jobs-activation -only-testing:PommeCLITests/PommeAgentTests -only-testing:PommeCLITests/PommeAgentProcessExchangeTests -only-testing:PommeCLITests/PommeGuestJobWaitTests
 rtk proxy bash Scripts/build-local.sh
 rtk proxy bash Tests/PommeCLIIntegrationTests.sh --runner /Users/wes/.local/bin/pomme --no-build
 ```

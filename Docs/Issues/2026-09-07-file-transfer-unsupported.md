@@ -84,10 +84,10 @@ reporting a pre-publication failure or deleting it.
 - `rtk proxy zsh -lc 'command -v pomme'` — `/Users/wes/.local/bin/pomme`.
 - `rtk proxy bash Tests/PommeCLIIntegrationTests.sh --runner /Users/wes/.local/bin/pomme --no-build`
   — all 22 checks passed.
-- `rtk xcodebuildmcp macos test --project-path /Users/wes/dev/pomme/pomme.xcodeproj --scheme pomme --configuration Debug --derived-data-path /Users/wes/Library/Developer/XcodeBuildMCP/workspaces/pomme-repair-tests/DerivedData --extra-args '-only-testing:PommeCLITests/PommeGuestFileTransferTests' '-only-testing:PommeCLITests/PommeFileCommitRecoveryTests' '-only-testing:PommeCLITests/PommeAgentOperationsTests' '-only-testing:PommeCLITests/PommeAgentPathWalkerTests' '-only-testing:PommeCLITests/PommeAgentTests' --verbose --output text`
-  — 36 tests passed, 0 failed, 0 skipped, including parameterized cases.
+- Current native equivalent of the historical test invocation: `rtk proxy xcodebuild test CODE_SIGNING_ALLOWED=NO -destination 'platform=macOS' -project /Users/wes/dev/pomme/pomme.xcodeproj -scheme pomme -configuration Debug -derivedDataPath /tmp/pomme-repair-tests '-only-testing:PommeCLITests/PommeGuestFileTransferTests' '-only-testing:PommeCLITests/PommeFileCommitRecoveryTests' '-only-testing:PommeCLITests/PommeAgentOperationsTests' '-only-testing:PommeCLITests/PommeAgentPathWalkerTests' '-only-testing:PommeCLITests/PommeAgentTests'`
+  — historical result: 36 tests passed, 0 failed, 0 skipped, including parameterized cases.
 - Result bundle:
-  `~/Library/Developer/XcodeBuildMCP/workspaces/pomme-64d67e0299b1/result-bundles/test_macos_2026-09-08T14-52-42-398Z_pid67736_324759f2.xcresult`.
+  `test_macos_2026-09-08T14-52-42-398Z_pid67736_324759f2.xcresult`.
 
 The new transfer tests invoke the real `PommeAgent.perform` implementation,
 covering empty files, 32 KiB and multi-chunk binary files, replacement, offset

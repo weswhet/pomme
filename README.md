@@ -21,12 +21,12 @@ rtk proxy bash Scripts/build-local.sh
 Run isolated offline tests without accessing real VM credentials:
 
 ```sh
-rtk xcodebuildmcp macos test \
-  --project-path pomme.xcodeproj \
-  --scheme pomme \
-  --configuration Release \
-  --extra-args CODE_SIGNING_ALLOWED=NO \
-  --output text
+rtk proxy xcodebuild test \
+  -project pomme.xcodeproj \
+  -scheme pomme \
+  -configuration Release \
+  -destination 'platform=macOS' \
+  CODE_SIGNING_ALLOWED=NO
 ```
 
 The package installs the host executable at `/usr/local/bin/pomme`. The guest

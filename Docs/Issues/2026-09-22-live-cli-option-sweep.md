@@ -4,6 +4,8 @@ Status: complete — live macOS 27 then macOS 26 sweep finished 2026-09-22
 
 The sweep is complete, not every reported issue. Follow-up fixes and remaining
 observations are recorded below; historical rows retain their original status.
+Historical Xcode test/build results below retain their recorded outcomes; the
+current Pomme workflow uses native `xcodebuild` as documented in the README.
 
 ## Current follow-up status
 
@@ -179,7 +181,7 @@ guards are unchanged.
 A regression at the actual registration-policy seam reproduces this behavior
 across three registrations. With the old policy, the new parameterized test
 failed while the other 22 capture tests passed. With the candidate, all 23
-capture tests passed via XcodeBuildMCP. The test also checks old-source callback
+capture tests passed via Xcode. The test also checks old-source callback
 rejection and both full-frame and damage-only publication. This establishes
 the replay-policy change, not yet the cause or resolution of the live Recovery
 timeout. Signed Release and live validation follow the candidate commit.
@@ -231,7 +233,7 @@ was removed; raw screenshots are not committed. Permanent synthetic coverage
 locks down the confidence boundary as well as stale/unknown frames, uncertain
 delivery, mismatched receipts, and alternate observed branches.
 
-The final five focused XcodeBuildMCP suites passed all 68 tests, with no
+The final five focused Xcode suites passed all 68 tests, with no
 failures or skips: language activation, interaction, profile selection,
 virtualization observation readiness, and incremental navigation recognition.
 The local build/install regression script also passed all 21 checks. These are
@@ -276,7 +278,7 @@ coordinates (one expected failure, 15 other port tests passed). It verifies one
 click and no keyboard event. This changes only the fixed activation target;
 the exact build scope and frame/receipt guards remain in place.
 
-All 69 permanent tests across the same five focused XcodeBuildMCP suites passed
+All 69 permanent tests across the same five focused Xcode suites passed
 after the target change, with no failures. Signed build and full live retest
 follow this commit; manual navigation is not a substitute for SIP-status
 completion.
@@ -435,7 +437,7 @@ format options. All 21 local build/install regression checks also passed.
 Signed Release and live verification follow the candidate commit.
 
 Candidate `e0f6544` was committed before building and installed through
-`Scripts/build-local.sh`. XcodeBuildMCP Release/arm64 build and all exact
+`Scripts/build-local.sh`. Xcode Release/arm64 build and all exact
 signature, entitlement, designated-requirement, and archive checks passed.
 A fresh login shell resolved `/Users/wes/.local/bin/pomme`, reporting
 `pomme 0.1.0 (e0f6544)`. All 104 CLI contract checks passed against that signed
@@ -492,7 +494,7 @@ Coverage includes echo/near-marker rejection by strict proof, exact redacted
 rendering, independent frame-comparison calls, and a diagnostic hash failure
 that leaves a valid proof intact. These tests validate instrumentation, not
 reproduction or resolution of the intermittent marker failure. The green
-XcodeBuildMCP result is
+Xcode result is
 `test_macos_2026-09-22T08-18-38-433Z_pid60265_d337737e.xcresult`.
 
 Read-only review found no proof-gate or redaction regression. The diagnostic
@@ -781,7 +783,7 @@ tests and private-path references were removed, as were the temporary
 `[DEBUG-marker-20260922]` evidence and adjacent-frame-hash instrumentation.
 The existing closed Terminal/exact-marker/fresh-prompt diagnostics remain.
 
-Combined XcodeBuildMCP verification passed all 98 test functions across eight
+Combined Xcode verification passed all 98 test functions across eight
 Recovery suites, with zero failures or skips (112 reported executions):
 `test_macos_2026-09-22T09-56-57-932Z_pid82062_9194c16d.xcresult`.
 This includes navigation, interaction, profile selection, observation,
@@ -1136,7 +1138,7 @@ No guest protocol, credential, creation pin, journal, or security predicate is
 being changed. Earlier diagnostic paragraphs were moved here from the marker
 section to restore chronological grouping without changing their evidence.
 
-The final combined XcodeBuildMCP run passed 76 test functions, 125 executions,
+The final combined Xcode run passed 76 test functions, 125 executions,
 with zero failures or skips across foreground execution, normal-agent proof,
 foreground control, persistent agent, and real daemon process exchanges:
 `test_macos_2026-09-22T11-35-23-544Z_pid2493_ac50f82a.xcresult`.
@@ -1227,7 +1229,7 @@ owner, credential, or pinned executable is changed for this revision.
 The tests-first run `0b5b50c2` executed 77 functions / 134 cases. Only the new
 `allDesktopStagesRetry` console/verified and process-list/verified cases failed,
 each with its original stage's timeout diagnostic; the other cases passed.
-After implementation, the final five-suite XcodeBuildMCP run passed all 78
+After implementation, the final five-suite Xcode run passed all 78
 functions / 190 executions, with zero failures or skips:
 `test_macos_2026-09-22T11-55-17-742Z_pid6490_03f44743.xcresult`.
 Coverage now includes exact-payload negatives and all-stage cleanup uncertainty,
@@ -1339,7 +1341,7 @@ and forwarding; this label does not claim to distinguish those operations.
 
 Tests-first evidence: `5942af2a` failed the missing exact-probe start diagnostic
 while ordinary-command exclusion passed; `27b7cacd` failed the four missing
-outer error-category cases. The final seven-suite XcodeBuildMCP run passed
+outer error-category cases. The final seven-suite Xcode run passed
 103 test functions / 225 executions, zero failures or skips:
 `test_macos_2026-09-22T12-20-12-746Z_pid11259_8a9d1cfd.xcresult`.
 Tests exercise the real foreground executor and console verification catch
@@ -1474,7 +1476,7 @@ remain temporary evidence for the unresolved console transport failure.
 
 Main and read-only review found no behavior or validation blocker; repository
 search found no old Aqua diagnostic tags/types in Sources or Tests. The final
-seven-suite XcodeBuildMCP run passed 96 functions / 199 executions with zero
+seven-suite Xcode run passed 96 functions / 199 executions with zero
 failures or skips:
 `test_macos_2026-09-22T13-02-56-186Z_pid19434_e01c9770.xcresult`.
 The cleanup is committed before building another signed Release. Its new guest
@@ -1592,7 +1594,7 @@ host receipt now includes and strictly checks those fields. Unknown extras,
 wrong field types, old-helper responses, wrong identity/job, cancellation, and
 expired cleanup/readiness budgets remain failures.
 
-Final XcodeBuildMCP verification across eight foreground, normal-security,
+Final Xcode verification across eight foreground, normal-security,
 cleanup-adapter, daemon, wire, and coordinator suites passed 103 test functions /
 260 executions, zero failures or skips:
 `test_macos_2026-09-22T13-38-41-073Z_pid27301_735e3234.xcresult`.
@@ -1729,7 +1731,7 @@ the original job's exit proof. A fresh-registry variant returns `not-found` and
 is rejected. Neither replacement connection starts nor signals a process;
 all tasks and sockets are joined/closed and the bounded child is reaped.
 
-The full nine-suite XcodeBuildMCP run passed 104 test functions / 262 executions,
+The full nine-suite Xcode run passed 104 test functions / 262 executions,
 zero failures or skips:
 `test_macos_2026-09-22T14-55-45-864Z_pid40021_4b8e36aa.xcresult`.
 This composes the formerly separate regression seams without a synthetic thrown
@@ -1768,7 +1770,7 @@ table retains those limits rather than treating successful comparisons as a
 root-cause finding. All twelve VMs were stopped before the cleanup test build;
 61 GiB was free internally before final signed-build validation.
 
-The nine focused XcodeBuildMCP suites passed 104 test functions / 262 executions,
+The nine focused Xcode suites passed 104 test functions / 262 executions,
 zero failures or skips:
 `test_macos_2026-09-22T15-02-35-709Z_pid41953_29c3041c.xcresult`.
 Independent review confirmed the diff removes only diagnostic instrumentation;
@@ -2003,7 +2005,7 @@ trace for unauthenticated/Recovery/non-signal requests, closed message formattin
 host response/timeout stage ordering, existing daemon framing, foreground
 execution, and real cleanup-adapter reconnect integration.
 
-The complete isolated XcodeBuildMCP suite then passed 1,191 functions / 1,623
+The complete isolated Xcode suite then passed 1,191 functions / 1,623
 invocations, zero failures or skips:
 `test_macos_2026-09-22T22-30-13-156Z_pid65807_76d68cc4.xcresult`.
 The temporary diagnostic source, tests, and evidence are committed before the
@@ -3437,7 +3439,7 @@ CFPreferences; even a live result cannot prove the pre-failure state or cause.
 Test-first red found the new probe absent: 1,208 existing functions passed
 and the new 12-case parameterized function failed
 (`test_macos_2026-09-23T06-34-20-266Z_pid67311_90a91d94.xcresult`; the
-initial XcodeBuildMCP test selector was ignored, so this was a full run).
+initial Xcode test selector was ignored, so this was a full run).
 The corrected focused owner-preparation run passed 86 functions / 215
 executions, zero failures/skips
 (`test_macos_2026-09-23T06-35-21-204Z_pid67641_ab0aecac.xcresult`). A fresh
@@ -3522,12 +3524,12 @@ stall. The retained internal clone remains stopped with SIP independently
 verified enabled; its exact pinned agent digest is present in the append-only
 artifact archive.
 
-Focused XcodeBuildMCP validation passed 50 test functions / 205 executions,
+Focused Xcode validation passed 50 test functions / 205 executions,
 zero failures or skips, including exact-payload gating, phase classification,
 original-error and single-cleanup preservation, and host control failures:
 `test_macos_2026-09-23T07-02-43-391Z_pid73146_7b60ea44.xcresult`.
 The focused tests use injected exchange failures; they do not reproduce a
-physical VSOCK stall. The full XcodeBuildMCP suite then passed 1,213 test
+physical VSOCK stall. The full Xcode suite then passed 1,213 test
 functions / 1,822 executions, zero failures or skips:
 `test_macos_2026-09-23T07-03-37-193Z_pid73329_211427e6.xcresult`.
 Signed live validation follows after committing this candidate.
@@ -3638,7 +3640,7 @@ payloads do not opt in. No error propagation, timeout, retry, process cleanup,
 or security decision changes; an uncertain start is never replayed. A missing
 guest event may still reflect log loss rather than absence of guest activity.
 
-The focused XcodeBuildMCP wire and real-daemon suites passed 27 test functions
+The focused Xcode wire and real-daemon suites passed 27 test functions
 / 56 executions with zero failures or skips:
 `test_macos_2026-09-23T07-37-15-520Z_pid80370_0a5c4280.xcresult`.
 They cover exact gates, a peer withholding a response while preserving the
@@ -3646,7 +3648,7 @@ original timeout, authenticated guest event ordering, unauthenticated silence,
 Recovery exclusion, and existing signal/status behavior. An initial focused
 run found a test cleanup mistake (`process.wait` requires a detached job),
 which was corrected using the existing foreground-child cleanup helper; it
-did not expose a production failure. The full XcodeBuildMCP suite passed
+did not expose a production failure. The full Xcode suite passed
 1,217 test functions / 1,827 executions, zero failures or skips:
 `test_macos_2026-09-23T07-38-14-260Z_pid80612_51dbdf74.xcresult`.
 The candidate still needs a signed Release build and fresh internal live test.
@@ -3754,12 +3756,12 @@ describe the local wire reader only; buffered bytes could predate this
 request, and the markers carry no request ID, payload, output, credential, or
 VM identity. No timeout, retry, cleanup, protocol, or security policy changes.
 Tests-first compilation failed on the missing diagnostic events. The focused
-XcodeBuildMCP run passed 27 tests / 59 executions with no failures or skips;
+Xcode run passed 27 tests / 59 executions with no failures or skips;
 bundle `test_macos_2026-09-23T08-06-24-636Z_pid86728_a008c25f.xcresult`.
 Coverage includes unauthenticated rejection, authenticated event order,
 Recovery exclusion, empty and partial reads, a correlated stream-only
 response, and a mismatched complete frame. This qualifies the candidate for
-the full suite, not yet for live inference. The isolated full XcodeBuildMCP
+the full suite, not yet for live inference. The isolated full Xcode
 suite then passed 1,217 test functions / 1,830 executions, with zero failures
 or skips; bundle
 `test_macos_2026-09-23T08-07-13-412Z_pid86946_f0d63c41.xcresult`.
@@ -3847,7 +3849,7 @@ Tests cover normal authentication followed by a generic non-desktop health
 request, ordered read/frame/write events without assuming a fixed count of
 stream-socket reads, and silence for Recovery, terminal, and
 operation-limited scopes. The existing desktop exchange tests also passed.
-`git diff --check` passed. The isolated full XcodeBuildMCP suite also passed
+`git diff --check` passed. The isolated full Xcode suite also passed
 1,219 test functions / 1,834 executions, zero
 failures or skips; bundle
 `test_macos_2026-09-23T08-30-52-742Z_pid91674_103c965d.xcresult`.
@@ -4680,6 +4682,15 @@ explain the first-write failure, nor close the separate intermittent guest
 transport stall reproduced by clone-s. No write/retry/journal behavior was
 changed by this diagnostic release.
 
+At 15:06Z on September 23, an internal-capacity cleanup attempt selected the
+completed macOS 27 `pomme-agent-ownerproof-20260922b` fixture. Its archived
+agent matched the creation pin; authenticated Recovery independently verified
+SIP enabled, all six cleanup fields true, and a stopped final state. Public
+status confirmed no helper. Public `delete --force` then refused with
+`Pomme owner credential Keychain removal failed.` The VM remained stopped and
+intact; no manual Keychain change or bypass was attempted. This is a separate
+deletion/credential observation, not a transport or preference-write result.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
@@ -4878,7 +4889,7 @@ login-shell command resolution. Its SHA-256 remains
 All twelve VMs were confirmed stopped, with no helpers and all bundles on the
 internal drive. No VM deletion or mutation was needed for these checks.
 
-An unrestricted Debug `PommeCLITests` run through XcodeBuildMCP began at
+An unrestricted Debug `PommeCLITests` run through Xcode began at
 17:35:44Z, discovering 1,156 test functions. The runner used a fresh private
 `POMME_APP_SUPPORT_DIR`, with target and owner-authorization environment values
 cleared; temporary-Keychain tests did not target the login Keychain. Progress
@@ -4983,7 +4994,7 @@ PommeSecurityDesktopCleanupIntegrationTests/lostSignalResponse(newRegistry:)
 ```
 
 Each selector is supplied as `-only-testing:PommeCLITests/<selector>` through
-XcodeBuildMCP with the same isolated app-support environment and Debug build
+Xcode with the same isolated app-support environment and Debug build
 settings as the full run. After five minutes, a process sample again showed
 three synchronous client reads, the cleanup relay's daemon read and relay
 `recv`, and three OCR invocations occupying the cooperative pool. Cancellation

@@ -38,7 +38,7 @@ are unchanged.
   `8dd368d7ba59b58c48d5f641c32df9f839cda295d9d4dc0d5332e9ba1cbe8756`.
 - Updated executable SHA-256:
   `3b24ac3917ac3e7ce5943648b33f53012558e3ce6625f1c5de6c82a2b70baf51`.
-- Both executables were built through XcodeBuildMCP using
+- Both executables were built with Xcode using the then-current wrapper in
   `Scripts/build-local.sh`, Release/arm64, the established Developer ID identity,
   Hardened Runtime, and only the Virtualization entitlement. Signature and
   designated-requirement checks passed. The updated executable was installed

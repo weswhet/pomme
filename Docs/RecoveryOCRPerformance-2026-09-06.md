@@ -40,8 +40,7 @@ Updated source: `e656586`.
 Updated executable SHA-256:
 `fce77dcf695b6740c8da395bc213b4ead347707e427bd1cb4167acc545567022`.
 
-The signed Release/arm64 build completed through `Scripts/build-local.sh` and
-XcodeBuildMCP. Signature, exact entitlements, designated-requirement continuity,
+The signed Release/arm64 build completed through the then-current Xcode wrapper in `Scripts/build-local.sh`. Signature, exact entitlements, designated-requirement continuity,
 and atomic installation checks passed. All 78 focused Recovery tests passed,
 with zero failures or skips, and all 15 CLI contract checks passed.
 The test result bundle is

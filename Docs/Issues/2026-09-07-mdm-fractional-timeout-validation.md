@@ -65,8 +65,10 @@ supported. The shared timeout option and downstream MDM guards are unchanged.
 
 Commands:
 
+Current native command equivalents (the results above are historical):
+
 ```sh
-rtk xcodebuildmcp macos test --project-path pomme.xcodeproj --scheme pomme --configuration Debug --derived-data-path /tmp/pomme-mdm-timeout-parser --extra-args=-only-testing:PommeCLITests/MDMCommandTests --output text --verbose
+rtk proxy xcodebuild test CODE_SIGNING_ALLOWED=NO -destination 'platform=macOS' -project pomme.xcodeproj -scheme pomme -configuration Debug -derivedDataPath /tmp/pomme-mdm-timeout-parser -only-testing:PommeCLITests/MDMCommandTests
 rtk proxy bash Scripts/build-local.sh
 rtk proxy bash Tests/PommeCLIIntegrationTests.sh --runner /Users/wes/.local/bin/pomme --no-build
 ```

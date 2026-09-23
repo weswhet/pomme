@@ -27,33 +27,34 @@ may use at most one read-only explorer inside its assigned subsystem.
 
 ## Build and verification
 
-Work from the repository root. Use a full Xcode installation and build through
-XcodeBuildMCP:
+Work from the repository root and use native Xcode command-line tooling. For a
+credential-bearing CLI, use the signed Release build/install workflow:
 
 ```sh
-rtk xcodebuildmcp macos build \
-  --project-path pomme.xcodeproj \
-  --scheme pomme \
-  --configuration Release \
-  --arch arm64 \
-  --output text
+rtk proxy bash Scripts/build-local.sh
 ```
 
-Resolve the executable with:
+For isolated tests that do not access real VM credentials, use native
+`xcodebuild` with signing disabled:
 
 ```sh
-rtk xcodebuildmcp macos get-app-path \
-  --project-path pomme.xcodeproj \
-  --scheme pomme \
-  --configuration Release \
-  --arch arm64 \
-  --output json
+rtk proxy xcodebuild test \
+  -project pomme.xcodeproj \
+  -scheme pomme \
+  -configuration Release \
+  -destination 'platform=macOS' \
+  CODE_SIGNING_ALLOWED=NO
 ```
+
+The signed local executable is `~/.local/bin/pomme`; never use an unsigned or
+ad-hoc test product for real Pomme Keychain access. With an explicit
+`-derivedDataPath DIR`, native build products are under
+`DIR/Build/Products/<configuration>/pomme`.
 
 After parser or workflow changes:
 
 ```sh
-rtk Tests/PommeCLIIntegrationTests.sh --runner "$POMME" --no-build
+rtk proxy bash Tests/PommeCLIIntegrationTests.sh --runner "$POMME" --no-build
 ```
 
 Do not operate a VM for parser/unit verification. A live command requires an

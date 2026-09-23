@@ -80,8 +80,10 @@ entitlement already present in Pomme's signed Release build.
   verified that it remained absent. No VM was created or started. The exact
   temporary fixtures were removed after validation.
 
+Current native command equivalents (the results above are historical):
+
 ```sh
-rtk xcodebuildmcp macos test --project-path pomme.xcodeproj --scheme pomme --configuration Debug --derived-data-path /tmp/pomme-remote-login --extra-args=-only-testing:PommeCLITests/DirectLocalRestoreImageCommandTests -only-testing:PommeCLITests/RestoreImageIntegrityTests -only-testing:PommeCLITests/CreateCommandTests -only-testing:PommeCLITests/PommeRestoreImageTests -only-testing:PommeCLITests/PommeRecoveryProfileSelectorTests -only-testing:PommeCLITests/PommeProvisioningTests --output text --verbose
+rtk proxy xcodebuild test CODE_SIGNING_ALLOWED=NO -destination 'platform=macOS' -project pomme.xcodeproj -scheme pomme -configuration Debug -derivedDataPath /tmp/pomme-remote-login -only-testing:PommeCLITests/DirectLocalRestoreImageCommandTests -only-testing:PommeCLITests/RestoreImageIntegrityTests -only-testing:PommeCLITests/CreateCommandTests -only-testing:PommeCLITests/PommeRestoreImageTests -only-testing:PommeCLITests/PommeRecoveryProfileSelectorTests -only-testing:PommeCLITests/PommeProvisioningTests
 rtk proxy bash Scripts/build-local.sh
 rtk proxy bash Tests/PommeCLIIntegrationTests.sh --runner /Users/wes/.local/bin/pomme --no-build
 ```

@@ -89,8 +89,10 @@ It does not add `ui.screenSharing` to the current agent's capability list.
   Remote Management, or privacy setting was changed. Live Screen Sharing
   functionality remains unsupported by the current agent.
 
+Current native command equivalents (the results above are historical):
+
 ```sh
-rtk xcodebuildmcp macos test --project-path pomme.xcodeproj --scheme pomme --configuration Debug --derived-data-path /tmp/pomme-remote-login --extra-args=-only-testing:PommeCLITests/PommeAgentCLIModelsTests -only-testing:PommeCLITests/PommeScreenSharingDispatchTests -only-testing:PommeCLITests/PommeAgentTests --output text --verbose
+rtk proxy xcodebuild test CODE_SIGNING_ALLOWED=NO -destination 'platform=macOS' -project pomme.xcodeproj -scheme pomme -configuration Debug -derivedDataPath /tmp/pomme-remote-login -only-testing:PommeCLITests/PommeAgentCLIModelsTests -only-testing:PommeCLITests/PommeScreenSharingDispatchTests -only-testing:PommeCLITests/PommeAgentTests
 rtk proxy bash Scripts/build-local.sh
 rtk proxy bash Tests/PommeCLIIntegrationTests.sh --runner /Users/wes/.local/bin/pomme --no-build
 ```

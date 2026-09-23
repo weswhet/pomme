@@ -52,7 +52,7 @@ Experimental creation, resume, and agent installation retain their existing obse
 
 ## Verification
 
-XcodeBuildMCP ran 58 focused tests: all passed, with zero failures or skips. Suites covered the security preflight and qualification helper, live Recovery integration, profile selector, Core Recovery provisioning, durable provisioning, and VM creation planning. The new effect-order test exercises all six SIP/AMFI actions on Sequoia evidence and proves only read-only identity/executable/profile resolution is reached. A separate test proves experimental agent installation still reaches its injected credential boundary. Existing tests verify experimental planning and evidence remain supported.
+Xcode ran 58 focused tests: all passed, with zero failures or skips. Suites covered the security preflight and qualification helper, live Recovery integration, profile selector, Core Recovery provisioning, durable provisioning, and VM creation planning. The new effect-order test exercises all six SIP/AMFI actions on Sequoia evidence and proves only read-only identity/executable/profile resolution is reached. A separate test proves experimental agent installation still reaches its injected credential boundary. Existing tests verify experimental planning and evidence remain supported.
 
 The canonical signed Release build/install passed identity, designated-requirement and entitlement verification. Installed SHA-256: `309353a733244d81b199652e465c455008eab00e3120d64c3fc6049825175eec`. A fresh login shell resolves `/Users/wes/.local/bin/pomme`; all 31 CLI integration checks passed against it. `git diff --check` passed.
 

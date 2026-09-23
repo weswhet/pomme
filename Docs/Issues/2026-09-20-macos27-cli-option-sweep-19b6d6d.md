@@ -104,7 +104,7 @@ separate from `2026-09-20-cli-full-sweep.md`, which tested the older build
 
 ## Additional option probes
 
-The full XcodeBuildMCP `pomme` test scheme run discovered 1,113 tests and
+The full Xcode `pomme` test scheme run discovered 1,113 tests and
 finished with 1,114 passed, 1 failed, and 0 skipped. The failure was in the
 host-only `Pomme agent process exchanges / Successful process exchanges put
 bounded output before the response` test, which threw

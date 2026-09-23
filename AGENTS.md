@@ -11,7 +11,7 @@ in the September 6, 2026 lab; do not reuse that size for Tahoe install tests.
 ## Build and sign consistently
 
 Run commands from the Pomme repository root and prefix shell commands with `rtk`.
-Use XcodeBuildMCP for builds. For any CLI that will access real Pomme Keychain
+Use native Xcode command-line tooling for builds and tests. For any CLI that will access real Pomme Keychain
 items, use the signed Release workflow below, including during local development.
 The project's Debug configuration is ad-hoc signed and is not a replacement for
 the credential-bearing CLI.
@@ -26,7 +26,7 @@ Keep these identities consistent across builds:
 
 ### Canonical local build and install
 
-Requires full Xcode, XcodeBuildMCP, and the named certificate with its private key
+Requires full Xcode and the named certificate with its private key
 available to codesign. If the identity is missing, locked, expired, or ambiguous,
 stop and report it; never substitute ad-hoc signing, Apple Development, another
 team, or disabled signing. Do not export keys or alter Keychain permissions to
@@ -38,8 +38,8 @@ Run this from the repository root as your normal user (no `sudo`):
 rtk proxy bash Scripts/build-local.sh
 ```
 
-[Scripts/build-local.sh](Scripts/build-local.sh) builds and signs through
-XcodeBuildMCP with explicit Release/arm64 settings, the certificate/team above,
+[Scripts/build-local.sh](Scripts/build-local.sh) builds and signs through native
+`xcodebuild` with explicit Release/arm64 settings, the certificate/team above,
 the fixed signing identifier, Hardened Runtime, and a secure timestamp. It checks
 the signature and exact entitlements before atomically installing the signed
 bytes to `~/.local/bin/pomme`. If an installed CLI exists, its designated
@@ -60,7 +60,7 @@ does not modify any VM or credential. Do not garbage-collect pinned artifacts
 without proving that no retained VM journal needs them.
 
 The default build directory is
-`~/Library/Developer/XcodeBuildMCP/workspaces/pomme-local-signed/DerivedData`.
+`~/Library/Developer/Xcode/DerivedData/pomme-local-signed`.
 `--derived-data-path DIR` and `--install-dir DIR` accept absolute paths for isolated
 verification; they do not change the signing identity. The script does not modify
 shell startup files or publish/notarize artifacts.
@@ -75,8 +75,8 @@ rtk pomme --help
 ```
 
 Run `rtk proxy bash Tests/LocalBuildInstall.sh` for offline installer regression
-tests. Use `rtk xcodebuildmcp macos build --help` when updating the script for a new
-tool version. Do not substitute an unsigned or ad-hoc artifact if it fails.
+tests. Use `rtk proxy xcodebuild -help` when updating the build command for a new
+Xcode version. Do not substitute an unsigned or ad-hoc artifact if it fails.
 
 ### Keychain continuity
 

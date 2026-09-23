@@ -74,7 +74,7 @@ the `nobody` account's group ID `4294967294`.
 
 ## Verification
 
-The final focused XcodeBuildMCP Debug run passed all 12 tests in
+The final focused Xcode Debug run passed all 12 tests in
 `PommeAgentExecutionOptionsTests`, `PommeAgentProcessExchangeTests`, and
 `PommeAgentPTYTests`. The new regressions exercise real child cwd and environment,
 all three redirections, preserved streaming on unredirected descriptors, invalid
@@ -84,8 +84,10 @@ cover current-identity launches from a non-root process, `nobody` identity
 resolution, and the helper status protocol's premature EOF and failure cases.
 Another 33 model, foreground-execution, protocol, and session-failure tests passed.
 
+Current native command equivalents (the results above are historical):
+
 ```text
-rtk xcodebuildmcp macos test --project-path pomme.xcodeproj --scheme pomme --configuration Debug --derived-data-path /tmp/pomme-exec-options-derived --extra-args=-only-testing:PommeCLITests/PommeAgentExecutionOptionsTests --extra-args=-only-testing:PommeCLITests/PommeAgentProcessExchangeTests --extra-args=-only-testing:PommeCLITests/PommeAgentPTYTests --output text --verbose
+rtk proxy xcodebuild test CODE_SIGNING_ALLOWED=NO -destination 'platform=macOS' -project pomme.xcodeproj -scheme pomme -configuration Debug -derivedDataPath /tmp/pomme-exec-options-derived -only-testing:PommeCLITests/PommeAgentExecutionOptionsTests -only-testing:PommeCLITests/PommeAgentProcessExchangeTests -only-testing:PommeCLITests/PommeAgentPTYTests
 rtk proxy bash Scripts/build-local.sh
 rtk proxy bash Tests/PommeCLIIntegrationTests.sh --runner /Users/wes/.local/bin/pomme --no-build
 ```

@@ -54,7 +54,7 @@ Successful required restoration now durably removes the consumed state file befo
 
 ## Verification
 
-All 35 final focused XcodeBuildMCP tests passed, with zero failures or skips: capture receipts/artifacts, snapshot store, pause/resume transitions, snapshot CLI grammar, restore startup, and control wire behavior. New tests cover preserved native failure messages, incomplete acknowledgements, missing/empty/symlink artifacts, a valid capture, rejected lifecycle failures, launching exactly one restore helper, and rejecting failed or inactive helper receipts.
+All 35 final focused Xcode tests passed, with zero failures or skips: capture receipts/artifacts, snapshot store, pause/resume transitions, snapshot CLI grammar, restore startup, and control wire behavior. New tests cover preserved native failure messages, incomplete acknowledgements, missing/empty/symlink artifacts, a valid capture, rejected lifecycle failures, launching exactly one restore helper, and rejecting failed or inactive helper receipts.
 
 Canonical signed Release build/install passed the required identity, designated-requirement and entitlement checks. Final installed SHA-256: `182db3e3310c079b08618fab6cc0e5599b1562ecda3e29a8be78d1a08cd50e3f`. A fresh login shell resolves `/Users/wes/.local/bin/pomme`; all 31 CLI integration checks passed against it.
 

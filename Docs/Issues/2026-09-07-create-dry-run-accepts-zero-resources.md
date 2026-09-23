@@ -68,6 +68,6 @@ a process trap. Values at that rounded boundary now fail size validation.
 - `rtk proxy bash Tests/PommeCLIIntegrationTests.sh --runner /Users/wes/.local/bin/pomme --no-build`
   — all 22 contract checks passed.
 - Tests use command validation and dry-run only; no VM was created or operated.
-- `rtk xcodebuildmcp macos test --project-path /Users/wes/dev/pomme/pomme.xcodeproj --scheme pomme --configuration Debug --derived-data-path /Users/wes/Library/Developer/XcodeBuildMCP/workspaces/pomme-repair-tests/DerivedData --extra-args '-only-testing:PommeCLITests/CreateCommandTests' --verbose --output text`
-  — 4 tests passed, 0 failed, 0 skipped, with parameterized resource/mode cases.
-- Result bundle: `~/Library/Developer/XcodeBuildMCP/workspaces/pomme-64d67e0299b1/result-bundles/test_macos_2026-09-08T14-24-56-430Z_pid51975_d2c98749.xcresult`.
+- Current native equivalent of the historical test invocation: `rtk proxy xcodebuild test CODE_SIGNING_ALLOWED=NO -destination 'platform=macOS' -project /Users/wes/dev/pomme/pomme.xcodeproj -scheme pomme -configuration Debug -derivedDataPath /tmp/pomme-repair-tests '-only-testing:PommeCLITests/CreateCommandTests'`
+  — historical result: 4 tests passed, 0 failed, 0 skipped, with parameterized resource/mode cases.
+- Result bundle: `test_macos_2026-09-08T14-24-56-430Z_pid51975_d2c98749.xcresult`.

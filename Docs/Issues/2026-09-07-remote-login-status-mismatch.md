@@ -83,8 +83,10 @@ guest-to-host exchange and cause a nonzero CLI result.
   policy was changed. A live enable/disable cycle with this build remains
   unverified; existing guests need the corrected agent implementation.
 
+Current native command equivalents (the results above are historical):
+
 ```sh
-rtk xcodebuildmcp macos test --project-path pomme.xcodeproj --scheme pomme --configuration Debug --derived-data-path /tmp/pomme-remote-login --extra-args=-only-testing:PommeCLITests/PommeAgentTests -only-testing:PommeCLITests/PommeAgentProtocolTests -only-testing:PommeCLITests/PommeAgentSessionFailureTests -only-testing:PommeCLITests/PommeRemoteLoginExchangeTests -only-testing:PommeCLITests/PommeAgentCLIModelsTests -only-testing:PommeCLITests/PommeForegroundControlTests --output text --verbose
+rtk proxy xcodebuild test CODE_SIGNING_ALLOWED=NO -destination 'platform=macOS' -project pomme.xcodeproj -scheme pomme -configuration Debug -derivedDataPath /tmp/pomme-remote-login -only-testing:PommeCLITests/PommeAgentTests -only-testing:PommeCLITests/PommeAgentProtocolTests -only-testing:PommeCLITests/PommeAgentSessionFailureTests -only-testing:PommeCLITests/PommeRemoteLoginExchangeTests -only-testing:PommeCLITests/PommeAgentCLIModelsTests -only-testing:PommeCLITests/PommeForegroundControlTests
 rtk proxy bash Scripts/build-local.sh
 rtk proxy bash Tests/PommeCLIIntegrationTests.sh --runner /Users/wes/.local/bin/pomme --no-build
 ```
