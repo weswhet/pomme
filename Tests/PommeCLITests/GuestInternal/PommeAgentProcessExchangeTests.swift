@@ -9,6 +9,64 @@ import Synchronization
 /// cross-test concurrency.
 @Suite("Pomme agent process exchanges", .serialized)
 struct PommeAgentProcessExchangeTests: Sendable {
+    @Test("Actor status boundaries repeat in order through authenticated PTY exchanges")
+    func actorStatusBoundaries() async throws {
+        let trace = Mutex<[(PommeAgentStatusTrace.Event, Double)]>([])
+        let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64),
+                                  statusTraceSink: { event, elapsed in trace.withLock { $0.append((event, elapsed)) } })
+        let started = try await agent.performAsynchronously(.request(operation: "process.start", payload: .object([
+            "path": .string("/bin/sleep"), "arguments": .array([.string("60")]), "pty": .bool(true)
+        ])))
+        let jobID = try #require(started.objectValue?["jobID"]?.stringValue)
+        do {
+            try await withDaemon(agent: agent) { context in
+                try await authenticate(using: context.wire)
+                for _ in 0..<5 {
+                    trace.withLock { $0.removeAll() }
+                    let response = try await exchange(.request(operation: "process.status", payload: .object([
+                        "jobID": .string(jobID)
+                    ])), using: context.wire)
+                    try #require(response.response.ok == true)
+                    let samples = trace.withLock { $0 }
+                    #expect(samples.map(\.0) == [.actorAdmitted, .statusEntered, .refreshEntered,
+                                                .waitidEntered, .waitidReturned, .refreshReturned,
+                                                .statusResultEntered, .statusResultReturned])
+                    #expect(samples.allSatisfy { $0.1 >= 0 && $0.1.isFinite })
+                    #expect(zip(samples, samples.dropFirst()).allSatisfy { $0.1 <= $1.1 })
+                }
+            }
+        } catch {
+            let cleaned = try await finishSignalTraceChild(agent: agent, jobID: jobID, terminate: true)
+            #expect(cleaned)
+            throw error
+        }
+        let cleaned = try await finishSignalTraceChild(agent: agent, jobID: jobID, terminate: true)
+        #expect(cleaned)
+    }
+
+    @Test("Actor status trace excludes other operations and Recovery", arguments: ["health", "terminal", "recovery", "recoveryTerminal"])
+    func actorStatusExclusions(mode: String) async throws {
+        let trace = Mutex<[PommeAgentStatusTrace.Event]>([])
+        let agent = try PommeAgent(role: mode.hasPrefix("recovery") ? .recovery : .persistent,
+                                  executableSHA256: String(repeating: "a", count: 64),
+                                  authority: mode == "recoveryTerminal" ? .recoveryTerminal : .standard,
+                                  statusTraceSink: { event, _ in trace.withLock { $0.append(event) } })
+        _ = try? await agent.performAsynchronously(.request(
+            operation: mode == "health" ? "agent.health" : mode == "terminal" ? "terminal.status" : "process.status",
+            payload: .object([:])))
+        #expect(trace.withLock { $0.isEmpty })
+    }
+
+    @Test("Actor trace preserves syscall errno across an injected sink")
+    func actorStatusTracePreservesErrno() {
+        let trace = PommeAgentStatusTrace(sink: { _, _ in errno = EIO })
+        let saved = errno
+        defer { errno = saved }
+        errno = EINTR
+        trace.emit(.waitpidReturned)
+        #expect(errno == EINTR)
+    }
+
     @Test("Normal serve loop traces authentication and a generic request in order")
     func serveLoopBoundaries() async throws {
         let trace = Mutex<[(PommeAgentServeLoopTrace.Event, Double)]>([])
