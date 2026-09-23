@@ -12,7 +12,7 @@ observations are recorded below; historical rows retain their original status.
 | CLI discovery omissions / `agent-help` output ambiguity | Fixed in `e0f6544`; signed CLI contract and live compatibility checks passed. |
 | macOS 27 inactive Language Chooser / framebuffer replay | Guarded activation and replay-policy fixes validated; complete SIP/AMFI status workflows passed. |
 | Recovery Terminal marker recognition | Bounded prompt-punctuation and word-encoding/output-separation fixes validated; not a claim of universal OCR reliability. |
-| macOS 26 first-owner desktop readiness / cleanup | Same-job cleanup-verified retry and pinned reconnect adapter implemented. Three fresh signed-candidate SIP cycles passed, including a live Aqua timeout recovered after instrumentation cleanup; original intermittent signal delay and earlier console transport failure remain unexplained. Later readback failures identify stock Setup Assistant automatic-login ownership after the preference-recovery reboot. A narrowly gated retry candidate has red/green regression evidence; signed/live qualification is pending, and stopped failure fixtures are retained. |
+| macOS 26 first-owner desktop readiness / cleanup | Same-job cleanup-verified retry and pinned reconnect adapter implemented. Three fresh signed-candidate SIP cycles passed, including a live Aqua timeout recovered after instrumentation cleanup; original intermittent signal delay and earlier console transport failure remain unexplained. Later readback failures identify stock Setup Assistant automatic-login ownership after the preference-recovery reboot. Narrow retry candidate `96edcf2` has red/green tests and a signed build, but its first live run instead rejected expected native owner plus mismatched loginwindow preference; the new branch remains live-unqualified. Failure fixtures are retained. |
 | macOS 27 creation `ownerProof` | Open; subsequent internal-drive baselines passed, including fresh creation with the exact original `ffc41a7` host, without a targeted fix. |
 | macOS 26 creation `verifyNormalAgent` / slow first boot | Open historical failure; subsequent internal-drive creations passed, including a fresh original-`ffc41a7` run with first-attempt verification receipts, without establishing its cause. |
 | macOS 27 restart after pause/resume | Open; two earlier internal-drive sequences plus ten-cycle runs with both current `a3852a5` and original `ffc41a7` hosts passed without reproducing the missing helper. |
@@ -2489,6 +2489,74 @@ The candidate and evidence are committed before the canonical signed Release
 build. Live qualification will use another direct macOS 26.6.2/25G83 restore
 with identical internal-drive 40 GB / 4 GB resources; existing creation pins,
 credentials, and failure journals will not be rewritten to exercise the fix.
+
+Candidate `96edcf2` built and installed through the canonical signed Release
+workflow at 00:12:19Z. Signature, exact entitlements, designated-requirement
+continuity, signed archival, and atomic install passed. Fresh login-shell
+resolution/version and all 104 CLI contract checks passed. Installed SHA-256:
+`a2fadc0621808d7a2a2d92179b172dead027f899b06eb5ee082eb9c24d7f5c23`.
+Following dry-run and stopped/internal inventory checks, fresh
+`pomme-agent-autologinretry26-20260922a` creation began at 00:13:15Z using the
+same regular-file internal macOS 26.6.2/25G83 restore image, explicit
+40 GB disk / 4 GB memory, and `--boot none`. Existing failure fixtures remain
+untouched; experimental Recovery qualification is still reported honestly.
+
+This live prerequisite has not reached the candidate owner-login path.
+Restore reached 100% at 00:17:00Z and Recovery navigation began at 00:17:01Z,
+but no Terminal or agent-install receipt followed by 00:24Z. The journal
+retains `installRecoveryAgent` intent. A one-second read-only sample of the
+exact creation process at 00:23:55Z found its navigation task inside synchronous
+Vision OCR (`recognizeWithVN` / `VNImageRequestHandler.performRequests`),
+waiting on a semaphore throughout the sample. This is a separate prerequisite
+stall, not evidence against or qualification of the owner-login candidate.
+No competing lifecycle command or manual journal/pin change was issued.
+
+At 00:26:10Z, after revalidating the exact idle creation PID/executable/UID,
+one SIGINT terminated that process with exit 130. This was process interruption,
+not a successful Recovery cleanup receipt. Independent checks found no remaining
+process or helper and all twelve internal VMs stopped. The new target retains
+UUID `8f47dafa-5f86-4e6a-9b5c-99d59df53a5e`, immutable plan
+`9dc5ff01a87e32e85f333f2b84814aca92e15750ff651d7be8e50e8e56b044e8`,
+the original candidate agent pin, and the same provisioning intent. No guest
+owner or security workflow has been tested yet. Any continuation must use the
+public creation-resume path and its immutable-plan/reconciliation checks.
+
+Read-only mapping confirms a 300-second per-observation deadline, not an
+overall navigation deadline. The synchronous Vision call runs after the
+deadline/cancellation checks and cannot be interrupted by task cancellation;
+the timeout is observed only if classification returns. Public `create --resume`
+at 00:26:50Z accepted the retained identity/intent without overrides. This time
+Terminal verification passed at 00:28:17Z, exact marker proof passed on attempt
+two at 00:28:20Z, and the agent launcher was submitted at 00:28:23Z. The extra
+Recovery boot is recorded as a prerequisite difference; owner preparation has
+still not been invoked. This recovery does not establish the OCR stall's cause.
+
+Creation resume completed successfully by 00:29:41Z, returning stopped state.
+Independent status confirmed startup volume
+`9a7c91c2-d58a-496e-b563-44e20e22eb55`, unchanged VM/plan/resources, and the
+exact `a2fadc06…d7f5c23` candidate pin. No security journal existed. The first
+owner `sip disable --force --final-state previous` began at 00:29:57Z, with a
+fixed-tag-only helper follower and no intervening guest probe/account edit.
+
+Owner verification passed at 00:30:23Z; initial native login was OFF. Setup
+Assistant handoff passed at 00:31:07Z. The initial setter's readback at
+00:31:21–22Z verified native expected owner, matching preference, and valid
+artifact metadata. Owner-completion status 1 triggered the existing single
+reboot at 00:31:23Z; the same owner was verified again at 00:31:42Z.
+At 00:31:43Z, the retry reported `nativeExpectedOwner`, then
+`preferenceMismatch` and `reconcileRejected`. Unlike the preceding fixture,
+the native value did not classify as Setup Assistant, so the new special branch
+was not exercised. The mismatched preference value is not present in the closed
+trace and must not be inferred. This is neither live validation nor a reason
+to widen the candidate's acceptance policy.
+
+The command exited 1 with the original native-state verification error before
+SIP mutation. Status at 00:32:08Z confirmed stopped/no helper, unchanged identity
+and pin, and `sipDisable` / `autologinIntent` / `previous` with no normal-boot
+verification. The follower emitted no signal event and was stopped. All twelve
+VMs remain stopped/internal with 50 GiB free. No SIP-enable restoration is
+needed, and no inspection boot has altered this failure fixture. The evidence
+is committed before the next diagnostic refinement.
 
 ### macOS 27 pause/resume/restart repetition
 
