@@ -823,11 +823,14 @@ final class HeadlessFramebufferCaptureState: @unchecked Sendable {
         lock.withLock { latestSurface != nil }
     }
 
+    var generation: UInt64 { lock.withLock { sourceGeneration } }
+
     /// Renders the retained live surface immediately. Returns nil until the
     /// observer has published its first full update.
-    func renderLatestSurface() throws -> CGImage? {
-        let retained: Unmanaged<IOSurface>? = lock.withLock {
-            latestSurface.map { $0.retain() }
+    func renderLatestSurface(expectedGeneration: UInt64? = nil, beforeValidation: () -> Void = {}) throws -> CGImage? {
+        let (retained, generation) = lock.withLock {
+            (expectedGeneration == nil || expectedGeneration == sourceGeneration
+                ? latestSurface.map { $0.retain() } : nil, sourceGeneration)
         }
         guard let retained else { return nil }
         defer { retained.release() }
@@ -850,7 +853,8 @@ final class HeadlessFramebufferCaptureState: @unchecked Sendable {
                 detail: "The private framebuffer IOSurface could not be rendered."
             )
         }
-        return rendered
+        beforeValidation()
+        return lock.withLock { sourceGeneration == generation ? rendered : nil }
     }
 
     func beginRequest() throws -> UInt64 {
@@ -976,8 +980,20 @@ final class HeadlessFramebufferCaptureState: @unchecked Sendable {
 }
 
 enum HeadlessFramebufferPresenterRegistration {
-    /// Each actual native association can replay cached scanout synchronously,
-    /// including the re-registration used to request a fresh static screen.
+    enum Action: Equatable {
+        case detach, invalidate, makeObserver, associateVirtualMachine, attach
+    }
+
+    static func actions(hasObserver: Bool, sameDisplay: Bool, gen2: Bool) -> [Action] {
+        if hasObserver && sameDisplay {
+            if gen2 { return [] }
+            return [.detach, .invalidate, .associateVirtualMachine, .attach]
+        }
+        return (hasObserver ? [.detach] : []) + [.invalidate, .makeObserver, .associateVirtualMachine, .attach]
+    }
+
+    /// Each actual native association can replay cached scanout synchronously.
+    /// Retained gen2 displays do not require another native association.
     static func associate(
         source: AnyObject, state: HeadlessFramebufferCaptureState,
         operation: () -> Void
@@ -1641,17 +1657,17 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
     private func captureFrame(timeout: TimeInterval) async throws -> CGImage {
         try VirtualizationPrivateABIPreflight.validateRuntime()
         let resources = try captureResources()
-        // Ask for a frame before re-arming, so the update that registration
-        // republishes completes this request instead of only refreshing the
-        // retained surface.
+        // Install the request before any initial or changed-display binding so
+        // its asynchronous publication can complete the request.
         let requestID = try framebufferCaptureState.beginRequest()
         do {
             let deadline = Date().addingTimeInterval(max(0.1, timeout))
             let gen2 = try VirtualizationPrivateABIPreflight.frameObservation().variantName == "gen2"
-            try await ensureFramebufferObserver(display: resources.display, deadline: deadline, gen2: gen2)
-            // A host that republishes on registration answers within the first
-            // poll. Falling back to the retained surface only after that keeps
-            // a static screen fast without serving it a stale frame first.
+            let retainedGeneration = try await ensureFramebufferObserver(
+                display: resources.display, deadline: deadline, gen2: gen2
+            )
+            // Gen1 retains its bounded publication grace period. A retained
+            // gen2 association can render the current live surface immediately.
             let freshFrameBudget = Date().addingTimeInterval(min(0.5, max(0.1, timeout)))
             while Date() < deadline {
                 try Task.checkCancellation()
@@ -1664,8 +1680,8 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
                     )
                     return image
                 }
-                if !gen2, Date() >= freshFrameBudget,
-                   let image = try framebufferCaptureState.renderLatestSurface() {
+                if retainedGeneration != nil || (!gen2 && Date() >= freshFrameBudget),
+                   let image = try framebufferCaptureState.renderLatestSurface(expectedGeneration: retainedGeneration) {
                     framebufferCaptureState.cancel(requestID: requestID)
                     try Self.validateFrame(
                         image,
@@ -1688,49 +1704,49 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
 
     private func ensureFramebufferObserver(
         display: VZGraphicsDisplay, deadline: Date, gen2: Bool
-    ) async throws {
-        try queue.sync {
+    ) async throws -> UInt64? {
+        let retainedAssociation = try queue.sync {
             try requireRunning()
             let displayIdentity = ObjectIdentifier(display)
-            if let framebufferObserver, observedDisplayIdentity == displayIdentity {
-                // Request registration again for every capture. A static gen2
-                // presenter can stop publishing after its initial update even
-                // when frames are acknowledged. Replacing the accessor requests
-                // a fresh registration callback without accepting a timed cache.
-                try HeadlessFramebufferObserverRuntime.setDisplay(
-                    nil,
-                    on: framebufferObserver.value
-                )
-                framebufferCaptureState.associateSource(nil)
-                try HeadlessFramebufferObserverRuntime.associateVirtualMachine(
-                    virtualMachine.value,
-                    on: framebufferObserver.value
-                )
-                try HeadlessFramebufferObserverRuntime.setDisplay(
-                    display,
-                    on: framebufferObserver.value
-                )
-                return
-            }
-            if let framebufferObserver {
-                try HeadlessFramebufferObserverRuntime.setDisplay(
-                    nil,
-                    on: framebufferObserver.value
-                )
-            }
-            framebufferCaptureState.associateSource(nil)
-            let observer = try HeadlessFramebufferObserverRuntime.make(
-                state: framebufferCaptureState
+            let actions = HeadlessFramebufferPresenterRegistration.actions(
+                hasObserver: framebufferObserver != nil,
+                sameDisplay: observedDisplayIdentity == displayIdentity,
+                gen2: gen2
             )
-            try HeadlessFramebufferObserverRuntime.associateVirtualMachine(
-                virtualMachine.value,
-                on: observer
-            )
-            try HeadlessFramebufferObserverRuntime.setDisplay(display, on: observer)
-            framebufferObserver = QueueConfined(value: observer)
+            // Replacing a live gen2 accessor can wait on its callback queue
+            // while that callback waits for the presenter's lock. Preserve the
+            // association and read its live scanout for repeated captures.
+            if actions.isEmpty { return true }
+            var observer = framebufferObserver?.value
+            func requireObserver() throws -> AnyObject {
+                guard let observer else {
+                    throw VirtualizationPrivateHeadlessError(
+                        .privateABIMismatch,
+                        detail: "The private framebuffer binding has no observer."
+                    )
+                }
+                return observer
+            }
+            for action in actions {
+                switch action {
+                case .detach:
+                    try HeadlessFramebufferObserverRuntime.setDisplay(nil, on: requireObserver())
+                case .invalidate:
+                    framebufferCaptureState.associateSource(nil)
+                case .makeObserver:
+                    observer = try HeadlessFramebufferObserverRuntime.make(state: framebufferCaptureState)
+                case .associateVirtualMachine:
+                    try HeadlessFramebufferObserverRuntime.associateVirtualMachine(virtualMachine.value, on: requireObserver())
+                case .attach:
+                    try HeadlessFramebufferObserverRuntime.setDisplay(display, on: requireObserver())
+                }
+            }
+            framebufferObserver = observer.map { QueueConfined(value: $0) }
             observedDisplayIdentity = displayIdentity
+            return false
         }
-        guard gen2 else { return }
+        guard gen2 else { return nil }
+        let priorGeneration = framebufferCaptureState.generation
         while Date() < deadline {
             try Task.checkCancellation()
             let objects: QueueConfined<(AnyObject, AnyObject)>? = try queue.sync {
@@ -1753,7 +1769,10 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
                         } catch { completion(.failure(error)) }
                     }
                 }
-                if ready { return }
+                if ready {
+                    return retainedAssociation && framebufferCaptureState.generation == priorGeneration
+                        ? priorGeneration : nil
+                }
             }
             try await Task.sleep(nanoseconds: 20_000_000)
         }

@@ -407,6 +407,20 @@ struct VirtualizationPrivateHeadlessBackendTests {
         }
     }
 
+    @Test("Retained gen2 display avoids native observer rebinding")
+    func retainedObserverActions() {
+        typealias Registration = HeadlessFramebufferPresenterRegistration
+        #expect(Registration.actions(hasObserver: true, sameDisplay: true, gen2: true).isEmpty)
+        #expect(Registration.actions(hasObserver: true, sameDisplay: true, gen2: false)
+            == [.detach, .invalidate, .associateVirtualMachine, .attach])
+        for gen2 in [false, true] {
+            #expect(Registration.actions(hasObserver: false, sameDisplay: false, gen2: gen2)
+                == [.invalidate, .makeObserver, .associateVirtualMachine, .attach])
+            #expect(Registration.actions(hasObserver: true, sameDisplay: false, gen2: gen2)
+                == [.detach, .invalidate, .makeObserver, .associateVirtualMachine, .attach])
+        }
+    }
+
     @Test("Presenter replacement discards retained scanout before damage reuse")
     func presenterReplacementDiscardsSurface() throws {
         let state = HeadlessFramebufferCaptureState()
@@ -454,6 +468,70 @@ struct VirtualizationPrivateHeadlessBackendTests {
                 #expect(!state.hasLatestSurface)
             }
         }
+    }
+
+    @Test("Retained scanout renders changed pixels and rejects replacement during render")
+    func retainedScanoutPixels() throws {
+        let state = HeadlessFramebufferCaptureState()
+        let source = NSObject()
+        let replacement = NSObject()
+        state.associateSource(source)
+        let request = try state.beginRequest()
+        #expect(try state.renderLatestSurface() == nil)
+        #expect(state.takeResult(requestID: request) == nil)
+        state.cancel(requestID: request)
+        let next = try state.beginRequest()
+        state.cancel(requestID: next)
+        let surface = try #require(IOSurfaceCreate([
+            kIOSurfaceWidth: 2, kIOSurfaceHeight: 2,
+            kIOSurfaceBytesPerElement: 4, kIOSurfaceBytesPerRow: 8,
+            kIOSurfacePixelFormat: 0x42475241, kIOSurfaceAllocSize: 16
+        ] as CFDictionary))
+        func fill(_ pixel: UInt32) {
+            IOSurfaceLock(surface, [], nil)
+            let address = IOSurfaceGetBaseAddress(surface).assumingMemoryBound(to: UInt32.self)
+            for index in 0..<4 { address[index] = pixel }
+            IOSurfaceUnlock(surface, [], nil)
+        }
+        fill(0xffff0000)
+        var frame = [UInt64](repeating: 0, count: 2)
+        frame.withUnsafeMutableBytes { bytes in
+            bytes.storeBytes(of: Unmanaged.passUnretained(surface).toOpaque(), as: UnsafeMutableRawPointer.self)
+            bytes.storeBytes(of: UInt8(1), toByteOffset: 8, as: UInt8.self)
+            var pointer = bytes.baseAddress.map(UnsafeRawPointer.init)
+            withUnsafePointer(to: &pointer) { shared in
+                #expect(state.receive(sharedFrameUpdatePointer: UnsafeRawPointer(shared), source: source))
+            }
+        }
+        func pixel(_ image: CGImage) throws -> [UInt8] {
+            var bytes = [UInt8](repeating: 0, count: 16)
+            let context = try #require(CGContext(data: &bytes, width: 2, height: 2,
+                bitsPerComponent: 8, bytesPerRow: 8, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.draw(image, in: CGRect(x: 0, y: 0, width: 2, height: 2))
+            return bytes
+        }
+        let first = try pixel(#require(try state.renderLatestSurface()))
+        fill(0xff00ff00)
+        let second = try pixel(#require(try state.renderLatestSurface()))
+        #expect(first != second)
+        #expect(first[0] > first[1])
+        #expect(second[1] > second[0])
+        let oldGeneration = state.generation
+        #expect(try state.renderLatestSurface(beforeValidation: {
+            state.associateSource(replacement)
+        }) == nil)
+        #expect(try state.renderLatestSurface() == nil)
+        #expect(!state.acceptsSource(source))
+        frame.withUnsafeMutableBytes { bytes in
+            var pointer = bytes.baseAddress.map(UnsafeRawPointer.init)
+            withUnsafePointer(to: &pointer) { shared in
+                #expect(!state.receive(sharedFrameUpdatePointer: UnsafeRawPointer(shared), source: source))
+                #expect(state.receive(sharedFrameUpdatePointer: UnsafeRawPointer(shared), source: replacement))
+            }
+        }
+        #expect(try state.renderLatestSurface(expectedGeneration: oldGeneration) == nil)
+        #expect(try state.renderLatestSurface(expectedGeneration: state.generation) != nil)
     }
 
     @Test("Every presenter registration caches replay but waits for a live callback", arguments: [false, true])
