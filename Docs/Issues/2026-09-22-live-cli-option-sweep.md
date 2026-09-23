@@ -3606,6 +3606,25 @@ The transport root cause remains open. The next diagnostic should discriminate
 request write, guest start handling/response, and host response receipt while
 preserving fail-closed, no-replay semantics.
 
+The failed boot's start request has no guest-start boundary trace in the
+current pinned agent, so the existing log cannot distinguish those subphases.
+A read-only path audit found the same five-second timeout at both the VSOCK
+request `POLLOUT` and response `POLLIN` waits. The host serializes whole wire
+exchanges, and the guest serializes requests through its session actor; no
+lock inversion was found. The next diagnostic candidate will gate on the
+exact three desktop `process.start` payloads and emit fixed local-elapsed
+host write/response and authenticated persistent-guest handler/response-write
+events. It will not log request IDs, VM identity, payload, output, credentials,
+or raw errors, and it will not replay an uncertain start. Guest log loss across
+a failed boot remains a limit when interpreting absent guest events.
+
+After archiving the exact `85083e56…f658b75` signed agent, recording the
+failure, and independently verifying SIP enabled/stopped/no helper, clone-f
+was deleted to preserve internal-drive headroom for a fresh comparison.
+Public inventory now shows twelve VMs, all stopped/no helper, no clone-f;
+internal free space rose from 16 to 19 GiB. Its VM disk is not recoverable
+through Pomme. No external-drive VM or unrelated VM was removed.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
