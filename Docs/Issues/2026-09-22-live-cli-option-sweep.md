@@ -4182,6 +4182,15 @@ The four existing `PommeCore.swift` compiler warnings remain unrelated. The
 candidate is qualified for a source/test/evidence commit before signed
 Release build and live comparison; it remains a diagnostic, not a fix.
 
+Candidate `65e8a17` was committed before the canonical signed Release build.
+Build, Developer ID signature, exact entitlements, designated-requirement
+compatibility, signed artifact archive, and atomic install checks passed.
+Fresh-login resolution finds `/Users/wes/.local/bin/pomme`; it reports
+`65e8a17` with SHA-256
+`bd4d93e8c6966db5857af54fdce545af9afdb070e534a2bd8e81791d632d966d`.
+All 104 CLI contract checks passed. Live initial-read classification is
+pending on a fresh same-resource internal clone.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
