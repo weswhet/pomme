@@ -16,6 +16,7 @@ enum PommeAutoLoginReadbackTrace: String, CaseIterable, Sendable {
   case ownerBuildPreferenceWriteEntered, ownerMiniBuddyPreferenceWriteEntered
   case ownerWriteStderrEmpty, ownerWriteStderrStartsSudo
   case ownerWriteStderrStartsDefaults, ownerWriteStderrOther
+  case ownerWriteStderrMissingDomain, ownerWriteStderrMissingPair
   case ownerWriteHomeExpectedDirectory, ownerWriteHomeOtherOwner
   case ownerWriteHomeNotDirectory, ownerWriteHomeNotStatable, ownerWriteHomeProbeUnavailable
   case ownerPostWritePreferencesExpectedOwnerWriteSearchMode, ownerPostWritePreferencesOwnerModeRestricted
@@ -1295,26 +1296,29 @@ struct PommeSecurityOwnerPreparation: Sendable {
     domain: String,
     key: String
   ) -> Bool {
-    let messages = [
-      "Domain \(domain) does not exist",
-      "Domain \(domain) does not exist.",
-      "The domain/default pair of (\(domain), \(key)) does not exist",
-      "The domain/default pair of (\(domain), \(key)) does not exist.",
-    ]
+    missingOwnerPreferenceDiagnostic(output, domain: domain, key: key) != nil
+  }
+
+  private enum MissingOwnerPreferenceDiagnostic { case domain, pair }
+
+  private static func missingOwnerPreferenceDiagnostic(
+    _ output: String, domain: String, key: String
+  ) -> MissingOwnerPreferenceDiagnostic? {
     let lines = output.split(whereSeparator: \.isNewline).map {
       String($0).trimmingCharacters(in: .whitespacesAndNewlines)
     }.filter { !$0.isEmpty }
-    guard !lines.isEmpty else { return false }
-    if lines.count == 1 {
-      return messages.contains(lines[0])
-    }
-    guard lines.count == 2,
+    guard let message = lines.last else { return nil }
+    guard lines.count == 1 || (lines.count == 2 &&
       lines[0].range(
         of: #"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ defaults\[\d+:\d+\]$"#,
         options: .regularExpression
-      ) != nil
-    else { return false }
-    return messages.contains(lines[1])
+      ) != nil)
+    else { return nil }
+    let missingDomain = "Domain \(domain) does not exist"
+    let missingPair = "The domain/default pair of (\(domain), \(key)) does not exist"
+    if message == missingDomain || message == missingDomain + "." { return .domain }
+    if message == missingPair || message == missingPair + "." { return .pair }
+    return nil
   }
 
   private func writeOwnerPreference(
@@ -1336,7 +1340,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
       throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
     }
     guard result.exitCode == 0 else {
-      autoLoginTrace(Self.classifyOwnerWriteStderr(result.stderr))
+      autoLoginTrace(Self.classifyOwnerWriteStderr(result.stderr, domain: domain, key: key))
       autoLoginTrace(probeOwnerHomeAfterFailedWrite(ownerUID: ownerUID))
       if result.exitCode == 1, domain == Self.setupAssistantPreferencesDomain,
         key == Self.lastSeenBuddyBuildVersionKey
@@ -1351,9 +1355,16 @@ struct PommeSecurityOwnerPreparation: Sendable {
     else { throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed }
   }
 
-  /// Diagnostic only: classify the already-bounded first stderr line. The
+  /// Diagnostic only: recognize exact bounded messages, then classify the first line. The
   /// native message and owner identity never enter the trace or error.
-  private static func classifyOwnerWriteStderr(_ stderr: String) -> PommeAutoLoginReadbackTrace {
+  private static func classifyOwnerWriteStderr(
+    _ stderr: String, domain: String, key: String
+  ) -> PommeAutoLoginReadbackTrace {
+    switch missingOwnerPreferenceDiagnostic(stderr, domain: domain, key: key) {
+    case .domain: return .ownerWriteStderrMissingDomain
+    case .pair: return .ownerWriteStderrMissingPair
+    case nil: break
+    }
     let firstLine = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
       .split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
     if firstLine.isEmpty { return .ownerWriteStderrEmpty }

@@ -3342,6 +3342,32 @@ and do **not** establish an XPC failure or cause. No raw guest log lines were
 retained or copied into the issue log. The VM was gracefully stopped again
 with `stopMethod=guest-stopped`.
 
+### Exact first-owner stderr classification candidate
+
+The first-write failure has recurred on multiple fresh internal clones, but
+its existing trace retained only an empty/sudo/defaults/other first-line
+prefix. A bounded diagnostic candidate recognizes only two exact native
+`defaults` messages already accepted by the owner-preference read verifier:
+the expected domain missing and the expected domain/key pair missing, with
+the existing strict optional timestamped `defaults` header. Wrong domain,
+wrong key, extra lines, malformed headers, and all unknown native messages
+retain the previous closed fallback labels. No raw stderr, account, domain,
+key, PID, or credential enters the trace. The failed write still throws its
+original status-1 error, runs the same post-failure probes, and uses the
+unchanged guarded-reboot/journal behavior. This is evidence refinement, not
+a claimed cause or preference-write fix.
+
+The new exact-message cases failed before production classification changed
+(84 focused tests passed, one parameterized test failed across six new cases;
+`test_macos_2026-09-23T06-16-58-896Z_pid63686_f77b1358.xcresult`). The
+focused owner-preparation suite then passed 85 functions / 203 invocations,
+zero failures/skips
+(`test_macos_2026-09-23T06-18-27-301Z_pid63960_3b1fc3b7.xcresult`). The
+full suite passed 1,208 functions / 1,767 executions, zero failures/skips
+(`test_macos_2026-09-23T06-19-34-277Z_pid64212_be0b925a.xcresult`). A
+signed build and a fresh-clone reproduction are required before interpreting
+the new live label.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
