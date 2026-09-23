@@ -3766,6 +3766,13 @@ or skips; bundle
 `git diff --check` passed. This source, test, and evidence checkpoint precedes
 the canonical signed Release build.
 
+Candidate `9cac88a` was committed before the canonical signed Release build.
+Build, signature, exact entitlements, designated-requirement compatibility,
+artifact archive, and atomic install checks passed. Fresh-login resolution
+finds `/Users/wes/.local/bin/pomme`; it reports `9cac88a` and has SHA-256
+`c7a847b5b2211686473f5826b1ac91914c823ae0480eed96b37883ccc3c687da`.
+All 104 CLI contract checks passed. No VM has yet been run on this candidate.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
