@@ -4745,6 +4745,46 @@ the diagnostic candidate for a signed Release and fresh-clone comparison; it
 does not establish that logging caused the intermittent transport stall or
 that the stall is fixed.
 
+The signed native-Xcode Release at `9e58236` (SHA-256
+`9cb378edab386244c570394f3f942317917f91f36444a5aabdea41878db0742a`)
+passed all 104 CLI integration contracts and was installed at
+`~/.local/bin/pomme`. A fresh internal-drive macOS 26.6.2/25G83 disposable
+`pomme-agent-quiettrace-clone26-20260923u` was created from the unprovisioned
+template with `--disk-size 40GB --memory 4GB --boot none`. It retained UUID
+`4f9b3ce5-f3b2-4f77-8916-12cdb5bf3286`, plan digest
+`84960b297f1f00587cef479448d4791bbef5720ea7dd4f579b1ba760efffa003`,
+and the exact new agent pin above. Creation passed its Recovery Terminal marker
+on the first attempt and ended stopped with no helper.
+
+The first `sip disable --force --final-state previous` attempt verified the
+owner but stopped at native Setup Assistant Aqua-session verification, before
+the first owner-preference write. An exact same-operation resume then completed
+both build and MiniBuddy preference writes on their first attempts, finished
+Setup Assistant, and passed desktop proof. Because the earlier attempt had
+already booted and restored this clone, that success is not a clean comparison
+for the original first-write rejection. The resumed operation reached
+authenticated Recovery boot and `navigationStarted`, but failed with `Recovery
+session preparation failed` before `terminalVerified`. A second exact resume
+again passed owner/desktop proof and failed at the same pre-Terminal Recovery
+boundary. No third retry was made.
+
+The retained security journal showed `securityMutationIntent` without a
+mutation receipt. Read-only Recovery-path review found no evidence of launcher
+submission, authentication, or `csrutil disable`; the generic preparation error
+does not distinguish all underlying pre-Terminal navigation failures. To check
+the actual security state independently of that failing Recovery path, the
+installed signed CLI started the same clone in normal mode, authenticated its
+pinned agent, and executed `/usr/bin/csrutil status`. It exited zero with
+complete, untruncated output: `System Integrity Protection status: enabled.`
+Graceful stop returned `guest-stopped`; public status was stopped/no helper
+with unchanged UUID, resources, and pin. The archived signed agent's SHA-256
+matched the pin. With complete cleanup and SIP enabled, public `delete --force`
+removed only this disposable clone; its disk/bundle is not recoverable through
+Pomme. Final inventory had 12 VMs, all stopped with no helpers, none external,
+and no clone-u. This run does not isolate guest logging as a cause or establish
+a transport fix; the repeated pre-Terminal Recovery preparation failure is a
+separate live observation requiring its own bounded diagnosis.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
