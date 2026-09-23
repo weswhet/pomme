@@ -57,6 +57,7 @@ struct PommeSignalBoundaryTrace: Sendable {
         case guestResponseWriteEntered, guestResponseWritten, guestResponseWriteFailed
         case guestStatusHandlerEntered, guestStatusPerformReturned, guestStatusPerformFailed
         case guestStatusStreamsEntered, guestStatusStreamsReturned, guestStatusStreamsFailed
+        case guestStatusStreamLoopEntered, guestStatusFrameConstructionEntered, guestStatusFrameConstructionReturned
         case guestStatusStreamWriteEntered, guestStatusStreamWritten, guestStatusStreamWriteFailed
         case guestStatusResponseWriteEntered, guestStatusResponseWritten, guestStatusResponseWriteFailed
         case hostExchangeAdmitted, hostWriteCompleted, hostResponseReceived
@@ -93,6 +94,8 @@ struct PommeSignalBoundaryTrace: Sendable {
     }
 
     func emit(_ event: Event) {
+        let savedErrno = errno
+        defer { errno = savedErrno }
         let elapsed = started.duration(to: .now).components
         sink(isStatus ? event.statusEvent : event,
              Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15)
@@ -104,6 +107,33 @@ struct PommeSignalBoundaryTrace: Sendable {
 
     static func guestLog(_ event: Event, _ elapsed: Double) {
         logger.notice("\(message(event, elapsedMilliseconds: elapsed), privacy: .public)")
+    }
+
+    static func hostLog(_ event: Event, _ elapsed: Double) {
+        PommeCore.log(message(event, elapsedMilliseconds: elapsed))
+    }
+
+    func emitStatusPublication(_ event: Event) {
+        if isStatus { emit(event) }
+    }
+}
+
+/// Host status exchange diagnostics contain only closed events and local elapsed time.
+struct PommeStatusWireTrace: Sendable {
+    typealias Event = PommeDesktopStartBoundaryTrace.Event
+    typealias Sink = @Sendable (Event, Double) -> Void
+    private let started = ContinuousClock.now
+    let sink: Sink
+
+    func emit(_ event: Event) {
+        let savedErrno = errno
+        defer { errno = savedErrno }
+        let elapsed = started.duration(to: .now).components
+        sink(event, Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15)
+    }
+
+    static func message(_ event: Event, elapsedMilliseconds: Double) -> String {
+        "[DEBUG-status-wire-20260923] \(event.rawValue) elapsedMs=\(elapsedMilliseconds)"
     }
 
     static func hostLog(_ event: Event, _ elapsed: Double) {
@@ -608,8 +638,11 @@ enum PommeAgentDaemon {
                     )
                     signalTrace?.emit(events == nil ? .guestStreamsFailed : .guestStreamsReturned)
                     desktopStartTrace?.emit(events == nil ? .streamsFailed : .streamsReturned)
+                    signalTrace?.emitStatusPublication(.guestStatusStreamLoopEntered)
                     for event in events ?? [] {
+                        signalTrace?.emitStatusPublication(.guestStatusFrameConstructionEntered)
                         let frame = PommeAgentJobStreamFrame(jobID: jobID, frame: event)
+                        signalTrace?.emitStatusPublication(.guestStatusFrameConstructionReturned)
                         signalTrace?.emit(.guestStreamWriteEntered)
                         desktopStartTrace?.emit(.streamWriteEntered)
                         guard let encoded = try? PommeAgentProtocol.encode(frame.envelope()),

@@ -4367,6 +4367,36 @@ VMs with clone-p absent. The next discriminating evidence needs correlated
 host exchange timing and the guest status stream/response publication
 boundary, ideally before host restoration can cut observation short.
 
+One timing clue makes that correlation important: ordinary normal-agent
+exchanges still use a five-second VSOCK deadline. Clone-p's decoded status
+spent about 3.641 seconds before `statusResultReturned` and another 1.482
+seconds in stream collection, or over 5.12 seconds before response
+publication. This is consistent with a deadline expiry, but the result
+construction is ordinarily trivial and diagnostic OSLog/scheduling delay may
+contribute. The outer `agentOtherTimeout` does not identify the exact
+exchange, and the host and guest timestamps alone do not establish a common
+start instant. Increasing a timeout without that correlation is premature.
+
+The next diagnostic candidate therefore adds a closed host wire trace only
+for normal-port `process.status` exchanges: admission, write completion,
+correlated response or failure, and no-byte/partial/complete/stream read
+progress, each with local elapsed time. The guest status trace additionally
+brackets entry to stream-frame iteration and per-frame construction before
+the existing stream-write and response-write markers. It preserves `errno`
+and excludes Recovery and terminal traces; no payload, identity, output,
+credential, frame count, or raw error is logged. Wire protocol, request
+handling, and the five-second budget remain unchanged. The focused isolated
+suite passed 40 functions / 90 executions, zero failures/skips; bundle
+`test_macos_2026-09-23T11-26-51-680Z_pid25505_0c80a9ef.xcresult`.
+It covers normal response and timeout ordering, read-progress classes,
+guest output publication, role exclusions, and redaction. Diff check passed.
+The fresh isolated full suite passed 1,234 tests with zero failures/skips;
+bundle `test_macos_2026-09-23T11-27-32-840Z_pid25662_a7d43839.xcresult`.
+Existing deprecation and unrelated compiler warnings remain. This
+diagnostic is qualified for commit before signed Release build and live
+comparison; it is not a transport fix, and logging itself may perturb
+timing.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns

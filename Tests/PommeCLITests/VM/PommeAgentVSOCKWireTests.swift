@@ -22,15 +22,17 @@ struct PommeAgentVSOCKWireTests {
         }
     }
 
-    @Test("Desktop start response failure reports closed read progress", arguments: ["response", "empty", "partial", "stream", "mismatch"])
-    func desktopStartResponseBoundary(mode: String) throws {
+    @Test("Desktop start and status response failures report closed read progress", arguments: ["response", "empty", "partial", "stream", "mismatch"], [false, true])
+    func desktopStartResponseBoundary(mode: String, status: Bool) throws {
         let withhold = mode != "response"
         let trace = Mutex<[(PommeDesktopStartBoundaryTrace.Event, Double)]>([])
-        let request = PommeAgentProtocol.Envelope.request(operation: "process.start", payload: .object([
-            "path": .string("/bin/ps"), "arguments": .array([.string("-axo"), .string("uid=,comm=")])]))
+        let payload: [String: JSONValue] = status ? ["jobID": .string(UUID().uuidString)] : [
+            "path": .string("/bin/ps"), "arguments": .array([.string("-axo"), .string("uid=,comm=")])]
+        let request = PommeAgentProtocol.Envelope.request(operation: status ? "process.status" : "process.start", payload: .object(payload))
         let finished = DispatchSemaphore(value: 0)
         let ready = DispatchSemaphore(value: 0)
-        try Self.withWire(desktopStartTraceSink: { event, elapsed in trace.withLock { $0.append((event, elapsed)) } }, peer: { descriptor in
+        let sink: PommeDesktopStartBoundaryTrace.Sink = { event, elapsed in trace.withLock { $0.append((event, elapsed)) } }
+        try Self.withWire(desktopStartTraceSink: status ? nil : sink, statusTraceSink: status ? sink : nil, peer: { descriptor in
             if mode == "partial" { try Self.writeAll(Data("{\"version\":".utf8), to: descriptor) }
             if mode == "stream" {
                 let stream = PommeAgentProtocol.Envelope(kind: .stream, requestID: request.requestID,
@@ -67,6 +69,35 @@ struct PommeAgentVSOCKWireTests {
         #expect(events.map(\.0) == expected)
         #expect(events.allSatisfy { $0.1.isFinite && $0.1 >= 0 })
         #expect(events.map(\.1) == events.map(\.1).sorted())
+    }
+
+    @Test("Status wire diagnostics exclude other operations and Recovery", arguments: ["recovery", "terminal", "signal", "health"])
+    func statusTraceExclusions(mode: String) throws {
+        let events = Mutex<[PommeStatusWireTrace.Event]>([])
+        let request = PommeAgentProtocol.Envelope.request(
+            operation: mode == "signal" ? "process.signal" : mode == "health" ? "agent.health" : "process.status")
+        try Self.withWire(statusTraceSink: { event, _ in events.withLock { $0.append(event) } },
+                          normalScope: mode != "recovery" && mode != "terminal", peer: { descriptor in
+            let received = try Self.readEnvelope(from: descriptor)
+            try Self.writeAll(try PommeAgentProtocol.encode(.response(to: received, result: .object([:]))), to: descriptor)
+        }) { wire in
+            _ = try wire.exchange(try PommeAgentProtocol.encode(request), timeout: 2)
+        }
+        #expect(events.withLock { $0.isEmpty })
+    }
+
+    @Test("Status diagnostic messages are closed and preserve errno")
+    func statusTraceRedaction() {
+        for event in PommeStatusWireTrace.Event.allCases {
+            #expect(PommeStatusWireTrace.message(event, elapsedMilliseconds: 1.25)
+                == "[DEBUG-status-wire-20260923] \(event.rawValue) elapsedMs=1.25")
+        }
+        errno = EBUSY
+        PommeStatusWireTrace(sink: { _, _ in errno = EIO }).emit(.writeCompleted)
+        #expect(errno == EBUSY)
+        PommeSignalBoundaryTrace(sink: { _, _ in errno = EIO }, isStatus: true)
+            .emitStatusPublication(.guestStatusFrameConstructionReturned)
+        #expect(errno == EBUSY)
     }
 
     @Test("A late status response cannot complete a subsequent signal exchange", arguments: [false, true])
@@ -404,6 +435,8 @@ struct PommeAgentVSOCKWireTests {
     private static func withWire<T>(
         signalTraceSink: PommeSignalBoundaryTrace.Sink? = nil,
         desktopStartTraceSink: PommeDesktopStartBoundaryTrace.Sink? = nil,
+        statusTraceSink: PommeStatusWireTrace.Sink? = nil,
+        normalScope: Bool = true,
         peer operation: @escaping @Sendable (Int32) throws -> Void,
         _ body: (PommeAgentVSOCKWire) throws -> T
     ) throws -> T {
@@ -411,7 +444,8 @@ struct PommeAgentVSOCKWireTests {
         let peer = PeerThread(fileDescriptor: sockets.peer)
         peer.start { try operation(sockets.peer) }
         let wire = PommeAgentVSOCKWire(fileDescriptor: sockets.client, signalTraceSink: signalTraceSink,
-                                       desktopStartTraceSink: desktopStartTraceSink)
+                                       desktopStartTraceSink: desktopStartTraceSink,
+                                       statusTraceSink: statusTraceSink, normalScope: normalScope)
         do {
             let value = try body(wire)
             try peer.join()

@@ -506,6 +506,58 @@ struct PommeAgentProcessExchangeTests: Sendable {
         }
     }
 
+    @Test("Status output publication brackets iteration and frame construction", arguments: ["normal", "recovery", "terminal"])
+    func statusPublication(mode: String) async throws {
+        let events = Mutex<[PommeSignalBoundaryTrace.Event]>([])
+        let agent = try PommeAgent(role: mode == "recovery" ? .recovery : .persistent,
+                                  executableSHA256: String(repeating: "a", count: 64))
+        if mode == "recovery" {
+            try await withDaemon(agent: agent, signalTraceSink: { event, _ in events.withLock { $0.append(event) } }) { context in
+                try await authenticate(using: context.wire)
+                let status = try await exchange(.request(operation: "process.status", payload: .object([
+                    "jobID": .string(UUID().uuidString)
+                ])), using: context.wire)
+                #expect(status.response.ok == false)
+            }
+            #expect(events.withLock { $0.isEmpty })
+            return
+        }
+        let started = try await agent.performAsynchronously(.request(operation: "process.start", payload: .object([
+            "path": .string("/bin/echo"), "arguments": .array([.string("private-output-do-not-log")]), "detached": .bool(true)
+        ])))
+        let jobID = try #require(started.objectValue?["jobID"]?.stringValue)
+        _ = try await agent.performAsynchronously(.request(operation: "process.wait", payload: .object([
+            "jobID": .string(jobID), "timeout": .integer(5)
+        ])))
+        try await withDaemon(agent: agent, signalTraceSink: { event, _ in events.withLock { $0.append(event) } },
+                             terminalAuthority: mode == "terminal") { context in
+            try await authenticate(using: context.wire)
+            let status = try await exchange(.request(operation: "process.status", payload: .object([
+                "jobID": .string(jobID)
+            ])), using: context.wire)
+            if mode == "terminal" {
+                #expect(status.response.ok == false)
+                #expect(status.streams.isEmpty)
+            } else {
+                try #require(status.response.ok == true)
+                #expect(!status.streams.isEmpty)
+            }
+        }
+        let recorded = events.withLock { $0 }
+        if mode != "normal" {
+            #expect(recorded.isEmpty)
+            return
+        }
+        #expect(Array(recorded.prefix(5)) == [.guestStatusHandlerEntered, .guestStatusPerformReturned,
+            .guestStatusStreamsEntered, .guestStatusStreamsReturned, .guestStatusStreamLoopEntered])
+        #expect(Array(recorded.suffix(2)) == [.guestStatusResponseWriteEntered, .guestStatusResponseWritten])
+        let frames = Array(recorded.dropFirst(5).dropLast(2))
+        try #require(!frames.isEmpty && frames.count.isMultiple(of: 4))
+        let cycle: [PommeSignalBoundaryTrace.Event] = [.guestStatusFrameConstructionEntered,
+            .guestStatusFrameConstructionReturned, .guestStatusStreamWriteEntered, .guestStatusStreamWritten]
+        for (index, event) in frames.enumerated() { #expect(event == cycle[index % 4]) }
+    }
+
     private func finishSignalTraceChild(agent: PommeAgent, jobID: String, terminate: Bool) async throws -> Bool {
         let id = try #require(UUID(uuidString: jobID))
         // Cleanup does not inherit caller cancellation and retains the actor
