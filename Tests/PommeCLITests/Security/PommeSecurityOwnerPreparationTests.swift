@@ -4,6 +4,99 @@ import Synchronization
 
 @Suite("Pomme normal guest owner preparation")
 struct PommeSecurityOwnerPreparationTests {
+  @Test("Owner launchd observations are bounded, redacted, and preserve the failed write", arguments: [
+    "present", "nonzero", "throw", "timeout", "truncated", "stderrTruncated", "oversize", "stderrOversize",
+    "detached", "notExited", "signal", "missingExit", "invalidExit", "stderr",
+  ])
+  func ownerLaunchdDomainObservation(mode: String) async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    fixture.setupAssistantBuildWriteExit = 1
+    let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
+    let order = Mutex<[String]>([])
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID), freshnessRequirements: .verifiedFresh,
+      executeGuest: { request in
+        if request.path == "/bin/launchctl", ["user/501", "gui/501"].contains(request.arguments.last ?? "") {
+          #expect(request.arguments == ["print", request.arguments.last!])
+          #expect(request.timeout == 5)
+          #expect(request.inputData == nil)
+          #expect(!request.attachStdin)
+          #expect(!request.pty)
+          #expect(request.cwd == nil)
+          #expect(request.environment.isEmpty)
+          #expect(request.user == nil)
+          #expect(request.uid == nil)
+          #expect(request.group == nil)
+          #expect(request.gid == nil)
+          #expect(request.guestStdinPath == nil)
+          #expect(request.guestStdoutPath == nil)
+          #expect(request.guestStderrPath == nil)
+          order.withLock { $0.append(request.arguments.last!) }
+          if mode == "throw" { throw CocoaError(.fileReadUnknown) }
+          return .init(exitCode: mode == "missingExit" ? nil : mode == "invalidExit" ? -1 : mode == "nonzero" ? 113 : 0,
+                       signal: mode == "signal" ? 9 : nil,
+                       stdout: Data((mode == "oversize" ? String(repeating: "x", count: 65537) : "private-synthetic-sentinel").utf8),
+                       stderr: Data((mode == "stderrOversize" ? String(repeating: "x", count: 1025)
+                                     : mode == "stderr" || mode == "nonzero" ? "opaque-owner-secret" : "").utf8),
+                       stdoutTruncated: mode == "truncated", stderrTruncated: mode == "stderrTruncated",
+                       timedOut: mode == "timeout", detached: mode == "detached", exited: mode != "notExited")
+        }
+        if request.path == "/usr/bin/sudo", request.arguments.contains("write"),
+          request.arguments.contains("LastSeenBuddyBuildVersion") { order.withLock { $0.append("write") } }
+        return try fixture.execute(request)
+      }, executePrivatePTY: fixture.executePTY,
+      autoLoginTrace: { event in trace.withLock { $0.append(event) } })
+    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
+      try await preparation.configureLogin(password: "opaque-owner-secret")
+    }
+    #expect(order.withLock { $0 } == ["user/501", "gui/501", "write", "user/501", "gui/501"])
+    let suffix = mode == "present" ? "Reachable" : mode == "nonzero" ? "Nonzero" : "Unavailable"
+    #expect(trace.withLock { $0.map(\.rawValue).filter { $0.contains("Domain") && ($0.hasPrefix("ownerPreWrite") || $0.hasPrefix("ownerPostWrite")) } }
+      == ["ownerPreWriteUserDomain", "ownerPreWriteGUIDomain", "ownerPostWriteUserDomain", "ownerPostWriteGUIDomain"].map { $0 + suffix })
+    for value in ["501", "pomme", "private-synthetic-sentinel", "opaque-owner-secret", "user/", "gui/"] {
+      #expect(trace.withLock { $0.allSatisfy { !$0.message.contains(value) } })
+    }
+    #expect(!fixture.setupDone)
+  }
+
+  @Test("Unavailable prewrite launchd observations do not prevent a successful original write")
+  func unavailableLaunchdProbeDoesNotBlockWrite() async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    let writes = Mutex(0)
+    let probes = Mutex(0)
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID), freshnessRequirements: .verifiedFresh,
+      executeGuest: { request in
+        if request.path == "/bin/launchctl", ["user/501", "gui/501"].contains(request.arguments.last ?? "") {
+          probes.withLock { $0 += 1 }
+          throw CocoaError(.fileReadUnknown)
+        }
+        if request.path == "/usr/bin/sudo", request.arguments.contains("write"),
+          request.arguments.contains("LastSeenBuddyBuildVersion") { writes.withLock { $0 += 1 } }
+        return try fixture.execute(request)
+      }, executePrivatePTY: fixture.executePTY)
+    _ = try await preparation.configureLogin(password: "opaque-owner-secret")
+    #expect(writes.withLock { $0 } == 1)
+    #expect(probes.withLock { $0 } == 2)
+    #expect(fixture.setupAssistantBuildPreference == "25G83")
+  }
+
+  @Test("Unchanged build preference does not probe owner launchd domains")
+  func unchangedBuildDoesNotProbeLaunchd() async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    fixture.setupAssistantBuildPreference = "25G83"
+    fixture.miniBuddyLaunchWriteExit = 1
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID), freshnessRequirements: .verifiedFresh,
+      executeGuest: { request in
+        #expect(request.path != "/bin/launchctl" || !["user/501", "gui/501"].contains(request.arguments.last ?? ""))
+        return try fixture.execute(request)
+      }, executePrivatePTY: fixture.executePTY)
+    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
+      try await preparation.configureLogin(password: "opaque-owner-secret")
+    }
+  }
+
   @Test("Failed build write reads strict preference state without changing the failure", arguments: [
     "committed", "missingPair", "missingDomain", "mismatch", "wrongType", "malformed",
     "unknown", "thrown", "truncated", "oversize", "readThrown", "readTruncated",
@@ -135,7 +228,7 @@ struct PommeSecurityOwnerPreparationTests {
     }
     #expect(probes.withLock { $0 } == ["Preferences", "UID", "HOME", "Processes"])
     let labels = trace.withLock { $0.map(\.rawValue).filter {
-      $0.hasPrefix("ownerPostWrite") && !$0.hasPrefix("ownerPostWriteBuildState")
+      $0.hasPrefix("ownerPostWrite") && !$0.hasPrefix("ownerPostWriteBuildState") && !$0.contains("Domain")
     } }
     if mode == "expected" || mode.hasPrefix("preferences") || mode.hasPrefix("process") {
       let metadata: String
@@ -676,6 +769,7 @@ struct PommeSecurityOwnerPreparationTests {
       .reconcileEntered, .nativeEntered, .nativeOff, .reconcileOff,
       .nativeEntered, .nativeExpectedOwner, .preferenceEntered, .preferenceMatch,
       .artifactEntered, .artifactMetadataEntered, .artifactValid,
+      .ownerPreWriteUserDomainNonzero, .ownerPreWriteGUIDomainNonzero,
       .ownerBuildPreferenceWriteEntered, .ownerMiniBuddyPreferenceWriteEntered,
       .ownerWriteStderrEmpty, .ownerWriteHomeExpectedDirectory,
       .reconcileEntered, .nativeEntered,

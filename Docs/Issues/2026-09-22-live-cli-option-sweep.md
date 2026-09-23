@@ -4036,6 +4036,46 @@ recoverable through Pomme. No external-drive or unrelated VM was touched.
 This comparison did not reproduce the clone-i actor/status gap, so no
 production transport or status fix is claimed.
 
+### First-owner launchd-domain diagnostic candidate
+
+The first `LastSeenBuddyBuildVersion` write still returns status 1 on fresh
+macOS 26 owner clones and usually succeeds after the existing guarded normal
+reboot. Read-only code review found no changed command syntax or static
+permission fault to explain that pattern: the write uses the expected owner
+through `sudo -n -H -u`, and the post-failure probes have shown expected UID,
+HOME, owner-writable Preferences, and an owner `cfprefsd` process. These facts
+do not establish preferences-service responsiveness or owner session
+readiness. A transient bootstrap/CFPreferences condition remains a hypothesis,
+not a cause established by the current evidence.
+
+The next diagnostic observes only whether `launchctl print user/<owner UID>`
+and `launchctl print gui/<owner UID>` complete successfully immediately before
+the first changed build-preference write and after that exact write returns
+status 1. Each read-only request has a five-second command bound. The trace
+contains fixed `Reachable`, `Nonzero`, or `Unavailable` labels only; launchctl
+output, UID, paths, and credentials are never logged or parsed. Nonzero does
+not prove absence, and successful `print` does not prove `cfprefsd` readiness.
+Two extra prewrite exchanges can also alter the timing being observed. Probe
+errors cannot prevent the original write; its command, single-attempt behavior,
+error, and journal/security decisions remain unchanged. No cfprefsd service
+target is assumed.
+
+The isolated focused owner-preparation suite passed 89 functions / 231
+executions with zero failures or skips; bundle
+`test_macos_2026-09-23T09-47-12-485Z_pid6401_563e344c.xcresult`.
+It checks command shape and order, closed/redacted classifications, strict
+result bounds, original failure preservation, successful one-write behavior
+when probes fail, and no probe for an unchanged preference. `git diff --check`
+passed. Signed Release build and a fresh-clone comparison remain pending;
+this is a diagnostic candidate, not a fix.
+
+The fresh isolated full suite then passed 1,225 test functions / 1,856
+executions, zero failures or skips; bundle
+`test_macos_2026-09-23T09-47-59-545Z_pid6594_cb6b860f.xcresult`.
+Four existing `PommeCore.swift` compiler warnings remain unrelated. The
+candidate is qualified for commit before the signed Release build and live
+comparison; the observed write failure remains unexplained.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns

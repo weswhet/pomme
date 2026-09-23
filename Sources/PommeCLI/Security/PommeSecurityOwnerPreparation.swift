@@ -29,6 +29,10 @@ enum PommeAutoLoginReadbackTrace: String, CaseIterable, Sendable {
   case ownerPostWriteSetupAssistantAbsent, ownerPostWriteSetupAssistantUnavailable
   case ownerPostWriteBuildStateCommitted, ownerPostWriteBuildStateMissing
   case ownerPostWriteBuildStateMismatch, ownerPostWriteBuildStateUnavailable
+  case ownerPreWriteUserDomainReachable, ownerPreWriteUserDomainNonzero, ownerPreWriteUserDomainUnavailable
+  case ownerPreWriteGUIDomainReachable, ownerPreWriteGUIDomainNonzero, ownerPreWriteGUIDomainUnavailable
+  case ownerPostWriteUserDomainReachable, ownerPostWriteUserDomainNonzero, ownerPostWriteUserDomainUnavailable
+  case ownerPostWriteGUIDomainReachable, ownerPostWriteGUIDomainNonzero, ownerPostWriteGUIDomainUnavailable
 
   var message: String { "[DEBUG-autologin-readback-20260922] \(rawValue)" }
   static func log(_ event: Self) { PommeCore.log(event.message) }
@@ -1139,6 +1143,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
     )
 
     if existingBuild != buildVersion {
+      probeOwnerLaunchdDomains(ownerUID: verification.uniqueID, afterFailure: false)
       autoLoginTrace(.ownerBuildPreferenceWriteEntered)
       try writeOwnerPreference(
         domain: Self.setupAssistantPreferencesDomain,
@@ -1349,6 +1354,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
       if result.exitCode == 1, domain == Self.setupAssistantPreferencesDomain,
         key == Self.lastSeenBuddyBuildVersionKey
       {
+        probeOwnerLaunchdDomains(ownerUID: ownerUID, afterFailure: true)
         probeContextAfterFailedOwnerBuildWrite(ownerUID: ownerUID)
         probeBuildStateAfterFailedWrite(expectedValue: value)
       }
@@ -1358,6 +1364,31 @@ struct PommeSecurityOwnerPreparation: Sendable {
     guard result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
       result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     else { throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed }
+  }
+
+  /// Read-only snapshots add two bounded command exchanges before the write and
+  /// can therefore affect timing. `print` does not bootstrap a domain. Its text
+  /// is not an API and is never parsed or retained; nonzero does not prove absence.
+  private func probeOwnerLaunchdDomains(ownerUID: UInt32, afterFailure: Bool) {
+    for gui in [false, true] {
+      let reachable: PommeAutoLoginReadbackTrace = afterFailure
+        ? (gui ? .ownerPostWriteGUIDomainReachable : .ownerPostWriteUserDomainReachable)
+        : (gui ? .ownerPreWriteGUIDomainReachable : .ownerPreWriteUserDomainReachable)
+      let nonzero: PommeAutoLoginReadbackTrace = afterFailure
+        ? (gui ? .ownerPostWriteGUIDomainNonzero : .ownerPostWriteUserDomainNonzero)
+        : (gui ? .ownerPreWriteGUIDomainNonzero : .ownerPreWriteUserDomainNonzero)
+      let unavailable: PommeAutoLoginReadbackTrace = afterFailure
+        ? (gui ? .ownerPostWriteGUIDomainUnavailable : .ownerPostWriteUserDomainUnavailable)
+        : (gui ? .ownerPreWriteGUIDomainUnavailable : .ownerPreWriteUserDomainUnavailable)
+      guard let result = try? executeGuest(.init(
+        path: "/bin/launchctl", arguments: ["print", "\(gui ? "gui" : "user")/\(ownerUID)"], timeout: 5)),
+        !result.detached, result.exited, !result.timedOut, result.signal == nil,
+        !result.stdoutTruncated, !result.stderrTruncated,
+        result.stdout.count <= 65536, result.stderr.count <= 1024,
+        let exitCode = result.exitCode, (0...255).contains(exitCode)
+      else { autoLoginTrace(unavailable); continue }
+      autoLoginTrace(exitCode == 0 ? (result.stderr.isEmpty ? reachable : unavailable) : nonzero)
+    }
   }
 
   /// Post-failure evidence is non-atomic. Even this read may initialize CFPreferences;
