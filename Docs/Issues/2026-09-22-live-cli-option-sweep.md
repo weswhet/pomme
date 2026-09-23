@@ -3458,6 +3458,36 @@ compiler warnings remain unrelated. Live validation will use another fresh
 internal 40 GB / 4 GB template clone; the previous clone was deleted after
 verified SIP-enabled status and stopped restoration.
 
+The fresh internal `pomme-agent-ownerloop-clone26-20260922e` passed the same
+40 GB / 4 GB template dry run and actual creation, reaching Terminal after
+590 navigation captures and passing marker proof on attempt one. Creation
+finished stopped, UUID `3e171384-4d95-4127-894c-dff4ba896ecd`, pinned to
+the signed `e45159a6…ff8c977` artifact. Its first-owner SIP-disable run
+began at 06:41:12Z with no prior security journal. Owner creation, native
+OFF readback, and setter verification passed. The first build-preference
+write returned status 1 at 06:42:43Z with generic `defaults` stderr; the
+new strict post-failure read reported **`ownerPostWriteBuildStateMissing`**.
+The expected home, Preferences mode, sudo UID/HOME, owner cfprefsd presence,
+and stock-only Setup Assistant labels again passed. This establishes that
+the target build preference was absent when read after the failed write;
+because the read is post-failure and may initialize CFPreferences, it does
+not establish the native failure's cause or the state at the instant of the
+write.
+
+The existing guarded reboot re-proved owner/login state and both preference
+writes plus Setup Assistant completion passed by 06:43:40Z. The subsequent
+normal-desktop `ps` probe failed with `agentOtherTimeout` at 06:45:04Z,
+retaining `sipDisable/autologinIntent` and restoring stopped/no helper.
+No SIP mutation was reached. A separate public `sip status` ran authenticated
+Recovery, passed Terminal marker proof after 588 cumulative captures,
+reported verified `sipEnabled=true`, `sipDisabled=false`, full cleanup and
+`finalStateVerified=true`, and returned the same VM stopped/no helper.
+The retained owner journal remains open; it was neither rewritten nor treated
+as proof of a completed security mutation. The first-write cause remains
+unresolved. The repeatedly failing Aqua/console/ps normal-agent transport
+is now the stronger functional blocker to completing first-owner security
+workflows and remains a separate open issue.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
