@@ -4076,6 +4076,14 @@ Four existing `PommeCore.swift` compiler warnings remain unrelated. The
 candidate is qualified for commit before the signed Release build and live
 comparison; the observed write failure remains unexplained.
 
+Candidate `cb30b48` was committed before the canonical signed Release build.
+Build, Developer ID signature, exact entitlements, designated-requirement
+compatibility, artifact archive, and atomic install checks passed. Fresh-login
+resolution finds `/Users/wes/.local/bin/pomme`; it reports `cb30b48` with
+SHA-256 `efff58552e2742867692ff40218168e4754c2a41a5080394ab88fccada71ece6`.
+All 104 CLI contract checks passed. The first-owner launchd-domain labels
+still require a fresh same-resource live comparison.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
