@@ -3448,6 +3448,16 @@ unknown, thrown/truncated/oversize, bounded request shapes, single write
 attempt, original error, and no private values in traces. Signed build and
 fresh-clone validation are next.
 
+Candidate `464f3ad` was committed before the canonical signed Release build.
+Exact Developer ID signature, entitlements, designated-requirement
+compatibility, agent archive, and atomic install checks passed. Fresh-login
+resolution points to `/Users/wes/.local/bin/pomme`, reporting `464f3ad`,
+SHA-256 `e45159a66f8463d705cff40a3d811bdb52975ddc555689beb57adba5bff8c977`.
+All 104 CLI contract checks passed; four pre-existing `PommeCore.swift`
+compiler warnings remain unrelated. Live validation will use another fresh
+internal 40 GB / 4 GB template clone; the previous clone was deleted after
+verified SIP-enabled status and stopped restoration.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
