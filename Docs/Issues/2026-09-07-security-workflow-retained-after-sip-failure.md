@@ -92,7 +92,7 @@ Security failures and conflicting requests now provide the retained operation's 
 
 ## Verification
 
-XcodeBuildMCP ran 114 focused tests with 114 passing, zero failures and zero skips: `PommeSecurityWorkflowTests`, `PommeSecurityWorkflowJournalTests`, `PommeSecurityOwnerPreparationTests`, and `PommeSecurityWorkflowResumeGuidanceTests`.
+Xcode ran 114 focused tests with 114 passing, zero failures and zero skips: `PommeSecurityWorkflowTests`, `PommeSecurityWorkflowJournalTests`, `PommeSecurityOwnerPreparationTests`, and `PommeSecurityWorkflowResumeGuidanceTests`.
 
 The new durable regression begins at `autologinIntent`, fails owner preparation, proves the journal is unchanged and the original stopped state is requested, rejects AMFI and a different final state, then reopens the same transaction and reaches verified completion. The retained owner and credential reference remain identical; a subsequent AMFI operation is admitted only after completion. Guest effects are injected in this test. Existing concrete owner-preparation tests cover account retry without `-addUser`, partial native preference-write recovery, and already-configured login reconciliation.
 

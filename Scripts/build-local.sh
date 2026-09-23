@@ -10,7 +10,7 @@ usage() {
 fail() { echo "pomme local build: $*" >&2; exit 1; }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-derived_data="$HOME/Library/Developer/XcodeBuildMCP/workspaces/pomme-local-signed/DerivedData"
+derived_data="$HOME/Library/Developer/Xcode/DerivedData/pomme-local-signed"
 install_dir="$HOME/.local/bin"
 archive_script="$repo_root/Scripts/archive-agent.sh"
 while [[ $# -gt 0 ]]; do
@@ -33,9 +33,11 @@ destination="$install_dir/pomme"
 [[ ! -L "$install_dir" && ! -L "$destination" ]] || fail 'Refusing a symlink install directory or destination.'
 [[ ! -e "$destination" || -f "$destination" ]] || fail 'The install destination is not a regular file.'
 
-for dependency in rtk xcodebuildmcp codesign plutil bash; do
+for dependency in rtk xcrun codesign plutil bash; do
   command -v "$dependency" >/dev/null || fail "Required tool is unavailable: $dependency"
 done
+xcodebuild="$(rtk proxy xcrun --find xcodebuild)" || fail 'Native xcodebuild is unavailable; select a full Xcode installation.'
+[[ "$xcodebuild" == /* && -x "$xcodebuild" ]] || fail 'Native xcodebuild did not resolve to an executable absolute path.'
 [[ -x "$archive_script" ]] || fail 'The signed-agent archive script is unavailable.'
 
 has_line() {
@@ -70,11 +72,10 @@ cd "$repo_root"
 git_commit="$(git describe --always --dirty 2>/dev/null || echo unknown)"
 # Xcode signs the target using its Release entitlement configuration. Do not
 # apply a global entitlement path to Swift package dependency targets.
-rtk proxy xcodebuildmcp macos build \
-  --project-path "$repo_root/pomme.xcodeproj" \
-  --scheme pomme --configuration Release --arch arm64 \
-  --derived-data-path "$derived_data" \
-  --extra-args \
+rtk proxy "$xcodebuild" build \
+  -project "$repo_root/pomme.xcodeproj" \
+  -scheme pomme -configuration Release -arch arm64 -sdk macosx \
+  -derivedDataPath "$derived_data" \
     "CODE_SIGN_IDENTITY=$signing_identity" \
     "DEVELOPMENT_TEAM=$team_id" \
     'CODE_SIGN_STYLE=Manual' \
@@ -83,8 +84,7 @@ rtk proxy xcodebuildmcp macos build \
     'CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO' \
     'ENABLE_HARDENED_RUNTIME=YES' \
     "OTHER_CODE_SIGN_FLAGS=--identifier $identifier --timestamp" \
-    "POMME_GIT_COMMIT=$git_commit" \
-  --verbose --output text
+    "POMME_GIT_COMMIT=$git_commit"
 
 [[ -f "$runner" && -x "$runner" && ! -L "$runner" ]] || fail 'The build did not produce a regular executable.'
 verify_signature "$runner"

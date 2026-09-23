@@ -256,7 +256,7 @@ Add `parsing: .unconditional` to every numeric `@Option`:
 
 ## Verification
 
-Per commit (offline, via XcodeBuildMCP on scheme `pomme`):
+Per commit (offline, via Xcode on scheme `pomme`):
 `-only-testing:PommeCLITests/<Suite>` for the suites named in each commit, then
 the full `PommeCLITests` target for the "Offline suite" line. Run
 `Tests/PommeIdentifierAudit.sh` after C3 and C12 (new identifiers).

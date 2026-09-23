@@ -16,7 +16,7 @@ fractional, string, and out-of-range completion codes.
 
 Validation:
 
-- XcodeBuildMCP: all 17 `PommeGuestJobWaitTests` and
+- Xcode: all 17 `PommeGuestJobWaitTests` and
   `PommeAgentProcessExchangeTests` passed.
 - `Scripts/build-local.sh`: signed Release build installed with the required
   Developer ID, team, identifier, Hardened Runtime, exact Virtualization

@@ -24,35 +24,16 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ $build -eq 1 ]]; then
-  rtk xcodebuildmcp macos build \
-    --project-path "$repo_root/pomme.xcodeproj" \
-    --scheme pomme \
-    --configuration Release \
-    --arch arm64 \
-    --output text
-  app_path_json="$(rtk xcodebuildmcp macos get-app-path \
-    --project-path "$repo_root/pomme.xcodeproj" \
-    --scheme pomme \
-    --configuration Release \
-    --arch arm64 \
-    --output json)"
-  runner="$(POMME_APP_PATH_JSON="$app_path_json" /usr/bin/python3 - <<'PY'
-import json
-import os
-
-value = json.loads(os.environ["POMME_APP_PATH_JSON"])
-# schemaVersion 2 nests the artifact under data.artifacts; older output carried
-# the path at the top level.
-sources = [value.get("data", {}).get("artifacts", {}), value]
-for source in sources:
-    path = source.get("appPath") or source.get("path") or source.get("executablePath")
-    if path:
-        print(path)
-        break
-else:
-    print("")
-PY
-)"
+  derived_data_path="$HOME/Library/Developer/Xcode/DerivedData/pomme-cli-contract"
+  rtk proxy xcodebuild \
+    -project "$repo_root/pomme.xcodeproj" \
+    -scheme pomme \
+    -configuration Release \
+    -destination 'generic/platform=macOS' \
+    -arch arm64 \
+    -derivedDataPath "$derived_data_path" \
+    build
+  runner="$derived_data_path/Build/Products/Release/pomme"
 fi
 
 [[ -n "$runner" && -x "$runner" ]] || {

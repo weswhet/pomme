@@ -23,9 +23,36 @@ trap cleanup EXIT
 
 mkdir -p "$mock_bin"
 
-cat > "$mock_bin/xcodebuildmcp" <<'MOCK'
+cat > "$mock_bin/xcrun" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ $# == 2 && "$1" == --find && "$2" == xcodebuild ]] || exit 2
+[[ "${MOCK_XCODE_DISCOVERY_FAILURE:-0}" != 1 ]] || exit 1
+printf '%s/xcodebuild\n' "${BASH_SOURCE[0]%/*}"
+MOCK
+
+cat > "$mock_bin/xcodebuild" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+
+has() { local wanted="$1" arg; shift; for arg in "$@"; do [[ "$arg" == "$wanted" ]] && return 0; done; return 1; }
+pair() { local key="$1" value="$2"; shift 2; while [[ $# -ge 2 ]]; do [[ "$1" == "$key" && "$2" == "$value" ]] && return 0; shift; done; return 1; }
+for required in build 'CODE_SIGN_IDENTITY=Developer ID Application: Wesley Whetstone (2D8XQ77EBQ)' \
+  'DEVELOPMENT_TEAM=2D8XQ77EBQ' 'CODE_SIGN_STYLE=Manual' 'CODE_SIGNING_ALLOWED=YES' \
+  'CODE_SIGNING_REQUIRED=YES' 'CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO' \
+  'ENABLE_HARDENED_RUNTIME=YES' \
+  'OTHER_CODE_SIGN_FLAGS=--identifier com.github.weswhet.pomme --timestamp'; do
+  has "$required" "$@" || { echo "missing native build argument: $required" >&2; exit 2; }
+done
+pair -project "$MOCK_REPO_ROOT/pomme.xcodeproj" "$@" &&
+  pair -scheme pomme "$@" && pair -configuration Release "$@" &&
+  pair -arch arm64 "$@" && pair -sdk macosx "$@" || exit 2
+commit_found=0
+for arg in "$@"; do
+  [[ "$arg" != CODE_SIGN_ENTITLEMENTS=* ]] || exit 2
+  if [[ "$arg" == POMME_GIT_COMMIT=?* ]]; then commit_found=1; fi
+done
+[[ "$commit_found" == 1 ]] || exit 2
 
 if [[ "${MOCK_BUILD_FAILURE:-0}" == 1 ]]; then
   echo 'mock build failure' >&2
@@ -34,7 +61,7 @@ fi
 
 derived=''
 while [[ $# -gt 0 ]]; do
-  if [[ "$1" == --derived-data-path ]]; then
+  if [[ "$1" == -derivedDataPath ]]; then
     [[ $# -ge 2 ]] || exit 2
     derived="$2"
     shift 2
@@ -42,7 +69,7 @@ while [[ $# -gt 0 ]]; do
     shift
   fi
 done
-[[ -n "$derived" ]] || { echo 'mock build did not receive --derived-data-path' >&2; exit 2; }
+[[ -n "$derived" ]] || { echo 'mock build did not receive -derivedDataPath' >&2; exit 2; }
 runner="$derived/Build/Products/Release/pomme"
 mkdir -p "${runner%/*}"
 printf '%s' "${MOCK_PRODUCT_CONTENT:-built}" > "$runner"
@@ -100,8 +127,9 @@ if has --requirements "$@"; then
 fi
 MOCK
 
-chmod 0755 "$mock_bin/xcodebuildmcp" "$mock_bin/codesign"
+chmod 0755 "$mock_bin/xcrun" "$mock_bin/xcodebuild" "$mock_bin/codesign"
 export PATH="$mock_bin:$old_path"
+export MOCK_REPO_ROOT="$repo_root"
 export MOCK_DERIVED_DATA_PATH="$derived"
 
 checks=0
@@ -131,7 +159,7 @@ expect_success 'help succeeds' bash "$script" --help
 expect_failure 'invalid flag fails' bash "$script" --not-a-real-option
 
 export MOCK_PRODUCT_CONTENT=first
-unset MOCK_BUILD_FAILURE MOCK_CODESIGN_VERIFY_FAILURE MOCK_NEW_REQUIREMENT
+unset MOCK_BUILD_FAILURE MOCK_CODESIGN_VERIFY_FAILURE MOCK_NEW_REQUIREMENT MOCK_XCODE_DISCOVERY_FAILURE
 expect_success 'explicit paths install a signed build' bash "$script" --derived-data-path "$derived" --install-dir "$install_dir"
 assert_bytes 'initial install has first build' "$destination" first
 first_digest="$(rtk proxy sh -c 'printf %s "$1" | shasum -a 256 | awk "{print \$1}"' sh first)"
@@ -145,6 +173,10 @@ fi
 export MOCK_PRODUCT_CONTENT=second
 expect_success 'compatible build replaces the installed CLI' bash "$script" --derived-data-path "$derived" --install-dir "$install_dir"
 assert_bytes 'replacement has second build' "$destination" second
+export MOCK_XCODE_DISCOVERY_FAILURE=1
+expect_failure 'missing native Xcode tool is reported' bash "$script" --derived-data-path "$derived" --install-dir "$install_dir"
+unset MOCK_XCODE_DISCOVERY_FAILURE
+assert_bytes 'Xcode discovery failure preserves installed bytes' "$destination" second
 second_digest="$(rtk proxy sh -c 'printf %s "$1" | shasum -a 256 | awk "{print \$1}"' sh second)"
 second_artifact="$work/app-support/AgentArtifacts/sha256/$second_digest/pomme-agent"
 if [[ -f "$second_artifact" && ! -L "$second_artifact" ]]; then

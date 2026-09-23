@@ -63,7 +63,7 @@ Each commit: focused suites + full `PommeCLITests` green, prose body ending
 
 - `Config/pomme-Info.plist` (new, checked in): `CFBundleIdentifier com.github.weswhet.pomme` (must equal the signing identifier so the designated requirement is unchanged), `CFBundleName pomme`, `CFBundleShortVersionString $(MARKETING_VERSION)`, `CFBundleVersion $(CURRENT_PROJECT_VERSION)`, `PommeGitCommit $(POMME_GIT_COMMIT)`.
 - `pomme.xcodeproj/project.pbxproj` tool target (Debug `:223`, Release `:244`, where `GENERATE_INFOPLIST_FILE = NO` lives): add `INFOPLIST_FILE = Config/pomme-Info.plist` and `CREATE_INFOPLIST_SECTION_IN_BINARY = YES`. Not in `Shared.xcconfig` (the test bundle generates its own plist). `Config/Shared.xcconfig`: `POMME_GIT_COMMIT = unknown`.
-- `Scripts/build-local.sh`: add `POMME_GIT_COMMIT=$(git describe --always --dirty 2>/dev/null || echo unknown)` to the existing `--extra-args` build settings. `Makefile`/`build-release-pkg.sh` keep deriving the pkg version from the xcconfig (unchanged).
+- `Scripts/build-local.sh`: add `POMME_GIT_COMMIT=$(git describe --always --dirty 2>/dev/null || echo unknown)` to the native `xcodebuild` build settings. `Makefile`/`build-release-pkg.sh` keep deriving the pkg version from the xcconfig (unchanged).
 - `Sources/PommeCLI/Support/PommeBuildInfo.swift` (new): `init(dictionary:)` reading `CFBundleShortVersionString` and `PommeGitCommit` (missing/empty/unexpanded `$(…)` → `unknown`), `static let current = PommeBuildInfo(dictionary: Bundle.main.infoDictionary ?? [:])`, `versionLine` = `pomme <version> (<commit>)`.
 - `PommeBootstrap`: before parsing, `if arguments == ["--version"] { print(PommeBuildInfo.current.versionLine); exit(0) }`. Add a `discussion:` to `PommeCLI`'s configuration mentioning `pomme --version`.
 - Delete the dead `PommeHelp`/`PommeHelpPage` blob (`RunnerError.swift:171-215`, hard-codes `pomme 0.1.0`, unreferenced).
@@ -171,7 +171,7 @@ Each commit: focused suites + full `PommeCLITests` green, prose body ending
 
 ## Verification
 
-Per commit: `xcodebuildmcp macos test` scheme `pomme` with the suites named
+Per commit: `rtk proxy xcodebuild test CODE_SIGNING_ALLOWED=NO -project pomme.xcodeproj -scheme pomme -destination 'platform=macOS'` with the suites named
 above, then the full `PommeCLITests` target for the "Offline suite" line;
 `Tests/PommeIdentifierAudit.sh` after L2, L13, L15.
 
