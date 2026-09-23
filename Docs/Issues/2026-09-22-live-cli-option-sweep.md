@@ -3128,6 +3128,12 @@ earlier native `defaults` status 1. The next first-owner experiment will keep
 the existing write/retry behavior and collect only bounded, redacted facts
 that distinguish preferences-service readiness, preferences-path metadata,
 identity/HOME context, and possible Setup Assistant overlap.
+After recording the result, public deletion removed only the stopped/no-helper
+first clone, whose failure had preceded SIP mutation. The exact pinned
+`c8e5233f…89b2c3` signed agent archive was checked first. Its VM disk is
+unrecoverable, but the pristine unprovisioned template and evidence remain.
+Inventory confirms 12 stopped/internal VMs, clone name absent, and 21 GiB
+free for the next copy-on-write clone.
 
 ### macOS 27 pause/resume/restart repetition
 
