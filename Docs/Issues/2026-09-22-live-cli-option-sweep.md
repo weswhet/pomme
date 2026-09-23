@@ -3566,6 +3566,46 @@ shows twelve VMs, all stopped, none with a helper, and no clone-e entry;
 internal free space rose from 13 to 19 GiB. Its VM disk is not recoverable
 through Pomme. No external-drive VM or other retained VM was touched.
 
+A fresh `pomme-agent-ownerloop-clone26-20260922f` was then cloned from the
+same internal unprovisioned 26.6.2/25G83 template after a successful dry run,
+with explicit 40 GB disk, 4 GB memory, and `--boot none`. Creation passed
+Recovery Terminal marker proof on attempt one and finished stopped/no helper.
+Its UUID is `018d9e81-3f83-45af-ae46-d40d1025fe11`, immutable plan digest
+`c31a89c3fdf9e29701a4f45a69856e4241224921262a89cc0bf4b3293dc4812d`,
+and pinned signed agent digest `85083e56…f658b75`. An exact-tag-only follower
+of this VM's helper log started before the first-owner operation; no guest
+probe, account edit, or other VM run intervened.
+
+First-owner SIP disable began at 07:20:07Z. Owner creation, native OFF, and
+autologin setter readback passed. The first build-preference write failed at
+07:21:32Z with status 1 and generic `defaults` stderr; the post-failure target
+read found the build key missing. The existing single guarded reboot then
+passed both preference writes and Setup Assistant completion by 07:22:47Z.
+Normal-desktop verification began at 07:23:05Z. At 07:23:46Z an Aqua probe
+reached its foreground deadline: the new helper marker was
+`boundary=checkpoint elapsedMs=15292 jobEstablished=true pollCount=55
+errorKind=foregroundDeadline`; the public timeout receipt recorded
+`exited=false`, `outputComplete=false`, and `terminationRequested=true`.
+At 07:23:57Z the next console probe failed with public cause
+`agentOtherTimeout`. Its helper marker was
+`boundary=start elapsedMs=5001 jobEstablished=false pollCount=0
+errorKind=agentTimeout`. This identifies a five-second `process.start`
+exchange that did not return a usable job ID, not proof that the guest never
+started a process or whether host write, guest handling, guest response write,
+or host read stalled. No raw command, output, error, identity, or credential
+was captured in these new markers.
+
+The command exited 1, retained `sipDisable/autologinIntent/previous`, and
+restored the VM stopped/no helper before any SIP mutation. A separate public
+`sip status` passed authenticated Recovery Terminal marker proof on attempt
+two, reported verified `sipEnabled=true` and `sipDisabled=false` with complete
+cleanup and final-state verification, and again left the VM stopped/no helper.
+Public inventory shows thirteen internal VMs, all stopped, no helpers. Clone-f
+is retained as a failing fixture; its journal and agent pin were not changed.
+The transport root cause remains open. The next diagnostic should discriminate
+request write, guest start handling/response, and host response receipt while
+preserving fail-closed, no-replay semantics.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
