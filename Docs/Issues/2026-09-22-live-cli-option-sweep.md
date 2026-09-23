@@ -3488,6 +3488,16 @@ unresolved. The repeatedly failing Aqua/console/ps normal-agent transport
 is now the stronger functional blocker to completing first-owner security
 workflows and remains a separate open issue.
 
+An independent normal start of the same retained-journal clone then connected
+the exact creation-pinned agent. Three sequential public `ps` process-list
+executions completed in about 0.09–0.15 seconds each, with exit
+zero, complete untruncated output, and no timeout. A graceful public stop
+returned `stopMethod=guest-stopped`. This weakens a persistent broken agent
+or `ps` command explanation for the desktop failure; it does not reproduce
+the owner proof's timing or prove that the earlier `agentOtherTimeout` was
+spurious. The retained security journal was not edited, and SIP remains
+independently verified enabled.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
