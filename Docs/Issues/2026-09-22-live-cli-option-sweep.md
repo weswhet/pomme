@@ -3910,6 +3910,41 @@ from 13 to 19 GiB. The clone's VM disk is not recoverable through Pomme. No
 external-drive or unrelated VM was touched. The status-handler stall is now
 the primary target for code-path analysis; no production fix is claimed.
 
+### Actor-side status diagnostic candidate
+
+Read-only code review refined the clone-i interpretation: the existing
+`guestStatusHandlerEntered` marker precedes `await
+agent.performAsynchronously`, so its missing return cannot prove that the
+`PommeAgent` actor admitted the status request. The actor's ordinary status
+path calls `waitid` with `WNOHANG|WNOWAIT`, zero-timeout descriptor polls,
+and `waitpid` with `WNOHANG`; no normal lock inversion was found. An actor
+backlog, unusual syscall stall, repeated `EINTR`, or missing persisted logs
+remain possible. A diagnostic-only actor-internal trace is proposed at actor
+admission, status entry, refresh-status/syscall boundaries, and status-result
+return. It must emit only fixed labels and local elapsed time for persistent
+normal `process.status`, with no identity or payload, and leave process,
+security, deadline, and retry behavior unchanged.
+
+The focused process-exchange suite passed 21 test functions / 51 executions,
+zero failures or skips; bundle
+`test_macos_2026-09-23T08-50-52-581Z_pid95794_f55a30f8.xcresult`.
+Coverage includes repeated authenticated PTY status requests through the
+real daemon, ordered actor/syscall boundaries, Recovery and other-operation
+exclusion, and `errno` preservation across trace emission. Existing desktop
+and serve-loop exchange tests also passed. `git diff --check` passed. This
+remains diagnostic-only. The first isolated full-suite run had one unrelated
+`PommeMDMPrivateHelperTests.sharedFileLease` failure (`.leaseBusy` after
+release), with 1,221 other tests passing; bundle
+`test_macos_2026-09-23T08-54-34-558Z_pid96669_17922c25.xcresult`.
+That six-test MDM suite passed in isolation without source changes; bundle
+`test_macos_2026-09-23T08-56-29-222Z_pid97142_65887b94.xcresult`.
+A fresh isolated full-suite rerun then passed 1,222 test functions / 1,840
+executions, zero failures or skips; bundle
+`test_macos_2026-09-23T08-56-48-186Z_pid97257_a136d6e2.xcresult`.
+The one-off lease failure is not represented as fixed. The actor candidate is
+qualified for a source/test/evidence commit before the canonical signed
+Release build and live comparison.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns

@@ -1,6 +1,32 @@
 import Darwin
 import Dispatch
 import Foundation
+import OSLog
+
+/// Closed events timed locally to one actor-admitted status request.
+struct PommeAgentStatusTrace: Sendable {
+    enum Event: String, CaseIterable, Sendable {
+        case actorAdmitted, statusEntered, refreshEntered, refreshReturned
+        case statusResultEntered, statusResultReturned
+        case waitidEntered, waitidReturned, outputWritersClosedEntered, outputWritersClosedReturned
+        case waitpidEntered, waitpidReturned
+    }
+    typealias Sink = @Sendable (Event, Double) -> Void
+    private static let logger = Logger(subsystem: "com.github.weswhet.pomme", category: "actor-status-boundary")
+    private let started = ContinuousClock.now
+    let sink: Sink
+
+    func emit(_ event: Event) {
+        let savedErrno = errno
+        defer { errno = savedErrno }
+        let elapsed = started.duration(to: .now).components
+        sink(event, Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15)
+    }
+
+    static func guestLog(_ event: Event, _ elapsed: Double) {
+        logger.notice("[DEBUG-actor-status-boundary-20260923] \(event.rawValue, privacy: .public) elapsedMs=\(elapsed, privacy: .public)")
+    }
+}
 
 enum PommeAgentRole: String, Sendable { case persistent, recovery }
 enum PommeAgentAuthority: Sendable { case standard, recoveryTerminal }
@@ -123,6 +149,7 @@ actor PommeAgent {
     private let recoverySecurity: PommeGuestRecoverySecurityOperations
     private let ownerCredential: PommeGuestOwnerCredentialReader
     private let terminalService: PommeTerminalService
+    private let statusTraceSink: PommeAgentStatusTrace.Sink
 
     init(role: PommeAgentRole, executableSHA256: String, journalPath: String = PommeAgentInstall.journal,
          executablePath: String = PommeAgentInstall.executable,
@@ -132,7 +159,8 @@ actor PommeAgent {
          recoverySecurity: PommeGuestRecoverySecurityOperations = .init(),
          ownerCredential: PommeGuestOwnerCredentialReader = .init(),
          recoveredJournal: PommeAgentUpdateJournal? = nil,
-         authority: PommeAgentAuthority = .standard) throws {
+         authority: PommeAgentAuthority = .standard,
+         statusTraceSink: @escaping PommeAgentStatusTrace.Sink = PommeAgentStatusTrace.guestLog) throws {
         guard executableSHA256.count == 64, executableSHA256.allSatisfy(\.isHexDigit) else {
             throw PommeAgentProtocol.Error.invalidRequest
         }
@@ -140,6 +168,7 @@ actor PommeAgent {
         self.recoveryInstaller = role == .recovery ? (recoveryInstaller ?? PommeAgentRecoveryInstaller()) : nil
         self.recoverySecurity = recoverySecurity
         self.ownerCredential = ownerCredential
+        self.statusTraceSink = statusTraceSink
         let terminalSpoolRoot = URL(fileURLWithPath: journalPath)
             .deletingLastPathComponent()
             .appendingPathComponent("terminal-spool", isDirectory: true)
@@ -162,7 +191,7 @@ actor PommeAgent {
         for job in jobs.values { [job.ptyMaster, job.stdin, job.stdout, job.stderr].compactMap { $0 }.forEach { _ = Darwin.close($0) } }
     }
 
-    func perform(_ request: PommeAgentProtocol.Envelope) throws -> JSONValue {
+    func perform(_ request: PommeAgentProtocol.Envelope, statusTrace: PommeAgentStatusTrace? = nil) throws -> JSONValue {
         if authority == .recoveryTerminal {
             guard role == .recovery else { throw PommeAgentOperationError.invalid }
             switch request.operation {
@@ -253,7 +282,7 @@ actor PommeAgent {
             guard role == .persistent else { throw PommeAgentOperationError.invalid }
             return try ownerCredential.read(payload: request.payload)
         case "process.start": return try start(request.payload)
-        case "process.status": return try status(request.payload)
+        case "process.status": return try status(request.payload, trace: statusTrace)
         case "process.signal": return try signal(request.payload)
         case "process.list": return try list(request.payload)
         case "process.output": return try output(request.payload)
@@ -283,6 +312,9 @@ actor PommeAgent {
     /// uses this entry point so ordinary synchronous in-process operation
     /// seams remain usable for file and process tests.
     func performAsynchronously(_ request: PommeAgentProtocol.Envelope) async throws -> JSONValue {
+        let statusTrace = role == .persistent && authority == .standard && request.operation == "process.status"
+            ? PommeAgentStatusTrace(sink: statusTraceSink) : nil
+        statusTrace?.emit(.actorAdmitted)
         if authority == .recoveryTerminal {
             guard request.operation == "agent.describe"
                     || request.operation == "agent.health"
@@ -301,7 +333,7 @@ actor PommeAgent {
             guard !activationPending else { throw PommeAgentOperationError.activationPending }
             return try await wait(request.payload)
         }
-        return try perform(request)
+        return try perform(request, statusTrace: statusTrace)
     }
 
     private func start(_ payload: JSONValue) throws -> JSONValue {
@@ -333,10 +365,16 @@ actor PommeAgent {
         return .object(result)
     }
 
-    private func status(_ payload: JSONValue) throws -> JSONValue {
+    private func status(_ payload: JSONValue, trace: PommeAgentStatusTrace? = nil) throws -> JSONValue {
+        trace?.emit(.statusEntered)
         let id = try jobID(payload)
-        let job = try refreshStatus(for: id)
-        return .object(statusResult(for: job, id: id))
+        trace?.emit(.refreshEntered)
+        let job = try refreshStatus(for: id, trace: trace)
+        trace?.emit(.refreshReturned)
+        trace?.emit(.statusResultEntered)
+        let result = statusResult(for: job, id: id)
+        trace?.emit(.statusResultReturned)
+        return .object(result)
     }
 
     private func statusResult(for job: Job, id: UUID) -> [String: JSONValue] {
@@ -479,12 +517,16 @@ actor PommeAgent {
         return true
     }
 
-    private func refreshStatus(for id: UUID) throws -> Job {
+    private func refreshStatus(for id: UUID, trace: PommeAgentStatusTrace? = nil) throws -> Job {
         guard var job = jobs[id] else { throw PommeAgentOperationError.notFound }
         guard job.ownership == .owned else { return job }
         var info = siginfo_t()
         var observed: Int32
-        repeat { observed = waitid(P_PID, id_t(job.pid), &info, WEXITED | WNOHANG | WNOWAIT) }
+        repeat {
+            trace?.emit(.waitidEntered)
+            observed = waitid(P_PID, id_t(job.pid), &info, WEXITED | WNOHANG | WNOWAIT)
+            trace?.emit(.waitidReturned)
+        }
         while observed < 0 && errno == EINTR
         if observed < 0 {
             // ECHILD or any other non-interruption failure leaves ownership
@@ -505,13 +547,18 @@ actor PommeAgent {
         job.exited = true
         job.status = rawStatus
         jobs[id] = job
-        guard outputWritersClosed(job) else {
+        trace?.emit(.outputWritersClosedEntered)
+        let writersClosed = outputWritersClosed(job)
+        trace?.emit(.outputWritersClosedReturned)
+        guard writersClosed else {
             scheduleReapRetry(jobID: id, pid: job.pid)
             return job
         }
         while true {
             var value: Int32 = 0
+            trace?.emit(.waitpidEntered)
             let result = waitpid(job.pid, &value, WNOHANG)
+            trace?.emit(.waitpidReturned)
             if result == job.pid {
                 job.ownership = .reaped
                 job.status = value
