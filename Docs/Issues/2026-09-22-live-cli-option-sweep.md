@@ -3952,6 +3952,58 @@ finds `/Users/wes/.local/bin/pomme`; it reports `dde2cfc` with SHA-256
 `615101afcc28f10f71e186baf71bb3a30edbae1f17088fc291563edb10da3428`.
 All 104 CLI contract checks passed. Actor-side live evidence is pending.
 
+Fresh internal `pomme-agent-ownerloop-clone26-20260922j` passed the same
+40 GB / 4 GB template dry run and creation. Its UUID is
+`952ec4e8-a17c-4c07-97ec-9f38abaa7a40`, plan digest
+`bc4a29f9cdbfc8493d4d8834f8f1e848c9c38d58d503541d61f436fc29c3946d`,
+and pinned signed agent digest `615101af…da3428`. All twelve preexisting
+internal VMs were stopped/no helper. First-owner SIP disable began at
+09:02:51Z with a fixed-tag helper follower. The first owner build-preference
+write again returned status 1 and left the target key absent; its guarded
+reboot recovered, and owner completion and Setup Assistant passed.
+
+The first desktop proof failed differently from clone-i. Aqua and then `ps`
+each established a job, but each foreground check exceeded its 15-second
+checkpoint deadline with termination requested. The Aqua boundary was
+`jobEstablished=true pollCount=52` at 09:06:31Z; the `ps` boundary was
+`jobEstablished=true pollCount=352` at 09:06:56Z. All closed desktop-start
+exchanges shown around those checks received responses, including starts at
+09:06:33, 09:06:34, and 09:06:41Z. There was no console-start response-read
+timeout on this run. The command exited 1 with public
+`normal-agent-ps-timedOut`, restored stopped/no helper, and retained the
+pre-mutation `sipDisable/autologinIntent/previous` journal.
+
+A separate normal inspection boot connected the exact pinned agent. A
+complete, untruncated guest actor-status query for 02:06:54–02:06:59 local
+(09:06:54–09:06:59Z) returned 663 fixed events. Repeated status operations
+show `actorAdmitted`, `statusEntered`, `refreshEntered`, `waitidEntered`,
+`waitidReturned`, `refreshReturned`, `statusResultEntered`, and
+`statusResultReturned` in order; the final sampled operation returned its
+result within 0.096 ms of actor admission. This validates the marker path
+under live load but does not reproduce or explain clone-i's missing actor
+return. The first log query had a transient failed `pomme exec`; a repeated
+query completed successfully and untruncated. The inspection boot stopped
+gracefully.
+
+One matching public resume began at 09:09:29Z on the same retained
+operation/final state. Owner checks and desktop proof passed; authenticated
+Recovery disabled SIP and normal-boot enforcement verified the disabled
+configuration with a stopped final state. A separate explicit `sip enable
+--final-state previous` then completed successfully and verified enabled SIP
+after a normal boot, again stopping the VM. This success on resume does not
+close the intermittent foreground deadlines or clone-i actor/status stall.
+
+Independent public `sip status` then passed authenticated Recovery marker
+proof on attempt one and reported verified `sipEnabled=true`,
+`sipDisabled=false`, complete cleanup, and final-state verification. The
+clone was checked stopped/no helper with unchanged UUID and agent pin; its
+archived signed executable still matched the pinned SHA-256. It was deleted
+to reclaim internal space. Inventory returned to twelve VMs, all stopped/no
+helper, with no clone-j; available internal space rose from 12 to 18 GiB.
+Clone-j's VM disk is not recoverable through Pomme. No external-drive or
+unrelated VM was touched. The actor-side trace is live-validated as a
+diagnostic, but the specific actor/status stall did not recur in this run.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
