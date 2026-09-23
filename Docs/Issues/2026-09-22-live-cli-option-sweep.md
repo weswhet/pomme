@@ -4084,6 +4084,37 @@ SHA-256 `efff58552e2742867692ff40218168e4754c2a41a5080394ab88fccada71ece6`.
 All 104 CLI contract checks passed. The first-owner launchd-domain labels
 still require a fresh same-resource live comparison.
 
+Fresh internal `pomme-agent-ownerloop-clone26-20260922l` passed template
+dry run and creation from the same unprovisioned macOS 26.6.2/25G83 base,
+with explicit 40 GB disk / 4 GB memory, UUID
+`16e43781-3884-4ead-a7c7-2c61aaa71c51`, plan digest
+`48106d5048e82542e74414e16a1e42bcf3eef7d4406cd9984f71e83cb80fecee`,
+and creation-pinned signed agent digest `efff5855…cda71ece6`. All twelve
+preexisting VMs were stopped and internal. The first SIP-disable attempt
+began at 09:54:21Z but stopped at the native Setup Assistant Aqua proof,
+before reaching the preference write or any SIP mutation; restoration left
+the VM stopped/no helper and a matching operation/final-state resume path.
+
+The matching public resume began at 09:56:27Z. It reached owner completion;
+the prewrite user-domain probe returned `Reachable` and the GUI-domain probe
+returned `Nonzero`. The original build-preference write then succeeded,
+followed by MiniBuddy write and Setup Assistant completion. There were no
+post-status-1 labels. Because the first attempt had already changed owner
+and automatic-login state, this is not an independent reproduction of the
+fresh first-write failure. The observations also do not establish whether a
+GUI domain or `cfprefsd` caused earlier failures. The resumed run later hit
+the separately known Aqua foreground timeout and console agent transport
+timeout; it failed before Recovery/SIP mutation and restored stopped/no
+helper. No transport or preference fix is claimed.
+
+Independent public `sip status` passed authenticated Recovery marker proof
+and reported verified `sipEnabled=true`, `sipDisabled=false`, complete cleanup,
+and final-state verification. The clone was checked stopped/no helper with
+unchanged UUID, plan, resources, and agent pin; the archived signed executable
+matched its pinned SHA-256. The exact disposable clone was deleted. Its VM
+disk is not recoverable through Pomme; no external or unrelated VM was
+touched. A new clean clone is needed to test the status-1 preference path.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
