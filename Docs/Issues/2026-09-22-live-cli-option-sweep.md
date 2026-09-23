@@ -3651,6 +3651,15 @@ did not expose a production failure. The full XcodeBuildMCP suite passed
 `test_macos_2026-09-23T07-38-14-260Z_pid80612_51dbdf74.xcresult`.
 The candidate still needs a signed Release build and fresh internal live test.
 
+Candidate `ad11333` was committed before the canonical signed Release build.
+Developer ID identity/team, fixed identifier, Hardened Runtime, exact
+entitlements, designated-requirement compatibility, prior pinned-agent
+preservation, and atomic installation checks passed. A fresh login shell
+resolves `/Users/wes/.local/bin/pomme`; it reports `ad11333` and SHA-256
+`f0bd7a929a8b8507d146de77369d76921c22f1c6ea8c9b5256e94b1d17a5fd48`.
+All 104 CLI contract checks passed. This is still diagnostic-only; live
+first-owner reproduction is the next validation step.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
