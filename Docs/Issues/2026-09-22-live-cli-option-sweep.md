@@ -3077,6 +3077,58 @@ exact experimental identity; the intermittent Aqua/process-list transport
 failures and first owner preference-write status 1 are still separate open
 issues.
 
+### Faster first-owner failure feedback loop
+
+To investigate the still-unexplained first owner build-preference write, the
+completed, SIP-restored, stopped/no-helper
+`pomme-agent-desktopcause26-20260922a` was deleted after verifying its
+`sipEnable/restorationComplete/previous` journal and exact archived signed
+agent digest `a9ec6ce0…039dd`. Its VM disk is unrecoverable; the recorded
+evidence and signed agent archive remain. The public inventory then held 12
+stopped/internal VMs and internal free space rose from 14 to 42 GiB.
+
+An **unprovisioned** local macOS 26.6.2/25G83 template,
+`pomme-agent-ownerloop-base26-20260922a`, was restored from the same signed
+internal IPSW with explicit 40 GB disk and 4 GB restore memory. It completed
+at 04:45:25Z. Public template inventory confirms `provisioned=false`, no
+owner account, `securityDisabled=false`, exact build 25G83, and the internal
+bundle. Free space was 21 GiB afterward. The first 40 GB / 4 GB clone dry
+run admitted stopped final state and the same experimental Recovery profile.
+
+`pomme-agent-ownerloop-clone26-20260922a` cloned at 04:46:01Z and completed
+the normal creation bootstrap by about 04:48Z, with UUID
+`40f97587-c023-4ada-9dce-66bdf2438c1d`, plan
+`eafa072ce8358220bb81c4ce6ef3cf058e42d3d5697cae159446e0e37f845d33`,
+and creation-pinned agent `c8e5233f…89b2c3`. Public status was stopped/no
+helper, and no security journal existed before the first owner workflow.
+The clone's Recovery bootstrap used the retained five-input language path,
+passed Terminal marker proof on attempt two, and did not change SIP or AMFI.
+
+First `sip disable --force --final-state previous` began at 04:48:47Z. It
+found native autologin OFF, created and verified the owner, then proved the
+setter's expected native owner, matching global preference, and valid
+artifact. At 04:50:13–14Z the first build-preference write entered and
+returned status 1 with `defaults`-shaped stderr; the bounded post-failure
+home probe found the expected-owner directory. The guarded single reboot
+then found stock Setup Assistant ownership, re-verified the owner, and both
+preference writes plus Setup Assistant completion passed by 04:51:24Z. This
+is the same precise first-attempt failure/reboot-success pattern seen on
+fresh IPSW-created VMs, so an unprovisioned template clone is a live-qualified
+faster feedback fixture. It remains a minutes-scale integration loop, not an
+offline deterministic unit reproduction; unit fixtures inject the failure.
+
+The clone's later console proof separately timed out at 04:52:30Z and then
+reported `normal-agent-console-transport` at 04:52:38Z. The closed diagnostic
+classified its helper failure as `stage=console, kind=agentOtherTimeout`.
+The SIP command failed before Recovery mutation and restored stopped/no
+helper state. The retained journal is `sipDisable/autologinIntent/previous`,
+original stopped, `normalBootVerified=false`; no SIP-enable operation was
+run. This transport cause is useful evidence but does not explain the
+earlier native `defaults` status 1. The next first-owner experiment will keep
+the existing write/retry behavior and collect only bounded, redacted facts
+that distinguish preferences-service readiness, preferences-path metadata,
+identity/HOME context, and possible Setup Assistant overlap.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
