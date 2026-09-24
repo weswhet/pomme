@@ -4813,6 +4813,16 @@ preservation rule and exact names are in `AGENTS.md`. Final ordinary VM
 inventory contains only the two deletion-blocked, stopped/no-helper VMs;
 the internal volume has 254 GiB available after the macOS 27 restore.
 
+At the user's explicit follow-up request, the two exact VM bundle directories
+above were then removed from the filesystem after reconfirming their public
+stopped/no-helper state, exact internal-drive paths, directory ownership, and
+separation from the protected Templates root. Both paths are absent and public
+`pomme list` is empty; both unprovisioned base templates remain intact. The
+internal volume now has 309 GiB available. This direct path removal bypassed
+Pomme's failed Keychain credential cleanup: no Keychain item, ACL, or permission
+was changed, and orphaned VM credentials may remain. The deleted VM disks are
+unrecoverable through Pomme. The underlying public-delete failure remains open.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
