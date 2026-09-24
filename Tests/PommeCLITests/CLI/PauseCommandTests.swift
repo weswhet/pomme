@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @Suite("Pause lifecycle command")
@@ -104,6 +105,92 @@ struct PauseCommandTests {
 
         #expect(text == "OK stopped (forced; the guest did not shut itself down)\nOK boot mode=normal")
         #expect(text.split(separator: "\n").last.map(String.init) == "OK boot mode=normal")
+    }
+
+    @Test("Restart payload reports each stop method and keeps ordered phase payloads", arguments: [
+        VMStopOutcome.guestStopped.rawValue,
+        VMStopOutcome.forced.rawValue,
+        VMStopOutcome.alreadyStopped.rawValue
+    ])
+    func restartPayloadCopiesStopMethod(_ stopMethod: String) throws {
+        let status: [String: Any] = ["phase": "status", "vmState": "running"]
+        let stop: [String: Any] = ["phase": "stop", "stopMethod": stopMethod, "stopMarker": "from-stop"]
+        let boot: [String: Any] = [
+            "phase": "boot",
+            "bootMarker": "from-boot",
+            "stopMethod": "boot-conflict",
+            "operation": "boot",
+            "preservedMode": false,
+            "ok": true
+        ]
+
+        let payload = PommeApplication.restartPayload(
+            status: status,
+            stop: stop,
+            boot: boot,
+            preservedMode: true
+        )
+
+        #expect(payload["operation"] as? String == "restart")
+        #expect(payload["preservedMode"] as? Bool == true)
+        #expect(payload["stopMethod"] as? String == stopMethod)
+        #expect(payload["bootMarker"] as? String == "from-boot")
+        #expect(payload["phase"] as? String == "boot")
+
+        let steps = try #require(payload["steps"] as? [[String: Any]])
+        #expect(steps.count == 3)
+        #expect(steps[0]["phase"] as? String == "status")
+        #expect(steps[1]["phase"] as? String == "stop")
+        #expect(steps[1]["stopMarker"] as? String == "from-stop")
+        #expect(steps[1]["stopMethod"] as? String == stopMethod)
+        #expect(steps[2]["phase"] as? String == "boot")
+        #expect(steps[2]["stopMethod"] as? String == "boot-conflict")
+    }
+
+    @Test("Restart payload uses JSON null when the stop method is unavailable")
+    func restartPayloadUsesNullForMissingStopMethod() throws {
+        let stop: [String: Any] = ["phase": "stop", "changed": false]
+        let payload = PommeApplication.restartPayload(
+            status: ["phase": "status"],
+            stop: stop,
+            boot: ["phase": "boot", "stopMethod": "boot-conflict"],
+            preservedMode: false
+        )
+
+        #expect(payload["stopMethod"] is NSNull)
+        let steps = try #require(payload["steps"] as? [[String: Any]])
+        #expect(steps[1]["stopMethod"] == nil)
+        let serialized = try JSONSerialization.data(withJSONObject: payload)
+        #expect(!serialized.isEmpty)
+    }
+
+    @Test("A stopped synthetic bundle produces a complete no-op stop result")
+    func alreadyStoppedSyntheticBundle() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pomme-already-stopped-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bundle = BundleLayout(rootURL: root.appendingPathComponent("synthetic.bundle", isDirectory: true))
+        try FileManager.default.createDirectory(at: bundle.rootURL, withIntermediateDirectories: true)
+        let reference = VMReference(name: "synthetic-stopped", bundle: bundle)
+        let status = try PommeCore.vmStatusPayload(reference: reference)
+
+        #expect(status["helperRunning"] as? Bool == false)
+        #expect(status["vmState"] as? String == "stopped")
+
+        let result = PommeApplication.alreadyStoppedStopResult(
+            reference: reference,
+            statusPayload: status,
+            force: false
+        )
+
+        #expect(result.ok)
+        #expect(result.hostExitCode == 0)
+        #expect(result.text == "VM is already stopped.")
+        #expect(result.payload["operation"] as? String == "stop")
+        #expect(result.payload["stopMethod"] as? String == VMStopOutcome.alreadyStopped.rawValue)
+        #expect(result.payload["changed"] as? Bool == false)
+        #expect(result.payload["guestShutdownRequested"] as? Bool == false)
+        #expect(result.payload["forceRequested"] as? Bool == false)
     }
 
     @Test("Only a guest that was asked to shut down gets the longer window")

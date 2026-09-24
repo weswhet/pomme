@@ -54,6 +54,15 @@ command group per line. Neither command needs a VM.
 a paused VM so it can, and waits before powering the VM off; if it has to power
 off, it says so. `stop --force` powers the VM off immediately.
 
+For unattended deletion, `delete --force` (or `rm --force`) skips confirmation
+and stops a running VM before deleting it. It uses the normal shutdown sequence
+described above and verifies that the helper exits before deletion. If stopping
+or helper exit cannot be confirmed, the VM bundle is retained:
+
+```sh
+pomme delete NAME --force
+```
+
 Create is a durable provisioning workflow, not only an installation command:
 
 ```sh

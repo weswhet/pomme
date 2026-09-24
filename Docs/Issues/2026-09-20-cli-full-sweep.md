@@ -143,6 +143,22 @@ carries a full status payload rather than the stop decision. Since `restart`
 performs a stop, the same disclosure would tell an operator whether their guest
 was asked to shut down or power-cut.
 
+**Resolved 2026-09-23.** Restart JSON and JSONL now copy the stop result's
+`stopMethod` to the top level: `guest-stopped`, `forced`, `already-stopped`, or
+`null` when the stop result lacks the field. The original stop payload remains
+in `steps[1]`; final boot fields, step order, and text output are preserved.
+The no-helper stop path explicitly reports `already-stopped`, `changed=false`,
+and `guestShutdownRequested=false`.
+
+The signed Release build and install passed; `/Users/wes/.local/bin/pomme`
+reported `1e292a5-dirty`. Focused native `PauseCommandTests` and
+`CommandSupportTests` passed, covering all three methods, a missing method,
+conflicting boot data, and JSON/JSONL output. Live disposable macOS 26.6.2
+(25G83) and macOS 27.0 (26A428) clones, each with 4 GB memory and a 40 GB disk,
+reported `guest-stopped` both at the top level and in `steps[1]` for JSON and
+JSONL restarts. Forced and already-stopped restart outcomes were covered by
+unit tests, not these live runs.
+
 ### 8. `delete --force` does not cover a running VM — Low
 
 ```
@@ -155,6 +171,42 @@ the command usable unattended without a separate `stop`. Either `--force`
 should stop the VM first, or the message should say that `--force` covers the
 prompt and not the run state. The refusal itself is safe behavior; only the
 flag's reach is unclear.
+
+**Initial resolution 2026-09-23.** Both `delete --help` and `rm --help` stated that
+`--force` skipped confirmation and required a stopped VM. The running-helper
+refusal retained exit 1, named `pomme stop NAME` as the next step, and explained
+that `--force` only skipped confirmation. The README documented the scripting
+sequence `pomme stop NAME` followed by `pomme delete NAME --force`; deletion
+did not automatically stop a VM or change credential cleanup.
+
+All 116 CLI integration checks passed with the signed installed runner above,
+including help, refusal with preserved fixture files, and stopped deletion.
+Live macOS 26 and 27 clones at the same 4 GB / 40 GB settings refused both
+`delete --force` and `rm --force` while their helpers were running, then deleted
+successfully after a normal stop. On macOS 27, a controlled repeat confirmed
+the matching live runtime PID before each refusal. An earlier macOS 27 attempt
+observed running status followed by successful deletion without checking the
+PID immediately before deletion; this remains an unproven race observation,
+not a confirmed guard regression. The disposable clones were deleted, and both
+protected source templates remained unchanged and unprovisioned.
+
+**Behavior updated later on 2026-09-23.** At the user's request,
+`delete --force` and its `rm --force` alias now skip confirmation and stop a
+running VM before deleting it. They use the normal stop path, including
+`shutdown -h now` when the persistent guest agent is available and the bounded
+fallback described in `Docs/Protocols.md`. A stop failure preserves the VM
+bundle. Deletion without `--force` still requires a stopped VM. The preceding
+validation results describe the initial resolution, before this behavior change.
+
+Final verification passed with the signed Release build and install from
+`Scripts/build-local.sh`; `/Users/wes/.local/bin/pomme` reported
+`1e292a5-dirty`. The focused `VMDestroySafetyTests` passed, along with all 114
+CLI integration checks. Live `delete --force` checks on running disposable
+macOS 26 and 27 clones, each with 4 GB memory and a 40 GB disk, exited 0,
+reported `stopMethod: guest-stopped` and `guestShutdownRequested: true`, and
+removed the VM bundle. The commands took 8.31 seconds on macOS 26 and 14.62
+seconds on macOS 27. Both protected templates remained unchanged and
+unprovisioned, and no VMs remained after verification.
 
 ### 9. `sip disable` cannot complete — two attempts, two different stages — High
 

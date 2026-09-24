@@ -502,7 +502,10 @@ struct DeleteCommand: ParsableCommand {
     @Argument(help: "VM names. Uses POMME_VM_NAME when omitted.")
     var names: [String] = []
 
-    @Flag(name: .customLong("force"), help: "Delete without prompting.")
+    @Flag(
+        name: .customLong("force"),
+        help: "Stop running VMs and delete without prompting. May power off if shutdown times out."
+    )
     var force = false
 
     @OptionGroup var output: GlobalOptions
@@ -510,7 +513,7 @@ struct DeleteCommand: ParsableCommand {
     mutating func run() throws {
         let targets = try VMTargetResolver.names(from: names)
         try CLIConfirmation.confirmDeletion(of: targets, force: force)
-        let results = try targets.map(PommeEnvironment.live().lifecycle.destroy)
+        let results = try targets.map { try PommeEnvironment.live().lifecycle.destroy($0, force) }
         try CLIOutputWriter.write(results, options: output)
     }
 }
