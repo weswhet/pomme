@@ -8,6 +8,32 @@ requires it and explain why. Keep an active before/after comparison at the same
 resource settings across all measured runs. A 25GB disk failed Tahoe installation
 in the September 6, 2026 lab; do not reuse that size for Tahoe install tests.
 
+## Protected base-OS templates
+
+Keep these two unprovisioned, internal-drive templates as permanent test bases:
+
+| macOS | Pomme template name | Version/build | Disk |
+| --- | --- | --- | --- |
+| 26 | `pomme-agent-ownerloop-base26-20260922a` | 26.6.2 / 25G83 | 40 GB |
+| 27 | `pomme-agent-base27-20260923a` | 27.0 / 26A428 | 40 GB |
+
+They are restored base OS images only: no owner account, Pomme guest agent,
+Keychain credential, security override, or provisioning journal. They are inert
+template bundles after installation, not running VMs; there is no additional
+shutdown step. Verify them with `rtk pomme template list --format json`, not
+`pomme list`. Never delete, replace, provision, or use either template as a live
+test target, including for disk-space cleanup. Do not run
+`pomme template delete` on them unless the user explicitly revokes this
+preservation rule.
+
+For disposable tests, create a separate VM clone with
+`pomme create VM --from-template NAME --memory 4GB --boot none`; the template
+supplies the 40 GB disk. The clone may install its own agent and be deleted
+when the test is complete, but the source template must remain unchanged. Do
+not add `--provisioned` to these templates:
+that would create an owner and change the security posture. Keep both templates
+and all future clones on the internal drive, not an external volume.
+
 ## Build and sign consistently
 
 Run commands from the Pomme repository root and prefix shell commands with `rtk`.
