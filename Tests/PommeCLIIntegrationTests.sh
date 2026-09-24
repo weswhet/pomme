@@ -42,7 +42,28 @@ fi
 }
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/pomme-cli-contract.XXXXXX")"
+delete_fixture_bundle=""
+delete_fixture_vm_store_dir=""
+delete_fixture_sentinel=""
+delete_fixture_runtime_dir=""
+delete_fixture_runtime_record=""
 cleanup() {
+  if [[ -n "$delete_fixture_runtime_record" ]]; then
+    rm -f -- "$delete_fixture_runtime_record"
+  fi
+  if [[ -n "$delete_fixture_sentinel" ]]; then
+    rm -f -- "$delete_fixture_sentinel"
+  fi
+  if [[ -n "$delete_fixture_bundle" ]]; then
+    if [[ -d "$delete_fixture_bundle" ]] && ! rmdir "$delete_fixture_bundle"; then
+      printf 'cleanup left non-empty delete fixture bundle: %s\n' "$delete_fixture_bundle" >&2
+    fi
+  fi
+  if [[ -n "$delete_fixture_vm_store_dir" ]]; then
+    if [[ -d "$delete_fixture_vm_store_dir" ]] && ! rmdir "$delete_fixture_vm_store_dir"; then
+      printf 'cleanup left non-empty delete fixture VM store: %s\n' "$delete_fixture_vm_store_dir" >&2
+    fi
+  fi
   local item
   while IFS= read -r item; do
     [[ -n "$item" ]] || continue
@@ -51,6 +72,10 @@ cleanup() {
   # Inventory reads create an empty app-support layout holding only lock files.
   if [[ -d "$work/app-support" ]]; then
     find "$work/app-support" -type f -name '*.lock' -delete
+    if [[ -n "$delete_fixture_runtime_dir" && -d "$delete_fixture_runtime_dir" ]] \
+      && ! rmdir "$delete_fixture_runtime_dir"; then
+      printf 'cleanup left non-empty delete fixture runtime directory: %s\n' "$delete_fixture_runtime_dir" >&2
+    fi
     find "$work/app-support" -depth -type d -empty -delete
   fi
   rmdir "$work"
@@ -91,6 +116,23 @@ expect_failure() {
     fail "$label"
   else
     pass "$label"
+  fi
+}
+
+expect_exit_1() {
+  local label="$1"
+  shift
+  local status
+  if "$@" >"$work/stdout" 2>"$work/stderr"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [[ $status -eq 1 ]]; then
+    pass "$label"
+  else
+    fail "$label (exit $status, expected 1)"
+    sed -n '1,80p' "$work/stderr" >&2
   fi
 }
 
@@ -345,6 +387,63 @@ if grep -q '^Usage: pomme delete' "$work/stderr" && grep -q -- '--force' "$work/
   pass "delete run-time validation names the delete usage"
 else
   fail "delete run-time validation names the delete usage"
+fi
+
+for delete_command in delete rm; do
+  expect_success "$delete_command help" "$runner" "$delete_command" --help
+  tr -s '[:space:]' ' ' <"$work/stdout" >"$work/delete-help-normalized"
+  if grep -Fq 'Stop running VMs and delete without prompting. May power off if shutdown times out.' "$work/delete-help-normalized"; then
+    pass "$delete_command help explains automatic stopping and skipped confirmation"
+  else
+    fail "$delete_command help explains automatic stopping and skipped confirmation"
+  fi
+done
+
+delete_fixture_name="pomme-delete-cli-$$"
+delete_fixture_vm_store_dir="$POMME_APP_SUPPORT_DIR/VMs"
+delete_fixture_bundle="$POMME_APP_SUPPORT_DIR/VMs/$delete_fixture_name.bundle"
+delete_fixture_sentinel="$delete_fixture_bundle/untouched-sentinel"
+delete_fixture_runtime_dir="$POMME_APP_SUPPORT_DIR/Runtime"
+delete_fixture_runtime_record="$delete_fixture_runtime_dir/issue8-$delete_fixture_name.json"
+mkdir -p -- "$delete_fixture_bundle" "$delete_fixture_runtime_dir"
+printf 'issue 8 deletion sentinel\n' >"$delete_fixture_sentinel"
+python3 - "$delete_fixture_name" "$delete_fixture_bundle" "$delete_fixture_runtime_record" "$$" <<'PY'
+import json, sys
+
+name, bundle, record, pid = sys.argv[1:]
+with open(record, 'w', encoding='utf-8') as destination:
+    json.dump({
+        'id': '00000000-0000-0000-0000-000000000008',
+        'name': name,
+        'bundlePath': bundle,
+        'socketPath': '/tmp/pomme-issue8-fixture.sock',
+        'pid': int(pid),
+        'startedAt': '2026-09-23T00:00:00Z',
+    }, destination, sort_keys=True)
+    destination.write('\n')
+PY
+cp -- "$delete_fixture_sentinel" "$work/delete-expected-sentinel"
+cp -- "$delete_fixture_runtime_record" "$work/delete-expected-runtime-record"
+
+for delete_command in delete rm; do
+  expect_exit_1 "$delete_command --force fails when the running helper cannot be stopped" \
+    "$runner" "$delete_command" "$delete_fixture_name" --force
+  if [[ -d "$delete_fixture_bundle" ]] \
+    && cmp -s "$work/delete-expected-sentinel" "$delete_fixture_sentinel" \
+    && cmp -s "$work/delete-expected-runtime-record" "$delete_fixture_runtime_record"; then
+    pass "$delete_command stop failure preserves the bundle and runtime record"
+  else
+    fail "$delete_command stop failure preserves the bundle and runtime record"
+  fi
+done
+
+rm -f -- "$delete_fixture_runtime_record"
+expect_success "force deletes the stopped credential-free synthetic bundle" \
+  "$runner" delete "$delete_fixture_name" --force
+if [[ ! -e "$delete_fixture_bundle" ]]; then
+  pass "stopped synthetic bundle was removed"
+else
+  fail "stopped synthetic bundle was removed"
 fi
 
 marketing_version="$(sed -n 's/^MARKETING_VERSION = //p' "$repo_root/Config/Shared.xcconfig")"

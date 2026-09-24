@@ -147,7 +147,18 @@ stopped outright, and `already-stopped` for a no-op. `pomme stop` reports a
 forced stop in its own output rather than presenting it as a clean one, so an
 unclean stop is never silent. `stop --force` asks for that outright stop
 deliberately and always reports `forced`. `restart` ends on its boot line and
-keeps a forced stop's line above it.
+keeps a forced stop's line above it. Structured restart output also exposes the
+stop result's `stopMethod` at the top level (`guest-stopped`, `forced`, or
+`already-stopped`); it is JSON `null` when the stop reply does not provide a
+method. Its ordered `steps` remain status, stop, and boot.
+
+`delete --force` and `rm --force` skip confirmation and stop a running VM
+through the normal stop sequence before deletion. This requests guest shutdown
+when the persistent agent is available and uses the same bounded fallback.
+After a successful stop reply, deletion waits for the helper to exit and
+verifies that exit before removing the bundle. A stop failure or helper-exit
+timeout retains the VM bundle. Deletion without `--force` still requires
+a stopped VM.
 
 ## Terminal-session control operations
 

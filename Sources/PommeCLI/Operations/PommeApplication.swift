@@ -304,18 +304,7 @@ enum PommeApplication {
         let reference = try namedReference(name)
         let statusPayload = try PommeCore.vmStatusPayload(reference: reference)
         if statusPayload["helperRunning"] as? Bool != true {
-            var payload = statusPayload
-            payload["ok"] = true
-            payload["operation"] = "stop"
-            payload["hostExitCode"] = 0
-            payload["forceRequested"] = force
-            payload["response"] = "VM is already stopped."
-            return result(
-                title: "Stop",
-                reference: reference,
-                payload: payload,
-                text: "VM is already stopped."
-            )
+            return alreadyStoppedStopResult(reference: reference, statusPayload: statusPayload, force: force)
         }
         // The framework's stop is a power button that a macOS guest may take
         // the whole graceful window to honor, and cutting power before it
@@ -340,6 +329,30 @@ enum PommeApplication {
         payload["guestShutdownRequested"] = requestedGuestShutdown
         return lifecycleResult(title: "Stop", command: force ? .forceStop : .stop, reference: reference, payload: payload)
         }
+    }
+
+    /// Keeps the no-helper stop result consistent with the lifecycle control
+    /// reply while allowing the offline path to be tested with a synthetic VM.
+    static func alreadyStoppedStopResult(
+        reference: VMReference,
+        statusPayload: [String: Any],
+        force: Bool
+    ) -> PommeOperationResult {
+        var payload = statusPayload
+        payload["ok"] = true
+        payload["operation"] = "stop"
+        payload["hostExitCode"] = 0
+        payload["forceRequested"] = force
+        payload["stopMethod"] = VMStopOutcome.alreadyStopped.rawValue
+        payload["changed"] = false
+        payload["guestShutdownRequested"] = false
+        payload["response"] = "VM is already stopped."
+        return result(
+            title: "Stop",
+            reference: reference,
+            payload: payload,
+            text: "VM is already stopped."
+        )
     }
 
     static func pause(name: String, lease: VMBundleMutationLease? = nil) throws -> PommeOperationResult {
@@ -415,6 +428,23 @@ enum PommeApplication {
               !stopText.isEmpty
         else { return bootText }
         return stopText + "\n" + bootText
+    }
+
+    /// Builds the restart payload from its three ordered phases. The reported
+    /// stop method comes from the stop result so a boot payload cannot hide it.
+    static func restartPayload(
+        status: [String: Any],
+        stop: [String: Any],
+        boot: [String: Any],
+        preservedMode: Bool
+    ) -> [String: Any] {
+        var payload = boot
+        payload["operation"] = "restart"
+        payload["preservedMode"] = preservedMode
+        payload["steps"] = [status, stop, boot]
+        payload["stopMethod"] = (stop["stopMethod"] as? String)
+            .map { $0 as Any } ?? NSNull()
+        return payload
     }
 
     /// The confirmation line for pause, resume, and stop, or the no-op
@@ -664,10 +694,12 @@ enum PommeApplication {
         let stopResult = try stop(name: name, allowGuestShutdown: selectedMode != .recovery, lease: scope)
         let bootResult = try boot(name: name, mode: selectedMode, options: options, lease: scope)
 
-        var payload = bootResult.payload
-        payload["operation"] = "restart"
-        payload["preservedMode"] = mode == nil
-        payload["steps"] = [statusResult.payload, stopResult.payload, bootResult.payload]
+        let payload = restartPayload(
+            status: statusResult.payload,
+            stop: stopResult.payload,
+            boot: bootResult.payload,
+            preservedMode: mode == nil
+        )
         // The boot result already carries the line this restart should end on.
         // Re-formatting `payload` would read the steps above instead, whose
         // last response is the stop's.
@@ -684,10 +716,43 @@ enum PommeApplication {
         }
     }
 
-    static func destroy(name: String) throws -> PommeOperationResult {
-        let reference = try namedReference(name)
-        let payload = try PommeCore.destroyVMPayload(reference: reference, confirmation: name)
-        return result(title: "Destroy", reference: reference, payload: payload, text: "OK destroyed name=\(name) bundle=\(stringValue(payload["bundlePath"]))")
+    static func destroy(name: String, force: Bool = false) throws -> PommeOperationResult {
+        try VMBundleMutationLease.withLease(name: name) { scope in
+            let reference = try namedReference(name)
+            let stopResult: PommeOperationResult?
+            if force {
+                // Keep the lease through shutdown and deletion so another command
+                // cannot restart the VM between these operations.
+                let stopped = try stop(name: name, force: false, lease: scope)
+                try PommeCore.requireDeletionStopSucceeded(stopped.payload)
+                if stopped.payload["stopMethod"] as? String != VMStopOutcome.alreadyStopped.rawValue {
+                    try PommeCore.waitForDeletionHelperExit(reference: reference)
+                }
+                stopResult = stopped
+            } else {
+                stopResult = nil
+            }
+            let payload = try PommeCore.destroyVMPayload(reference: reference, confirmation: name)
+            return deletionResult(reference: reference, payload: payload, stopResult: stopResult)
+        }
+    }
+
+    static func deletionResult(
+        reference: VMReference,
+        payload: [String: Any],
+        stopResult: PommeOperationResult?
+    ) -> PommeOperationResult {
+        var payload = payload
+        var text = "OK destroyed name=\(reference.name ?? "") bundle=\(stringValue(payload["bundlePath"]))"
+        if let stopResult {
+            payload["stopMethod"] = (stopResult.payload["stopMethod"] as? String)
+                .map { $0 as Any } ?? NSNull()
+            payload["guestShutdownRequested"] = stopResult.payload["guestShutdownRequested"] as? Bool ?? false
+            if stopResult.payload["stopMethod"] as? String == VMStopOutcome.forced.rawValue {
+                text = "OK stopped (forced; the VM was powered off)\n" + text
+            }
+        }
+        return result(title: "Destroy", reference: reference, payload: payload, text: text)
     }
 
     static func detailedInspect(name: String) throws -> PommeOperationResult {

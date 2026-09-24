@@ -1776,7 +1776,10 @@ struct PommeCore {
             throw RunnerError.namedVMNotFound(name)
         }
         if (try? runtimeRecord(for: reference.bundle)) != nil {
-            throw RunnerError.virtualMachineState("Stop the VM before deleting it.")
+            throw RunnerError.virtualMachineState(
+                "Cannot delete VM '\(name)' while its helper is running. " +
+                "Run 'pomme stop \(name)' first, then retry deletion."
+            )
         }
         let schema = try provisioningSchemaIfPresent(bundle: reference.bundle)
         let ownedPlan = try schema.map { _ in try loadOwnedProvisioningPlan(reference: reference) }
@@ -5599,6 +5602,39 @@ struct PommeCore {
         reference: VMReference
     ) throws -> PommeProvisioningFinalState {
         try capturedProvisioningFinalState(from: vmStatusPayload(reference: reference))
+    }
+
+    /// The stop response can arrive before its helper exits. Keep deletion
+    /// behind proof that the helper is gone, while the caller holds its lease.
+    static func waitForDeletionHelperExit(reference: VMReference) throws {
+        try waitForDeletionHelperExit {
+            do {
+                _ = try runtimeRecord(for: reference.bundle)
+                return true
+            } catch RunnerError.noRunningVM {
+                return false
+            }
+        }
+    }
+
+    static func waitForDeletionHelperExit(
+        timeout: TimeInterval = Constants.gracefulStopTimeoutSeconds,
+        pollInterval: TimeInterval = 0.1,
+        helperIsRunning: () throws -> Bool
+    ) throws {
+        guard timeout.isFinite, timeout >= 0, pollInterval.isFinite, pollInterval > 0 else {
+            throw RunnerError.virtualMachineState("Invalid VM deletion helper wait configuration.")
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while try helperIsRunning() {
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else {
+                throw RunnerError.virtualMachineState(
+                    "Refusing VM deletion because its helper did not exit after stopping."
+                )
+            }
+            Thread.sleep(forTimeInterval: min(pollInterval, remaining))
+        }
     }
 
     static func requireDeletionStopSucceeded(_ payload: [String: Any]) throws {

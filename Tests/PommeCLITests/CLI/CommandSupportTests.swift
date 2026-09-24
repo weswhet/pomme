@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 import Testing
 
-@Suite("CLI output chunk validation")
+@Suite("CLI output chunk validation", .serialized)
 struct CommandSupportTests {
     @Test("Terminal output accepts one complete 64 KiB stream chunk")
     func terminalOutputAcceptsStreamLimit() throws {
@@ -57,6 +57,32 @@ struct CommandSupportTests {
         let payload: [String: Any] = ["ok": true, "result": ["jobs": [["jobID": "j1"]]]]
 
         #expect(CLIOutputWriter.jsonlLines(payload: payload, keyPath: ["result", "jobs"]).map { $0["jobID"] as? String } == ["j1"])
+    }
+
+    @Test("Restart stop method is top-level in JSON and JSONL")
+    func restartStopMethodSurvivesStructuredOutput() throws {
+        let payload = PommeApplication.restartPayload(
+            status: ["phase": "status"],
+            stop: ["phase": "stop", "stopMethod": VMStopOutcome.forced.rawValue],
+            boot: ["phase": "boot", "stopMethod": "boot-conflict", "ok": true],
+            preservedMode: true
+        )
+        let result = operationResult(ok: true, text: "OK boot mode=normal", payload: payload)
+
+        let captured = try captureStandardOutputAndError {
+            for format in ["json", "jsonl"] {
+                try CLIOutputWriter.write(result, options: GlobalOptions.parse(["--format", format]))
+            }
+        }
+
+        let lines = captured.stdout.split(separator: "\n")
+        #expect(lines.count == 2)
+        let objects = try lines.map { line in
+            try #require(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+        }
+        #expect(objects.map { $0["stopMethod"] as? String } == ["forced", "forced"])
+        #expect(objects.allSatisfy { $0["operation"] as? String == "restart" })
+        #expect(captured.stderr.isEmpty)
     }
 
     @Test("Recovery helper diagnostics stay on stderr for successful and failed JSON and JSONL results")

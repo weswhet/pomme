@@ -7,7 +7,7 @@ struct ManagedVMLifecycle: Sendable {
     let pause: @Sendable (String) throws -> PommeOperationResult
     let resume: @Sendable (String) throws -> PommeOperationResult
     let restart: @Sendable (String, BootMode?) throws -> PommeOperationResult
-    let destroy: @Sendable (String) throws -> PommeOperationResult
+    let destroy: @Sendable (String, Bool) throws -> PommeOperationResult
     let inspect: @Sendable (String) throws -> PommeOperationResult
 }
 
@@ -45,7 +45,7 @@ struct PommeEnvironment: Sendable {
                 pause: { try PommeApplication.pause(name: $0) },
                 resume: { try PommeApplication.resume(name: $0) },
                 restart: { try PommeApplication.restart(name: $0, mode: $1) },
-                destroy: PommeApplication.destroy,
+                destroy: { try PommeApplication.destroy(name: $0, force: $1) },
                 inspect: PommeApplication.detailedInspect
             ),
             snapshots: .init(
