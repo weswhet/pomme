@@ -4785,6 +4785,34 @@ and no clone-u. This run does not isolate guest logging as a cause or establish
 a transport fix; the repeated pre-Terminal Recovery preparation failure is a
 separate live observation requiring its own bounded diagnosis.
 
+#### Protected base templates and legacy VM cleanup — 2026-09-23
+
+At the user's request, the twelve ordinary internal-drive VMs were checked
+stopped with no helpers, then individually submitted to public
+`delete --force`. Ten deletions succeeded; their VM bundles/disks are unrecoverable
+through Pomme. The two remaining stopped/no-helper VMs are
+`pomme-agent-bootstrap26-20260922a` and
+`pomme-agent-ownerproof-20260922b`. The former refused at agent credential
+removal with Security status `-25244`; the latter again refused at owner
+credential removal. Both bundles remained intact. Read-only source and
+Keychain-metadata review found that each delete stops before bundle removal
+and rolls back its credential snapshot on this error. No Keychain ACL/item,
+credential, or VM bundle was manually changed to bypass either guard. The
+internal volume grew from 14 GiB to 279 GiB available after the ten deletes.
+
+The existing `pomme-agent-ownerloop-base26-20260922a` is an unprovisioned
+macOS 26.6.2/25G83 base template. A second unprovisioned base template,
+`pomme-agent-base27-20260923a`, was created from the signed macOS 27.0/26A428
+restore image with a 40 GB disk and 4 GB restore-time memory. Both template
+list entries report no owner, `provisioned=false`, and
+`securityDisabled=false`; they live under Pomme's internal-drive Templates
+root, not the managed-VM inventory. The new bundle contains only `Disk.img`,
+`AuxiliaryStorage`, `HardwareModel`, and `Template.json`. Templates are inert
+after restore, so no separate shutdown operation applies. The new
+preservation rule and exact names are in `AGENTS.md`. Final ordinary VM
+inventory contains only the two deletion-blocked, stopped/no-helper VMs;
+the internal volume has 254 GiB available after the macOS 27 restore.
+
 ### macOS 27 pause/resume/restart repetition
 
 After committing the retained-console fixture outcome, investigation returns
