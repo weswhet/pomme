@@ -72,6 +72,23 @@ bytes to `~/.local/bin/pomme`. If an installed CLI exists, its designated
 requirement must match the new build's before replacement. Build/signature or
 compatibility failures leave the installed CLI unchanged.
 
+### Mandatory signed runner before testing
+
+Before **any** Pomme test (unit, integration, CLI, or live VM), build and
+install the current source with `rtk proxy bash Scripts/build-local.sh`.
+Confirm the install succeeded, the signed Release still passes the script's
+signature and entitlement checks, a fresh login shell resolves `pomme` to
+`/Users/wes/.local/bin/pomme`, and that executable reports the expected source
+commit with `--version`. If any check fails, stop; do not test a stale,
+Debug/ad-hoc, DerivedData, or alternate-path executable.
+
+Every test that launches the Pomme CLI must use the exact installed path
+`/Users/wes/.local/bin/pomme`, including live VM tests and CLI integration
+tests. Pass that path explicitly as the integration runner; do not rely on a
+different `pomme` found on `PATH`. Native `xcodebuild test` runs its own test
+bundle, not the installed CLI, so it may run only after this signed-install
+gate and must not be described as a test of the installed executable.
+
 Before replacement, the script retains both signed executables in the
 append-only `~/Library/Application Support/pomme/AgentArtifacts/sha256` store.
 Recovery installation can therefore resume using the exact agent digest pinned
