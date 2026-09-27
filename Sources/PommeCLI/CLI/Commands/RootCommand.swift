@@ -17,6 +17,7 @@ struct PommeCLI: AsyncParsableCommand {
             DeleteCommand.self,
             StatusCommand.self,
             InspectCommand.self,
+            LogCommand.self,
             ExecCommand.self,
             ShellCommand.self,
             JobsCommand.self,

@@ -1460,6 +1460,111 @@ struct PommeCore {
         )
     }
 
+    /// Streams helper-owned guest unified logs directly to the caller. The
+    /// client leaves input open so it can cancel a quiet follow request, but
+    /// never sends arbitrary guest input and never retains log output.
+    static func sendLogControlStream(
+        _ payload: [String: Any],
+        bundle: BundleLayout,
+        shouldCancel: @escaping () -> Bool,
+        onOutput: @escaping (Int32, Data) throws -> Void
+    ) throws -> [String: Any] {
+        let unstreamed = try makeControlRequest(from: payload)
+        guard unstreamed.command == "logs.show" || unstreamed.command == "logs.stream" else {
+            throw RunnerError.invalidControlCommand(unstreamed.command)
+        }
+        let request = PommeControlRequest(
+            id: unstreamed.id,
+            command: unstreamed.command,
+            payload: unstreamed.payload,
+            streaming: true
+        )
+        let record = try runtimeRecord(for: bundle)
+        let identity = PommeRuntimeIdentity(
+            socketPath: record.socketPath,
+            pid: record.pid,
+            startedAt: record.startedAt
+        )
+        let stream = try PommeControlSocketClient(identity: identity).openStream(request)
+        var cancellationSent = false
+        var outputFailure: Error?
+        var completionReceived = false
+
+        func cancel() throws {
+            guard !cancellationSent else { return }
+            try stream.send(stream: .cancellation)
+            cancellationSent = true
+        }
+
+        do {
+            while true {
+                if shouldCancel() { try cancel() }
+                guard let event = try stream.receiveEventIfAvailable(timeout: 0.025) else { continue }
+                switch event {
+                case .stream(let frame):
+                    switch frame.stream {
+                    case .stdout, .stderr:
+                        guard let data = try frame.decodedData() else {
+                            throw RunnerError.invalidControlResponse("Pomme log output frame is missing data.")
+                        }
+                        // Once cancellation is on the wire, the helper owns
+                        // process cleanup. Do not keep writing guest bytes to
+                        // a terminal that may already be gone.
+                        if !cancellationSent, outputFailure == nil {
+                            let descriptor: Int32 = frame.stream == .stdout ? STDOUT_FILENO : STDERR_FILENO
+                            do { try onOutput(descriptor, data) }
+                            catch is PommeLogOutputSink.Cancelled {
+                                try cancel()
+                            } catch {
+                                outputFailure = error
+                                try cancel()
+                            }
+                        }
+                    case .progress:
+                        // The helper uses a progress envelope for the validated
+                        // guest exit receipt. It is not user output.
+                        break
+                    case .stdin, .resize, .signal, .cancellation:
+                        throw RunnerError.invalidControlResponse("Unexpected Pomme log output stream.")
+                    }
+                case .response(let response):
+                    completionReceived = true
+                    if let outputFailure {
+                        guard response.ok,
+                              let result = response.result,
+                              result.objectValue?["cleanupConfirmed"] == .bool(true)
+                        else {
+                            throw RunnerError.invalidControlResponse(
+                                "Pomme log process cleanup could not be confirmed after host output failed."
+                            )
+                        }
+                        throw outputFailure
+                    }
+                    guard response.ok, let result = response.result else {
+                        let failure = response.error
+                        throw RunnerError.controlCommandFailed(
+                            failure.map { "\($0.code): \($0.message)" }
+                                ?? "Missing Pomme log completion response."
+                        )
+                    }
+                    let normalized = normalizedControlObject(result)
+                    if !cancellationSent,
+                       normalized["ok"] as? Bool == false,
+                       let message = normalized["error"] as? String,
+                       !message.isEmpty {
+                        throw RunnerError.controlCommandFailed(message)
+                    }
+                    return normalized
+                }
+            }
+        } catch {
+            guard completionReceived else {
+                throw RunnerError.invalidControlResponse("Pomme log cleanup could not be confirmed.")
+            }
+            throw error
+        }
+    }
+
     /// A public PTY is a full-duplex terminal bridge, unlike buffered
     /// foreground execution which closes input before collecting output.
     static func sendPublicPTYControlObject(
@@ -1633,7 +1738,7 @@ struct PommeCore {
 
     private static func controlCommand(from payload: [String: Any]) throws -> String {
         let candidate = (payload["command"] as? String) ?? (payload["operation"] as? String)
-        guard let candidate, ["pause", "resume", "stop", "force-stop", "status", "inspect", "snapshot-save", "agent.perform", "guest-ui", "terminal.session"].contains(candidate) else {
+        guard let candidate, ["pause", "resume", "stop", "force-stop", "status", "inspect", "snapshot-save", "agent.perform", "guest-ui", "terminal.session", "logs.show", "logs.stream"].contains(candidate) else {
             throw RunnerError.invalidControlCommand(candidate ?? "")
         }
         return candidate
@@ -4655,10 +4760,20 @@ struct PommeCore {
                 await exitSignal.endExitHold()
             },
             streamHandler: { request, stream in
-                await runtimeStreamResponse(request, stream: stream, runtime: retained.runtime)
+                await runtimeStreamResponse(
+                    request,
+                    stream: stream,
+                    runtime: retained.runtime,
+                    normalGuest: bootMode == .normal
+                )
             },
             handler: { request in
-                await runtimeControlResponse(request, runtime: retained.runtime, exitSignal: exitSignal, bundle: bundle)
+                await runtimeControlResponse(
+                    request,
+                    runtime: retained.runtime,
+                    exitSignal: exitSignal,
+                    bundle: bundle
+                )
             }
         )
         try server.start()
@@ -4774,6 +4889,8 @@ struct PommeCore {
                 }
                 let result = try await runtime.performGuestOperationCorrelated(request.operation, payload: request.payload)
                 return try correlatedResultJSON(result)
+            case .logsShow, .logsStream:
+                throw RunnerError.invalidControlCommand("Pomme log requires a streaming control request.")
             }
         } catch {
             var payload: [String: Any] = ["ok": false, "error": error.localizedDescription, "hostExitCode": 1]
@@ -4870,7 +4987,8 @@ struct PommeCore {
     private static func runtimeStreamResponse(
         _ request: PommeVMControlRequest,
         stream: PommeControlStreamSession,
-        runtime: PommeVMRuntime
+        runtime: PommeVMRuntime,
+        normalGuest: Bool
     ) async -> String {
         if case .terminalSession(let operation, let streaming) = request {
             guard streaming, operation.operation == "terminal.attach" else {
@@ -4896,10 +5014,40 @@ struct PommeCore {
                 return "ERROR \(error.localizedDescription)"
             }
         }
-        guard case .agentPerform(let operation, _) = request else {
-            return "ERROR Pomme control streaming is limited to agent.perform or terminal.attach."
-        }
         do {
+            switch request {
+            case .logsShow(let log):
+                return try await logControlResponse(
+                    payload: log.processPayload,
+                    timeout: log.timeout,
+                    stream: stream,
+                    runtime: runtime,
+                    normalGuest: normalGuest
+                )
+            case .logsStream(let log):
+                return try await logControlResponse(
+                    payload: log.processPayload,
+                    timeout: nil,
+                    stream: stream,
+                    runtime: runtime,
+                    normalGuest: normalGuest
+                )
+            case .agentPerform(let operation, _):
+                return try await agentPerformStreamResponse(operation, stream: stream, runtime: runtime)
+            default:
+                return "ERROR Pomme control streaming is limited to agent.perform, Pomme log, or terminal.attach."
+            }
+        } catch {
+            return (try? jsonLine(["ok": false, "error": error.localizedDescription, "hostExitCode": 1]))
+                ?? "{\"ok\":false,\"hostExitCode\":1}"
+        }
+    }
+
+    private static func agentPerformStreamResponse(
+        _ operation: PommeAgentPerformRequest,
+        stream: PommeControlStreamSession,
+        runtime: PommeVMRuntime
+    ) async throws -> String {
             if PommeSecurityDesktopCleanup.handles(operation) {
                 return try await securityDesktopCleanupControlResponse(operation, runtime: runtime)
             }
@@ -4959,10 +5107,152 @@ struct PommeCore {
                 if frame.eof == true || frame.stream == .cancellation { break }
             }
             return try correlatedResultJSON(result)
-        } catch {
-            return (try? jsonLine(["ok": false, "error": error.localizedDescription, "hostExitCode": 1]))
-                ?? "{\"ok\":false,\"hostExitCode\":1}"
+    }
+
+    /// A small synchronous probe state shared with the asynchronous log
+    /// runner. Any malformed inbound client frame or socket read failure is
+    /// retained so it cannot be misreported as a clean cancellation.
+    private final class PommeLogInboundProbe: @unchecked Sendable {
+        private let lock = NSLock()
+        private var failure: Error?
+
+        func shouldCancel(stream: PommeControlStreamSession) -> Bool {
+            do {
+                guard let frame = try stream.receiveIfAvailable(timeout: 0.025) else { return false }
+                guard frame.stream == .cancellation else {
+                    record(RunnerError.invalidControlResponse("Unexpected Pomme log input stream."))
+                    return true
+                }
+                return true
+            } catch {
+                record(error)
+                return true
+            }
         }
+
+        func recordedFailure() -> Error? {
+            lock.lock()
+            defer { lock.unlock() }
+            return failure
+        }
+
+        private func record(_ error: Error) {
+            lock.lock()
+            defer { lock.unlock() }
+            if failure == nil { failure = error }
+        }
+    }
+
+    /// Runs the closed `/usr/bin/log` request through one pinned persistent
+    /// agent session. Recovery has no persistent agent and is rejected before
+    /// the process-start exchange.
+    private static func logControlResponse(
+        payload: JSONValue,
+        timeout: TimeInterval?,
+        stream: PommeControlStreamSession,
+        runtime: PommeVMRuntime,
+        normalGuest: Bool
+    ) async throws -> String {
+        guard normalGuest else {
+            throw RunnerError.guestAgentError("Pomme log is unavailable while the VM is booted in Recovery.")
+        }
+        let pinned = try runtime.captureAuthenticatedAgentSession(as: .normal)
+        let description = try await pinned.request(operation: "agent.describe")
+        guard supportsPommeLog(description) else {
+            throw RunnerError.guestAgentError(
+                "The running guest agent does not support Pomme log streaming. Start the VM with a current normal guest agent."
+            )
+        }
+        let inbound = PommeLogInboundProbe()
+        do {
+            let result = try await PommeLogStreamExecution.run(
+                payload: payload,
+                timeout: timeout,
+                perform: { operation, values in
+                    try await pinned.requestCorrelated(operation: operation, payload: values)
+                },
+                sendStream: { jobID, kind, data in
+                    try await pinned.sendStream(
+                        jobID: jobID,
+                        stream: kind,
+                        requestID: UUID(),
+                        data: data
+                    )
+                },
+                shouldCancel: {
+                    inbound.shouldCancel(stream: stream)
+                },
+                onFrames: { frames in
+                    try sendControlFrames(frames, through: stream)
+                }
+            )
+            if let failure = inbound.recordedFailure() { throw failure }
+            return try logResultJSON(result, cleanupConfirmed: true)
+        } catch {
+            if let failure = inbound.recordedFailure() { throw failure }
+            if let logError = error as? PommeLogStreamExecution.Error {
+                switch logError {
+                case .interrupted(let reason):
+                    let code = reason == .timedOut ? 124 : 130
+                    return try jsonLine([
+                        "ok": false,
+                        "error": logError.localizedDescription,
+                        "hostExitCode": code,
+                        "cleanupConfirmed": true,
+                    ])
+                case .cleanupUnconfirmed:
+                    return try jsonLine([
+                        "ok": false,
+                        "error": logError.localizedDescription,
+                        "hostExitCode": 1,
+                        "cleanupConfirmed": false,
+                    ])
+                default:
+                    break
+                }
+            }
+            throw error
+        }
+    }
+
+    /// This checks the describe receipt before process creation. A helper can
+    /// be newer than its installed guest agent, so the control command must
+    /// not assume `process.start` will be accepted just because the VM runs.
+    static func supportsPommeLog(_ description: JSONValue) -> Bool {
+        guard let object = description.objectValue,
+              object["role"] == .string("persistent"),
+              object["protocol"] == .string(PommeAgentProtocol.name),
+              object["version"] == .integer(Int64(PommeAgentProtocol.version)),
+              case .array(let rawCapabilities)? = object["capabilities"],
+              rawCapabilities.allSatisfy({ $0.stringValue != nil })
+        else { return false }
+        return Set(rawCapabilities.compactMap(\.stringValue)).isSuperset(of: [
+            "process.start", "process.status", "process.signal",
+        ])
+    }
+
+    private static func logResultJSON(
+        _ result: PommeAgentCorrelatedResult,
+        cleanupConfirmed: Bool
+    ) throws -> String {
+        guard let terminal = result.result.objectValue,
+              terminal["exited"] == .bool(true)
+        else { throw PommeAgentProtocol.Error.invalidResponse }
+        let exitCode: Int
+        if case .integer(let value)? = terminal["exitCode"], (0...255).contains(value), terminal["signal"] == nil {
+            exitCode = Int(value)
+        } else if case .integer(let value)? = terminal["signal"], (1...127).contains(value), terminal["exitCode"] == nil {
+            exitCode = 128 + Int(value)
+        } else {
+            throw PommeAgentProtocol.Error.invalidResponse
+        }
+        return try jsonLine([
+            "ok": exitCode == 0,
+            "requestID": result.requestID.uuidString.lowercased(),
+            "result": result.result.publicValue,
+            "hostExitCode": exitCode,
+            "cleanupConfirmed": cleanupConfirmed,
+        ])
     }
 
     private static func securityDesktopCleanupControlResponse(

@@ -41,7 +41,7 @@ never chooses a machine merely because it is the only running one.
 
 ```text
 create, list|ls, start, stop, restart, pause, resume, delete|rm,
-status, inspect, exec, shell, sessions, jobs, cp, cat, agent, sip, amfi,
+status, inspect, log, exec, shell, sessions, jobs, cp, cat, agent, sip, amfi,
 mdm, remote-login, screen-sharing, snapshot, template, config, ipsw, ui, tui
 ```
 
@@ -49,6 +49,16 @@ mdm, remote-login, screen-sharing, snapshot, template, config, ipsw, ui, tui
 inventory for coding agents. Both accept `--format table|json|jsonl` and
 `--json`; their JSON discovery payloads are the same, while JSONL emits one
 command group per line. Neither command needs a VM.
+
+View Pomme subsystem records from a running guest with `pomme log`. History
+defaults to 10 minutes; `--follow` streams new records until interrupted:
+
+```sh
+pomme log VM
+pomme log VM --last 1h --category buddy-preferences
+pomme log VM --follow
+pomme log VM --follow --level debug --format jsonl
+```
 
 `stop` asks the guest to shut itself down when the agent is connected, resuming
 a paused VM so it can, and waits before powering the VM off; if it has to power
