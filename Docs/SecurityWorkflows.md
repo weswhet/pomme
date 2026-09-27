@@ -175,7 +175,12 @@ available. The authenticated `buddy.preferences.status` operation reads this
 receipt without initiating maintenance.
 
 The agent also records unified logs under subsystem
-`com.github.weswhet.pomme`, category `buddy-preferences`.
+`com.github.weswhet.pomme`, category `buddy-preferences`. From the host, query
+a running guest through its authenticated agent:
+
+```sh
+rtk proxy /Users/wes/.local/bin/pomme log VM --category buddy-preferences
+```
 
 Progress uses notice-level logs; failures use error-level logs. Events include
 the boot UUID, daemon PID, and run ID, plus owner discovery and revalidation,
@@ -184,6 +189,10 @@ recognized error categories, and typed readback results. A launcher labelled
 `sudo` identifies the spawned process; it does not prove that `defaults` started.
 Unknown command output is redacted. Waiting logs appear on account/home state
 changes and at most once per minute while that state remains unchanged.
+History defaults to the last 10 minutes and includes info-level events. Use
+`--last 1h` for a wider window or `--level debug` to include debug events. Increase
+`--timeout` up to 300 seconds for larger queries. Installing the host CLI does
+not upgrade an existing guest agent or add new diagnostic events.
 
 Fresh-owner preparation requires a successful matching receipt after owner
 verification, before configuring native automatic login and system completion

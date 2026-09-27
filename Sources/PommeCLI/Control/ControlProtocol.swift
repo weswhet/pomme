@@ -516,6 +516,195 @@ struct PommeAgentPerformRequest: Sendable {
     }
 }
 
+enum PommeLogFormat: String, Sendable {
+    case text
+    case json
+    case jsonl
+
+    var logStyle: String {
+        switch self {
+        case .text: "compact"
+        case .json: "json"
+        case .jsonl: "ndjson"
+        }
+    }
+}
+
+/// Closed, typed inputs for the helper-owned unified-log command. Keeping
+/// these requests separate from `agent.perform` lets an older helper reject
+/// the new control command before it can create a guest process.
+struct PommeLogShowRequest: Sendable {
+    static let defaultLast = "10m"
+    static let defaultTimeout: TimeInterval = 60
+    static let maximumTimeout: TimeInterval = 300
+
+    let last: String
+    let categories: [String]
+    let level: String
+    let format: PommeLogFormat
+    let timeout: TimeInterval
+
+    static func parse(from object: [String: JSONValue]) throws -> Self {
+        let allowed: Set<String> = ["last", "categories", "level", "format", "timeout"]
+        guard Set(object.keys).isSubset(of: allowed) else {
+            throw RunnerError.invalidControlCommand("logs.show")
+        }
+        let lastValue = try optionalString(object["last"], default: defaultLast, command: "logs.show")
+        let last = try validatedLast(lastValue, command: "logs.show")
+        let categories = try validatedCategories(object["categories"], command: "logs.show")
+        let level = try validatedLevel(
+            optionalString(object["level"], default: "info", command: "logs.show"), command: "logs.show")
+        let format = try validatedFormat(
+            optionalString(object["format"], default: "text", command: "logs.show"), command: "logs.show")
+        let timeout = try validatedTimeout(
+            object["timeout"] ?? .number(defaultTimeout), command: "logs.show")
+        return .init(last: last, categories: categories, level: level, format: format, timeout: timeout)
+    }
+
+    var processPayload: JSONValue {
+        .object([
+            "path": .string("/usr/bin/log"),
+            "arguments": .array(logArguments.map(JSONValue.string)),
+            "timeout": .number(timeout),
+            "detached": .bool(false),
+            "pty": .bool(false),
+        ])
+    }
+
+    var logArguments: [String] {
+        var values = ["show", "--style", format.logStyle, "--predicate", logPredicate, "--last", last]
+        switch level {
+        case "debug": values.append("--debug")
+        case "info": values.append("--info")
+        default: break
+        }
+        return values
+    }
+
+    var logPredicate: String { PommeLogPredicate.make(categories: categories) }
+}
+
+struct PommeLogStreamRequest: Sendable {
+    /// `process.start` requires a finite admission timeout. The dedicated log
+    /// runner owns follow's lifetime, so this does not impose a host deadline.
+    static let processAdmissionTimeout: TimeInterval = 300
+
+    let categories: [String]
+    let level: String
+    let format: PommeLogFormat
+
+    static func parse(from object: [String: JSONValue]) throws -> Self {
+        let allowed: Set<String> = ["categories", "level", "format"]
+        guard Set(object.keys).isSubset(of: allowed) else {
+            throw RunnerError.invalidControlCommand("logs.stream")
+        }
+        let categories = try validatedCategories(object["categories"], command: "logs.stream")
+        let level = try validatedLevel(
+            optionalString(object["level"], default: "info", command: "logs.stream"), command: "logs.stream")
+        let format = try validatedFormat(
+            optionalString(object["format"], default: "text", command: "logs.stream"), command: "logs.stream")
+        guard format != .json else { throw RunnerError.invalidControlCommand("logs.stream") }
+        return .init(categories: categories, level: level, format: format)
+    }
+
+    var processPayload: JSONValue {
+        .object([
+            "path": .string("/usr/bin/log"),
+            "arguments": .array(logArguments.map(JSONValue.string)),
+            "timeout": .number(Self.processAdmissionTimeout),
+            "detached": .bool(false),
+            "pty": .bool(false),
+        ])
+    }
+
+    var logArguments: [String] {
+        ["stream", "--style", format.logStyle, "--predicate", logPredicate, "--level", level]
+    }
+
+    var logPredicate: String { PommeLogPredicate.make(categories: categories) }
+}
+
+private enum PommeLogPredicate {
+    static func make(categories: [String]) -> String {
+        let subsystem = "subsystem == \"com.github.weswhet.pomme\""
+        guard !categories.isEmpty else { return subsystem }
+        let categoryTerms = categories.map { "category == \"\(escape($0))\"" }
+        return subsystem + " AND (" + categoryTerms.joined(separator: " OR ") + ")"
+    }
+
+    private static func escape(_ value: String) -> String {
+        value.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+    }
+}
+
+private func validatedLast(_ value: String, command: String) throws -> String {
+    guard value == "boot" else {
+        guard let unit = value.last, ["s", "m", "h", "d"].contains(unit) else {
+            throw RunnerError.invalidControlCommand(command)
+        }
+        let number = value.dropLast()
+        guard !number.isEmpty,
+              number.utf8.allSatisfy({ (48...57).contains($0) || $0 == 46 }),
+              number.utf8.filter({ $0 == 46 }).count <= 1,
+              let parsed = Double(String(number)), parsed.isFinite, parsed > 0
+        else { throw RunnerError.invalidControlCommand(command) }
+        return value
+    }
+    return value
+}
+
+private func optionalString(_ value: JSONValue?, default defaultValue: String, command: String) throws -> String {
+    guard let value else { return defaultValue }
+    guard let text = value.stringValue else { throw RunnerError.invalidControlCommand(command) }
+    return text
+}
+
+private func validatedCategories(_ value: JSONValue?, command: String) throws -> [String] {
+    guard let value else { return [] }
+    guard case .array(let raw) = value, raw.count <= 64 else {
+        throw RunnerError.invalidControlCommand(command)
+    }
+    let categories = raw.compactMap(\.stringValue)
+    guard categories.count == raw.count,
+          categories.allSatisfy({
+              !$0.isEmpty
+                  && $0.utf8.count <= 1_024
+                  && !$0.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+          })
+    else { throw RunnerError.invalidControlCommand(command) }
+    return categories
+}
+
+private func validatedLevel(_ value: String, command: String) throws -> String {
+    guard ["default", "info", "debug"].contains(value) else {
+        throw RunnerError.invalidControlCommand(command)
+    }
+    return value
+}
+
+private func validatedFormat(_ value: String, command: String) throws -> PommeLogFormat {
+    guard let format = PommeLogFormat(rawValue: value) else {
+        throw RunnerError.invalidControlCommand(command)
+    }
+    return format
+}
+
+private func validatedTimeout(_ value: JSONValue, command: String) throws -> TimeInterval {
+    let timeout: TimeInterval
+    switch value {
+    case .integer(let value): timeout = TimeInterval(value)
+    case .number(let value): timeout = value
+    default: throw RunnerError.invalidControlCommand(command)
+    }
+    guard timeout.isFinite, timeout > 0, timeout <= PommeLogShowRequest.maximumTimeout else {
+        throw RunnerError.invalidControlCommand(command)
+    }
+    return timeout
+}
+
 enum PommeVMControlRequest: Sendable {
     /// `guestShutdownRequested` is true when the host has already asked the
     /// guest to shut itself down, which is the only case where waiting out the
@@ -525,6 +714,8 @@ enum PommeVMControlRequest: Sendable {
     case status
     case inspect
     case agentPerform(PommeAgentPerformRequest, streaming: Bool)
+    case logsShow(PommeLogShowRequest)
+    case logsStream(PommeLogStreamRequest)
     case guestUI(PommeUIControlRequest)
     case terminalSession(PommeTerminalSessionControlRequest, streaming: Bool)
 
@@ -533,6 +724,7 @@ enum PommeVMControlRequest: Sendable {
         case .lifecycle, .snapshotSave: .lifecycle
         case .status, .inspect: .status
         case .agentPerform(_, let streaming): streaming ? .streaming : .status
+        case .logsShow, .logsStream: .streaming
         case .guestUI: .ui
         // A streamed terminal attach needs both the streaming transport and
         // the terminal-session capability. The socket client checks the

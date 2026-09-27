@@ -613,6 +613,410 @@ struct PommeForegroundExecutionTests {
     }
 }
 
+@Suite("Pomme log stream execution")
+struct PommeLogStreamExecutionTests {
+    private let jobID = UUID(uuidString: "dddddddd-dddd-dddd-dddd-dddddddddddd")!
+    private let startRequestID = UUID(uuidString: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")!
+
+    @Test("forwards more than 64 KiB without retaining output")
+    func forwardsLargeOutputWithoutRetention() async throws {
+        let collector = FrameCollector()
+        let chunk = Data(repeating: 0x61, count: PommeAgentProtocol.maximumStreamChunkBytes)
+        let transport = LogStreamTransport(
+            start: correlated(result: started()),
+            statuses: [.success(correlated(
+                result: status(exited: true, exitCode: 0),
+                frames: [
+                    frame(stream: .stdout, data: chunk),
+                    frame(stream: .stderr, data: chunk),
+                    frame(stream: .exit)
+                ]
+            ))]
+        )
+
+        let result = try await run(transport: transport, onFrames: { frames in
+            await collector.append(frames)
+        })
+
+        #expect(result.streamFrames.isEmpty)
+        #expect(await collector.frames.reduce(0) { $0 + ($1.frame.data?.count ?? 0) }
+                == 2 * PommeAgentProtocol.maximumStreamChunkBytes)
+        #expect(await transport.streamCalls.map(\.stream) == [.eof])
+    }
+
+    @Test("allows a follow lifetime beyond the ordinary five-minute limit")
+    func unlimitedFollowUsesInjectedClock() async throws {
+        let instant = Mutex(ContinuousClock.now)
+        let transport = LogStreamTransport(
+            start: correlated(result: started()),
+            statuses: [
+                .success(correlated(result: status(exited: false))),
+                .success(correlated(result: status(exited: true, exitCode: 0), frames: [frame(stream: .exit)]))
+            ]
+        )
+        let timing = PommeLogStreamExecution.PollTiming(
+            now: { instant.withLock { $0 } },
+            sleep: { _ in instant.withLock { $0 = $0.advanced(by: .milliseconds(300_500)) } }
+        )
+
+        let result = try await run(transport: transport, timeout: 301, pollTiming: timing)
+
+        #expect(result.result.objectValue?["exited"] == .bool(true))
+        #expect(await transport.operationNames.filter { $0 == "process.status" }.count == 2)
+    }
+
+    @Test("preserves split stdout and stderr frames through the callback")
+    func forwardsSplitFrames() async throws {
+        let collector = FrameCollector()
+        let transport = LogStreamTransport(
+            start: correlated(result: started()),
+            statuses: [.success(correlated(
+                result: status(exited: true, exitCode: 0),
+                frames: [
+                    frame(stream: .stdout, data: Data("first".utf8)),
+                    frame(stream: .stdout, data: Data("second".utf8)),
+                    frame(stream: .stderr, data: Data("warning".utf8)),
+                    frame(stream: .exit)
+                ]
+            ))]
+        )
+
+        let result = try await run(transport: transport, onFrames: { frames in
+            await collector.append(frames)
+        })
+
+        #expect(result.streamFrames.isEmpty)
+        #expect(await collector.frames.map { $0.frame.data }.compactMap { $0 }
+                == [Data("first".utf8), Data("second".utf8), Data("warning".utf8)])
+    }
+
+    @Test("quiet disconnect terminates and confirms the owned process")
+    func quietDisconnectTerminatesAndConfirmsCleanup() async throws {
+        let probes = Mutex(0)
+        let transport = LogStreamTransport(
+            start: correlated(result: started()),
+            statuses: [
+                .success(correlated(result: status(exited: false))),
+                .success(correlated(result: status(exited: false))),
+                .success(correlated(result: status(exited: true, exitCode: 0), frames: [frame(stream: .exit)]))
+            ]
+        )
+
+        do {
+            _ = try await run(transport: transport, shouldCancel: {
+                probes.withLock { count in
+                    count += 1
+                    return count >= 3
+                }
+            })
+            Issue.record("Expected the quiet disconnect to interrupt the log stream.")
+        } catch let error as PommeLogStreamExecution.Error {
+            #expect(error == .interrupted(reason: .disconnected))
+        }
+
+        #expect(await transport.signals == [SIGTERM])
+        #expect(await transport.streamCalls.map(\.stream) == [.eof])
+    }
+
+    @Test("timeout reports its typed reason after confirmed cleanup")
+    func timeoutReportsTypedInterruption() async throws {
+        let instant = Mutex(ContinuousClock.now)
+        let transport = LogStreamTransport(
+            start: correlated(result: started()),
+            statuses: [
+                .success(correlated(result: status(exited: false))),
+                .success(correlated(result: status(exited: false))),
+                .success(correlated(result: status(exited: true, exitCode: 0), frames: [frame(stream: .exit)]))
+            ]
+        )
+        let timing = PommeLogStreamExecution.PollTiming(
+            now: { instant.withLock { $0 } },
+            sleep: { _ in instant.withLock { $0 = $0.advanced(by: .seconds(1)) } }
+        )
+
+        do {
+            _ = try await run(transport: transport, timeout: 0.5, pollTiming: timing)
+            Issue.record("Expected the log stream to time out.")
+        } catch let error as PommeLogStreamExecution.Error {
+            #expect(error == .interrupted(reason: .timedOut))
+        }
+        #expect(await transport.signals == [SIGTERM])
+    }
+
+    @Test("callback failures are preserved after confirmed cleanup")
+    func callbackFailureSurvivesConfirmedCleanup() async throws {
+        let transport = LogStreamTransport(
+            start: correlated(result: started()),
+            statuses: [
+                .success(correlated(
+                    result: status(exited: false),
+                    frames: [frame(stream: .stdout, data: Data("partial".utf8))]
+                )),
+                .success(correlated(result: status(exited: false))),
+                .success(correlated(result: status(exited: true, exitCode: 0), frames: [frame(stream: .exit)]))
+            ]
+        )
+
+        do {
+            _ = try await run(transport: transport, onFrames: { _ in throw LogStreamTestError.expected })
+            Issue.record("Expected the callback failure to be preserved.")
+        } catch let error as LogStreamTestError {
+            #expect(error == .expected)
+        }
+        #expect(await transport.signals == [SIGTERM])
+    }
+
+    @Test("malformed frames are preserved after confirmed cleanup")
+    func malformedFrameSurvivesConfirmedCleanup() async throws {
+        let foreign = try! PommeAgentJobStreamFrame(
+            jobID: UUID(),
+            frame: .init(requestID: UUID(), stream: .stdout, data: Data("wrong".utf8))
+        )
+        let transport = LogStreamTransport(
+            start: correlated(result: started()),
+            statuses: [
+                .success(correlated(result: status(exited: false), frames: [foreign])),
+                .success(correlated(result: status(exited: false))),
+                .success(correlated(result: status(exited: true, exitCode: 0), frames: [frame(stream: .exit)]))
+            ]
+        )
+
+        do {
+            _ = try await run(transport: transport)
+            Issue.record("Expected the foreign frame to be rejected.")
+        } catch let error as PommeLogStreamExecution.Error {
+            #expect(error == .unrelatedJobFrame)
+        }
+        #expect(await transport.signals == [SIGTERM])
+    }
+
+    @Test("cleanup escalates from TERM to KILL after its first grace deadline")
+    func cleanupEscalatesToKill() async throws {
+        let probes = Mutex(0)
+        let instant = Mutex(ContinuousClock.now)
+        let transport = LogStreamTransport(
+            start: correlated(result: started()),
+            statuses: [
+                .success(correlated(result: status(exited: false))),
+                .success(correlated(result: status(exited: false))),
+                .success(correlated(result: status(exited: false))),
+                .success(correlated(result: status(exited: true, exitCode: 0), frames: [frame(stream: .exit)]))
+            ]
+        )
+        let timing = PommeLogStreamExecution.PollTiming(
+            now: { instant.withLock { $0 } },
+            sleep: { _ in instant.withLock { $0 = $0.advanced(by: .seconds(5)) } }
+        )
+
+        do {
+            _ = try await run(transport: transport, pollTiming: timing, shouldCancel: {
+                probes.withLock { count in
+                    count += 1
+                    return count >= 3
+                }
+            })
+            Issue.record("Expected the disconnect to interrupt the log stream.")
+        } catch let error as PommeLogStreamExecution.Error {
+            #expect(error == .interrupted(reason: .disconnected))
+        }
+
+        #expect(await transport.signals == [SIGTERM, SIGKILL])
+    }
+
+    @Test("transport failure with no cleanup proof is explicit")
+    func transportFailureWithoutCleanupProofIsExplicit() async throws {
+        let transport = LogStreamTransport(
+            start: correlated(result: started()),
+            statuses: [.failure(.expected)],
+            signals: [.failure(.expected)]
+        )
+
+        do {
+            _ = try await run(transport: transport)
+            Issue.record("Expected unconfirmed cleanup after transport failure.")
+        } catch let error as PommeLogStreamExecution.Error {
+            #expect(error == .cleanupUnconfirmed(reason: .disconnected))
+        }
+        #expect(await transport.signals == [SIGTERM])
+    }
+
+    @Test("a reaped job is confirmed before TERM is sent")
+    func naturallyExitedJobIsConfirmedBeforeSignal() async throws {
+        let transport = LogStreamTransport(
+            start: correlated(result: started()),
+            statuses: [
+                .failure(.expected),
+                .success(correlated(result: status(exited: true, exitCode: 0), frames: [frame(stream: .exit)]))
+            ]
+        )
+
+        do {
+            _ = try await run(transport: transport)
+            Issue.record("Expected the original guest failure to be preserved.")
+        } catch let error as LogStreamTestError {
+            #expect(error == .expected)
+        }
+        #expect(await transport.signals.isEmpty)
+    }
+
+    @Test("a rejected TERM rechecks whether the job was reaped")
+    func rejectedTermRechecksForExitProof() async throws {
+        let transport = LogStreamTransport(
+            start: correlated(result: started()),
+            statuses: [
+                .failure(.expected),
+                .success(correlated(result: status(exited: false))),
+                .success(correlated(result: status(exited: true, exitCode: 0), frames: [frame(stream: .exit)]))
+            ],
+            signals: [.failure(.expected)]
+        )
+
+        do {
+            _ = try await run(transport: transport)
+            Issue.record("Expected the original guest failure to be preserved.")
+        } catch let error as LogStreamTestError {
+            #expect(error == .expected)
+        }
+        #expect(await transport.signals == [SIGTERM])
+    }
+
+    @Test("guest failures survive confirmed cleanup")
+    func guestFailureSurvivesConfirmedCleanup() async throws {
+        let transport = LogStreamTransport(
+            start: correlated(result: started()),
+            statuses: [
+                .failure(.expected),
+                .success(correlated(result: status(exited: false))),
+                .success(correlated(result: status(exited: true, exitCode: 0), frames: [frame(stream: .exit)]))
+            ]
+        )
+
+        do {
+            _ = try await run(transport: transport)
+            Issue.record("Expected the guest failure to be preserved.")
+        } catch let error as LogStreamTestError {
+            #expect(error == .expected)
+        }
+        #expect(await transport.signals == [SIGTERM])
+    }
+
+    private func run(
+        transport: LogStreamTransport,
+        timeout: TimeInterval? = nil,
+        pollTiming: PommeLogStreamExecution.PollTiming = .init(),
+        shouldCancel: @escaping PommeLogStreamExecution.CancellationProbe = { false },
+        onFrames: PommeLogStreamExecution.FrameHandler? = nil
+    ) async throws -> PommeAgentCorrelatedResult {
+        try await PommeLogStreamExecution.run(
+            payload: .object(["path": .string("/usr/bin/log"), "arguments": .array([])]),
+            timeout: timeout,
+            perform: { operation, payload in try await transport.perform(operation: operation, payload: payload) },
+            sendStream: { jobID, stream, data in try await transport.sendStream(jobID: jobID, stream: stream, data: data) },
+            shouldCancel: shouldCancel,
+            pollTiming: pollTiming,
+            onFrames: onFrames
+        )
+    }
+
+    private func started() -> JSONValue {
+        .object([
+            "jobID": .string(jobID.uuidString.lowercased()),
+            "pid": .integer(42),
+            "detached": .bool(false),
+            "exited": .bool(false)
+        ])
+    }
+
+    private func status(exited: Bool, exitCode: Int64? = nil) -> JSONValue {
+        var values: [String: JSONValue] = [
+            "jobID": .string(jobID.uuidString.lowercased()),
+            "pid": .integer(42),
+            "exited": .bool(exited)
+        ]
+        if let exitCode { values["exitCode"] = .integer(exitCode) }
+        return .object(values)
+    }
+
+    private func frame(
+        stream: PommeAgentProtocol.Stream,
+        data: Data? = nil
+    ) -> PommeAgentJobStreamFrame {
+        try! .init(jobID: jobID, frame: .init(requestID: UUID(), stream: stream, data: data))
+    }
+
+    private func correlated(
+        result: JSONValue,
+        frames: [PommeAgentJobStreamFrame] = []
+    ) -> PommeAgentCorrelatedResult {
+        .init(requestID: startRequestID, result: result, streamFrames: frames)
+    }
+}
+
+private enum LogStreamTestError: Swift.Error, Equatable, Sendable {
+    case expected
+}
+
+private actor LogStreamTransport {
+    struct StreamCall: Sendable {
+        let jobID: UUID
+        let stream: PommeAgentProtocol.Stream
+        let data: Data?
+    }
+
+    let start: PommeAgentCorrelatedResult
+    let statuses: [Result<PommeAgentCorrelatedResult, LogStreamTestError>]
+    let signalResults: [Result<PommeAgentCorrelatedResult, LogStreamTestError>]
+    private var statusIndex = 0
+    private var signalIndex = 0
+    private(set) var operationNames: [String] = []
+    private(set) var signals: [Int32] = []
+    private(set) var streamCalls: [StreamCall] = []
+
+    init(
+        start: PommeAgentCorrelatedResult,
+        statuses: [Result<PommeAgentCorrelatedResult, LogStreamTestError>],
+        signals: [Result<PommeAgentCorrelatedResult, LogStreamTestError>] = []
+    ) {
+        self.start = start
+        self.statuses = statuses
+        signalResults = signals
+    }
+
+    func perform(operation: String, payload: JSONValue) throws -> PommeAgentCorrelatedResult {
+        operationNames.append(operation)
+        switch operation {
+        case "process.start": return start
+        case "process.status":
+            guard statusIndex < statuses.count else { throw LogStreamTestError.expected }
+            defer { statusIndex += 1 }
+            return try statuses[statusIndex].get()
+        case "process.signal":
+            guard let raw = payload.objectValue?["signal"], case .integer(let signal) = raw,
+                  let value = Int32(exactly: signal)
+            else { throw LogStreamTestError.expected }
+            signals.append(value)
+            if signalIndex < signalResults.count {
+                defer { signalIndex += 1 }
+                return try signalResults[signalIndex].get()
+            }
+            guard let jobID = payload.objectValue?["jobID"]?.stringValue else { throw LogStreamTestError.expected }
+            return .init(requestID: UUID(), result: .object([
+                "jobID": .string(jobID), "signalled": .bool(true)
+            ]), streamFrames: [])
+        default: throw LogStreamTestError.expected
+        }
+    }
+
+    func sendStream(
+        jobID: UUID,
+        stream: PommeAgentProtocol.Stream,
+        data: Data?
+    ) throws -> [PommeAgentJobStreamFrame] {
+        streamCalls.append(.init(jobID: jobID, stream: stream, data: data))
+        return []
+    }
+}
+
 private actor FrameCollector {
     private(set) var frames: [PommeAgentJobStreamFrame] = []
 

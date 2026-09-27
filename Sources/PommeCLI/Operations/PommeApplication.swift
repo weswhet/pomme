@@ -1,3 +1,4 @@
+import ArgumentParser
 import CryptoKit
 import Darwin
 import Foundation
@@ -837,6 +838,77 @@ enum PommeApplication {
         let text = agentResponseText(payload)
         return result(title: "Exec", reference: reference, payload: payload,
                       text: payload["foreground"] as? Bool == true ? text : (text.isEmpty ? (ok ? "OK" : "The guest command failed.") : text))
+        }
+    }
+
+    /// Streams the guest's Pomme unified log records directly to host stdout
+    /// and stderr. The helper owns the guest process and proves its cleanup
+    /// before this method returns after cancellation.
+    static func guestLogs(
+        name: String,
+        request: [String: Any],
+        follow: Bool,
+        debug: Bool
+    ) throws {
+        let reference = try namedReference(name)
+        let signals = PommeLogSignalController()
+        let output = PommeLogOutputSink()
+        var controlRequest = request
+        controlRequest["command"] = follow ? "logs.stream" : "logs.show"
+
+        if debug {
+            let format = request["format"] as? String ?? "unknown"
+            let categoryCount = (request["categories"] as? [String])?.count ?? 0
+            PommeCore.log(
+                "guest log request mode=\(follow ? "follow" : "history") format=\(format) categories=\(categoryCount)",
+                vmName: name
+            )
+        }
+
+        let response = try PommeCore.sendLogControlStream(
+            controlRequest,
+            bundle: reference.bundle,
+            shouldCancel: { signals.cancellationRequested },
+            onOutput: { descriptor, data in
+                try output.write(data, to: descriptor, shouldCancel: { signals.cancellationRequested })
+            }
+        )
+
+        if output.failed {
+            guard response["cleanupConfirmed"] as? Bool == true else {
+                throw RunnerError.controlCommandFailed(
+                    "Guest log process cleanup could not be confirmed after host output failed."
+                )
+            }
+            throw ExitCode(1)
+        }
+
+        if let reason = signals.reason {
+            guard response["cleanupConfirmed"] as? Bool == true else {
+                throw RunnerError.controlCommandFailed(
+                    "Guest log process cleanup could not be confirmed after \(reason == .interrupt ? "Ctrl-C" : "termination")."
+                )
+            }
+            throw ExitCode(reason.exitCode)
+        }
+
+        if response["ok"] as? Bool == false,
+           let error = response["error"] as? String,
+           !error.isEmpty {
+            try? FileHandle.standardError.write(contentsOf: Data((error + "\n").utf8))
+        }
+
+        let exitCode = PommeCore.hostExitCode(
+            from: response,
+            default: response["ok"] as? Bool == false ? 1 : 0
+        )
+        if exitCode != 0, !output.wroteToStderr {
+            try? FileHandle.standardError.write(
+                contentsOf: Data("Guest log command exited with status \(exitCode).\n".utf8)
+            )
+        }
+        guard exitCode == 0, response["ok"] as? Bool != false else {
+            throw ExitCode(exitCode == 0 ? 1 : exitCode)
         }
     }
 

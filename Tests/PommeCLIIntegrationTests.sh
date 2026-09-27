@@ -180,6 +180,58 @@ then
 else
   fail "discovery matches registered commands, aliases, groups, and new leaves"
 fi
+
+expect_success "guest log help" "$runner" log --help
+if grep -q -- '--follow' "$work/stdout" \
+  && grep -q -- '--category' "$work/stdout" \
+  && grep -q -- '--last' "$work/stdout" \
+  && grep -q -- '--format' "$work/stdout"; then
+  pass "guest log help lists history, follow, category, and format options"
+else
+  fail "guest log help lists history, follow, category, and format options"
+fi
+
+expect_failure "guest log requires a name without POMME_VM_NAME" \
+  env -u POMME_VM_NAME "$runner" log
+if grep -q 'Specify a VM name or set POMME_VM_NAME' "$work/stderr"; then
+  pass "guest log names the target fallback"
+else
+  fail "guest log names the target fallback"
+fi
+
+expect_failure "guest log rejects malformed history duration" \
+  "$runner" log example --last 0m
+if grep -q -- '--last must be boot or a positive number' "$work/stderr"; then
+  pass "guest log explains its supported history duration"
+else
+  fail "guest log explains its supported history duration"
+fi
+
+expect_failure "guest log rejects JSON documents while following" \
+  "$runner" log example --follow --format json
+if grep -q -- '--format json conflicts with --follow' "$work/stderr"; then
+  pass "guest log explains the follow format restriction"
+else
+  fail "guest log explains the follow format restriction"
+fi
+
+expect_failure "guest log rejects explicit timeout while following" \
+  "$runner" log example --follow --timeout 30
+if grep -q -- '--timeout conflicts with --follow' "$work/stderr"; then
+  pass "guest log explains the follow timeout restriction"
+else
+  fail "guest log explains the follow timeout restriction"
+fi
+
+if env POMME_VM_NAME=log-target-fallback "$runner" log >"$work/stdout" 2>"$work/stderr"; then
+  fail "guest log uses POMME_VM_NAME before VM lookup"
+elif grep -q 'log-target-fallback' "$work/stderr"; then
+  pass "guest log uses POMME_VM_NAME before VM lookup"
+else
+  fail "guest log uses POMME_VM_NAME before VM lookup"
+  sed -n '1,80p' "$work/stderr" >&2
+fi
+
 for representation in json jsonl; do
   expect_success "tools $representation inventory" "$runner" tools --format "$representation"
   cp "$work/stdout" "$work/tools-$representation"
