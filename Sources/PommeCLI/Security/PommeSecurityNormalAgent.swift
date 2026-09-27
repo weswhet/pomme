@@ -1442,6 +1442,36 @@ struct PommeSecurityNormalAgent: Sendable {
       .contains(PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation)
   }
 
+  /// Reads the daemon's boot receipt. This operation cannot initiate maintenance.
+  func buddyPreferencesStatus() throws -> PommeBuddyPreferencesStatus? {
+    let described = try PommeCore.sendControlObject([
+      "command": "agent.perform", "operation": "agent.describe", "payload": [:],
+    ], bundle: reference.bundle, timeout: 15)
+    guard described["ok"] as? Bool == true,
+      let description = described["result"] as? [String: Any],
+      description["role"] as? String == "persistent",
+      description["protocol"] as? String == PommeAgentProtocol.name,
+      Self.integerValue(description["version"]) == Int64(PommeAgentProtocol.version),
+      description["executableSHA256"] as? String == expectedExecutableDigest
+    else { throw PommeSecurityWorkflowError.agentUnverified }
+    guard let capabilities = description["capabilities"] as? [String],
+      capabilities.contains("buddy.preferences.status")
+    else { throw PommeBuddyStatusReadError.updatedAgentRequired }
+    let response = try PommeCore.sendControlObject([
+      "command": "agent.perform", "operation": "buddy.preferences.status", "payload": [:],
+    ], bundle: reference.bundle, timeout: 15)
+    guard response["ok"] as? Bool == true, let result = response["result"] else {
+      throw PommeBuddyStatusReadError.invalidReceipt
+    }
+    if let value = try? JSONValue(any: result),
+      value == .object(["initializing": .bool(true)]) { return nil }
+    do {
+      let data = try JSONSerialization.data(withJSONObject: result)
+      guard data.count <= 16 * 1024 else { throw PommeBuddyStatusReadError.invalidReceipt }
+      return try JSONDecoder().decode(PommeBuddyPreferencesStatus.self, from: data)
+    } catch { throw PommeBuddyStatusReadError.invalidReceipt }
+  }
+
   /// Recovers the owner account's automatic-login password from the guest,
   /// for a VM whose host Keychain item is absent because it was cloned from a
   /// provisioned template. The credential is returned only over the
@@ -1542,6 +1572,19 @@ struct PommeSecurityNormalAgent: Sendable {
     case "System Integrity Protection status: enabled.": false
     case "System Integrity Protection status: disabled.": true
     default: nil
+    }
+  }
+}
+
+private enum PommeBuddyStatusReadError: Error, LocalizedError {
+  case updatedAgentRequired, invalidReceipt
+
+  var errorDescription: String? {
+    switch self {
+    case .updatedAgentRequired:
+      "Buddy preference maintenance requires an updated guest agent with buddy.preferences.status support."
+    case .invalidReceipt:
+      "The guest agent's Buddy preference receipt could not be verified."
     }
   }
 }

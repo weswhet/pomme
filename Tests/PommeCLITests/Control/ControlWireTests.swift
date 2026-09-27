@@ -78,6 +78,41 @@ struct ControlWireTests {
         #expect(throws: RunnerError.self) { try PommeVMControlRouter.route(.init(command: "agent.perform", payload: .object(["operation": .string("unknown.operation")])) ) }
     }
 
+    @Test("Buddy status passes the real control wire parser and closed router")
+    func buddyStatusRouting() throws {
+        let request = PommeControlRequest(command: "agent.perform", payload: .object([
+            "operation": .string("buddy.preferences.status"), "payload": .object([:])
+        ]))
+        let decoded = try ControlWireCodec.decodeRequest(ControlWireCodec.encodeLine(request))
+        guard case .agentPerform(let agent, streaming: false) = try PommeVMControlRouter.route(decoded) else {
+            Issue.record("Buddy status was not routed")
+            return
+        }
+        #expect(agent.operation == "buddy.preferences.status")
+        #expect(agent.payload == .object([:]))
+        #expect(PommeAgent.persistentCapabilities.contains(agent.operation))
+        #expect(!PommeAgent.recoveryCapabilities.contains(agent.operation))
+        #expect(!PommeAgent.recoveryTerminalCapabilities.contains(agent.operation))
+    }
+
+    @Test("Buddy forwarding rejects unknown operations and malformed status payloads")
+    func buddyStatusRoutingRejectsInvalidRequests() throws {
+        let values: [[String: JSONValue]] = [
+            ["operation": .string("buddy.preferences.write"), "payload": .object([:])],
+            ["operation": .string("buddy.preferences.status.extra"), "payload": .object([:])],
+            ["operation": .string("buddy.preferences.status")],
+            ["operation": .string("buddy.preferences.status"), "payload": .null],
+            ["operation": .string("buddy.preferences.status"), "payload": .string("invalid")],
+            ["operation": .string("buddy.preferences.status"), "payload": .object(["write": .bool(true)])],
+            ["operation": .string("buddy.preferences.status"), "payload": .object([:]), "extra": .bool(true)]
+        ]
+        for value in values {
+            let request = PommeControlRequest(command: "agent.perform", payload: .object(value))
+            let decoded = try ControlWireCodec.decodeRequest(ControlWireCodec.encodeLine(request))
+            #expect(throws: RunnerError.self) { try PommeVMControlRouter.route(decoded) }
+        }
+    }
+
     @Test("Bounded stream frames remain correlated and ordered")
     func streamOrderingAndBounds() throws {
         let id = try #require(UUID(uuidString: "00000000-0000-0000-0000-000000000042"))

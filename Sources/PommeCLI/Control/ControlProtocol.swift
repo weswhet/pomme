@@ -489,12 +489,18 @@ struct PommeAgentPerformRequest: Sendable {
         else { throw RunnerError.invalidControlCommand("agent.perform") }
         let payload = object["payload"]
         if let payload, payload.objectValue == nil { throw RunnerError.invalidControlCommand("agent.perform") }
+        if operation == "buddy.preferences.status" {
+            guard Set(object.keys) == ["operation", "payload"], payload == .object([:]) else {
+                throw RunnerError.invalidControlCommand("agent.perform")
+            }
+        }
         return .init(operation: operation, payload: payload)
     }
 
     private static func allowed(_ operation: String) -> Bool {
         let exact: Set<String> = [
             "agent.describe", "agent.health", "system.info", "network.interfaces",
+            "buddy.preferences.status",
             "amfi.normal.disable", "amfi.normal.enable",
             "amfi.normal.verifyDisabled", "amfi.normal.verifyEnabled",
             // Read-only AMFI inspection from a normal boot, so a caller does
