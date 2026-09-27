@@ -5,6 +5,122 @@ import Testing
 
 @Suite("Pomme agent daemon framing")
 struct PommeAgentDaemonTests {
+    @Test("persistent connection retries preserve the daemon while Recovery fails immediately")
+    func buddyConnectionRetries() throws {
+        enum Unavailable: Error { case listener }
+        var connections = 0
+        var pauses = 0
+        let descriptor = try PommeAgentDaemon.connectForRole(role: .persistent, port: 505051, connect: { _ in
+            connections += 1
+            if connections < 3 { throw Unavailable.listener }
+            return 42
+        }, pause: { pauses += 1 })
+        #expect(descriptor == 42)
+        #expect(connections == 3)
+        #expect(pauses == 2)
+        connections = 0
+        pauses = 0
+        #expect(throws: Unavailable.self) {
+            try PommeAgentDaemon.connectForRole(role: .recovery, port: 505052, connect: { _ in
+                connections += 1
+                throw Unavailable.listener
+            }, pause: { pauses += 1 })
+        }
+        #expect(connections == 1)
+        #expect(pauses == 0)
+    }
+
+    @Test("Buddy status requires authentication and Recovery excludes it")
+    func buddyStatusAdmission() async throws {
+        let token = String(repeating: "a", count: 64)
+        let agent = try PommeAgent(role: .persistent, executableSHA256: token)
+        let connection = try PommeAgentConnection(token: token, lifetime: .persistent)
+        let status = PommeAgentProtocol.Envelope.request(operation: PommeAgent.buddyPreferencesStatusOperation)
+        let entered = Mutex(false)
+        let denied = await connection.receive(Data(try PommeAgentProtocol.encode(status).dropLast())) { request in
+            entered.withLock { $0 = true }
+            return try await agent.performAsynchronously(request)
+        }
+        #expect(!entered.withLock { $0 })
+        #expect(try PommeAgentProtocol.decode(Data(denied.dropLast())).error?.code == "authentication-required")
+        let authenticate = PommeAgentProtocol.Envelope.request(operation: "authenticate", payload: .object([
+            "challenge": .string(String(repeating: "b", count: 64))
+        ]))
+        _ = await connection.receive(Data(try PommeAgentProtocol.encode(authenticate).dropLast())) { request in
+            try await agent.performAsynchronously(request)
+        }
+        let admitted = await connection.receive(Data(try PommeAgentProtocol.encode(
+            .request(operation: PommeAgent.buddyPreferencesStatusOperation)
+        ).dropLast())) { request in
+            try await agent.performAsynchronously(request)
+        }
+        #expect(try PommeAgentProtocol.decode(Data(admitted.dropLast())).ok == true)
+        #expect(try PommeAgentProtocol.decode(Data(admitted.dropLast())).result == .object(["initializing": .bool(true)]))
+        #expect(try await agent.performAsynchronously(status) == .object(["initializing": .bool(true)]))
+        #expect(PommeAgent.persistentCapabilities.contains(PommeAgent.buddyPreferencesStatusOperation))
+        #expect(!PommeAgent.recoveryCapabilities.contains(PommeAgent.buddyPreferencesStatusOperation))
+        #expect(!PommeAgent.recoveryTerminalCapabilities.contains(PommeAgent.buddyPreferencesStatusOperation))
+        let recovery = try PommeAgent(role: .recovery, executableSHA256: token)
+        await #expect(throws: PommeAgentOperationError.self) {
+            try await recovery.performAsynchronously(status)
+        }
+        let engine = PommeBuddyPreferencesMaintenance()
+        #expect(PommeAgentDaemon.startBuddyMaintenance(role: .recovery, maintenance: engine) == nil)
+        #expect(await engine.status() == nil)
+    }
+
+    @Test("authenticated transport stays responsive during Buddy waiting and running", arguments: [false, true])
+    func buddyTransportRemainsResponsive(running: Bool) async throws {
+        let reachedStage = Mutex(false)
+        let owner = PommeBuddyPreferencesOwner(account: "pomme", uid: 501,
+            generatedUID: UUID().uuidString, homeDirectory: "/Users/pomme")
+        let engine = PommeBuddyPreferencesMaintenance(dependencies: .init(
+            bootSessionUUID: { "11111111-1111-1111-1111-111111111111" },
+            owner: { running ? owner : nil }, homeExists: { _ in true },
+            command: { path, arguments in
+                if path == "/usr/bin/sw_vers" {
+                    return .init(status: 0, stdout: arguments == ["-productVersion"] ? "27.0" : "26A428", stderr: "")
+                }
+                reachedStage.withLock { $0 = true }
+                try await Task.sleep(for: .seconds(60))
+                throw CancellationError()
+            }, load: { nil }, save: { _ in }, sleep: {
+                reachedStage.withLock { $0 = true }
+                try await Task.sleep(for: .seconds(60))
+            }
+        ))
+        let maintenance = try #require(PommeAgentDaemon.startBuddyMaintenance(role: .persistent, maintenance: engine))
+        defer { maintenance.cancel() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !reachedStage.withLock({ $0 }), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        guard reachedStage.withLock({ $0 }) else {
+            maintenance.cancel()
+            await maintenance.value
+            Issue.record("Maintenance did not reach its suspended stage")
+            return
+        }
+        let token = String(repeating: "a", count: 64)
+        let agent = try PommeAgent(role: .persistent, executableSHA256: token, buddyPreferences: engine)
+        let connection = try PommeAgentConnection(token: token, lifetime: .persistent)
+        for operation in ["authenticate", "agent.health", PommeAgent.buddyPreferencesStatusOperation] {
+            let request = PommeAgentProtocol.Envelope.request(operation: operation,
+                payload: operation == "authenticate"
+                    ? .object(["challenge": .string(String(repeating: "b", count: 64))]) : .object([:]))
+            let reply = await connection.receive(Data(try PommeAgentProtocol.encode(request).dropLast())) {
+                try await agent.performAsynchronously($0)
+            }
+            let envelope = try PommeAgentProtocol.decode(Data(reply.dropLast()))
+            #expect(envelope.ok == true)
+            if operation == PommeAgent.buddyPreferencesStatusOperation {
+                #expect(envelope.result?.objectValue?["outcome"] == .string(running ? "running" : "waiting"))
+            }
+        }
+        maintenance.cancel()
+        await maintenance.value
+    }
+
     @Test("socketpair admission is newline framed and bounded before allocation")
     func socketpairAdmission() async throws {
         try await runSocketpairAdmission()

@@ -13,28 +13,6 @@ enum PommeAutoLoginReadbackTrace: String, CaseIterable, Sendable {
   case artifactEntered, artifactProbeCommandFailed, artifactProbeEvidenceFailed, artifactAbsent
   case artifactMetadataEntered, artifactMetadataCommandFailed, artifactMetadataEvidenceFailed
   case artifactValid, artifactInvalid
-  case ownerBuildPreferenceWriteEntered, ownerMiniBuddyPreferenceWriteEntered
-  case ownerWriteStderrEmpty, ownerWriteStderrStartsSudo
-  case ownerWriteStderrStartsDefaults, ownerWriteStderrOther
-  case ownerWriteStderrMissingDomain, ownerWriteStderrMissingPair
-  case ownerWriteStderrWriteDomainFailed
-  case ownerWriteHomeExpectedDirectory, ownerWriteHomeOtherOwner
-  case ownerWriteHomeNotDirectory, ownerWriteHomeNotStatable, ownerWriteHomeProbeUnavailable
-  case ownerPostWritePreferencesExpectedOwnerWriteSearchMode, ownerPostWritePreferencesOwnerModeRestricted
-  case ownerPostWritePreferencesOtherOwner, ownerPostWritePreferencesNotDirectory
-  case ownerPostWritePreferencesNotStatable, ownerPostWritePreferencesUnavailable
-  case ownerPostWriteUIDExpected, ownerPostWriteUIDMismatch, ownerPostWriteUIDUnavailable
-  case ownerPostWriteHOMEExpected, ownerPostWriteHOMEMismatch, ownerPostWriteHOMEUnavailable
-  case ownerPostWriteCFPrefsPresent, ownerPostWriteCFPrefsAbsent, ownerPostWriteCFPrefsUnavailable
-  case ownerPostWriteSetupAssistantStockOnly, ownerPostWriteSetupAssistantOwnerOnly, ownerPostWriteSetupAssistantBoth
-  case ownerPostWriteSetupAssistantAbsent, ownerPostWriteSetupAssistantUnavailable
-  case ownerPostWriteBuildStateCommitted, ownerPostWriteBuildStateMissing
-  case ownerPostWriteBuildStateMismatch, ownerPostWriteBuildStateUnavailable
-  case ownerPreWriteUserDomainReachable, ownerPreWriteUserDomainNonzero, ownerPreWriteUserDomainUnavailable
-  case ownerPreWriteGUIDomainReachable, ownerPreWriteGUIDomainNonzero, ownerPreWriteGUIDomainUnavailable
-  case ownerPreWriteBuildTypeString, ownerPreWriteBuildMissingDomain, ownerPreWriteBuildMissingPair
-  case ownerPostWriteUserDomainReachable, ownerPostWriteUserDomainNonzero, ownerPostWriteUserDomainUnavailable
-  case ownerPostWriteGUIDomainReachable, ownerPostWriteGUIDomainNonzero, ownerPostWriteGUIDomainUnavailable
 
   var message: String { "[DEBUG-autologin-readback-20260922] \(rawValue)" }
   static func log(_ event: Self) { PommeCore.log(event.message) }
@@ -216,6 +194,8 @@ enum PommeSecurityOwnerPreparationError: Error, LocalizedError, Equatable, Senda
   case autoLoginUnsupported
   case setupAssistantContextUnavailable
   case ownerCompletionVerificationFailed
+  case buddyPreferencesAgentRequired
+  case buddyPreferencesFailed
   case setupAssistantProcessCleanupFailed
   case privatePTYUnavailable
   case phaseCallbackFailed
@@ -257,6 +237,10 @@ enum PommeSecurityOwnerPreparationError: Error, LocalizedError, Equatable, Senda
       return "The native normal guest automatic-login command is unsupported."
     case .setupAssistantContextUnavailable:
       return "The native Setup Assistant Aqua session could not be verified."
+    case .buddyPreferencesAgentRequired:
+      return "Buddy preference maintenance requires an updated guest agent."
+    case .buddyPreferencesFailed:
+      return "Guest Buddy preference maintenance failed; the VM and diagnostics were retained."
     case .ownerCompletionVerificationFailed:
       return "The fresh normal guest owner completion state could not be verified."
     case .setupAssistantProcessCleanupFailed:
@@ -519,10 +503,6 @@ struct PommeSecurityOwnerPreparation: Sendable {
   private static let setupDonePath = "/var/db/.AppleSetupDone"
   private static let diagnosticsSetupDonePath = "/var/db/.AppleDiagnosticsSetupDone"
   private static let setupTermsOfServicePath = "/var/db/.AppleSetupTermsOfService"
-  private static let setupAssistantPreferencesDomain = "com.apple.SetupAssistant"
-  private static let loginWindowPreferencesDomain = "com.apple.loginwindow"
-  private static let lastSeenBuddyBuildVersionKey = "LastSeenBuddyBuildVersion"
-  private static let miniBuddyLaunchKey = "MiniBuddyLaunch"
   private static let ownerPreferenceOutputLimit = 4 * 1024
   private static let ownerSetupAssistantCleanupTimeout: TimeInterval = 5
   // A malformed APFS observation can be transient immediately after account
@@ -544,25 +524,6 @@ struct PommeSecurityOwnerPreparation: Sendable {
     case configured
     case disabled
     case setupAssistantRecovery
-  }
-
-  private enum OwnerPreferenceType: Equatable {
-    case string
-    case boolean
-
-    var nativeReadType: String {
-      switch self {
-      case .string: return "Type is string"
-      case .boolean: return "Type is boolean"
-      }
-    }
-
-    var nativeWriteFlag: String {
-      switch self {
-      case .string: return "-string"
-      case .boolean: return "-bool"
-      }
-    }
   }
 
   private struct SetupMarkerMetadata: Equatable {
@@ -593,6 +554,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
 
   let identity: PommeSecurityOwnerIdentity
   let freshnessRequirements: PommeSecurityOwnerFreshnessRequirements
+  private let readBuddyPreferencesStatus: @Sendable () throws -> PommeBuddyPreferencesStatus?
   private let executeGuest: GuestCommandExecutor
   private let executePrivatePTY: PrivatePTYExecutor
   private let reportPhase: PhaseReporter
@@ -605,6 +567,9 @@ struct PommeSecurityOwnerPreparation: Sendable {
     freshnessRequirements: PommeSecurityOwnerFreshnessRequirements = .unverified,
     executeGuest: @escaping GuestCommandExecutor,
     executePrivatePTY: @escaping PrivatePTYExecutor,
+    readBuddyPreferencesStatus: @escaping @Sendable () throws -> PommeBuddyPreferencesStatus? = {
+      throw PommeSecurityOwnerPreparationError.buddyPreferencesAgentRequired
+    },
     reportPhase: @escaping PhaseReporter = { _, _ in },
     waitForFreshOwnerAPFS: @escaping @Sendable (TimeInterval) async throws -> Void = {
       interval in
@@ -618,6 +583,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
   ) {
     self.identity = identity
     self.freshnessRequirements = freshnessRequirements
+    self.readBuddyPreferencesStatus = readBuddyPreferencesStatus
     self.executeGuest = executeGuest
     self.executePrivatePTY = executePrivatePTY
     self.reportPhase = reportPhase
@@ -998,7 +964,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
     // the host lost its phase receipt. Reconcile that exact state first. The
     // native setter and GUI-context discovery are skipped on this path; a
     // fresh owner still re-authenticates its canonical account before its
-    // per-user completion preferences are touched.
+    // agent maintenance receipt is accepted.
     try phase(.globalAutoLoginReadback, .intent)
     let reconciliation = try reconcileConfiguredAutoLogin(
       allowSetupAssistantRecovery: freshOwner && attempt == .afterPreferenceRestart)
@@ -1129,11 +1095,8 @@ struct PommeSecurityOwnerPreparation: Sendable {
     }
   }
 
-  /// Writes and verifies native per-user completion preferences after owner
-  /// login. Full desktop proof remains required.
-  /// This is reachable only for a host-proven fresh owner. Every preference
-  /// is read and type-checked before the first write, and each changed value
-  /// is read back before the owner phase receipt is recorded.
+  /// Revalidates the owner and the agent's current-boot receipt before closing
+  /// retained Setup Assistant. Full desktop proof remains required.
   func completeFreshOwnerAfterLogin(
     password: String, expected: PommeSecurityOwnerVerification
   ) async throws {
@@ -1160,452 +1123,81 @@ struct PommeSecurityOwnerPreparation: Sendable {
       verification.uniqueID < UInt32.max
     else { throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed }
 
-    let buildVersion = try nativeGuestBuildVersion()
-    let existingBuild = try readOwnerStringPreference(
-      domain: Self.setupAssistantPreferencesDomain,
-      key: Self.lastSeenBuddyBuildVersionKey,
-      kind: .setupAssistant,
-      tracePreWriteBuildType: true
-    )
-    let existingMiniBuddyLaunch = try readOwnerBoolPreference(
-      domain: Self.loginWindowPreferencesDomain,
-      key: Self.miniBuddyLaunchKey,
-      kind: .loginWindow
-    )
-
-    if existingBuild != buildVersion {
-      probeOwnerLaunchdDomains(ownerUID: verification.uniqueID, afterFailure: false)
-      autoLoginTrace(.ownerBuildPreferenceWriteEntered)
-      try writeOwnerPreference(
-        domain: Self.setupAssistantPreferencesDomain,
-        key: Self.lastSeenBuddyBuildVersionKey,
-        type: .string,
-        value: buildVersion,
-        ownerUID: verification.uniqueID
-      )
-      guard
-        try readOwnerStringPreference(
-          domain: Self.setupAssistantPreferencesDomain,
-          key: Self.lastSeenBuddyBuildVersionKey,
-          kind: .setupAssistant
-        ) == buildVersion
-      else { throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed }
-    }
-
-    if existingMiniBuddyLaunch != false {
-      autoLoginTrace(.ownerMiniBuddyPreferenceWriteEntered)
-      try writeOwnerPreference(
-        domain: Self.loginWindowPreferencesDomain,
-        key: Self.miniBuddyLaunchKey,
-        type: .boolean,
-        value: "false",
-        ownerUID: verification.uniqueID
-      )
-      guard
-        try readOwnerBoolPreference(
-          domain: Self.loginWindowPreferencesDomain,
-          key: Self.miniBuddyLaunchKey,
-          kind: .loginWindow
-        ) == false
-      else { throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed }
-    }
-
+    _ = try await waitForBuddyPreferences(expected: verification)
     try await closeRetainedOwnerSetupAssistant(ownerUID: verification.uniqueID)
-    let finalBuild = try readOwnerStringPreference(
-      domain: Self.setupAssistantPreferencesDomain,
-      key: Self.lastSeenBuddyBuildVersionKey,
-      kind: .setupAssistant
-    )
-    let finalMiniBuddyLaunch = try readOwnerBoolPreference(
-      domain: Self.loginWindowPreferencesDomain,
-      key: Self.miniBuddyLaunchKey,
-      kind: .loginWindow
-    )
-    guard finalBuild == buildVersion, finalMiniBuddyLaunch == false
-    else { throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed }
   }
 
-  private func nativeGuestBuildVersion() throws -> String {
-    let result = try execute(
-      .init(executable: "/usr/bin/sw_vers", arguments: ["-buildVersion"])
-    )
-    guard result.exitCode == 0,
-      result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-      result.stdout.utf8.count <= Self.ownerPreferenceOutputLimit
-    else {
-      throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
-    }
-    let value = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard Self.isValidAppleBuildVersion(value) else {
-      throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
-    }
-    return value
-  }
-
-  private func readOwnerStringPreference(
-    domain: String,
-    key: String,
-    kind: PommeSecurityOwnerCommandKind,
-    timeout: TimeInterval = Self.commandTimeout,
-    tracePreWriteBuildType: Bool = false
-  ) throws -> String? {
-    let result = try readOwnerPreference(
-      domain: domain, key: key, kind: kind, expectedType: .string, timeout: timeout,
-      tracePreWriteBuildType: tracePreWriteBuildType)
-    guard let result else { return nil }
-    let value = result.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard Self.isValidAppleBuildVersion(value) else {
-      throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
-    }
-    return value
-  }
-
-  private func readOwnerBoolPreference(
-    domain: String,
-    key: String,
-    kind: PommeSecurityOwnerCommandKind
-  ) throws -> Bool? {
-    let result = try readOwnerPreference(
-      domain: domain, key: key, kind: kind, expectedType: .boolean)
-    guard let result else { return nil }
-    let value = result.trimmingCharacters(in: .whitespacesAndNewlines)
-    switch value {
-    case "0": return false
-    case "1": return true
-    default: throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
-    }
-  }
-
-  private func readOwnerPreference(
-    domain: String,
-    key: String,
-    kind: PommeSecurityOwnerCommandKind,
-    expectedType: OwnerPreferenceType,
-    timeout: TimeInterval = Self.commandTimeout,
-    tracePreWriteBuildType: Bool = false
-  ) throws -> String? {
-    let typeCommand = PommeSecurityOwnerPTYCommand(
-      executable: "/usr/bin/sudo",
-      arguments: [
-        "-n", "-H", "-u", identity.username,
-        "/usr/bin/defaults", "read-type", domain, key,
-      ])
-    let typeResult = try execute(typeCommand, timeout: timeout)
-    guard typeResult.output.utf8.count <= Self.ownerPreferenceOutputLimit else {
-      throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
-    }
-    switch typeResult.exitCode {
-    case 0:
-      guard typeResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-        typeResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-          == expectedType.nativeReadType
-      else {
+  /// Status reads never initiate preference maintenance. The independent native
+  /// identity prevents a retained receipt from another boot or OS being accepted.
+  @discardableResult
+  func waitForBuddyPreferences(
+    expected: PommeSecurityOwnerVerification
+  ) async throws -> PommeBuddyPreferencesStatus {
+    func nativeIdentity(_ path: String, _ arguments: [String]) throws -> String {
+      let result = try execute(.init(executable: path, arguments: arguments), timeout: 15)
+      let value = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard result.exitCode == 0, result.stderr.isEmpty, !value.isEmpty,
+        value.utf8.count <= 128, !value.contains(where: { $0.isWhitespace }) else {
         throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
       }
-      if tracePreWriteBuildType { autoLoginTrace(.ownerPreWriteBuildTypeString) }
-    case 1:
-      // `defaults read-type` uses status 1 for a missing domain/key. stdout must
-      // remain empty and the observed key-specific native diagnostic must be
-      // present. The diagnostic itself is never retained or rendered.
-      guard typeResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-        let missing = Self.missingOwnerPreferenceDiagnostic(
-          typeResult.stderr, domain: domain, key: key)
-      else {
-        throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
-      }
-      if tracePreWriteBuildType {
-        autoLoginTrace(missing == .domain ? .ownerPreWriteBuildMissingDomain : .ownerPreWriteBuildMissingPair)
-      }
-      return nil
-    default:
-      throw PommeSecurityOwnerPreparationError.commandFailed(
-        kind, exitCode: Int(typeResult.exitCode))
+      return value
     }
-
-    let readCommand = PommeSecurityOwnerPTYCommand(
-      executable: "/usr/bin/sudo",
-      arguments: [
-        "-n", "-H", "-u", identity.username,
-        "/usr/bin/defaults", "read", domain, key,
-      ])
-    let result = try execute(readCommand, timeout: timeout)
-    guard result.output.utf8.count <= Self.ownerPreferenceOutputLimit,
-      result.exitCode == 0,
-      result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    else {
+    let boot = try nativeIdentity("/usr/sbin/sysctl", ["-n", "kern.bootsessionuuid"])
+    guard UUID(uuidString: boot) != nil else {
       throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
     }
-    return result.stdout
-  }
-
-  private enum MissingOwnerPreferenceDiagnostic { case domain, pair }
-
-  private static func missingOwnerPreferenceDiagnostic(
-    _ output: String, domain: String, key: String
-  ) -> MissingOwnerPreferenceDiagnostic? {
-    let lines = output.split(whereSeparator: \.isNewline).map {
-      String($0).trimmingCharacters(in: .whitespacesAndNewlines)
-    }.filter { !$0.isEmpty }
-    guard let message = lines.last else { return nil }
-    guard lines.count == 1 || (lines.count == 2 &&
-      lines[0].range(
-        of: #"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ defaults\[\d+:\d+\]$"#,
-        options: .regularExpression
-      ) != nil)
-    else { return nil }
-    let missingDomain = "Domain \(domain) does not exist"
-    let missingPair = "The domain/default pair of (\(domain), \(key)) does not exist"
-    if message == missingDomain || message == missingDomain + "." { return .domain }
-    if message == missingPair || message == missingPair + "." { return .pair }
-    return nil
-  }
-
-  private func writeOwnerPreference(
-    domain: String,
-    key: String,
-    type: OwnerPreferenceType,
-    value: String,
-    ownerUID: UInt32
-  ) throws {
-    let command = PommeSecurityOwnerPTYCommand(
-      executable: "/usr/bin/sudo",
-      arguments: [
-        "-n", "-H", "-u", identity.username,
-        "/usr/bin/defaults", "write", domain, key,
-        type.nativeWriteFlag, value,
-      ])
-    let result = try execute(command)
-    guard result.output.utf8.count <= Self.ownerPreferenceOutputLimit else {
-      throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
-    }
-    guard result.exitCode == 0 else {
-      autoLoginTrace(Self.classifyOwnerWriteStderr(result.stderr, domain: domain, key: key))
-      autoLoginTrace(probeOwnerHomeAfterFailedWrite(ownerUID: ownerUID))
-      if result.exitCode == 1, domain == Self.setupAssistantPreferencesDomain,
-        key == Self.lastSeenBuddyBuildVersionKey
-      {
-        probeOwnerLaunchdDomains(ownerUID: ownerUID, afterFailure: true)
-        probeContextAfterFailedOwnerBuildWrite(ownerUID: ownerUID)
-        probeBuildStateAfterFailedWrite(expectedValue: value)
+    let build = try nativeIdentity("/usr/bin/sw_vers", ["-buildVersion"])
+    let version = try nativeIdentity("/usr/bin/sw_vers", ["-productVersion"])
+    let deadline = now() + 120
+    for _ in 0..<61 {
+      try Task.checkCancellation()
+      if let status = try readBuddyPreferencesStatus() {
+        guard UUID(uuidString: status.bootSessionUUID) == UUID(uuidString: boot),
+          status.buildVersion == nil || status.buildVersion == build,
+          status.productVersion == nil || status.productVersion == version else {
+          throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
+        }
+        if let owner = status.owner {
+          guard owner.account == expected.username, owner.uid == expected.uniqueID,
+            UUID(uuidString: owner.generatedUID) == expected.generatedUID,
+            owner.homeDirectory == "/Users/\(expected.username)" else {
+            throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
+          }
+        }
+        guard status.outcome == "failed" || status.error == nil else {
+          throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
+        }
+        switch (status.outcome, status.stage) {
+        case ("failed", "initializing"), ("failed", "detectingOS"),
+          ("failed", "waitingForOwner"), ("failed", "maintainingBuild"),
+          ("failed", "maintainingMiniBuddy"), ("failed", "complete"):
+          throw PommeSecurityOwnerPreparationError.buddyPreferencesFailed
+        case ("succeeded", "complete"):
+          guard status.owner != nil, status.buildVersion == build,
+            status.productVersion == version else {
+            throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
+          }
+          guard try nativeIdentity("/usr/sbin/sysctl", ["-n", "kern.bootsessionuuid"]) == boot else {
+            throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
+          }
+          return status
+        case ("waiting", "detectingOS"):
+          break
+        case ("waiting", "waitingForOwner"):
+          guard status.buildVersion == build, status.productVersion == version else {
+            throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
+          }
+        case ("running", "maintainingBuild"), ("running", "maintainingMiniBuddy"):
+          guard status.owner != nil, status.buildVersion == build, status.productVersion == version else {
+            throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
+          }
+        default: throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
+        }
       }
-      throw PommeSecurityOwnerPreparationError.commandFailed(
-        .ownerCompletion, exitCode: Int(result.exitCode))
+      guard now() < deadline else { break }
+      try await waitForFreshOwnerAPFS(2)
     }
-    guard result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-      result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    else { throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed }
-  }
-
-  /// Read-only snapshots add two bounded command exchanges before the write and
-  /// can therefore affect timing. `print` does not bootstrap a domain. Its text
-  /// is not an API and is never parsed or retained; nonzero does not prove absence.
-  private func probeOwnerLaunchdDomains(ownerUID: UInt32, afterFailure: Bool) {
-    for gui in [false, true] {
-      let reachable: PommeAutoLoginReadbackTrace = afterFailure
-        ? (gui ? .ownerPostWriteGUIDomainReachable : .ownerPostWriteUserDomainReachable)
-        : (gui ? .ownerPreWriteGUIDomainReachable : .ownerPreWriteUserDomainReachable)
-      let nonzero: PommeAutoLoginReadbackTrace = afterFailure
-        ? (gui ? .ownerPostWriteGUIDomainNonzero : .ownerPostWriteUserDomainNonzero)
-        : (gui ? .ownerPreWriteGUIDomainNonzero : .ownerPreWriteUserDomainNonzero)
-      let unavailable: PommeAutoLoginReadbackTrace = afterFailure
-        ? (gui ? .ownerPostWriteGUIDomainUnavailable : .ownerPostWriteUserDomainUnavailable)
-        : (gui ? .ownerPreWriteGUIDomainUnavailable : .ownerPreWriteUserDomainUnavailable)
-      guard let result = try? executeGuest(.init(
-        path: "/bin/launchctl", arguments: ["print", "\(gui ? "gui" : "user")/\(ownerUID)"], timeout: 5)),
-        !result.detached, result.exited, !result.timedOut, result.signal == nil,
-        !result.stdoutTruncated, !result.stderrTruncated,
-        result.stdout.count <= 65536, result.stderr.count <= 1024,
-        let exitCode = result.exitCode, (0...255).contains(exitCode)
-      else { autoLoginTrace(unavailable); continue }
-      autoLoginTrace(exitCode == 0 ? (result.stderr.isEmpty ? reachable : unavailable) : nonzero)
-    }
-  }
-
-  /// Post-failure evidence is non-atomic. Even this read may initialize CFPreferences;
-  /// it describes observed state only and never authorizes accepting the failed write.
-  private func probeBuildStateAfterFailedWrite(expectedValue: String) {
-    let event: PommeAutoLoginReadbackTrace
-    do {
-      if let value = try readOwnerStringPreference(
-        domain: Self.setupAssistantPreferencesDomain,
-        key: Self.lastSeenBuddyBuildVersionKey, kind: .ownerCompletion, timeout: 5)
-      {
-        event = value == expectedValue ? .ownerPostWriteBuildStateCommitted : .ownerPostWriteBuildStateMismatch
-      } else {
-        event = .ownerPostWriteBuildStateMissing
-      }
-    } catch {
-      event = .ownerPostWriteBuildStateUnavailable
-    }
-    autoLoginTrace(event)
-  }
-
-  /// Diagnostic only: recognize exact bounded messages, then classify the first line. The
-  /// native message and owner identity never enter the trace or error.
-  private static func classifyOwnerWriteStderr(
-    _ stderr: String, domain: String, key: String
-  ) -> PommeAutoLoginReadbackTrace {
-    switch missingOwnerPreferenceDiagnostic(stderr, domain: domain, key: key) {
-    case .domain: return .ownerWriteStderrMissingDomain
-    case .pair: return .ownerWriteStderrMissingPair
-    case nil: break
-    }
-    // These are native defaults format strings, with only the expected domain
-    // accepted. Extra text or lines stay unknown; this does not infer a cause.
-    let lines = stderr.split(whereSeparator: \.isNewline).map {
-      String($0).trimmingCharacters(in: .whitespacesAndNewlines)
-    }.filter { !$0.isEmpty }
-    let header = #"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ defaults\[\d+:\d+\]"#
-    var message: String?
-    if lines.count == 1 {
-      message = lines[0]
-      if let prefix = lines[0].range(of: "^" + header + " ", options: .regularExpression) {
-        message = String(lines[0][prefix.upperBound...])
-      }
-    } else if lines.count == 2,
-      lines[0].range(of: "^" + header + "$", options: .regularExpression) != nil
-    {
-      message = lines[1]
-    }
-    if message == "Could not write domain \(domain); exiting"
-      || message == "Failed to write domain \(domain)"
-    {
-      return .ownerWriteStderrWriteDomainFailed
-    }
-    let firstLine = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-      .split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
-    if firstLine.isEmpty { return .ownerWriteStderrEmpty }
-    if firstLine.hasPrefix("sudo:") { return .ownerWriteStderrStartsSudo }
-    if firstLine.hasPrefix("defaults:") || firstLine.range(
-      of: #"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ defaults\[\d+:\d+\]"#,
-      options: .regularExpression
-    ) != nil { return .ownerWriteStderrStartsDefaults }
-    return .ownerWriteStderrOther
-  }
-
-  /// Read-only evidence at the failed write boundary. This cannot authorize
-  /// a retry or change the original native command failure.
-  private func probeOwnerHomeAfterFailedWrite(ownerUID: UInt32) -> PommeAutoLoginReadbackTrace {
-    let result: GuestCommandResult
-    do {
-      result = try executeGuest(.init(
-        path: "/usr/bin/stat",
-        arguments: ["-f", "%u:%HT", "/Users/\(identity.username)"],
-        timeout: 5
-      ))
-    } catch { return .ownerWriteHomeProbeUnavailable }
-    guard !result.detached, result.exited, !result.timedOut,
-      result.signal == nil, !result.stdoutTruncated, !result.stderrTruncated,
-      let exitCode = result.exitCode
-    else { return .ownerWriteHomeProbeUnavailable }
-    if exitCode == 1 { return .ownerWriteHomeNotStatable }
-    guard exitCode == 0, result.stdout.count <= 64, result.stderr.isEmpty else {
-      return .ownerWriteHomeProbeUnavailable
-    }
-    let fields = String(decoding: result.stdout, as: UTF8.self)
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-      .split(separator: ":", maxSplits: 1, omittingEmptySubsequences: true)
-    guard fields.count == 2, let actualUID = UInt32(fields[0]) else {
-      return .ownerWriteHomeProbeUnavailable
-    }
-    guard fields[1] == "Directory" else { return .ownerWriteHomeNotDirectory }
-    return actualUID == ownerUID ? .ownerWriteHomeExpectedDirectory : .ownerWriteHomeOtherOwner
-  }
-
-  /// These observations occur after the failed write and are not atomic with it.
-  /// Mode bits do not prove ACL-effective access; process presence is not readiness.
-  /// Probes never write preferences, authorize a retry, or replace the original error.
-  private func probeContextAfterFailedOwnerBuildWrite(ownerUID: UInt32) {
-    let home = "/Users/\(identity.username)"
-    let metadata = postWriteProbe(
-      path: "/usr/bin/stat", arguments: ["-f", "%u:%HT:%Lp", "\(home)/Library/Preferences"],
-      limit: 128, allowNotStatable: true)
-    let metadataEvent: PommeAutoLoginReadbackTrace
-    if let metadata, metadata.exitCode == 1 {
-      metadataEvent = .ownerPostWritePreferencesNotStatable
-    } else if let metadata,
-      let fields = String(data: metadata.stdout, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        .split(separator: ":", omittingEmptySubsequences: false),
-      fields.count == 3, let uid = UInt32(fields[0]),
-      let mode = UInt16(fields[2], radix: 8), mode <= 0o7777
-    {
-      if fields[1] != "Directory" { metadataEvent = .ownerPostWritePreferencesNotDirectory }
-      else if uid != ownerUID { metadataEvent = .ownerPostWritePreferencesOtherOwner }
-      else if mode & 0o300 == 0o300 { metadataEvent = .ownerPostWritePreferencesExpectedOwnerWriteSearchMode }
-      else { metadataEvent = .ownerPostWritePreferencesOwnerModeRestricted }
-    } else { metadataEvent = .ownerPostWritePreferencesUnavailable }
-    autoLoginTrace(metadataEvent)
-
-    let sudo = ["-n", "-H", "-u", identity.username]
-    if let result = postWriteProbe(path: "/usr/bin/sudo", arguments: sudo + ["/usr/bin/id", "-u"], limit: 32),
-      let text = String(data: result.stdout, encoding: .utf8),
-      let uid = UInt32(text.trimmingCharacters(in: .whitespacesAndNewlines))
-    {
-      autoLoginTrace(uid == ownerUID ? .ownerPostWriteUIDExpected : .ownerPostWriteUIDMismatch)
-    } else { autoLoginTrace(.ownerPostWriteUIDUnavailable) }
-    if let result = postWriteProbe(path: "/usr/bin/sudo", arguments: sudo + ["/usr/bin/printenv", "HOME"], limit: 1024),
-      let text = String(data: result.stdout, encoding: .utf8),
-      text.hasSuffix("\n"), !text.dropLast().contains(where: { $0.isNewline || $0 == "\0" })
-    {
-      autoLoginTrace(text == home + "\n" ? .ownerPostWriteHOMEExpected : .ownerPostWriteHOMEMismatch)
-    } else { autoLoginTrace(.ownerPostWriteHOMEUnavailable) }
-
-    // A single snapshot keeps both process-presence observations contemporaneous.
-    guard let result = postWriteProbe(path: "/bin/ps", arguments: ["-axo", "uid=,comm="], limit: 65536),
-      let text = String(data: result.stdout, encoding: .utf8),
-      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    else {
-      autoLoginTrace(.ownerPostWriteCFPrefsUnavailable)
-      autoLoginTrace(.ownerPostWriteSetupAssistantUnavailable)
-      return
-    }
-    var hasCFPrefs = false
-    var hasStockSetupAssistant = false
-    var hasOwnerSetupAssistant = false
-    var hasOtherSetupAssistant = false
-    for line in text.split(whereSeparator: \.isNewline) {
-      let fields = line.split(maxSplits: 1, whereSeparator: \.isWhitespace)
-      guard fields.count == 2, let uid = UInt32(fields[0]) else {
-        autoLoginTrace(.ownerPostWriteCFPrefsUnavailable)
-        autoLoginTrace(.ownerPostWriteSetupAssistantUnavailable)
-        return
-      }
-      let path = fields[1].trimmingCharacters(in: .whitespaces)
-      hasCFPrefs = hasCFPrefs || (uid == ownerUID && path == "/usr/sbin/cfprefsd")
-      if path == Self.setupAssistantExecutablePath {
-        if uid == ownerUID { hasOwnerSetupAssistant = true }
-        else if uid == Self.setupAssistantUID { hasStockSetupAssistant = true }
-        else { hasOtherSetupAssistant = true }
-      }
-    }
-    autoLoginTrace(hasCFPrefs ? .ownerPostWriteCFPrefsPresent : .ownerPostWriteCFPrefsAbsent)
-    if hasOtherSetupAssistant { autoLoginTrace(.ownerPostWriteSetupAssistantUnavailable) }
-    else if hasStockSetupAssistant && hasOwnerSetupAssistant { autoLoginTrace(.ownerPostWriteSetupAssistantBoth) }
-    else if hasStockSetupAssistant { autoLoginTrace(.ownerPostWriteSetupAssistantStockOnly) }
-    else if hasOwnerSetupAssistant { autoLoginTrace(.ownerPostWriteSetupAssistantOwnerOnly) }
-    else { autoLoginTrace(.ownerPostWriteSetupAssistantAbsent) }
-  }
-
-  private func postWriteProbe(
-    path: String, arguments: [String], limit: Int, allowNotStatable: Bool = false
-  ) -> GuestCommandResult? {
-    guard let result = try? executeGuest(.init(path: path, arguments: arguments, timeout: 5)),
-      !result.detached, result.exited, !result.timedOut, result.signal == nil,
-      !result.stdoutTruncated, !result.stderrTruncated,
-      result.stdout.count <= limit, result.stderr.count <= 1024
-    else { return nil }
-    if allowNotStatable, result.exitCode == 1 { return result }
-    guard result.exitCode == 0, result.stderr.isEmpty else { return nil }
-    return result
-  }
-
-  private static func isValidAppleBuildVersion(_ value: String) -> Bool {
-    guard !value.isEmpty, value.utf8.count <= 32 else { return false }
-    return value.utf8.allSatisfy { byte in
-      (byte >= 48 && byte <= 57)
-        || (byte >= 65 && byte <= 90)
-        || (byte >= 97 && byte <= 122)
-    }
+    throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
   }
 
   /// A previous interrupted attempt may leave Setup Assistant running as the

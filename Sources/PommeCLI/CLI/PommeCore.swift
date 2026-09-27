@@ -2506,7 +2506,7 @@ struct PommeCore {
 
     private static func verifyFrameworkProvisioning(_ plan: PommeProvisioningPlan) async throws -> PommeProvisioningV2Verification {
         enum Stage: String {
-            case ownerReference, normalRebootAndAgent, authenticate, ownerProof, desktopProof
+            case ownerReference, normalRebootAndAgent, authenticate, ownerProof, buddyPreferences, desktopProof
             case persistVolumeIdentity, remoteLoginOff, complete
         }
         var stage = Stage.ownerReference
@@ -2541,9 +2541,12 @@ struct PommeCore {
                 try await runSecurityPrivatePTY(reference: reference,
                     expectedExecutableDigest: plan.normalAgent.executableDigest,
                     command: command, password: secret, provisioningVerification: true)
-            })
+            },
+            readBuddyPreferencesStatus: { try normal.buddyPreferencesStatus() })
         let proof = try await preparation.verifyFrameworkProvisionedOwner(password: password,
             expectedGeneratedUID: owner.generatedUID)
+        checkpoint(.buddyPreferences)
+        _ = try await preparation.waitForBuddyPreferences(expected: proof.owner)
         checkpoint(.desktopProof)
         // A newly provisioned desktop can take longer than an established security workflow.
         _ = try await normal.verifyConsoleLogin(
@@ -2711,6 +2714,8 @@ struct PommeCore {
         guard let coordinator = retained.coordinator, retained.mode == .normal else { throw PommeSSHBootstrapError.invalid }
         if try await bootstrapAgentMatches(coordinator.status(), plan: plan) {
             log(diagnostics.checkpoint(.agentConnected))
+            try await verifyBootstrapBuddyPreferences(coordinator: coordinator, plan: plan,
+                expectedGeneratedUID: owner.generatedUID)
             try cleanupBootstrapWorkspace(plan: plan, completed: false)
             return try receiptDigest("bootstrap-normal-agent", plan: plan, bundle: reference.bundle)
         }
@@ -2860,6 +2865,8 @@ struct PommeCore {
         }
         // Keep the authenticated original request and host-key pin for replay.
         log(diagnostics.checkpoint(.agentConnected))
+        try await verifyBootstrapBuddyPreferences(coordinator: coordinator, plan: plan,
+            expectedUID: uid, expectedGeneratedUID: owner.generatedUID)
         // The guest received its token only through the root-private stdin path.
         try cleanupBootstrapWorkspace(plan: plan, completed: false)
         return try receiptDigest("bootstrap-normal-agent", plan: plan, bundle: reference.bundle)
@@ -2874,6 +2881,46 @@ struct PommeCore {
             }
             throw error
         }
+    }
+
+    /// First-boot maintenance must succeed before cleanup or the planned normal reboot.
+    private static func verifyBootstrapBuddyPreferences(
+        coordinator: PommeAgentVSOCKCoordinator, plan: PommeProvisioningPlan,
+        expectedUID: UInt32? = nil, expectedGeneratedUID: UUID?
+    ) async throws {
+        let status = await coordinator.status()
+        guard status.capabilities.contains("buddy.preferences.status") else {
+            throw PommeSecurityOwnerPreparationError.buddyPreferencesAgentRequired
+        }
+        let currentOwner = try await PommeBootstrapBuddyPreferences.readOwner { request in
+            try request.validate()
+            let result = try await PommeForegroundExecution.run(
+                payload: JSONValue(any: request.agentPayload()), timeout: request.timeout,
+                perform: { operation, payload in
+                    try await coordinator.performCorrelated(operation: operation, payload: payload)
+                },
+                sendStream: { jobID, stream, data in
+                    try await coordinator.sendStream(jobID: jobID, stream: stream,
+                        requestID: UUID(), data: data, dimensions: nil, signal: nil)
+                })
+            let response = try JSONSerialization.jsonObject(
+                with: Data(foregroundResultJSON(result).utf8))
+            guard let object = response as? [String: Any] else {
+                throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
+            }
+            return try PommeSecurityNormalAgent.decodeCompletedCommand(object)
+        }
+        guard expectedUID == nil || currentOwner.uid == expectedUID,
+              expectedGeneratedUID == nil || UUID(uuidString: currentOwner.generatedUID) == expectedGeneratedUID else {
+            throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
+        }
+        try await PommeBootstrapBuddyPreferences.wait(
+            productVersion: plan.restore.version, buildVersion: plan.restore.build,
+            expectedOwner: currentOwner,
+            read: {
+                try await coordinator.performCorrelated(
+                    operation: "buddy.preferences.status", payload: .object([:])).result
+            })
     }
 
     private static func cleanupBootstrapWorkspace(plan: PommeProvisioningPlan, completed: Bool) throws {

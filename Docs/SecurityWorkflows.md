@@ -153,25 +153,50 @@ handoff described below; failure to establish that session stops navigation. A
 retry that already has all native autologin proofs skips the setter and session
 handoff.
 
-Fresh-owner preparation configures and verifies native automatic login, writes
-and verifies the system completion markers (including `.AppleSetupDone`), then
-reboots and authenticates the normal agent. It waits for the exact owner console
-identity before writing per-user preferences. The reboot is a planned step
-before completion.
+On every normal boot, the persistent guest agent detects the product version and
+build with `sw_vers` and queries the local Open Directory node for the exact
+`pomme` account. It checks immediately and every two seconds while the account
+or its home directory is absent. It validates the UID, GeneratedUID, and home
+before maintaining preferences; it does not wait for login or a GUI session.
+Recovery agents never run this task.
 
-After that login, fresh-owner completion reads the native guest build and exact
-owner preference types before writing. For the owner's CurrentUser/AnyHost
-preferences,
-`LastSeenBuddyBuildVersion` must be an explicit string matching the current
-build and `MiniBuddyLaunch` an explicit boolean `false`; every changed value
-is read back. Commands run as the owner through `sudo -n -H -u`. A missing key
-is accepted only with the bounded positive native timestamped multiline
-diagnostic. Pomme then rechecks and closes the exact
-previously running owner Setup Assistant process before its final preference
-readbacks. These preferences and `.AppleSetupDone` do not by themselves prove
-that Setup Assistant has finished. The workflow still requires the full stable
-desktop proof before recording `autologinVerified` or starting a security change.
-A failed completion command exits without automatically rebooting and retrying.
+The agent uses bounded `sudo -n -H -u pomme /usr/bin/defaults` commands to
+maintain `com.apple.SetupAssistant/LastSeenBuddyBuildVersion` as the detected
+build string and `com.apple.loginwindow/MiniBuddyLaunch` as boolean `false`.
+It reads and checks types before writing, skips matching values, and verifies
+each changed value. The host never writes these preferences.
+
+A root-owned private receipt binds the task to `kern.bootsessionuuid` and the
+owner identity. It records waiting, running, succeeded, or failed status. A
+restart resumes waiting or reuses a terminal receipt; an interrupted running
+attempt becomes failed without replaying writes. A new boot permits another
+attempt. Failure retains bounded diagnostics and leaves command transport
+available. The authenticated `buddy.preferences.status` operation reads this
+receipt without initiating maintenance.
+
+The agent also records unified logs under subsystem
+`com.github.weswhet.pomme`, category `buddy-preferences`.
+
+Progress uses notice-level logs; failures use error-level logs. Events include
+the boot UUID, daemon PID, and run ID, plus owner discovery and revalidation,
+stage durations, command launcher PID and exit status, output byte counts,
+recognized error categories, and typed readback results. A launcher labelled
+`sudo` identifies the spawned process; it does not prove that `defaults` started.
+Unknown command output is redacted. Waiting logs appear on account/home state
+changes and at most once per minute while that state remains unchanged.
+
+Fresh-owner preparation requires a successful matching receipt after owner
+verification, before configuring native automatic login and system completion
+markers (including `.AppleSetupDone`). It reboots, authenticates the normal
+agent, and checks the new boot's receipt before continuing. Missing capability
+requires an updated guest agent. Failed or mismatched receipts stop the workflow
+without an automatic retry, reboot, cleanup, or security restoration.
+
+The workflow still verifies the owner console, revalidates the owner, and closes
+only the exact verified owner Setup Assistant process. It requires the full
+stable desktop proof before recording `autologinVerified` or starting a security
+change. Account creation, automatic login, completion markers, and Setup
+Assistant closure remain workflow responsibilities.
 
 Pomme requires native automatic-login status to report the account-bound
 diagnostic `Automatic login user: pomme` (with the native timestamp prefix

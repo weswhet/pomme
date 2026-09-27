@@ -265,13 +265,17 @@ enum PommeAgentDaemon {
                 )
             }
             var terminalAdmissionAuthenticated = false
+            let buddyPreferences = options.role == .persistent ? PommeBuddyPreferencesMaintenance() : nil
             let agent = try PommeAgent(
                 role: options.role,
                 executableSHA256: options.expectedSHA256,
+                buddyPreferences: buddyPreferences,
                 authority: options.terminalAuthority ? .recoveryTerminal : .standard
             )
+            let maintenanceTask = startBuddyMaintenance(role: options.role, maintenance: buddyPreferences)
+            defer { maintenanceTask?.cancel() }
             while true {
-                let descriptor = try connectToHost(port: options.port)
+                let descriptor = try connectForRole(role: options.role, port: options.port)
                 let lifetime: PommeAgentConnection.CredentialLifetime = options.terminalAuthority
                     ? .bootSession
                     : (options.role == .recovery ? .oneShot : .persistent)
@@ -305,6 +309,32 @@ enum PommeAgentDaemon {
             return error.exit.rawValue
         } catch {
             return Exit.transport.rawValue
+        }
+    }
+
+    /// Maintenance outlives transport reconnects and never runs in Recovery.
+    static func startBuddyMaintenance(
+        role: PommeAgentRole,
+        maintenance: PommeBuddyPreferencesMaintenance?
+    ) -> Task<Void, Never>? {
+        guard role == .persistent, let maintenance else { return nil }
+        return Task.detached { await maintenance.run() }
+    }
+
+    static func connectForRole(
+        role: PommeAgentRole,
+        port: UInt32,
+        connect: (UInt32) throws -> Int32 = connectToHost,
+        pause: () throws -> Void = { Thread.sleep(forTimeInterval: 2) }
+    ) throws -> Int32 {
+        while true {
+            do { return try connect(port) }
+            catch {
+                guard role == .persistent else { throw error }
+                // A missing host listener must not restart the daemon and
+                // interrupt an active preference attempt.
+                try pause()
+            }
         }
     }
 

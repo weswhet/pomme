@@ -4,42 +4,94 @@ import Synchronization
 
 @Suite("Pomme normal guest owner preparation")
 struct PommeSecurityOwnerPreparationTests {
-  @Test("Post-login preferences require the same verified owner and retain setup markers on failure", arguments: ["success", "writeFailure", "identityDrift"])
-  func postLoginOwnerCompletion(mode: String) async throws {
+  @Test("Buddy receipts must match the current boot, OS, and verified owner", arguments: [
+    "success", "failed", "boot", "build", "version", "uid", "guid", "home", "account", "missingOwner", "unknownOutcome",
+    "successStage", "waitingStage", "runningStage", "waitingError", "runningError", "successError",
+  ])
+  func buddyReceiptValidation(mode: String) async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    fixture.ownerSetupAssistantProcessPresent = true
+    let calls = Mutex(0)
+    let preparation = PommeSecurityOwnerPreparation(
+      freshnessRequirements: .verifiedFresh, executeGuest: fixture.execute,
+      executePrivatePTY: fixture.executePTY,
+      readBuddyPreferencesStatus: {
+        calls.withLock { $0 += 1 }
+        return .init(
+          bootSessionUUID: mode == "boot" ? UUID().uuidString : "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB",
+          productVersion: mode == "version" ? "27.0" : "26.6.2",
+          buildVersion: mode == "build" ? "26A428" : "25G83",
+          owner: mode == "missingOwner" ? nil : .init(
+            account: mode == "account" ? "other" : "pomme", uid: mode == "uid" ? 502 : 501,
+            generatedUID: mode == "guid" ? UUID().uuidString : fixture.generatedUID.uuidString,
+            homeDirectory: mode == "home" ? "/var/empty" : "/Users/pomme"),
+          stage: mode == "successStage" ? "maintainingBuild"
+            : mode == "waitingError" ? "waitingForOwner"
+            : mode == "runningError" ? "maintainingBuild" : "complete",
+          outcome: mode == "failed" ? "failed" : mode == "unknownOutcome" ? "other"
+            : mode.hasPrefix("waiting") ? "waiting" : mode.hasPrefix("running") ? "running" : "succeeded",
+          error: mode.hasSuffix("Error") ? .init(code: "unexpected-error", numericCode: 1) : nil)
+      })
+    let verified = try await preparation.verifyOwner(password: "opaque-owner-secret")
+    if mode == "success" {
+      try await preparation.completeFreshOwnerAfterLogin(password: "opaque-owner-secret", expected: verified)
+      #expect(!fixture.ownerSetupAssistantProcessPresent)
+    } else {
+      let expected: PommeSecurityOwnerPreparationError = mode == "failed"
+        ? .buddyPreferencesFailed : .ownerCompletionVerificationFailed
+      await #expect(throws: expected) {
+        try await preparation.completeFreshOwnerAfterLogin(password: "opaque-owner-secret", expected: verified)
+      }
+      #expect(fixture.ownerSetupAssistantProcessPresent)
+    }
+    #expect(calls.withLock { $0 } == 1)
+    #expect(!fixture.guestArguments.contains { $0.contains("/usr/bin/defaults") && $0.contains("write") })
+    #expect(!fixture.setupDone)
+  }
+
+  @Test("Buddy status waits without console login or host preference writes")
+  func buddyReceiptWaitsBeforeLogin() async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    fixture.autoLoginStatusOutput = "Automatic login is OFF.\n"
+    let calls = Mutex(0)
+    let waits = Mutex(0)
+    let preparation = PommeSecurityOwnerPreparation(
+      freshnessRequirements: .verifiedFresh, executeGuest: fixture.execute,
+      executePrivatePTY: fixture.executePTY,
+      readBuddyPreferencesStatus: {
+        let count = calls.withLock { $0 += 1; return $0 }
+        if count == 1 { return nil }
+        if count < 4 {
+          return .init(bootSessionUUID: "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB",
+            productVersion: "26.6.2", buildVersion: "25G83",
+            owner: count == 2 ? nil : fixture.buddyStatus()?.owner,
+            stage: count == 2 ? "waitingForOwner" : "maintainingBuild",
+            outcome: count == 2 ? "waiting" : "running", error: nil)
+        }
+        return fixture.buddyStatus()
+      }, waitForFreshOwnerAPFS: { seconds in
+        #expect(seconds == 2)
+        waits.withLock { $0 += 1 }
+      })
+    let verified = try await preparation.verifyOwner(password: "opaque-owner-secret")
+    let status = try await preparation.waitForBuddyPreferences(expected: verified)
+    #expect(status.outcome == "succeeded")
+    #expect(waits.withLock { $0 } == 3)
+    #expect(!fixture.guestArguments.contains { $0.contains("/dev/console") || $0.contains("write") })
+    #expect(!fixture.setupDone)
+  }
+
+  @Test("Missing Buddy capability requires an updated agent")
+  func buddyCapabilityRequired() async throws {
     let fixture = OwnerPreparationFixture(existingOwner: true)
     let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID), freshnessRequirements: .verifiedFresh,
-      executeGuest: { request in
-        if request.arguments.contains("write"), request.arguments.contains("LastSeenBuddyBuildVersion") {
-          #expect(fixture.setupDone)
-        }
-        return try fixture.execute(request)
-      }, executePrivatePTY: fixture.executePTY)
+      freshnessRequirements: .verifiedFresh, executeGuest: fixture.execute,
+      executePrivatePTY: fixture.executePTY)
     let verified = try await preparation.verifyOwner(password: "opaque-owner-secret")
-    _ = try await preparation.configureLogin(password: "opaque-owner-secret", deferOwnerPreferences: true)
-    #expect(fixture.setupDone)
-    #expect(fixture.setupAssistantBuildPreference == nil)
-    if mode == "writeFailure" { fixture.setupAssistantBuildWriteExit = 1 }
-    let expected = PommeSecurityOwnerVerification(
-      username: verified.username, generatedUID: mode == "identityDrift" ? UUID() : verified.generatedUID,
-      uniqueID: verified.uniqueID, passwordVerified: true, isAdministrator: true,
-      secureTokenEnabled: true, isAPFSVolumeOwner: true, startupVolumeGroupUUID: verified.startupVolumeGroupUUID)
-    if mode == "success" {
-      try await preparation.completeFreshOwnerAfterLogin(password: "opaque-owner-secret", expected: expected)
-      #expect(fixture.setupAssistantBuildPreference == "25G83")
-      #expect(fixture.miniBuddyLaunchPreference == false)
-    } else if mode == "identityDrift" {
-      await #expect(throws: PommeSecurityWorkflowJournalError.immutableRequestMismatch) {
-        try await preparation.completeFreshOwnerAfterLogin(password: "opaque-owner-secret", expected: expected)
-      }
-      #expect(fixture.setupAssistantBuildPreference == nil)
-    } else {
-      await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
-        try await preparation.completeFreshOwnerAfterLogin(password: "opaque-owner-secret", expected: expected)
-      }
-      #expect(fixture.miniBuddyLaunchPreference == nil)
+    await #expect(throws: PommeSecurityOwnerPreparationError.buddyPreferencesAgentRequired) {
+      try await preparation.waitForBuddyPreferences(expected: verified)
     }
-    #expect(fixture.setupDone)
+    #expect(!fixture.setupDone)
   }
 
   @Test("Marker-first lab writes setup markers without per-user preferences", arguments: [false, true])
@@ -51,7 +103,7 @@ struct PommeSecurityOwnerPreparationTests {
     let preparation = PommeSecurityOwnerPreparation(
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
-      executeGuest: fixture.execute, executePrivatePTY: fixture.executePTY)
+      executeGuest: fixture.execute, executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus)
     _ = try await preparation.configureLogin(
       password: "opaque-owner-secret", deferOwnerPreferences: true)
     #expect(fixture.setupDone)
@@ -68,7 +120,7 @@ struct PommeSecurityOwnerPreparationTests {
     let preparation = PommeSecurityOwnerPreparation(
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
-      executeGuest: fixture.execute, executePrivatePTY: fixture.executePTY)
+      executeGuest: fixture.execute, executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus)
     await #expect(throws: PommeSecurityOwnerPreparationError.privatePTYUnavailable) {
       try await preparation.configureLogin(password: "opaque-owner-secret", labSetter: { _ in
         calls.withLock { $0 += 1 }
@@ -88,7 +140,7 @@ struct PommeSecurityOwnerPreparationTests {
     let preparation = PommeSecurityOwnerPreparation(
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
-      executeGuest: fixture.execute, executePrivatePTY: fixture.executePTY)
+      executeGuest: fixture.execute, executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus)
     let setter: @Sendable (String) async throws -> Void = { password in
       #expect(password == "opaque-owner-secret")
       calls.withLock { $0 += 1 }
@@ -117,597 +169,12 @@ struct PommeSecurityOwnerPreparationTests {
     let preparation = PommeSecurityOwnerPreparation(
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
-      executeGuest: fixture.execute, executePrivatePTY: fixture.executePTY)
+      executeGuest: fixture.execute, executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus)
     let probe = try preparation.probe()
     #expect(probe.evidence.apfsUsers.count == 2)
     #expect(probe.evidence.apfsLocalOwners.count == 1)
     #expect(probe.evidence.apfsLocalOwners.first?.generatedUID == fixture.generatedUID)
     #expect(!probe.freshness.isVerifiedFresh)
-  }
-
-  @Test("Initial build type classification reuses the existing read and preserves the write failure", arguments: ["domain", "pair", "known", "unchanged"])
-  func initialBuildTypeClassification(mode: String) async throws {
-    let fixture = OwnerPreparationFixture(existingOwner: true)
-    if mode == "known" { fixture.setupAssistantBuildPreference = "24A123" }
-    if mode == "unchanged" { fixture.setupAssistantBuildPreference = "25G83" }
-    fixture.setupAssistantBuildWriteExit = 1
-    fixture.miniBuddyLaunchWriteExit = 1
-    let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
-    let order = Mutex<[String]>([])
-    let typeReads = Mutex(0)
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID), freshnessRequirements: .verifiedFresh,
-      executeGuest: { request in
-        if request.path == "/usr/bin/sudo", request.arguments.contains("LastSeenBuddyBuildVersion") {
-          if request.arguments.contains("read-type") {
-            let first = typeReads.withLock { count in count += 1; return count == 1 }
-            if first {
-              order.withLock { $0.append("read-type") }
-              if mode == "domain" || mode == "pair" {
-                let message = mode == "domain" ? "Domain com.apple.SetupAssistant does not exist"
-                  : "The domain/default pair of (com.apple.SetupAssistant, LastSeenBuddyBuildVersion) does not exist"
-                return .init(exitCode: 1, signal: nil, stdout: Data(),
-                             stderr: Data(("2026-09-23 01:02:03.456 defaults[123:456]\n" + message + "\n").utf8),
-                             stdoutTruncated: false, stderrTruncated: false, exited: true)
-              }
-            }
-          }
-          if request.arguments.contains("write") { order.withLock { $0.append("write") } }
-        }
-        return try fixture.execute(request)
-      }, executePrivatePTY: fixture.executePTY,
-      autoLoginTrace: { event in
-        trace.withLock { $0.append(event) }
-        if event.rawValue.hasPrefix("ownerPreWriteBuild") { order.withLock { $0.append(event.rawValue) } }
-      })
-    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
-      try await preparation.configureLogin(password: "opaque-owner-secret")
-    }
-    let label = mode == "domain" ? "ownerPreWriteBuildMissingDomain"
-      : mode == "pair" ? "ownerPreWriteBuildMissingPair" : "ownerPreWriteBuildTypeString"
-    #expect(order.withLock { $0 } == ["read-type", label] + (mode == "unchanged" ? [] : ["write"]))
-    #expect(typeReads.withLock { $0 } == (mode == "unchanged" ? 1 : 2))
-    for value in ["com.apple.SetupAssistant", "LastSeenBuddyBuildVersion", "123:456", "24A123", "25G83", "opaque-owner-secret"] {
-      #expect(trace.withLock { $0.allSatisfy { !$0.message.contains(value) } })
-    }
-    #expect(!fixture.setupDone)
-  }
-
-  @Test("Owner launchd observations are bounded, redacted, and preserve the failed write", arguments: [
-    "present", "nonzero", "throw", "timeout", "truncated", "stderrTruncated", "oversize", "stderrOversize",
-    "detached", "notExited", "signal", "missingExit", "invalidExit", "stderr",
-  ])
-  func ownerLaunchdDomainObservation(mode: String) async throws {
-    let fixture = OwnerPreparationFixture(existingOwner: true)
-    fixture.setupAssistantBuildWriteExit = 1
-    let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
-    let order = Mutex<[String]>([])
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID), freshnessRequirements: .verifiedFresh,
-      executeGuest: { request in
-        if request.path == "/bin/launchctl", ["user/501", "gui/501"].contains(request.arguments.last ?? "") {
-          #expect(request.arguments == ["print", request.arguments.last!])
-          #expect(request.timeout == 5)
-          #expect(request.inputData == nil)
-          #expect(!request.attachStdin)
-          #expect(!request.pty)
-          #expect(request.cwd == nil)
-          #expect(request.environment.isEmpty)
-          #expect(request.user == nil)
-          #expect(request.uid == nil)
-          #expect(request.group == nil)
-          #expect(request.gid == nil)
-          #expect(request.guestStdinPath == nil)
-          #expect(request.guestStdoutPath == nil)
-          #expect(request.guestStderrPath == nil)
-          order.withLock { $0.append(request.arguments.last!) }
-          if mode == "throw" { throw CocoaError(.fileReadUnknown) }
-          return .init(exitCode: mode == "missingExit" ? nil : mode == "invalidExit" ? -1 : mode == "nonzero" ? 113 : 0,
-                       signal: mode == "signal" ? 9 : nil,
-                       stdout: Data((mode == "oversize" ? String(repeating: "x", count: 65537) : "private-synthetic-sentinel").utf8),
-                       stderr: Data((mode == "stderrOversize" ? String(repeating: "x", count: 1025)
-                                     : mode == "stderr" || mode == "nonzero" ? "opaque-owner-secret" : "").utf8),
-                       stdoutTruncated: mode == "truncated", stderrTruncated: mode == "stderrTruncated",
-                       timedOut: mode == "timeout", detached: mode == "detached", exited: mode != "notExited")
-        }
-        if request.path == "/usr/bin/sudo", request.arguments.contains("write"),
-          request.arguments.contains("LastSeenBuddyBuildVersion") { order.withLock { $0.append("write") } }
-        return try fixture.execute(request)
-      }, executePrivatePTY: fixture.executePTY,
-      autoLoginTrace: { event in trace.withLock { $0.append(event) } })
-    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
-      try await preparation.configureLogin(password: "opaque-owner-secret")
-    }
-    #expect(order.withLock { $0 } == ["user/501", "gui/501", "write", "user/501", "gui/501"])
-    let suffix = mode == "present" ? "Reachable" : mode == "nonzero" ? "Nonzero" : "Unavailable"
-    #expect(trace.withLock { $0.map(\.rawValue).filter { $0.contains("Domain") && ($0.hasPrefix("ownerPreWrite") || $0.hasPrefix("ownerPostWrite")) } }
-      == ["ownerPreWriteUserDomain", "ownerPreWriteGUIDomain", "ownerPostWriteUserDomain", "ownerPostWriteGUIDomain"].map { $0 + suffix })
-    for value in ["501", "pomme", "private-synthetic-sentinel", "opaque-owner-secret", "user/", "gui/"] {
-      #expect(trace.withLock { $0.allSatisfy { !$0.message.contains(value) } })
-    }
-    #expect(!fixture.setupDone)
-  }
-
-  @Test("Unavailable prewrite launchd observations do not prevent a successful original write")
-  func unavailableLaunchdProbeDoesNotBlockWrite() async throws {
-    let fixture = OwnerPreparationFixture(existingOwner: true)
-    let writes = Mutex(0)
-    let probes = Mutex(0)
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID), freshnessRequirements: .verifiedFresh,
-      executeGuest: { request in
-        if request.path == "/bin/launchctl", ["user/501", "gui/501"].contains(request.arguments.last ?? "") {
-          probes.withLock { $0 += 1 }
-          throw CocoaError(.fileReadUnknown)
-        }
-        if request.path == "/usr/bin/sudo", request.arguments.contains("write"),
-          request.arguments.contains("LastSeenBuddyBuildVersion") { writes.withLock { $0 += 1 } }
-        return try fixture.execute(request)
-      }, executePrivatePTY: fixture.executePTY)
-    _ = try await preparation.configureLogin(password: "opaque-owner-secret")
-    #expect(writes.withLock { $0 } == 1)
-    #expect(probes.withLock { $0 } == 2)
-    #expect(fixture.setupAssistantBuildPreference == "25G83")
-  }
-
-  @Test("Unchanged build preference does not probe owner launchd domains")
-  func unchangedBuildDoesNotProbeLaunchd() async throws {
-    let fixture = OwnerPreparationFixture(existingOwner: true)
-    fixture.setupAssistantBuildPreference = "25G83"
-    fixture.miniBuddyLaunchWriteExit = 1
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID), freshnessRequirements: .verifiedFresh,
-      executeGuest: { request in
-        #expect(request.path != "/bin/launchctl" || !["user/501", "gui/501"].contains(request.arguments.last ?? ""))
-        return try fixture.execute(request)
-      }, executePrivatePTY: fixture.executePTY)
-    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
-      try await preparation.configureLogin(password: "opaque-owner-secret")
-    }
-  }
-
-  @Test("Failed build write reads strict preference state without changing the failure", arguments: [
-    "committed", "missingPair", "missingDomain", "mismatch", "wrongType", "malformed",
-    "unknown", "thrown", "truncated", "oversize", "readThrown", "readTruncated",
-  ])
-  func failedBuildWriteState(mode: String) async throws {
-    let fixture = OwnerPreparationFixture(existingOwner: true)
-    fixture.setupAssistantBuildWriteExit = 1
-    let failed = Mutex(false)
-    let writes = Mutex(0)
-    let reads = Mutex<[String]>([])
-    let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
-      freshnessRequirements: .verifiedFresh,
-      executeGuest: { request in
-        if request.path == "/usr/bin/sudo", request.arguments.contains("write"),
-          request.arguments.contains("LastSeenBuddyBuildVersion") {
-          failed.withLock { $0 = true }
-          writes.withLock { $0 += 1 }
-          return try fixture.execute(request)
-        }
-        if failed.withLock({ $0 }), request.path == "/usr/bin/sudo",
-          request.arguments.contains("/usr/bin/defaults") {
-          let operation = request.arguments[5]
-          #expect(request.timeout == 5)
-          #expect(request.arguments == ["-n", "-H", "-u", "pomme", "/usr/bin/defaults",
-                                       operation, "com.apple.SetupAssistant", "LastSeenBuddyBuildVersion"])
-          reads.withLock { $0.append(operation) }
-          let isType = operation == "read-type"
-          if mode == "thrown" || (mode == "readThrown" && !isType) { throw CocoaError(.fileReadUnknown) }
-          let missing = mode == "missingPair" || mode == "missingDomain"
-          var output = isType ? "Type is string\n" : mode == "mismatch" ? "25G72\n" : "25G83\n"
-          if mode == "wrongType" { output = "Type is boolean\n" }
-          if mode == "malformed", !isType { output = "private-synthetic-sentinel\n" }
-          if mode == "oversize" { output = String(repeating: "x", count: 65537) }
-          let diagnostic = mode == "missingDomain" ? "Domain com.apple.SetupAssistant does not exist\n"
-            : "The domain/default pair of (com.apple.SetupAssistant, LastSeenBuddyBuildVersion) does not exist\n"
-          return .init(exitCode: missing || mode == "unknown" ? 1 : 0, signal: nil,
-                       stdout: Data((missing || mode == "unknown" ? "" : output).utf8),
-                       stderr: Data((missing ? diagnostic : mode == "unknown" ? "private-synthetic-sentinel" : "").utf8),
-                       stdoutTruncated: mode == "truncated" || (mode == "readTruncated" && !isType),
-                       stderrTruncated: false, exited: true)
-        }
-        return try fixture.execute(request)
-      }, executePrivatePTY: fixture.executePTY,
-      autoLoginTrace: { event in trace.withLock { $0.append(event) } })
-    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
-      try await preparation.configureLogin(password: "opaque-owner-secret")
-    }
-    let expected = mode == "committed" ? "Committed" : mode.hasPrefix("missing") ? "Missing"
-      : mode == "mismatch" ? "Mismatch" : "Unavailable"
-    #expect(trace.withLock { $0.map(\.rawValue).filter { $0.hasPrefix("ownerPostWriteBuildState") } }
-            == ["ownerPostWriteBuildState" + expected])
-    #expect(writes.withLock { $0 } == 1)
-    #expect(reads.withLock { $0.first } == "read-type")
-    #expect(reads.withLock { $0.count } <= 2)
-    #expect(!fixture.setupDone)
-    for secret in ["private-synthetic-sentinel", "opaque-owner-secret", "25G83", "25G72", "/Users/pomme"] {
-      #expect(trace.withLock { $0.allSatisfy { !$0.message.contains(secret) } })
-    }
-  }
-
-  @Test("Failed owner writes collect bounded read-only context without replacing the failure", arguments: [
-    "expected", "mismatch", "unavailable", "truncated", "timeout", "malformed",
-    "oversize", "statusTwo", "signal", "detached", "notExited", "invalidUTF8", "stderr",
-    "preferencesRestricted", "preferencesNotDirectory", "preferencesNotStatable",
-    "processOwner", "processBoth", "processUnknownUID",
-  ])
-  func failedOwnerWriteContext(mode: String) async throws {
-    let fixture = OwnerPreparationFixture(existingOwner: true)
-    fixture.setupAssistantBuildWriteExit = 1
-    let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
-    let probes = Mutex<[String]>([])
-    let failedWrite = Mutex(false)
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
-      freshnessRequirements: .verifiedFresh,
-      executeGuest: { request in
-        if request.path == "/usr/bin/sudo", request.arguments.contains("write"),
-          request.arguments.contains("LastSeenBuddyBuildVersion")
-        {
-          failedWrite.withLock { $0 = true }
-          return try fixture.execute(request)
-        }
-        guard failedWrite.withLock({ $0 }) else { return try fixture.execute(request) }
-        let label: String
-        let good: String
-        let other: String
-        if request.path == "/usr/bin/stat", request.arguments.last == "/Users/pomme/Library/Preferences" {
-          #expect(request.arguments == ["-f", "%u:%HT:%Lp", "/Users/pomme/Library/Preferences"])
-          label = "Preferences"; good = "501:Directory:700\n"; other = "502:Directory:700\n"
-        } else if request.path == "/usr/bin/sudo", request.arguments.suffix(2) == ["/usr/bin/id", "-u"] {
-          #expect(request.arguments == ["-n", "-H", "-u", "pomme", "/usr/bin/id", "-u"])
-          label = "UID"; good = "501\n"; other = "0\n"
-        } else if request.path == "/usr/bin/sudo", request.arguments.suffix(2) == ["/usr/bin/printenv", "HOME"] {
-          #expect(request.arguments == ["-n", "-H", "-u", "pomme", "/usr/bin/printenv", "HOME"])
-          label = "HOME"; good = "/Users/pomme\n"; other = "/private-synthetic-sentinel\n"
-        } else if request.path == "/bin/ps" {
-          #expect(request.arguments == ["-axo", "uid=,comm="])
-          label = "Processes"
-          good = "501 /usr/sbin/cfprefsd\n248 /System/Library/CoreServices/Setup Assistant.app/Contents/MacOS/Setup Assistant\n"
-          other = "0 /usr/sbin/cfprefsd\n501 /private-synthetic-sentinel/Setup Assistant\n"
-        } else { return try fixture.execute(request) }
-        #expect(request.timeout == 5)
-        probes.withLock { $0.append(label) }
-        if mode == "unavailable" { throw CocoaError(.fileReadUnknown) }
-        var output = mode == "malformed" ? "private-synthetic-sentinel\n" : mode == "mismatch" ? other : good
-        if mode == "oversize" { output = String(repeating: "x", count: 65537) }
-        if label == "Preferences", mode == "preferencesRestricted" { output = "501:Directory:500\n" }
-        if label == "Preferences", mode == "preferencesNotDirectory" { output = "501:Regular File:700\n" }
-        if label == "Processes" {
-          let setup = "/System/Library/CoreServices/Setup Assistant.app/Contents/MacOS/Setup Assistant"
-          if mode == "processOwner" { output = "501 /usr/sbin/cfprefsd\n501 \(setup)\n" }
-          if mode == "processBoth" { output = good + "501 \(setup)\n" }
-          if mode == "processUnknownUID" { output = "501 /usr/sbin/cfprefsd\n502 \(setup)\n" }
-        }
-        let notStatable = label == "Preferences" && mode == "preferencesNotStatable"
-        return .init(exitCode: mode == "statusTwo" ? 2 : notStatable ? 1 : 0,
-                     signal: mode == "signal" ? 9 : nil,
-                     stdout: mode == "invalidUTF8" ? Data([255]) : Data(output.utf8),
-                     stderr: mode == "stderr" ? Data("private-synthetic-sentinel".utf8) : Data(),
-                     stdoutTruncated: mode == "truncated", stderrTruncated: false,
-                     timedOut: mode == "timeout", detached: mode == "detached", exited: mode != "notExited")
-      }, executePrivatePTY: fixture.executePTY,
-      autoLoginTrace: { event in trace.withLock { $0.append(event) } }
-    )
-    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
-      try await preparation.configureLogin(password: "opaque-owner-secret")
-    }
-    #expect(probes.withLock { $0 } == ["Preferences", "UID", "HOME", "Processes"])
-    let labels = trace.withLock { $0.map(\.rawValue).filter {
-      $0.hasPrefix("ownerPostWrite") && !$0.hasPrefix("ownerPostWriteBuildState") && !$0.contains("Domain")
-    } }
-    if mode == "expected" || mode.hasPrefix("preferences") || mode.hasPrefix("process") {
-      let metadata: String
-      switch mode {
-      case "preferencesRestricted": metadata = "ownerPostWritePreferencesOwnerModeRestricted"
-      case "preferencesNotDirectory": metadata = "ownerPostWritePreferencesNotDirectory"
-      case "preferencesNotStatable": metadata = "ownerPostWritePreferencesNotStatable"
-      default: metadata = "ownerPostWritePreferencesExpectedOwnerWriteSearchMode"
-      }
-      let setup: String
-      switch mode {
-      case "processOwner": setup = "ownerPostWriteSetupAssistantOwnerOnly"
-      case "processBoth": setup = "ownerPostWriteSetupAssistantBoth"
-      case "processUnknownUID": setup = "ownerPostWriteSetupAssistantUnavailable"
-      default: setup = "ownerPostWriteSetupAssistantStockOnly"
-      }
-      #expect(labels == [metadata, "ownerPostWriteUIDExpected",
-                         "ownerPostWriteHOMEExpected", "ownerPostWriteCFPrefsPresent", setup])
-    } else if mode == "mismatch" {
-      #expect(labels == ["ownerPostWritePreferencesOtherOwner", "ownerPostWriteUIDMismatch",
-                         "ownerPostWriteHOMEMismatch", "ownerPostWriteCFPrefsAbsent", "ownerPostWriteSetupAssistantAbsent"])
-    } else if mode == "malformed" {
-      #expect(labels == ["ownerPostWritePreferencesUnavailable", "ownerPostWriteUIDUnavailable",
-                         "ownerPostWriteHOMEMismatch", "ownerPostWriteCFPrefsUnavailable", "ownerPostWriteSetupAssistantUnavailable"])
-    } else {
-      #expect(labels.count == 5)
-      #expect(labels.allSatisfy { $0.hasSuffix("Unavailable") })
-    }
-    #expect(labels.allSatisfy { !$0.contains("private-synthetic-sentinel") })
-    #expect(fixture.setupDone == false)
-  }
-
-  @Test("Post-write probes do not run for other write outcomes", arguments: ["success", "miniBuddy", "statusTwo"])
-  func postWriteProbeAdmission(mode: String) async throws {
-    let fixture = OwnerPreparationFixture(existingOwner: true)
-    if mode == "miniBuddy" { fixture.miniBuddyLaunchWriteExit = 1 }
-    if mode == "statusTwo" { fixture.setupAssistantBuildWriteExit = 2 }
-    let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
-      freshnessRequirements: .verifiedFresh,
-      executeGuest: { request in
-        #expect(request.arguments.last != "/Users/pomme/Library/Preferences")
-        #expect(!request.arguments.contains("/usr/bin/printenv"))
-        #expect(!request.arguments.contains("/usr/bin/id") || request.path != "/usr/bin/sudo")
-        return try fixture.execute(request)
-      }, executePrivatePTY: fixture.executePTY,
-      autoLoginTrace: { event in trace.withLock { $0.append(event) } }
-    )
-    if mode == "success" {
-      _ = try await preparation.configureLogin(password: "opaque-owner-secret")
-    } else {
-      await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(
-        .ownerCompletion, exitCode: mode == "statusTwo" ? 2 : 1))
-      {
-        try await preparation.configureLogin(password: "opaque-owner-secret")
-      }
-    }
-    #expect(trace.withLock { $0.allSatisfy { !$0.rawValue.hasPrefix("ownerPostWrite") } })
-  }
-
-  @Test("A failed owner preference write classifies only the nearby home metadata", arguments: [
-    "expected", "otherOwner", "notDirectory", "notStatable", "unavailable",
-  ])
-  func ownerPreferenceFailureHomeProbe(mode: String) async throws {
-    let fixture = OwnerPreparationFixture(existingOwner: true)
-    let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
-    let statCalls = Mutex(0)
-    let expected: PommeAutoLoginReadbackTrace
-    switch mode {
-    case "expected": expected = .ownerWriteHomeExpectedDirectory
-    case "otherOwner": expected = .ownerWriteHomeOtherOwner
-    case "notDirectory": expected = .ownerWriteHomeNotDirectory
-    case "notStatable": expected = .ownerWriteHomeNotStatable
-    default: expected = .ownerWriteHomeProbeUnavailable
-    }
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
-      freshnessRequirements: .verifiedFresh,
-      executeGuest: { request in
-        if request.path == "/usr/bin/sudo",
-          request.arguments.contains("write"),
-          request.arguments.contains("com.apple.SetupAssistant")
-        {
-          return .init(exitCode: 1, signal: nil, stdout: Data(),
-                       stderr: Data("defaults: private-synthetic-sentinel\n".utf8),
-                       stdoutTruncated: false, stderrTruncated: false, exited: true)
-        }
-        if request.path == "/usr/bin/stat", request.arguments.last == "/Users/pomme" {
-          #expect(request.arguments == ["-f", "%u:%HT", "/Users/pomme"])
-          statCalls.withLock { $0 += 1 }
-          if mode == "unavailable" { throw CocoaError(.fileReadUnknown) }
-          let output: String
-          switch mode {
-          case "expected": output = "501:Directory\n"
-          case "otherOwner": output = "502:Directory\n"
-          case "notDirectory": output = "501:Regular File\n"
-          default: output = ""
-          }
-          return .init(exitCode: mode == "notStatable" ? 1 : 0, signal: nil,
-                       stdout: Data(output.utf8), stderr: Data(),
-                       stdoutTruncated: false, stderrTruncated: false, exited: true)
-        }
-        return try fixture.execute(request)
-      }, executePrivatePTY: fixture.executePTY,
-      autoLoginTrace: { event in trace.withLock { $0.append(event) } }
-    )
-    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
-      try await preparation.configureLogin(password: "opaque-owner-secret")
-    }
-    let events = trace.withLock { $0.filter { !$0.rawValue.hasPrefix("ownerPostWrite") } }
-    #expect(statCalls.withLock { $0 } == 1)
-    #expect(events.contains(.ownerWriteStderrStartsDefaults))
-    #expect(events.filter { $0.rawValue.hasPrefix("ownerWriteHome") } == [expected])
-    #expect(events.last == expected)
-    #expect(events.allSatisfy { !$0.message.contains("private-synthetic-sentinel") })
-    #expect(fixture.setupDone == false)
-  }
-
-  @Test("Owner preference write failure emits only a closed stderr classification", arguments: [
-    "empty", "sudo", "defaultsLog", "defaultsPlain", "other",
-    "domain", "domainPeriod", "domainHeader", "pair", "pairPeriod", "pairHeader",
-    "wrongDomain", "wrongPairDomain", "wrongKey", "extraLine", "malformedHeader",
-    "writeDomain", "writeDomainHeader", "writeDomainInline", "failedDomain",
-    "writeWrongDomain", "writeExtraLine", "writeSensitiveSuffix",
-  ])
-  func ownerPreferenceWriteStderrClassification(mode: String) async throws {
-    let fixture = OwnerPreparationFixture(existingOwner: true)
-    let stderr: String
-    let expected: PommeAutoLoginReadbackTrace
-    let domainMessage = "Domain com.apple.SetupAssistant does not exist"
-    let pairMessage = "The domain/default pair of (com.apple.SetupAssistant, LastSeenBuddyBuildVersion) does not exist"
-    let header = "2026-09-23 00:46:47.123 defaults[123:456]"
-    let writeMessage = "Could not write domain com.apple.SetupAssistant; exiting"
-    switch mode {
-    case "writeDomain", "writeDomainHeader", "writeDomainInline":
-      stderr = (mode == "writeDomainHeader" ? header + "\n"
-        : mode == "writeDomainInline" ? header + " " : "") + writeMessage
-      expected = .ownerWriteStderrWriteDomainFailed
-    case "failedDomain":
-      stderr = "Failed to write domain com.apple.SetupAssistant"
-      expected = .ownerWriteStderrWriteDomainFailed
-    case "writeWrongDomain":
-      stderr = writeMessage.replacingOccurrences(of: "com.apple.SetupAssistant", with: "/Users/private-synthetic-sentinel")
-      expected = .ownerWriteStderrOther
-    case "writeExtraLine":
-      stderr = header + "\n" + writeMessage + "\nprivate-synthetic-sentinel"
-      expected = .ownerWriteStderrStartsDefaults
-    case "writeSensitiveSuffix":
-      stderr = writeMessage + " private-synthetic-sentinel"
-      expected = .ownerWriteStderrOther
-    case "empty": stderr = ""; expected = .ownerWriteStderrEmpty
-    case "sudo": stderr = "sudo: private-synthetic-sentinel\n"; expected = .ownerWriteStderrStartsSudo
-    case "defaultsLog":
-      stderr = "2026-09-23 00:46:47.123 defaults[123:456] private-synthetic-sentinel\n"
-      expected = .ownerWriteStderrStartsDefaults
-    case "defaultsPlain": stderr = "defaults: private-synthetic-sentinel\n"; expected = .ownerWriteStderrStartsDefaults
-    case "domain", "domainPeriod", "domainHeader":
-      stderr = (mode == "domainHeader" ? header + "\n" : "") + domainMessage + (mode == "domainPeriod" ? "." : "")
-      expected = .ownerWriteStderrMissingDomain
-    case "pair", "pairPeriod", "pairHeader":
-      stderr = (mode == "pairHeader" ? header + "\n" : "") + pairMessage + (mode == "pairPeriod" ? "." : "")
-      expected = .ownerWriteStderrMissingPair
-    case "wrongDomain":
-      stderr = domainMessage.replacingOccurrences(of: "com.apple.SetupAssistant", with: "private-synthetic-sentinel")
-      expected = .ownerWriteStderrOther
-    case "wrongKey":
-      stderr = pairMessage.replacingOccurrences(of: "LastSeenBuddyBuildVersion", with: "private-synthetic-sentinel")
-      expected = .ownerWriteStderrOther
-    case "wrongPairDomain":
-      stderr = pairMessage.replacingOccurrences(of: "com.apple.SetupAssistant", with: "private-synthetic-sentinel")
-      expected = .ownerWriteStderrOther
-    case "extraLine":
-      stderr = header + "\n" + pairMessage + "\nprivate-synthetic-sentinel"
-      expected = .ownerWriteStderrStartsDefaults
-    case "malformedHeader":
-      stderr = header + " trailing\n" + domainMessage
-      expected = .ownerWriteStderrStartsDefaults
-    default: stderr = "private-synthetic-sentinel\n"; expected = .ownerWriteStderrOther
-    }
-    let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
-    let writeAttempts = Mutex(0)
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
-      freshnessRequirements: .verifiedFresh,
-      executeGuest: { request in
-        if request.path == "/usr/bin/sudo",
-          request.arguments.contains("write"),
-          request.arguments.contains("com.apple.SetupAssistant")
-        {
-          writeAttempts.withLock { $0 += 1 }
-          return GuestCommandResult(
-            exitCode: 1, signal: nil, stdout: Data(), stderr: Data(stderr.utf8),
-            stdoutTruncated: false, stderrTruncated: false, exited: true)
-        }
-        return try fixture.execute(request)
-      }, executePrivatePTY: fixture.executePTY,
-      autoLoginTrace: { event in trace.withLock { $0.append(event) } }
-    )
-    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
-      try await preparation.configureLogin(password: "opaque-owner-secret")
-    }
-    let events = trace.withLock { $0.filter { !$0.rawValue.hasPrefix("ownerPostWrite") } }
-    #expect(events.contains(expected))
-    #expect(events.filter { $0.rawValue.hasPrefix("ownerWriteStderr") } == [expected])
-    #expect(events.dropLast().last == expected)
-    #expect(events.last == .ownerWriteHomeExpectedDirectory)
-    #expect(events.filter { $0 == .ownerMiniBuddyPreferenceWriteEntered }.isEmpty)
-    #expect(events.allSatisfy { !$0.message.contains("private-synthetic-sentinel") })
-    #expect(fixture.setupDone == false)
-    #expect(writeAttempts.withLock { $0 } == 1)
-    for privateValue in ["com.apple.SetupAssistant", "LastSeenBuddyBuildVersion", "123:456", "opaque-owner-secret"] {
-      #expect(events.allSatisfy { !$0.message.contains(privateValue) })
-    }
-  }
-
-  @Test("Owner preference write diagnostics identify only the failing closed domain", arguments: [true, false])
-  func ownerPreferenceWriteTrace(buildFails: Bool) async throws {
-    let fixture = OwnerPreparationFixture(existingOwner: true)
-    if buildFails { fixture.setupAssistantBuildWriteExit = 1 }
-    else { fixture.miniBuddyLaunchWriteExit = 1 }
-    let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
-      freshnessRequirements: .verifiedFresh,
-      executeGuest: fixture.execute, executePrivatePTY: fixture.executePTY,
-      autoLoginTrace: { event in trace.withLock { $0.append(event) } }
-    )
-    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
-      try await preparation.configureLogin(password: "opaque-owner-secret")
-    }
-    let events = trace.withLock { $0.filter { !$0.rawValue.hasPrefix("ownerPostWrite") } }
-    #expect(events.last == .ownerWriteHomeExpectedDirectory)
-    #expect(Array(events.suffix(3)) == [
-      buildFails ? .ownerBuildPreferenceWriteEntered : .ownerMiniBuddyPreferenceWriteEntered,
-      .ownerWriteStderrEmpty, .ownerWriteHomeExpectedDirectory,
-    ])
-    #expect(events.filter { $0 == .ownerBuildPreferenceWriteEntered }.count == 1)
-    #expect(events.filter { $0 == .ownerMiniBuddyPreferenceWriteEntered }.count == (buildFails ? 0 : 1))
-    #expect(fixture.setupDone == false)
-    #expect(fixture.miniBuddyLaunchPreference == nil)
-  }
-
-  @Test("Stock Setup Assistant autologin after preference restart requires a fully verified setter retry", arguments: [
-    "success", "invalidContext", "postStatus", "postPreference", "postArtifact",
-  ])
-  func stockSetupOwnerAfterPreferenceRestart(mode: String) async throws {
-    let fixture = OwnerPreparationFixture(existingOwner: true)
-    fixture.autoLoginStatusOutput = "Automatic login is OFF.\n"
-    fixture.miniBuddyLaunchWriteExit = 1
-    let restarts = Mutex(0)
-    let completionReceipts = Mutex(0)
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
-      freshnessRequirements: .verifiedFresh,
-      executeGuest: { request in
-        let secondSetter = fixture.ptyCommands.filter { $0.arguments.contains("-autologin") }.count == 2
-        if secondSetter {
-          var replacement: String?
-          var exitCode = 0
-          if mode == "postStatus", request.path == "/usr/sbin/sysadminctl",
-             request.arguments == ["-autologin", "status"] {
-            replacement = "Automatic login user: _mbsetupuser\n"
-          } else if mode == "postPreference", request.path == "/usr/bin/defaults",
-                    request.arguments.last == "autoLoginUser" {
-            replacement = "other-owner\n"
-          } else if mode == "postArtifact", request.path == "/bin/test",
-                    request.arguments == ["-f", "/etc/kcpassword"] {
-            replacement = ""; exitCode = 1
-          }
-          if let replacement {
-            return GuestCommandResult(
-              exitCode: exitCode, signal: nil, stdout: Data(replacement.utf8), stderr: Data(),
-              stdoutTruncated: false, stderrTruncated: false, exited: true)
-          }
-        }
-        return try fixture.execute(request)
-      },
-      executePrivatePTY: fixture.executePTY,
-      reportPhase: { phase, event in
-        if phase == .ownerCompletion, event == .receipt { completionReceipts.withLock { $0 += 1 } }
-      }
-    )
-    func resumeExplicitly() async throws {
-      await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
-        try await preparation.configureLogin(password: "opaque-owner-secret")
-      }
-      // Simulate a separately requested retry of an older retained journal.
-      restarts.withLock { $0 += 1 }
-      fixture.miniBuddyLaunchWriteExit = 0
-      fixture.autoLoginStatusOutput = "Automatic login user: _mbsetupuser\n"
-      if mode == "invalidContext" { fixture.setupAssistantProcessUID = 501 }
-      _ = try await preparation.verifyOwner(password: "opaque-owner-secret")
-      _ = try await preparation.configureLogin(password: "opaque-owner-secret", attempt: .afterPreferenceRestart)
-    }
-    if mode == "success" {
-      try await resumeExplicitly()
-      #expect(fixture.setupDone)
-      #expect(fixture.miniBuddyLaunchPreference == false)
-    } else {
-      let expected: PommeSecurityOwnerPreparationError = mode == "invalidContext"
-        ? .setupAssistantContextUnavailable : .autoLoginVerificationFailed
-      await #expect(throws: expected) { try await resumeExplicitly() }
-      #expect(fixture.setupDone == false)
-      #expect(fixture.miniBuddyLaunchPreference == nil)
-    }
-    #expect(restarts.withLock { $0 } == 1)
-    #expect(fixture.ptyCommands.filter { $0.arguments.contains("-autologin") }.count == (mode == "invalidContext" ? 1 : 2))
-    #expect(fixture.guestPaths.contains("/usr/sbin/languagesetup") == false)
-    #expect(completionReceipts.withLock { $0 } == (mode == "success" ? 1 : 0))
   }
 
   @Test("Stock Setup Assistant retry remains gated by attempt, freshness, identity, policy, and exact context", arguments: [
@@ -744,7 +211,7 @@ struct PommeSecurityOwnerPreparationTests {
                        stdoutTruncated: false, stderrTruncated: false, exited: true)
         }
         return try fixture.execute(request)
-      }, executePrivatePTY: fixture.executePTY
+      }, executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
     let expected: PommeSecurityOwnerPreparationError
     switch mode {
@@ -828,7 +295,7 @@ struct PommeSecurityOwnerPreparationTests {
           exitCode: exitCode, signal: nil, stdout: Data(output.utf8), stderr: Data(),
           stdoutTruncated: truncated, stderrTruncated: false, exited: true)
       },
-      executePrivatePTY: fixture.executePTY,
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus,
       autoLoginTrace: { event in trace.withLock { $0.append(event) } }
     )
     var failure: PommeSecurityOwnerPreparationError?
@@ -880,84 +347,6 @@ struct PommeSecurityOwnerPreparationTests {
       #expect(event.message.contains("private-") == false)
       #expect(event.rawValue.allSatisfy { $0.isLetter })
     }
-  }
-
-  @Test("Real preference recovery rejects changed post-restart native status before completion", arguments: [
-    "malformed", "otherOwner", "offOwner", "rootOwner",
-    "preferenceCase", "preferenceSetup", "preferenceOff", "preferenceRoot", "preferenceOther",
-  ])
-  func autoLoginReadbackTraceAfterPreferenceRecovery(mode: String) async throws {
-    let fixture = OwnerPreparationFixture(existingOwner: true)
-    fixture.autoLoginStatusOutput = "Automatic login is OFF.\n"
-    fixture.miniBuddyLaunchWriteExit = 1
-    let trace = Mutex<[PommeAutoLoginReadbackTrace]>([])
-    let restartCount = Mutex(0)
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
-      freshnessRequirements: .verifiedFresh,
-      executeGuest: { request in
-        if restartCount.withLock({ $0 }) == 1, mode.hasPrefix("preference"),
-           request.path == "/usr/bin/defaults", request.arguments.last == "autoLoginUser" {
-          let value: String
-          switch mode {
-          case "preferenceCase": value = "POMME"
-          case "preferenceSetup": value = "_MBSETUPUSER"
-          case "preferenceOff": value = "OFF"
-          case "preferenceRoot": value = "ROOT"
-          default: value = "private-other-owner"
-          }
-          return .init(exitCode: 0, signal: nil, stdout: Data(value.utf8), stderr: Data(),
-                       stdoutTruncated: false, stderrTruncated: false, exited: true)
-        }
-        return try fixture.execute(request)
-      }, executePrivatePTY: fixture.executePTY,
-      autoLoginTrace: { event in trace.withLock { $0.append(event) } }
-    )
-    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
-      try await preparation.configureLogin(password: "opaque-owner-secret")
-    }
-    // An explicit later attempt must reject changed native evidence.
-    restartCount.withLock { $0 += 1 }
-    fixture.miniBuddyLaunchWriteExit = 0
-    switch mode {
-    case "otherOwner": fixture.autoLoginStatusOutput = "Automatic login user: private-other-owner\n"
-    case "offOwner": fixture.autoLoginStatusOutput = "Automatic login user: OFF\n"
-    case "rootOwner": fixture.autoLoginStatusOutput = "Automatic login user: root\n"
-    case "preferenceCase", "preferenceSetup", "preferenceOff", "preferenceRoot", "preferenceOther":
-      fixture.autoLoginStatusOutput = "Automatic login user: pomme\n"
-    default: fixture.autoLoginStatusOutput = "private-post-restart-malformed-status\n"
-    }
-    _ = try await preparation.verifyOwner(password: "opaque-owner-secret")
-    await #expect(throws: PommeSecurityOwnerPreparationError.autoLoginVerificationFailed) {
-      try await preparation.configureLogin(password: "opaque-owner-secret", attempt: .afterPreferenceRestart)
-    }
-    #expect(restartCount.withLock { $0 } == 1)
-    let rejection: PommeAutoLoginReadbackTrace
-    switch mode {
-    case "otherOwner": rejection = .nativeOtherOwner
-    case "offOwner": rejection = .nativeOffAsOwner
-    case "rootOwner": rejection = .nativeRootOwner
-    case "preferenceCase": rejection = .preferenceExpectedOwnerCaseMismatch
-    case "preferenceSetup": rejection = .preferenceSetupAssistantOwner
-    case "preferenceOff": rejection = .preferenceOffAsOwner
-    case "preferenceRoot": rejection = .preferenceRootOwner
-    case "preferenceOther": rejection = .preferenceMismatch
-    default: rejection = .nativeShapeRejected
-    }
-    let preferencePrefix: [PommeAutoLoginReadbackTrace] = mode.hasPrefix("preference")
-      ? [.nativeExpectedOwner, .preferenceEntered] : []
-    #expect(trace.withLock { $0 } == [
-      .reconcileEntered, .nativeEntered, .nativeOff, .reconcileOff,
-      .nativeEntered, .nativeExpectedOwner, .preferenceEntered, .preferenceMatch,
-      .artifactEntered, .artifactMetadataEntered, .artifactValid,
-      .ownerPreWriteBuildMissingPair, .ownerPreWriteUserDomainNonzero, .ownerPreWriteGUIDomainNonzero,
-      .ownerBuildPreferenceWriteEntered, .ownerMiniBuddyPreferenceWriteEntered,
-      .ownerWriteStderrEmpty, .ownerWriteHomeExpectedDirectory,
-      .reconcileEntered, .nativeEntered,
-    ] + preferencePrefix + [rejection, .reconcileRejected])
-    #expect(fixture.setupDone == false)
-    #expect(fixture.miniBuddyLaunchPreference == nil)
-    #expect(fixture.ptyCommands.filter { $0.arguments.contains("-autologin") }.count == 1)
   }
 
   @Test("Owner evidence commands allow bounded first-boot initialization")
@@ -1018,7 +407,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: identity,
       freshnessRequirements: .unverified,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
     let probe = try unverified.probe()
     #expect(!probe.freshness.creationOwnershipVerified)
@@ -1029,7 +418,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: identity,
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
     let freshProbe = try verified.probe()
     #expect(freshProbe.freshness.isVerifiedFresh)
@@ -1044,7 +433,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     let probe = try preparation.probe()
@@ -1060,7 +449,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     #expect(throws: PommeSecurityOwnerPreparationError.malformedEvidence(.localUsers)) {
@@ -1079,7 +468,7 @@ struct PommeSecurityOwnerPreparationTests {
       ),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     let probe = try preparation.probe()
@@ -1098,7 +487,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     let probe = try preparation.probe()
@@ -1117,7 +506,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     let probe = try preparation.probe()
@@ -1133,7 +522,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     let probe = try preparation.probe()
@@ -1149,7 +538,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     let probe = try preparation.probe()
@@ -1166,7 +555,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     #expect(throws: PommeSecurityOwnerPreparationError.malformedEvidence(.localUserRecord)) {
@@ -1182,7 +571,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     #expect(throws: PommeSecurityOwnerPreparationError.malformedEvidence(.apfsUsers)) {
@@ -1198,7 +587,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     #expect(throws: PommeSecurityOwnerPreparationError.malformedEvidence(.apfsUsers)) {
@@ -1214,7 +603,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     let probe = try preparation.probe()
@@ -1231,7 +620,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     let probe = try preparation.probe()
@@ -1248,7 +637,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: identity,
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY,
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus,
       reportPhase: phases.record
     )
 
@@ -1296,7 +685,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY,
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus,
       reportPhase: phases.record,
       waitForFreshOwnerAPFS: { _ in }
     )
@@ -1324,7 +713,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY,
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus,
       reportPhase: phases.record,
       waitForFreshOwnerAPFS: { _ in }
     )
@@ -1349,7 +738,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY,
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus,
       waitForFreshOwnerAPFS: { _ in throw CancellationError() }
     )
 
@@ -1405,7 +794,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY,
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus,
       reportPhase: phases.record,
       waitForFreshOwnerAPFS: { _ in throw CancellationError() }
     )
@@ -1434,7 +823,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY,
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus,
       reportPhase: phases.record,
       waitForFreshOwnerAPFS: { _ in clock.advance(to: 30) },
       now: { clock.value }
@@ -1500,7 +889,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
     let probe = try preparation.probe()
     await #expect(throws: PommeSecurityOwnerPreparationError.accountCollision) {
@@ -1529,7 +918,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY,
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus,
       reportPhase: phases.record,
       waitForFreshOwnerAPFS: { _ in throw CancellationError() }
     )
@@ -1556,7 +945,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     let verification = try await preparation.verifyOwner(password: "opaque-owner-secret")
@@ -1578,7 +967,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(throws: PommeSecurityOwnerPreparationError.loginRestricted) {
@@ -1600,7 +989,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(throws: PommeSecurityOwnerPreparationError.loginRestricted) {
@@ -1622,7 +1011,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(throws: PommeSecurityOwnerPreparationError.loginRestricted) {
@@ -1644,7 +1033,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(throws: PommeSecurityOwnerPreparationError.loginRestricted) {
@@ -1666,7 +1055,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(throws: PommeSecurityOwnerPreparationError.loginRestricted) {
@@ -1688,7 +1077,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(
@@ -1715,7 +1104,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(
@@ -1744,7 +1133,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY,
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus,
       reportPhase: phases.record
     )
 
@@ -1767,154 +1156,6 @@ struct PommeSecurityOwnerPreparationTests {
     #expect(phases.values.contains { $0 == (.finishSetupAssistant, .receipt) })
   }
 
-  @Test("Fresh owner completion writes and reads back the native owner preferences")
-  func freshOwnerCompletionWritesNativePreferences() async throws {
-    let fixture = OwnerPreparationFixture()
-    fixture.autoLoginStatusOutput = "Automatic login is OFF.\n"
-    fixture.markCreated()
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
-      freshnessRequirements: .verifiedFresh,
-      executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
-    )
-
-    let result = try await preparation.configureLogin(password: "opaque-owner-secret")
-
-    #expect(result.setupAssistantFinished)
-    #expect(fixture.setupAssistantBuildPreference == "25G83")
-    #expect(fixture.miniBuddyLaunchPreference == false)
-    #expect(
-      fixture.guestArguments.contains {
-        $0 == ["-buildVersion"]
-      })
-    #expect(
-      fixture.guestArguments.contains {
-        $0 == [
-          "-n", "-H", "-u", "pomme", "/usr/bin/defaults", "write",
-          "com.apple.SetupAssistant", "LastSeenBuddyBuildVersion", "-string", "25G83",
-        ]
-      })
-    #expect(
-      fixture.guestArguments.contains {
-        $0 == [
-          "-n", "-H", "-u", "pomme", "/usr/bin/defaults", "write",
-          "com.apple.loginwindow", "MiniBuddyLaunch", "-bool", "false",
-        ]
-      })
-    #expect(
-      fixture.guestArguments.allSatisfy { arguments in
-        !arguments.contains("opaque-owner-secret")
-      })
-  }
-
-  @Test("Fresh owner completion accepts an unknown but strictly bounded build version")
-  func unknownBuildVersionIsAccepted() async throws {
-    let fixture = OwnerPreparationFixture()
-    fixture.nativeBuildVersion = "27Z99"
-    fixture.autoLoginStatusOutput = "Automatic login is OFF.\n"
-    fixture.markCreated()
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
-      freshnessRequirements: .verifiedFresh,
-      executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
-    )
-
-    _ = try await preparation.configureLogin(password: "opaque-owner-secret")
-
-    #expect(fixture.setupAssistantBuildPreference == "27Z99")
-  }
-
-  @Test("Invalid native build output fails before fresh-owner preference mutation")
-  func invalidBuildOutputFailsBeforePreferenceMutation() async throws {
-    let fixture = OwnerPreparationFixture()
-    fixture.nativeBuildVersion = "25G-83"
-    fixture.autoLoginStatusOutput = "Automatic login is OFF.\n"
-    fixture.markCreated()
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
-      freshnessRequirements: .verifiedFresh,
-      executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
-    )
-
-    await #expect(throws: PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed) {
-      try await preparation.configureLogin(password: "opaque-owner-secret")
-    }
-    #expect(fixture.setupAssistantBuildPreference == nil)
-    #expect(fixture.miniBuddyLaunchPreference == nil)
-    #expect(!fixture.setupDone)
-    #expect(
-      !fixture.guestArguments.contains { $0.first == "-n" && $0.contains("/usr/bin/defaults") })
-  }
-
-  @Test("Malformed pre-existing owner preference fails before any completion write")
-  func malformedExistingOwnerPreferenceFailsBeforeWrite() async throws {
-    let fixture = OwnerPreparationFixture()
-    fixture.setupAssistantBuildPreference = "1"
-    fixture.setupAssistantBuildReadTypeOutput = "Type is integer\n"
-    fixture.setupAssistantBuildReadOutput = "1\n"
-    fixture.autoLoginStatusOutput = "Automatic login is OFF.\n"
-    fixture.markCreated()
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
-      freshnessRequirements: .verifiedFresh,
-      executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
-    )
-
-    await #expect(throws: PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed) {
-      try await preparation.configureLogin(password: "opaque-owner-secret")
-    }
-    #expect(fixture.miniBuddyLaunchPreference == nil)
-    #expect(!fixture.setupDone)
-    #expect(!fixture.guestArguments.contains { $0.first == "-n" && $0.contains("write") })
-  }
-
-  @Test("Unexpected native boolean preference type fails before completion")
-  func malformedExistingMiniBuddyPreferenceFailsBeforeWrite() async throws {
-    let fixture = OwnerPreparationFixture()
-    fixture.setupAssistantBuildPreference = "25G83"
-    fixture.miniBuddyLaunchPreference = true
-    fixture.miniBuddyLaunchReadTypeOutput = "Type is string\n"
-    fixture.miniBuddyLaunchReadOutput = "1\n"
-    fixture.markCreated()
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
-      freshnessRequirements: .verifiedFresh,
-      executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
-    )
-
-    await #expect(throws: PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed) {
-      try await preparation.configureLogin(password: "opaque-owner-secret")
-    }
-    #expect(!fixture.setupDone)
-    #expect(
-      !fixture.guestArguments.contains {
-        $0.count > 5 && $0[4] == "/usr/bin/defaults" && $0.contains("write")
-      })
-  }
-
-  @Test("An empty missing-preference diagnostic is not proof of absence")
-  func missingPreferenceWithoutNativeDiagnosticFailsClosed() async throws {
-    let fixture = OwnerPreparationFixture()
-    fixture.missingDefaultsDiagnosticEmpty = true
-    fixture.markCreated()
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
-      freshnessRequirements: .verifiedFresh,
-      executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
-    )
-
-    await #expect(throws: PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed) {
-      try await preparation.configureLogin(password: "opaque-owner-secret")
-    }
-    #expect(!fixture.setupDone)
-  }
-
   @Test("Fresh owner completion requires the canonical owner home")
   func freshOwnerCustomHomeFailsBeforePreferenceMutation() async throws {
     let fixture = OwnerPreparationFixture()
@@ -1925,7 +1166,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(throws: PommeSecurityOwnerPreparationError.ownerVerificationFailed) {
@@ -1934,56 +1175,6 @@ struct PommeSecurityOwnerPreparationTests {
     #expect(
       !fixture.guestArguments.contains { $0.first == "-n" && $0.contains("/usr/bin/defaults") })
     #expect(!fixture.setupDone)
-  }
-
-  @Test("A partial native preference write is resumable without a false receipt")
-  func partialNativePreferenceWriteResumes() async throws {
-    let fixture = OwnerPreparationFixture()
-    fixture.autoLoginStatusOutput = "Automatic login is OFF.\n"
-    fixture.miniBuddyLaunchWriteExit = 23
-    fixture.markCreated()
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
-      freshnessRequirements: .verifiedFresh,
-      executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
-    )
-
-    await #expect(
-      throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 23)
-    ) {
-      try await preparation.configureLogin(password: "opaque-owner-secret")
-    }
-    #expect(fixture.setupAssistantBuildPreference == "25G83")
-    #expect(fixture.miniBuddyLaunchPreference == nil)
-    #expect(!fixture.setupDone)
-
-    fixture.miniBuddyLaunchWriteExit = 0
-    let result = try await preparation.configureLogin(password: "opaque-owner-secret")
-    #expect(result.setupAssistantFinished)
-    #expect(fixture.miniBuddyLaunchPreference == false)
-  }
-
-  @Test("Pre-existing native completion values are idempotent and skip writes")
-  func preExistingNativeCompletionValuesSkipWrites() async throws {
-    let fixture = OwnerPreparationFixture()
-    fixture.setupAssistantBuildPreference = "25G83"
-    fixture.miniBuddyLaunchPreference = false
-    fixture.markCreated()
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
-      freshnessRequirements: .verifiedFresh,
-      executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
-    )
-
-    _ = try await preparation.configureLogin(password: "opaque-owner-secret")
-
-    #expect(
-      !fixture.guestArguments.contains {
-        $0.count > 5 && $0[4] == "/usr/bin/defaults" && $0.contains("write")
-      })
-    #expect(fixture.setupDone)
   }
 
   @Test("Fresh completion closes only an exact retained owner Setup Assistant")
@@ -1995,7 +1186,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     _ = try await preparation.configureLogin(password: "opaque-owner-secret")
@@ -2008,26 +1199,6 @@ struct PommeSecurityOwnerPreparationTests {
     #expect(fixture.setupDone)
   }
 
-  @Test("Preference drift after owner-process cleanup prevents the completion receipt")
-  func preferenceDriftAfterCleanupFailsClosed() async throws {
-    let fixture = OwnerPreparationFixture()
-    fixture.ownerSetupAssistantProcessPresent = true
-    fixture.driftOwnerPreferencesAfterKill = true
-    fixture.markCreated()
-    let preparation = PommeSecurityOwnerPreparation(
-      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
-      freshnessRequirements: .verifiedFresh,
-      executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
-    )
-
-    await #expect(throws: PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed) {
-      try await preparation.configureLogin(password: "opaque-owner-secret")
-    }
-    #expect(!fixture.ownerSetupAssistantProcessPresent)
-    #expect(!fixture.setupDone)
-  }
-
   @Test("A retained Setup Assistant for another UID is never terminated")
   func retainedOtherUIDSetupAssistantIsUntouched() async throws {
     let fixture = OwnerPreparationFixture()
@@ -2038,7 +1209,7 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     _ = try await preparation.configureLogin(password: "opaque-owner-secret")
@@ -2062,7 +1233,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY,
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus,
       reportPhase: phases.record
     )
 
@@ -2091,7 +1262,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     let result = try await preparation.configureLogin(password: "opaque-owner-secret")
@@ -2119,7 +1290,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     let result = try await preparation.configureLogin(password: "opaque-owner-secret")
@@ -2144,7 +1315,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     let result = try await preparation.configureLogin(password: "opaque-owner-secret")
@@ -2169,7 +1340,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     let result = try await preparation.configureLogin(password: "opaque-owner-secret")
@@ -2193,7 +1364,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(throws: PommeSecurityOwnerPreparationError.ownerVerificationFailed) {
@@ -2217,7 +1388,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(throws: PommeSecurityOwnerPreparationError.ownerVerificationFailed) {
@@ -2240,7 +1411,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(throws: PommeSecurityOwnerPreparationError.ownerVerificationFailed) {
@@ -2263,7 +1434,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(throws: PommeSecurityOwnerPreparationError.ownerVerificationFailed) {
@@ -2287,7 +1458,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(throws: PommeSecurityOwnerPreparationError.ownerVerificationFailed) {
@@ -2311,7 +1482,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(throws: PommeSecurityOwnerPreparationError.ownerVerificationFailed) {
@@ -2334,7 +1505,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY,
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus,
       reportPhase: phases.record
     )
 
@@ -2363,7 +1534,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     let result = try await preparation.configureLogin(password: "opaque-owner-secret")
@@ -2389,7 +1560,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     let result = try await preparation.configureLogin(password: "opaque-owner-secret")
@@ -2423,7 +1594,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(
@@ -2451,7 +1622,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(
@@ -2477,7 +1648,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(
@@ -2505,7 +1676,7 @@ struct PommeSecurityOwnerPreparationTests {
           retryExistingAccount: true
         ),
         executeGuest: fixture.execute,
-        executePrivatePTY: fixture.executePTY
+        executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
       )
 
       await #expect(
@@ -2532,7 +1703,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(
@@ -2558,7 +1729,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(
@@ -2584,7 +1755,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(
@@ -2609,7 +1780,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(throws: PommeSecurityOwnerPreparationError.autoLoginVerificationFailed) {
@@ -2632,7 +1803,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(
@@ -2657,7 +1828,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(throws: PommeSecurityOwnerPreparationError.autoLoginVerificationFailed) {
@@ -2679,7 +1850,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(throws: PommeSecurityOwnerPreparationError.autoLoginVerificationFailed) {
@@ -2701,7 +1872,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(throws: PommeSecurityOwnerPreparationError.autoLoginVerificationFailed) {
@@ -2723,7 +1894,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(
@@ -2748,7 +1919,7 @@ struct PommeSecurityOwnerPreparationTests {
         retryExistingAccount: true
       ),
       executeGuest: fixture.execute,
-      executePrivatePTY: fixture.executePTY
+      executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus
     )
 
     await #expect(
@@ -3248,6 +2419,13 @@ private final class OwnerPreparationFixture: @unchecked Sendable {
       "2026-09-05 14:08:43.780 defaults[335:2142] \nThe domain/default pair of (\(domain), \(key)) does not exist\n"
   }
 
+  func buddyStatus() -> PommeBuddyPreferencesStatus? {
+    .init(bootSessionUUID: "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB", productVersion: "26.6.2",
+      buildVersion: "25G83", owner: .init(account: "pomme", uid: 501,
+      generatedUID: generatedUID.uuidString, homeDirectory: "/Users/pomme"),
+      stage: "complete", outcome: "succeeded", error: nil)
+  }
+
   func execute(_ request: GuestCommandRequest) throws -> GuestCommandResult {
     lock.withLock {
       guestPathsValue.append(request.path)
@@ -3272,6 +2450,10 @@ private final class OwnerPreparationFixture: @unchecked Sendable {
       } else {
         response = (0, "")
       }
+    } else if request.path == "/usr/sbin/sysctl", request.arguments == ["-n", "kern.bootsessionuuid"] {
+      response = (0, "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB\n")
+    } else if request.path == "/usr/bin/sw_vers", request.arguments == ["-productVersion"] {
+      response = (0, "26.6.2\n")
     } else if request.path == "/usr/bin/sw_vers", request.arguments == ["-buildVersion"] {
       response = (nativeBuildExit, nativeBuildVersion + "\n")
     } else if request.path == "/usr/bin/sudo",

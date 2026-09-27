@@ -102,7 +102,8 @@ actor PommeAgent {
         "sip.status", "sip.disable", "sip.enable",
         "amfi.status", "amfi.disable", "amfi.enable"
     ]
-    static let persistentCapabilities = ["agent.describe", "agent.health", "process.start", "process.status", "process.signal", "process.list", "process.output", "process.wait", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize", PommeGuestOwnerCredentialReader.operation, PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation] + terminalCapabilities + normalAMFIOperations
+    static let buddyPreferencesStatusOperation = "buddy.preferences.status"
+    static let persistentCapabilities = [buddyPreferencesStatusOperation, "agent.describe", "agent.health", "process.start", "process.status", "process.signal", "process.list", "process.output", "process.wait", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize", PommeGuestOwnerCredentialReader.operation, PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation] + terminalCapabilities + normalAMFIOperations
     /// Detached-job logs retain their trailing bytes so an already streamed
     /// status response never makes `process.output` destructive. The agent
     /// keeps this bounded per channel and tells callers when earlier bytes
@@ -170,6 +171,7 @@ actor PommeAgent {
     private let writeChunk: @Sendable (Int32, Data, Int) -> Int
     private let recoveryInstaller: PommeAgentRecoveryInstaller?
     private let recoverySecurity: PommeGuestRecoverySecurityOperations
+    private let buddyPreferences: PommeBuddyPreferencesMaintenance?
     private let ownerCredential: PommeGuestOwnerCredentialReader
     private let terminalService: PommeTerminalService
     private let statusTraceSink: PommeAgentStatusTrace.Sink
@@ -182,6 +184,7 @@ actor PommeAgent {
          recoveryInstaller: PommeAgentRecoveryInstaller? = nil,
          recoverySecurity: PommeGuestRecoverySecurityOperations = .init(),
          ownerCredential: PommeGuestOwnerCredentialReader = .init(),
+         buddyPreferences: PommeBuddyPreferencesMaintenance? = nil,
          recoveredJournal: PommeAgentUpdateJournal? = nil,
          authority: PommeAgentAuthority = .standard,
          statusTraceSink: @escaping PommeAgentStatusTrace.Sink = { _, _ in },
@@ -193,6 +196,7 @@ actor PommeAgent {
         self.recoveryInstaller = role == .recovery ? (recoveryInstaller ?? PommeAgentRecoveryInstaller()) : nil
         self.recoverySecurity = recoverySecurity
         self.ownerCredential = ownerCredential
+        self.buddyPreferences = role == .persistent ? buddyPreferences : nil
         self.statusTraceSink = statusTraceSink
         self.startTraceSink = startTraceSink
         let terminalSpoolRoot = URL(fileURLWithPath: journalPath)
@@ -353,6 +357,15 @@ actor PommeAgent {
                 return try perform(request)
             }
             return try await terminalService.perform(operation: request.operation, payload: request.payload)
+        }
+        if request.operation == Self.buddyPreferencesStatusOperation {
+            guard role == .persistent else { throw PommeAgentOperationError.unsupported }
+            guard !activationPending else { throw PommeAgentOperationError.activationPending }
+            guard request.payload.objectValue?.isEmpty == true else { throw PommeAgentOperationError.invalid }
+            guard let buddyPreferences else {
+                return .object(["initializing": .bool(true)])
+            }
+            return try await buddyPreferences.statusPayload()
         }
         if Self.terminalCapabilities.contains(request.operation) {
             guard role == .persistent || role == .recovery else { throw PommeAgentOperationError.unsupported }

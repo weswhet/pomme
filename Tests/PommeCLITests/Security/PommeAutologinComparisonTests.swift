@@ -19,6 +19,22 @@ struct PommeAutologinComparisonTests {
         }
     }
 
+    @Test("Buddy harness selects only its new clone and the production owner path")
+    func buddyOwnerRoute() throws {
+        let strategy = PommeAutologinComparisonStrategy.buddy
+        #expect(strategy.vmName == "pomme-agent-buddy26-20260927a")
+        #expect(strategy.ownerPreparationOverride == nil)
+        try PommeAutologinComparison.validateScope(name: strategy.vmName, strategy: strategy)
+        for previous in [PommeAutologinComparisonStrategy.native, .legacy, .markerfirst, .production] {
+            #expect(throws: (any Error).self) {
+                try PommeAutologinComparison.validateScope(name: previous.vmName, strategy: strategy)
+            }
+            #expect(throws: (any Error).self) {
+                try PommeAutologinComparison.validateScope(name: strategy.vmName, strategy: previous)
+            }
+        }
+    }
+
     @Test("Marker-first console proof requires exact owner and UID")
     func consoleProof() {
         func result(_ text: String, timedOut: Bool = false) -> GuestCommandResult {
@@ -59,7 +75,7 @@ struct PommeAutologinComparisonTests {
 
     @Test("Only the assigned name can select each arm")
     func scope() throws {
-        for strategy in [PommeAutologinComparisonStrategy.native, .legacy, .markerfirst, .production] {
+        for strategy in [PommeAutologinComparisonStrategy.native, .legacy, .markerfirst, .production, .buddy] {
             try PommeAutologinComparison.validateScope(name: strategy.vmName, strategy: strategy)
             for name in ["arbitrary", PommeAutologinComparison.templateName,
                          strategy == .native ? PommeAutologinComparisonStrategy.legacy.vmName

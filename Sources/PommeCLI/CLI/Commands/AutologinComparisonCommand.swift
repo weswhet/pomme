@@ -3,15 +3,18 @@ import Foundation
 
 /// A one-shot experiment, deliberately unavailable for arbitrary VM names.
 enum PommeAutologinComparisonStrategy: String, ExpressibleByArgument, Sendable {
-    case native, legacy, markerfirst, production
+    case native, legacy, markerfirst, production, buddy
 
     var vmName: String {
-        self == .production ? "pomme-agent-ownerflow26-20260927a"
-                            : "pomme-agent-autologin-\(rawValue)26-20260927a"
+        switch self {
+        case .production: "pomme-agent-ownerflow26-20260927a"
+        case .buddy: "pomme-agent-buddy26-20260927a"
+        default: "pomme-agent-autologin-\(rawValue)26-20260927a"
+        }
     }
 
-    /// The production arm deliberately uses no lab override in owner preparation.
-    var ownerPreparationOverride: Self? { self == .production ? nil : self }
+    /// Production and Buddy arms use the normal owner preparation sequence.
+    var ownerPreparationOverride: Self? { self == .production || self == .buddy ? nil : self }
 }
 
 struct AutologinComparisonCommand: AsyncParsableCommand {
@@ -20,7 +23,7 @@ struct AutologinComparisonCommand: AsyncParsableCommand {
         shouldDisplay: false)
     @Argument var name: String
     @Option var strategy: PommeAutologinComparisonStrategy
-    @Flag(help: "Verify the retained marker-first stage after external CFPreferences writes.")
+    @Flag(help: "Verify the retained marker-first desktop after guest-agent preference maintenance.")
     var verifyDesktop = false
 
     mutating func run() async throws {
@@ -95,8 +98,8 @@ enum PommeAutologinComparison {
             let receipt: [String: String] = [
                 "strategy": strategy.rawValue, "vm": name, "planDigest": plan.digest,
                 "agentDigest": plan.normalAgent.executableDigest,
-                "completion": strategy == .production ? "production-owner-workflow"
-                    : strategy == .markerfirst ? "markers-before-owner-preferences" : "shared-native",
+                "completion": strategy.ownerPreparationOverride == nil ? "production-owner-workflow"
+                    : strategy == .markerfirst ? "markers-with-agent-preferences" : "shared-native",
                 "failurePolicy": "preserve-no-retry"
             ]
             let bytes = try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
@@ -113,7 +116,7 @@ enum PommeAutologinComparison {
             let owner = PommeSecurityLiveOwnerPreparation(
                 reference: reference, normal: normal, force: true, labStrategy: strategy.ownerPreparationOverride)
             let started = Date()
-            if strategy == .production {
+            if strategy.ownerPreparationOverride == nil {
                 PommeCore.log("Production owner workflow harness: normal owner sequencing selected; isolated journal; no SIP or AMFI operation will run.", vmName: name)
             }
             PommeCore.log("Autologin comparison started: strategy=\(strategy.rawValue), retry=disabled, failureCleanup=disabled.", vmName: name)
@@ -125,7 +128,7 @@ enum PommeAutologinComparison {
                           progress.journal.phase == .autologinIntent else {
                         throw RunnerError.hostCommandFailed("Marker-first lab failed: post-reboot console stage was not recorded.")
                     }
-                    PommeCore.log("Marker-first lab stage passed: markers created, normal reboot authenticated, owner console verified. Per-user preferences remain deferred; run the CFPreferences probe before --verify-desktop.", vmName: name)
+                    PommeCore.log("Marker-first lab stage passed: markers created, normal reboot authenticated, owner console verified. Guest-agent preference maintenance verified; run --verify-desktop for the full desktop proof.", vmName: name)
                     return
                 }
                 guard progress.journal.phase == .autologinVerified else {
@@ -208,7 +211,7 @@ enum PommeAutologinComparison {
             guard let journal = try store.loadIfPresent(lease: lease), journal.phase == .autologinIntent,
                   journal.identity.matches(currentIdentity),
                   journal.owner?.accountUsername == "pomme" else {
-                throw RunnerError.hostCommandFailed("Marker-first lab refused: owner journal does not match the deferred preference stage.")
+                throw RunnerError.hostCommandFailed("Marker-first lab refused: owner journal does not match the retained console stage.")
             }
             // An attempted verification is never silently repeated after failure.
             try Data("desktop-verification-intent".utf8).write(
