@@ -285,46 +285,32 @@ extension PommeSecurityWorkflow {
   }
 }
 
-/// Retries only the fresh-owner completion preference write after the native
-/// command reports the observed first-boot preference-domain initialization
-/// failure. The host restart, exact-owner verification, and durable journal
-/// receipt are injected so this bounded recovery remains testable without a
-/// VM or a native guest helper.
-struct PommeSecurityFreshOwnerPreferenceRecovery: Sendable {
-  typealias RestartAndAuthenticate = @Sendable () async throws -> Void
-  typealias VerifyOwner = @Sendable () async throws -> PommeSecurityOwnerVerification
-  typealias RecordVerification = @Sendable (PommeSecurityOwnerVerification) throws -> Void
-  typealias ConfigureLogin = @Sendable (PommeSecurityOwnerPreparation.LoginAttempt) async throws -> Void
+/// Every stage runs once per explicitly requested attempt. A failure preserves
+/// the phase at the caller and never triggers a reboot or a second preference write.
+struct PommeSecurityFreshOwnerLoginSequence: Sendable {
+  let configureLoginAndMarkers: @Sendable () async throws -> Void
+  let restartAndAuthenticate: @Sendable () async throws -> Void
+  let verifyOwnerConsole: @Sendable () async throws -> Void
+  let completeOwnerPreferences: @Sendable () async throws -> Void
+  let verifyDesktop: @Sendable () async throws -> Void
+  var log: @Sendable (String) -> Void = { _ in }
 
-  let restartAndAuthenticate: RestartAndAuthenticate
-  let verifyOwner: VerifyOwner
-  let recordVerification: RecordVerification
-  let configureLogin: ConfigureLogin
-
-  func run(initialVerification: PommeSecurityOwnerVerification) async throws {
-    do {
-      try await configureLogin(.initial)
-      return
-    } catch {
-      guard Self.isRetryable(error) else { throw error }
+  func run() async throws {
+    let stages: [(String, @Sendable () async throws -> Void)] = [
+      ("autologin-and-system-markers", configureLoginAndMarkers),
+      ("normal-reboot-and-authentication", restartAndAuthenticate),
+      ("owner-console-proof", verifyOwnerConsole),
+      ("owner-preferences-and-setup-assistant-closure", completeOwnerPreferences),
+      ("full-desktop-proof", verifyDesktop)
+    ]
+    for (stage, perform) in stages {
+      log("Fresh-owner stage started: \(stage).")
+      do { try await perform() } catch {
+        log("Fresh-owner stage failed: \(stage). State retained; no automatic retry or failure restart.")
+        throw error
+      }
+      log("Fresh-owner stage verified: \(stage).")
     }
-
-    try await restartAndAuthenticate()
-    let retryVerification = try await verifyOwner()
-    guard retryVerification.username == initialVerification.username,
-      retryVerification.generatedUID == initialVerification.generatedUID
-    else {
-      throw PommeSecurityWorkflowJournalError.immutableRequestMismatch
-    }
-    try recordVerification(retryVerification)
-    try await configureLogin(.afterPreferenceRestart)
-  }
-
-  static func isRetryable(_ error: Error) -> Bool {
-    guard let preparationError = error as? PommeSecurityOwnerPreparationError,
-      case .commandFailed(let kind, let exitCode) = preparationError
-    else { return false }
-    return kind == .ownerCompletion && exitCode == 1
   }
 }
 
@@ -383,17 +369,20 @@ struct PommeSecurityFrameworkOwnerPreparation: Sendable {
 
 /// Coordinates durable owner intent with native guest checks. Only the fresh
 /// branch is allowed to create an account or alter automatic login.
-private struct PommeSecurityLiveOwnerPreparation: Sendable {
+struct PommeSecurityLiveOwnerPreparation: Sendable {
   let reference: VMReference
   let normal: PommeSecurityNormalAgent
   let force: Bool
+  let labStrategy: PommeAutologinComparisonStrategy?
   private let credentials = PommeOwnerCredentialStore()
   private let interaction = PommeSecurityOwnerInteraction()
 
-  init(reference: VMReference, normal: PommeSecurityNormalAgent, force: Bool) {
+  init(reference: VMReference, normal: PommeSecurityNormalAgent, force: Bool,
+       labStrategy: PommeAutologinComparisonStrategy? = nil) {
     self.reference = reference
     self.normal = normal
     self.force = force
+    self.labStrategy = labStrategy
   }
 
   func prepare(progress: PommeSecurityWorkflowProgress) async throws
@@ -418,6 +407,9 @@ private struct PommeSecurityLiveOwnerPreparation: Sendable {
       "Inspecting Setup Assistant, local accounts, and startup-volume ownership.",
       vmName: reference.displayName)
     let probe = try helper.probe()
+    if labStrategy != nil, !probe.freshness.isVerifiedFresh {
+      throw RunnerError.hostCommandFailed("Autologin comparison refused: the normal agent did not prove a fresh ownerless guest. No owner mutation was attempted.")
+    }
     try progress.update {
       try progress.store.bind(
         $0, volumeVUID: probe.evidence.startupIdentity.rootVolumeUUID.uuidString.lowercased(),
@@ -574,32 +566,60 @@ private struct PommeSecurityLiveOwnerPreparation: Sendable {
       PommeCore.log(
         "Configuring persistent automatic login for verified owner \(account).",
         vmName: reference.displayName)
-      let preferenceRecovery = PommeSecurityFreshOwnerPreferenceRecovery(
-        restartAndAuthenticate: {
-          PommeCore.log(
-            "Restarting normal boot once to initialize fresh-owner preference domains after owner completion status 1.",
-            vmName: reference.displayName)
-          try await PommeCore.restoreStableVMRunState(.stopped, reference: reference)
-          try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
-          try await normal.authenticate()
-        },
-        verifyOwner: {
-          try await helper.verifyOwner(password: credential.password, requireFullName: true)
-        },
-        recordVerification: { retryVerification in
-          try recordVerification(retryVerification, progress: progress)
-        },
-        configureLogin: { attempt in
-          _ = try await helper.configureLogin(password: credential.password, attempt: attempt)
+      if labStrategy == nil {
+        try await PommeSecurityFreshOwnerLoginSequence(
+          configureLoginAndMarkers: {
+            _ = try await helper.configureLogin(password: credential.password, deferOwnerPreferences: true)
+          },
+          restartAndAuthenticate: {
+            try await PommeCore.restoreStableVMRunState(.stopped, reference: reference)
+            try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
+            try await normal.authenticate()
+          },
+          verifyOwnerConsole: {
+            try await normal.verifyOwnerConsole(username: verified.username, uniqueID: verified.uniqueID)
+          },
+          completeOwnerPreferences: {
+            try await helper.completeFreshOwnerAfterLogin(password: credential.password, expected: verified)
+          },
+          verifyDesktop: {
+            try await normal.verifyConsoleLogin(username: verified.username, uniqueID: verified.uniqueID)
+          },
+          log: { PommeCore.log($0, vmName: reference.displayName) }
+        ).run()
+        try progress.advance(.autologinVerified)
+        return try .init(username: credential.reference.account, password: credential.password)
+      }
+      if let labStrategy {
+        let setter: (@Sendable (String) async throws -> Void)?
+        if labStrategy == .legacy {
+          setter = { @Sendable password in
+            try PommeAutologinComparison.setLegacy(reference: reference, password: password)
+          }
+        } else {
+          setter = nil
         }
-      )
-      try await preferenceRecovery.run(initialVerification: verified)
+        if labStrategy == .markerfirst {
+          PommeCore.log("Marker-first lab: native autologin and Setup Assistant markers now; per-user preferences deferred until after reboot.", vmName: reference.displayName)
+        }
+        _ = try await helper.configureLogin(
+          password: credential.password, labSetter: setter,
+          deferOwnerPreferences: labStrategy == .markerfirst)
+      }
       PommeCore.log(
         "Restarting normally to verify automatic login as \(account).",
         vmName: reference.displayName)
       try await PommeCore.restoreStableVMRunState(.stopped, reference: reference)
       try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
       try await normal.authenticate()
+      if labStrategy == .markerfirst {
+        PommeCore.log("Marker-first lab: reboot authenticated; checking only the owner console before external CFPreferences writes.", vmName: reference.displayName)
+        try await PommeAutologinComparison.verifyOwnerConsole(
+          normal: normal, username: verified.username, uniqueID: verified.uniqueID)
+        try PommeAutologinComparison.recordMarkerReady(
+          reference: reference, progress: progress, uniqueID: verified.uniqueID)
+        return try .init(username: credential.reference.account, password: credential.password)
+      }
       PommeCore.log(
         "Checking the console user and login session for \(account).",
         vmName: reference.displayName)

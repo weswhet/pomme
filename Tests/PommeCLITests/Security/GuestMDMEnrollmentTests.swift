@@ -4,6 +4,78 @@ import Testing
 
 @Suite("Guest MDM enrollment")
 struct GuestMDMEnrollmentTests {
+    @Test("Private authentication rejection selects only the explicit readable System store before import")
+    func privateAuthenticationFallback() throws {
+        for readable in [false, true] {
+            var opened: [String] = []
+            let collector = GuestMDMDiagnostics.Collector()
+            try GuestMDMDiagnostics.$current.withValue(collector) { () throws -> Void in
+                let operations = GuestMDMIdentityKeychainOperations<String>(
+                    open: { path in opened.append(path); return (errSecSuccess, path) },
+                    status: { path in (errSecSuccess, path == GuestMDMIdentityKeychain.privatePath || readable ? kSecReadPermStatus : 0) },
+                    unlockPrivate: { _ in errSecAuthFailed })
+                if readable {
+                    #expect(try GuestMDMIdentityKeychain.select(operations: operations) == GuestMDMIdentityKeychain.systemPath)
+                } else {
+                    #expect(throws: GuestInternalError.self) { _ = try GuestMDMIdentityKeychain.select(operations: operations) }
+                }
+            }
+            #expect(opened == [GuestMDMIdentityKeychain.privatePath, GuestMDMIdentityKeychain.systemPath])
+            #expect(!collector.identityImportAttempted)
+            #expect(collector.failureStage == "systemKeychainStatus")
+        }
+    }
+
+    @Test("Credential diagnostics preserve only allowlisted reader errors")
+    func credentialFailureDiagnostics() throws {
+        for failure in PommeGuestOwnerCredentialError.allCases {
+            let collector = GuestMDMDiagnostics.Collector()
+            GuestMDMDiagnostics.$current.withValue(collector) {
+                #expect(throws: GuestInternalError.self) {
+                    _ = try GuestMDMIdentityKeychain.unlockWithGuestPassword(
+                        readPassword: { throw failure },
+                        unlock: { _ in Issue.record("Unexpected unlock"); return errSecSuccess })
+                }
+            }
+            #expect(collector.failureStage == "privateKeychainCredential")
+            let data = try JSONEncoder().encode(collector.value)
+            #expect(String(decoding: data, as: UTF8.self).contains(failure.code))
+            #expect(try GuestMDMDiagnostics.validated(from: .object(["diagnostics": collector.value])) != nil)
+        }
+        #expect(throws: PommeMDMEnrollmentError.self) {
+            _ = try GuestMDMDiagnostics.validated(from: .object(["diagnostics": .array([.object([
+                "stage": .string("privateKeychainCredential"), "event": .string("failed"),
+                "elapsedMillis": .integer(0), "credentialError": .string("arbitrary-secret")])])]))
+        }
+    }
+
+    @Test("Guest unlock passes exact UTF-8 password bytes and preserves authentication failure")
+    func guestPasswordUnlock() throws {
+        let result = try GuestMDMIdentityKeychain.unlockWithGuestPassword(
+            readPassword: { "test-秘密-password" },
+            unlock: { bytes in
+                #expect(bytes == Data("test-秘密-password".utf8))
+                return errSecAuthFailed
+            })
+        #expect(result == errSecAuthFailed)
+    }
+
+    @Test("Unavailable guest password never invokes unlock or exposes reader errors")
+    func unavailableGuestPassword() {
+        for missing in [false, true] {
+            do {
+                _ = try GuestMDMIdentityKeychain.unlockWithGuestPassword(
+                    readPassword: {
+                        if missing { throw NSError(domain: "sensitive-reader-details", code: 1) }
+                        return ""
+                    }, unlock: { _ in Issue.record("Unexpected unlock"); return errSecSuccess })
+                Issue.record("Expected credential failure")
+            } catch {
+                #expect(!error.localizedDescription.contains("sensitive-reader-details"))
+            }
+        }
+    }
+
     @Test("Missing private keychain uses the explicit guest System keychain")
     func missingPrivateKeychainSelectsSystem() throws {
         var paths: [String] = []
@@ -47,6 +119,39 @@ struct GuestMDMEnrollmentTests {
                 open: { _ in (errSecSuccess, "private") },
                 status: { _ in (errSecSuccess, 0) }
             ))
+        }
+    }
+
+    @Test("Private MDM keychain unlock is conditional and its resulting status is verified")
+    func privateUnlock() throws {
+        for initiallyUnlocked in [false, true] {
+            var unlocked = initiallyUnlocked
+            var unlockCalls = 0
+            let selected = try GuestMDMIdentityKeychain.select(operations: GuestMDMIdentityKeychainOperations<String>(
+                open: { _ in (errSecSuccess, "private") },
+                status: { _ in (errSecSuccess, unlocked ? kSecUnlockStateStatus : kSecReadPermStatus) },
+                unlockPrivate: { _ in unlockCalls += 1; unlocked = true; return errSecSuccess }
+            ))
+            #expect(selected == "private")
+            #expect(unlockCalls == (initiallyUnlocked ? 0 : 1))
+        }
+    }
+
+    @Test("Failed unlock or still-locked readback stops before identity import")
+    func privateUnlockFailure() {
+        for unlockStatus in [errSecAuthFailed, errSecSuccess] {
+            let collector = GuestMDMDiagnostics.Collector()
+            GuestMDMDiagnostics.$current.withValue(collector) {
+                #expect(throws: GuestInternalError.self) {
+                    _ = try GuestMDMIdentityKeychain.select(operations: GuestMDMIdentityKeychainOperations<String>(
+                        open: { _ in (errSecSuccess, "private") },
+                        status: { _ in (errSecSuccess, SecKeychainStatus(0)) },
+                        unlockPrivate: { _ in unlockStatus }
+                    ))
+                }
+            }
+            #expect(!collector.identityImportAttempted)
+            #expect(collector.failureStage == (unlockStatus == errSecSuccess ? "privateKeychainStatus" : "privateKeychainUnlock"))
         }
     }
 

@@ -74,8 +74,8 @@ struct MDMEnrollmentTransactionTests {
         #expect(await events.values() == ["describe"])
     }
 
-    @Test("A transfer failure still invokes cleanup and restores the captured baseline")
-    func transferFailureRestores() async throws {
+    @Test("A transfer failure preserves artifacts and baseline")
+    func transferFailurePreserves() async throws {
         let profile = try makeProfile()
         defer { try? FileManager.default.removeItem(at: profile) }
         let events = EventRecorder()
@@ -96,8 +96,9 @@ struct MDMEnrollmentTransactionTests {
         let recorded = await events.values()
         #expect(recorded.contains("prepare"))
         #expect(recorded.contains(where: { $0.hasPrefix("transfer:") }))
-        #expect(recorded.contains(where: { $0.hasPrefix("cleanup:") }))
-        #expect(Array(recorded.suffix(2)) == ["restore", "verify"])
+        #expect(!recorded.contains(where: { $0.hasPrefix("cleanup:") }))
+        #expect(!recorded.contains("restore"))
+        #expect(!recorded.contains("verify"))
     }
 
     @Test("A malformed or unavailable baseline fails before staging and transfer")
@@ -129,7 +130,7 @@ struct MDMEnrollmentTransactionTests {
         #expect(await events.values() == ["describe", "capture"])
     }
 
-    @Test("Cleanup failure is reported after successful enrollment and restoration")
+    @Test("Cleanup failure stops before restoration")
     func cleanupFailureIsFailClosed() async throws {
         let profile = try makeProfile()
         defer { try? FileManager.default.removeItem(at: profile) }
@@ -149,11 +150,12 @@ struct MDMEnrollmentTransactionTests {
             #expect(error == .cleanupFailed)
         }
         let recorded = await events.values()
-        #expect(Array(recorded.suffix(2)) == ["restore", "verify"])
+        #expect(!recorded.contains("restore"))
+        #expect(!recorded.contains("verify"))
     }
 
-    @Test("Restoration failure takes precedence over enrollment and cleanup failures")
-    func restorationFailureHasPriority() async throws {
+    @Test("The first failure exits before cleanup or restoration")
+    func firstFailureHasPriority() async throws {
         let profile = try makeProfile()
         defer { try? FileManager.default.removeItem(at: profile) }
         let events = EventRecorder()
@@ -170,14 +172,15 @@ struct MDMEnrollmentTransactionTests {
             _ = try await transaction.execute()
             Issue.record("Expected restoration failure.")
         } catch let error as PommeMDMEnrollmentError {
-            #expect(error == .restorationFailed)
+            #expect(error == .transferFailed)
         }
         let recorded = await events.values()
-        #expect(recorded.contains(where: { $0.hasPrefix("cleanup:") }))
-        #expect(Array(recorded.suffix(2)) == ["restore", "verify"])
+        #expect(!recorded.contains(where: { $0.hasPrefix("cleanup:") }))
+        #expect(!recorded.contains("restore"))
+        #expect(!recorded.contains("verify"))
     }
 
-    @Test("Unproven helper termination retains the profile while checking the baseline")
+    @Test("Unproven helper termination retains the profile without checking the baseline")
     func unprovenHelperRetainsProfile() async throws {
         let profile = try makeProfile()
         defer { try? FileManager.default.removeItem(at: profile) }
@@ -199,7 +202,32 @@ struct MDMEnrollmentTransactionTests {
         }
         let recorded = await events.values()
         #expect(!recorded.contains(where: { $0.hasPrefix("cleanup:") }))
-        #expect(Array(recorded.suffix(2)) == ["restore", "verify"])
+        #expect(!recorded.contains("restore"))
+        #expect(!recorded.contains("verify"))
+    }
+
+    @Test("Detailed helper failure reaches the workflow without follow-up guest operations")
+    func detailedFailurePreserved() async throws {
+        let profile = try makeProfile()
+        defer { try? FileManager.default.removeItem(at: profile) }
+        let events = EventRecorder()
+        let transaction = PommeMDMEnrollmentTransaction(
+            agent: makeAgent(events: events), state: makeState(events: events),
+            profileURL: profile, timeout: 60,
+            temporaryHelper: PommeMDMTemporaryHelperDependencies { _, _, _ in
+                await events.append("helperFailure")
+                throw PommeMDMHelperFailure(error: .enrollmentFailed,
+                    failureStage: .profileRead, beforeIdentityImport: true)
+            }
+        )
+        do {
+            _ = try await transaction.execute()
+            Issue.record("Expected detailed helper failure.")
+        } catch let failure as PommeMDMHelperFailure {
+            #expect(failure.failureStage == .profileRead)
+            #expect(failure.beforeIdentityImport)
+        }
+        #expect((await events.values()).last == "helperFailure")
     }
 
     @Test("Typed operation payloads have closed names and fixed staging paths")
@@ -297,7 +325,7 @@ struct MDMEnrollmentTransactionTests {
             #expect(error == .stagingPreparationFailed)
         }
         let recorded = await events.values()
-        #expect(recorded.contains(where: { $0.hasPrefix("cleanup:") }))
+        #expect(!recorded.contains(where: { $0.hasPrefix("cleanup:") }))
     }
 
     private func makeTransaction(profile: URL, events: EventRecorder) -> PommeMDMEnrollmentTransaction {

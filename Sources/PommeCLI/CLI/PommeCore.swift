@@ -5477,16 +5477,47 @@ struct PommeCore {
             throw VMBundleMutationLease.Error.invalidScope(name: name)
         }
         let reference = try namedVMReference(name, requireExists: true)
-        try validateProvisioningRepairSchema(provisioningSchema(bundle: reference.bundle))
+        let schema = try provisioningSchema(bundle: reference.bundle)
+        let effects = provisioningEffects()
+        if schema == 2 {
+            let journal = try loadProvisioningV2(reference: reference)
+            let plan = try loadOwnedProvisioningPlan(reference: reference)
+            guard plan == journal.plan,
+                  try await effects.verifyOwnership(plan.vm) == plan.vm else {
+                throw PommeProvisioningError.ownershipMismatch
+            }
+            if try PommeProvisioningV2Coordinator.nextPhase(in: journal) == nil,
+               let result = try alreadyHealthyAgentRepairResult(
+                   name: name,
+                   status: vmStatusPayload(reference: reference),
+                   hostExecutableDigest: runningExecutableIdentity().sha256
+               ) {
+                return result
+            }
+        }
+        try validateProvisioningRepairSchema(schema)
         let signer = try provisioningSigner(bundleURL: reference.bundle.rootURL)
         let repository = try provisioningRepository(bundleURL: reference.bundle.rootURL, signer: signer)
         let journal = try repository.load()
-        let effects = provisioningEffects()
         let ownership = try await effects.verifyOwnership(journal.plan.vm)
-        guard ownership == journal.plan.vm else {
+        guard ownership == journal.plan.vm,
+              journal.plan.vm.bundlePath == reference.standardizedPath,
+              journal.plan.vm.name == name else {
             throw PommeProvisioningError.ownershipMismatch
         }
-        let next = try PommeProvisioningCoordinator.repairPhase(in: journal)
+        let next: (phase: PommeProvisioningPhase, attempt: UInt64)
+        do {
+            next = try PommeProvisioningCoordinator.repairPhase(in: journal)
+        } catch PommeProvisioningError.nothingToRepair {
+            guard let result = try alreadyHealthyAgentRepairResult(
+                name: name,
+                status: vmStatusPayload(reference: reference),
+                hostExecutableDigest: runningExecutableIdentity().sha256
+            ) else {
+                throw PommeProvisioningError.nothingToRepair(vmName: name)
+            }
+            return result
+        }
 
         let state: PommeProvisioningFinalState
         switch finalState {
@@ -5561,6 +5592,39 @@ struct PommeCore {
             hostExitCode: 0,
             text: "OK repaired the Pomme agent through Recovery for \(name).",
             payload: payload
+        )
+    }
+
+    /// Call only after verifying ownership and a completed provisioning journal.
+    /// Connected status comes from the helper's authenticated agent session.
+    static func alreadyHealthyAgentRepairResult(
+        name: String,
+        status: [String: Any],
+        hostExecutableDigest: String
+    ) -> PommeOperationResult? {
+        guard let agent = status["guestAgent"] as? [String: Any],
+              agent["connection"] as? String == GuestAgentStatusV1.ConnectionState.connected.rawValue,
+              agent["role"] as? String == PommeProvisioningAgentRole.normal.rawValue,
+              let rawProtocolVersion = agent["protocolVersion"],
+              case .integer(let protocolVersion) = try? JSONValue(any: rawProtocolVersion),
+              protocolVersion == Int64(PommeAgentProtocol.version),
+              PommeProvisioningDigest.isSHA256(hostExecutableDigest),
+              agent["executableDigest"] as? String == hostExecutableDigest,
+              let capabilities = agent["capabilities"] as? [String],
+              supportsProvisioningAgentCapabilities(capabilities) else { return nil }
+        return PommeOperationResult(
+            title: "Agent Repair",
+            vmName: name,
+            ok: true,
+            hostExitCode: 0,
+            text: "Pomme agent is already healthy for \(name).",
+            payload: [
+                "ok": true,
+                "operation": "agent-repair",
+                "name": name,
+                "alreadyHealthy": true,
+                "hostExitCode": 0
+            ]
         )
     }
 

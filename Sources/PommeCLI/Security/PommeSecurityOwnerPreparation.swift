@@ -986,7 +986,9 @@ struct PommeSecurityOwnerPreparation: Sendable {
   /// Setup Assistant only after owner checks have succeeded.
   func configureLogin(
     password: String,
-    attempt: LoginAttempt = .initial
+    attempt: LoginAttempt = .initial,
+    labSetter: (@Sendable (String) async throws -> Void)? = nil,
+    deferOwnerPreferences: Bool = false
   ) async throws -> PommeSecurityOwnerLoginConfiguration {
     try identity.validate()
     let freshOwner =
@@ -1009,9 +1011,11 @@ struct PommeSecurityOwnerPreparation: Sendable {
         }
         let verification = try await verifyOwner(password: password, requireFullName: true)
         try phase(.configureLogin, .intent)
-        try phase(.ownerCompletion, .intent)
-        try await completeFreshOwnerNativeState(verification: verification)
-        try phase(.ownerCompletion, .receipt)
+        if !deferOwnerPreferences {
+          try phase(.ownerCompletion, .intent)
+          try await completeFreshOwnerNativeState(verification: verification)
+          try phase(.ownerCompletion, .receipt)
+        }
       } else {
         try phase(.configureLogin, .intent)
       }
@@ -1046,19 +1050,25 @@ struct PommeSecurityOwnerPreparation: Sendable {
       owner: identity.username, setupAssistantUserID: context.userID)
     let command = PommeSecurityOwnerPTYCommand(
       executable: nativeCommand.path, arguments: nativeCommand.arguments)
-    let status: Int32
-    do {
-      status = try await executePrivatePTY(command, password)
-    } catch let error as PommeSecurityOwnerPreparationError {
-      if case .autoLoginRefused = error {
-        throw error
+    if let labSetter {
+      // The lab changes only the setter; restrictions, Setup Assistant context,
+      // native readback, completion, and desktop proof remain shared.
+      try await labSetter(password)
+    } else {
+      let status: Int32
+      do {
+        status = try await executePrivatePTY(command, password)
+      } catch let error as PommeSecurityOwnerPreparationError {
+        if case .autoLoginRefused = error {
+          throw error
+        }
+        throw PommeSecurityOwnerPreparationError.privatePTYUnavailable
+      } catch {
+        throw PommeSecurityOwnerPreparationError.privatePTYUnavailable
       }
-      throw PommeSecurityOwnerPreparationError.privatePTYUnavailable
-    } catch {
-      throw PommeSecurityOwnerPreparationError.privatePTYUnavailable
-    }
-    guard status == 0 else {
-      throw PommeSecurityOwnerPreparationError.commandFailed(.autoLogin, exitCode: Int(status))
+      guard status == 0 else {
+        throw PommeSecurityOwnerPreparationError.commandFailed(.autoLogin, exitCode: Int(status))
+      }
     }
     try phase(.globalAutoLoginReadback, .intent)
     try verifyAutoLoginStatus()
@@ -1067,7 +1077,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
     }
     try verifyAutoLoginArtifact()
     try phase(.globalAutoLoginReadback, .receipt)
-    if freshOwner {
+    if freshOwner && !deferOwnerPreferences {
       try phase(.ownerCompletion, .intent)
       try await completeFreshOwnerNativeState(verification: verification)
       try phase(.ownerCompletion, .receipt)
@@ -1119,11 +1129,29 @@ struct PommeSecurityOwnerPreparation: Sendable {
     }
   }
 
-  /// Completes the two native per-user preferences that prevent a newly
-  /// created owner from being sent back through MiniBuddy on its first login.
+  /// Writes and verifies native per-user completion preferences after owner
+  /// login. Full desktop proof remains required.
   /// This is reachable only for a host-proven fresh owner. Every preference
   /// is read and type-checked before the first write, and each changed value
   /// is read back before the owner phase receipt is recorded.
+  func completeFreshOwnerAfterLogin(
+    password: String, expected: PommeSecurityOwnerVerification
+  ) async throws {
+    guard freshnessRequirements.creationOwnershipVerified,
+      freshnessRequirements.priorProvisioningAbsent else {
+      throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
+    }
+    let verified = try await verifyOwner(password: password, requireFullName: true)
+    guard verified.username == expected.username, verified.uniqueID == expected.uniqueID,
+      verified.generatedUID == expected.generatedUID,
+      verified.startupVolumeGroupUUID == expected.startupVolumeGroupUUID else {
+      throw PommeSecurityWorkflowJournalError.immutableRequestMismatch
+    }
+    try phase(.ownerCompletion, .intent)
+    try await completeFreshOwnerNativeState(verification: verified)
+    try phase(.ownerCompletion, .receipt)
+  }
+
   private func completeFreshOwnerNativeState(
     verification: PommeSecurityOwnerVerification
   ) async throws {
@@ -3320,10 +3348,14 @@ struct PommeSecurityOwnerPreparation: Sendable {
       .lowercased()
     switch normalized {
     case "local open directory user": return .localOpenDirectoryUser
+    case "mdm bootstrap token external key":
+      PommeCore.log("APFS owner evidence: recognized MDM bootstrap-token key; classified as non-account.")
+      return .other
     case "disk user", "icloud user", "recovery user", "institutional recovery user",
       "personal recovery user":
       return .other
     default:
+      PommeCore.log("APFS owner evidence rejected: unsupported cryptographic-user type.")
       throw PommeSecurityOwnerPreparationError.malformedEvidence(.apfsUsers)
     }
   }

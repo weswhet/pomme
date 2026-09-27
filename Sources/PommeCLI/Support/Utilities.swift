@@ -302,10 +302,9 @@ func kcpasswordString(from data: Data) -> String? {
     for index in bytes.indices {
         bytes[index] ^= kcpasswordKeyBytes[index % kcpasswordKeyBytes.count]
     }
-    while bytes.last == 0 {
-        bytes.removeLast()
-    }
-    return String(bytes: bytes, encoding: .utf8)
+    // Apple's autologin file may contain nonzero padding after the C-string
+    // terminator. Padding is not password data and need not be valid UTF-8.
+    return String(bytes: bytes.prefix { $0 != 0 }, encoding: .utf8)
 }
 
 func kcpasswordString(at path: String) throws -> String? {

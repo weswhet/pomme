@@ -3,7 +3,7 @@ import Foundation
 
 /// Closed failures for owner-credential recovery. Each case is a fixed
 /// diagnostic; none carries guest text, the artifact's bytes, or the password.
-enum PommeGuestOwnerCredentialError: Error, Equatable, LocalizedError, Sendable {
+enum PommeGuestOwnerCredentialError: Error, Equatable, LocalizedError, Sendable, CaseIterable {
     case rootRequired
     case invalidPayload
     case autoLoginUnavailable

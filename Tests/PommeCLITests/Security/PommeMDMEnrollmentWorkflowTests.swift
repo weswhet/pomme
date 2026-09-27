@@ -27,6 +27,44 @@ struct PommeMDMEnrollmentWorkflowTests {
         #expect(checked.generation == bound.generation + 1)
     }
 
+    @Test("Schema 4 remains readable without inventing clean retry evidence")
+    func schema4PreservesBindings() throws {
+        let fixture = try Fixture.make()
+        defer { fixture.remove() }
+        let initial = try fixture.store.begin(identity: fixture.identity, profile: fixture.profile,
+            agentSHA256: fixture.digest, enrollmentMode: .supervised, originalRunState: .stopped,
+            ownedArtifacts: [], lease: fixture.lease)
+        var object = try fixture.onDiskObject()
+        object["schema"] = 4
+        object.removeValue(forKey: "failure")
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            .write(to: fixture.store.journalURL)
+        let loaded = try #require(try fixture.store.loadIfPresent(lease: fixture.lease))
+        #expect(loaded.agentSHA256 == initial.agentSHA256)
+        #expect(loaded.profile == initial.profile)
+        #expect(loaded.failure == nil)
+        #expect(!loaded.canRetryEnrollment)
+        let failed = try fixture.store.update(loaded, failure: .beforeDispatch, lease: fixture.lease)
+        #expect(try fixture.store.loadIfPresent(lease: fixture.lease) == failed)
+        #expect(failed.phase == initial.phase)
+        #expect(failed.failure == .beforeDispatch)
+    }
+
+    @Test("An explicit restoration failure survives verified enrollment")
+    func restorationFailureIsDurable() throws {
+        let fixture = try Fixture.make()
+        defer { fixture.remove() }
+        let initial = try fixture.store.begin(identity: fixture.identity, profile: fixture.profile,
+            agentSHA256: fixture.digest, enrollmentMode: .supervised, originalRunState: .stopped,
+            ownedArtifacts: [], lease: fixture.lease)
+        let verified = try fixture.store.update(initial, enrollmentVerified: true, lease: fixture.lease)
+        let failed = try fixture.store.update(verified, enrollmentVerified: true,
+            failure: .restoration, lease: fixture.lease)
+        #expect(failed.enrollmentVerified)
+        #expect(failed.failure == .restoration)
+        #expect(try fixture.store.loadIfPresent(lease: fixture.lease) == failed)
+    }
+
     @Test("An unfinished operation rejects mode changes, while a completed one permits a new mode")
     func modeInterlockAndTerminalUpgrade() throws {
         let fixture = try Fixture.make()
@@ -273,6 +311,7 @@ struct PommeMDMEnrollmentWorkflowTests {
             var object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
             object["schema"] = 3
             object.removeValue(forKey: "stagedProfileOwned")
+            object.removeValue(forKey: "failure")
             let legacy = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
             try legacy.write(to: store.journalURL, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: store.journalURL.path)

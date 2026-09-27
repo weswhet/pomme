@@ -134,6 +134,71 @@ struct PommeProvisioningTests {
         #expect(PommeProvisioningError.nothingToRepair(vmName: "pomme-test").localizedDescription.contains("SIP or AMFI"))
     }
 
+    @Test("matching connected normal agent repair reports healthy success", arguments: [false, true])
+    func matchingAgentRepairIsHealthy(controlInteger: Bool) throws {
+        var agent = healthyAgentPayload()
+        if controlInteger {
+            agent["protocolVersion"] = JSONValue.integer(Int64(PommeAgentProtocol.version)).publicValue
+        }
+        let result = try #require(PommeCore.alreadyHealthyAgentRepairResult(
+            name: "pomme-test",
+            status: ["guestAgent": agent],
+            hostExecutableDigest: digest
+        ))
+
+        #expect(result.ok)
+        #expect(result.hostExitCode == 0)
+        #expect(result.text == "Pomme agent is already healthy for pomme-test.")
+        #expect(result.payload["operation"] as? String == "agent-repair")
+        #expect(result.payload["alreadyHealthy"] as? Bool == true)
+        #expect(result.payload["hostExitCode"] as? Int64 == 0)
+        #expect(result.payload["journalReconciled"] == nil)
+    }
+
+    @Test("agent repair does not report healthy for unverified or incompatible agents", arguments: [
+        "digestMismatch", "disconnected", "connecting", "recoveryRole", "unknownRole",
+        "wrongProtocol", "wrongControlProtocol", "booleanProtocol", "fractionalProtocol",
+        "missingProtocol", "missingCapabilities", "missingDigest",
+        "missingAgent", "malformedHostDigest",
+    ])
+    func incompatibleAgentRepairIsNotHealthy(condition: String) {
+        var agent = healthyAgentPayload()
+        var hostDigest = digest
+        switch condition {
+        case "digestMismatch": agent["executableDigest"] = String(repeating: "b", count: 64)
+        case "disconnected": agent["connection"] = "disconnected"
+        case "connecting": agent["connection"] = "connecting"
+        case "recoveryRole": agent["role"] = "recovery"
+        case "unknownRole": agent["role"] = "unknown"
+        case "wrongProtocol": agent["protocolVersion"] = PommeAgentProtocol.version + 1
+        case "wrongControlProtocol": agent["protocolVersion"] = Int64(PommeAgentProtocol.version + 1)
+        case "booleanProtocol": agent["protocolVersion"] = true
+        case "fractionalProtocol": agent["protocolVersion"] = Double(PommeAgentProtocol.version) + 0.5
+        case "missingProtocol": agent.removeValue(forKey: "protocolVersion")
+        case "missingCapabilities": agent["capabilities"] = ["process.start", "file.open"]
+        case "missingDigest": agent.removeValue(forKey: "executableDigest")
+        case "malformedHostDigest":
+            hostDigest = "not-a-sha256"
+            agent["executableDigest"] = hostDigest
+        default: break
+        }
+        let status: [String: Any] = condition == "missingAgent" ? [:] : ["guestAgent": agent]
+
+        #expect(PommeCore.alreadyHealthyAgentRepairResult(
+            name: "pomme-test", status: status, hostExecutableDigest: hostDigest
+        ) == nil)
+    }
+
+    private func healthyAgentPayload() -> [String: Any] {
+        [
+            "connection": "connected",
+            "role": "normal",
+            "protocolVersion": PommeAgentProtocol.version,
+            "executableDigest": digest,
+            "capabilities": ["process.start", "file.open", "mdm.enrollment", "maintenance"],
+        ]
+    }
+
     @Test("agent repair gives resume guidance for unsupported provisioning phases")
     func unsupportedRepairPhaseProvidesResumeGuidance() throws {
         let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 9, count: 32))

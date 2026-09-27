@@ -51,6 +51,34 @@ private actor PommeMDMRestorationProof {
     func isSecurityMatched() -> Bool { securityMatched }
 }
 
+private actor PommeMDMHelperDiagnostics {
+    private var fields: [String: JSONValue] = [:]
+
+    func record(_ result: JSONValue) throws {
+        guard let object = result.objectValue else {
+            throw PommeMDMEnrollmentError.enrollmentOutcomeUnknown
+        }
+        let diagnostics = try GuestMDMDiagnostics.validated(from: object)
+        if let diagnostics {
+            fields["diagnostics"] = diagnostics
+            if case .array(let records) = diagnostics {
+                for record in records {
+                    let bytes = try JSONEncoder().encode(record)
+                    PommeCore.log("MDM guest diagnostic: \(String(decoding: bytes, as: UTF8.self))")
+                }
+            }
+        }
+        if let stage = object["failureStage"] {
+            fields["failureStage"] = stage
+        }
+        if let attempted = object["identityImportAttempted"] {
+            fields["identityImportAttempted"] = attempted
+        }
+    }
+
+    func snapshot() -> [String: JSONValue] { fields }
+}
+
 enum PommeApplication {
     static func provisioningSummary(_ payload: [String: Any]) -> String {
         guard payload["guestProvisioning"] as? String == "virtualization" else { return "" }
@@ -1555,20 +1583,25 @@ enum PommeApplication {
             )
             let progress = PommeMDMWorkflowProgress(journal, store: store, lease: lease)
             let lastObservation = PommeMDMLastObservation()
+            let helperDiagnostics = PommeMDMHelperDiagnostics()
             let artifacts = try mdmArtifacts(journal)
             if let guestPath, guestPath != artifacts.profile {
                 throw PommeMDMEnrollmentWorkflowError.journalIdentityMismatch
             }
             let ensureNormal: @Sendable () async throws -> Void = {
+                PommeCore.log("MDM phase: ensure normal macOS and authenticate the agent.")
                 try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
                 let description = try await authenticatedMDMAgentDescription(reference: reference, timeout: timeout)
                 _ = try MDMEnrollmentAgentGate.verify(description, expectedExecutableDigest: journal.agentSHA256)
+                PommeCore.log("MDM agent authenticated and executable digest verified.")
             }
             let observe: @Sendable () async throws -> PommeMDMObservedEnrollment = {
                 if progress.journal.phase == .captured, !progress.journal.stagedProfileOwned {
                     try await requireMDMDestinationAbsent(reference: reference, destination: artifacts.profile)
                 }
+                PommeCore.log("MDM phase: observe installed profile, enrollment, and supervision.")
                 let value = try await observeMDMEnrollment(reference: reference, timeout: timeout)
+                PommeCore.log("MDM observation: enrolled=\(value.status.enrolled), userApproved=\(value.status.userApproved), supervised=\(value.supervised).")
                 await lastObservation.record(value, phase: progress.journal.phase)
                 return value
             }
@@ -1606,6 +1639,7 @@ enum PommeApplication {
                         activeBootArguments: normal.arguments, configuredBootArguments: normal.configured)
                 },
                 runSecurity: { operation in
+                    PommeCore.log("MDM security child requested: \(operation.rawValue).")
                     try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(recoveryDebugScreenshots) {
                         if operation == .amfiDisable,
                            try childStore.loadIfPresent(lease: lease)?.operation != .amfiDisable {
@@ -1635,11 +1669,13 @@ enum PommeApplication {
                     }
                 },
                 enroll: {
+                    PommeCore.log("MDM phase: prepare enrollment artifacts and dispatch the temporary helper.")
                     try await cleanupMDMArtifacts(reference: reference, journal: progress.journal)
                     _ = try await mdmHelperEnrollment(
                         name: name, profilePath: profileURL.path, guestPath: artifacts.profile,
                         timeout: timeout, enrollmentMode: enrollmentMode, lease: lease,
-                        operationID: artifacts.workspace.requestID, progress: progress
+                        operationID: artifacts.workspace.requestID, progress: progress,
+                        onHelperResult: { try await helperDiagnostics.record($0) }
                     )
                 },
                 cleanup: { try await cleanupMDMArtifacts(reference: reference, journal: progress.journal) },
@@ -1674,6 +1710,34 @@ enum PommeApplication {
                         }
                     }
                 },
+                restorationAlreadyVerified: { baseline in
+                    // Never bypass an unfinished native child transaction. A completed
+                    // child plus exact normal state can reconcile older parent journals
+                    // that still request a restoration already finished before a retry.
+                    let childPhase = try childStore.loadIfPresent(lease: lease)?.phase
+                    guard PommeMDMWorkflowSecurityBaseline.childAllowsRestorationReconciliation(childPhase) else {
+                        PommeCore.log("MDM restoration reconciliation: retained child is incomplete (phase=\(childPhase?.rawValue ?? "none")).")
+                        return false
+                    }
+                    PommeCore.log("MDM restoration reconciliation: child phase=\(childPhase?.rawValue ?? "none"); checking exact baseline.")
+                    guard baseline.sipWasDisabled != nil, baseline.amfiWasDisabled != nil else { return false }
+                    let normal = try await observeMDMNormalSecurity(reference: reference, timeout: timeout)
+                    guard normal.sipDisabled == baseline.sipWasDisabled,
+                          normal.arguments == baseline.normalBootArguments,
+                          normal.configured == baseline.configuredBootArguments else {
+                        PommeCore.log("MDM restoration reconciliation: normal security differs from baseline.")
+                        return false
+                    }
+                    guard let amfi = normalAgent.observeAMFIState(volumeGroupUUID: group),
+                          amfi.disabled == baseline.amfiWasDisabled else {
+                        PommeCore.log("MDM restoration reconciliation: authenticated AMFI evidence unavailable or mismatched.")
+                        return false
+                    }
+                    try PommeMDMWorkflowSecurityBaseline.validateOriginalAMFI(
+                        sipDisabled: normal.sipDisabled, activeBootArguments: normal.arguments, state: amfi)
+                    PommeCore.log("MDM restoration reconciliation: exact baseline and completed child verified; skipping repeated security changes.")
+                    return true
+                },
                 reportSecurityFailure: { failure in
                     await lastObservation.recordFailure(failure)
                     PommeCore.log("MDM security workflow failure: \(failure.localizedDescription)")
@@ -1683,15 +1747,23 @@ enum PommeApplication {
             do { observed = try await PommeMDMWorkflowExecution(progress: progress, dependencies: dependencies).run(preflightError: sourceError) }
             catch {
                 let retained = progress.journal
+                PommeCore.log("MDM failed at phase=\(retained.phase.rawValue). Preserving the current VM, SIP/AMFI settings, and diagnostic artifacts; no failure cleanup or restoration will run.")
                 var details: [String: Any] = [
                     "enrollmentMode": enrollmentMode.rawValue, "profileIdentifier": profile.identifier,
                     "enrolled": NSNull(), "userApproved": NSNull(), "supervised": NSNull(),
-                    "enrollmentOutcome": retained.enrollmentDispatched && !retained.enrollmentVerified ? "unknown" : "incomplete",
+                    "enrollmentOutcome": retained.enrollmentDispatched && !retained.enrollmentVerified
+                        && !retained.canRetryEnrollment ? "unknown" : "incomplete",
                     "securityRestored": [.securityRestored, .runStateRestorationIntent, .restorationComplete].contains(retained.phase),
-                    "runStateRestored": (try? PommeCore.provesStableVMRunState(retained.originalRunState, reference: reference)) == true,
+                    "runStateRestored": retained.phase == .restorationComplete,
                     "artifactsCleaned": retained.phase == .restorationComplete,
+                    "failureStatePreserved": true,
+                    "retryAllowed": !retained.enrollmentDispatched || retained.canRetryEnrollment,
+                    "failureDisposition": retained.failure?.rawValue as Any? ?? NSNull(),
                     "phase": retained.phase.rawValue
                 ]
+                if let cleanup = error as? PommeMDMCleanupFailure {
+                    details["cleanupFailureStage"] = cleanup.stage.rawValue
+                }
                 if let (last, phase) = await lastObservation.snapshot() {
                     details["lastObserved"] = ["enrolled": last.status.enrolled, "userApproved": last.status.userApproved,
                         "supervised": last.supervised, "phase": phase.rawValue]
@@ -1700,17 +1772,20 @@ enum PommeApplication {
                 if !securityFailures.isEmpty {
                     details["securityFailures"] = securityFailures.map(\.localizedDescription)
                 }
+                details.merge(await helperDiagnostics.snapshot().mapValues(\.publicValue)) { _, new in new }
                 return mdmResult(title: "MDM enrollment", operation: "mdm", reference: reference, ok: false,
                     agent: [:], steps: [], result: details, error: error.localizedDescription)
             }
+            var details: [String: Any] = [
+                "enrollmentMode": enrollmentMode.rawValue, "profileIdentifier": profile.identifier,
+                "enrolled": observed.status.enrolled, "userApproved": observed.status.userApproved,
+                "supervised": observed.supervised, "securityRestored": true,
+                "runStateRestored": true, "artifactsCleaned": true
+            ]
+            details.merge(await helperDiagnostics.snapshot().mapValues(\.publicValue)) { _, new in new }
             return mdmResult(title: "MDM enrollment", operation: "mdm", reference: reference, ok: true,
                 agent: ["role": "normal", "protocol": PommeAgentProtocol.name, "version": PommeAgentProtocol.version],
-                steps: [], result: [
-                    "enrollmentMode": enrollmentMode.rawValue, "profileIdentifier": profile.identifier,
-                    "enrolled": observed.status.enrolled, "userApproved": observed.status.userApproved,
-                    "supervised": observed.supervised, "securityRestored": true,
-                    "runStateRestored": true, "artifactsCleaned": true
-                ])
+                steps: [], result: details)
         }
     }
 
@@ -1852,43 +1927,71 @@ enum PommeApplication {
     }
 
     private static func cleanupMDMArtifacts(reference: VMReference, journal: PommeMDMEnrollmentJournal) async throws {
-        let artifacts = try mdmArtifacts(journal)
-        try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
-        _ = try MDMEnrollmentAgentGate.verify(
-            await authenticatedMDMAgentDescription(reference: reference, timeout: 30), expectedExecutableDigest: journal.agentSHA256)
-        func exists(_ path: String) async throws -> Bool {
-            for flag in ["-e", "-L"] {
-                let result = try await runMDMGuestProcess(reference: reference, path: "/bin/test", arguments: [flag, path], timeout: 15)
-                guard result.exited, result.exitCode == 0 || result.exitCode == 1, result.stdout.isEmpty, result.stderr.isEmpty else {
-                    throw PommeMDMEnrollmentError.cleanupFailed
+        var stage = PommeMDMCleanupFailure.Stage.authenticate
+        func receipt(_ result: MDMGuestProcessResult, stage: PommeMDMCleanupFailure.Stage) {
+            PommeCore.log("MDM cleanup receipt: stage=\(stage.rawValue), exit=\(result.exitCode ?? -1), exited=\(result.exited), stdoutBytes=\(result.stdout.count), stderrBytes=\(result.stderr.count), accepted=\(result.exitedSuccessfully).")
+        }
+        do {
+            let artifacts = try mdmArtifacts(journal)
+            try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
+            _ = try MDMEnrollmentAgentGate.verify(
+                await authenticatedMDMAgentDescription(reference: reference, timeout: 30), expectedExecutableDigest: journal.agentSHA256)
+            func exists(_ path: String) async throws -> Bool {
+                for flag in ["-e", "-L"] {
+                    let result = try await runMDMGuestProcess(reference: reference, path: "/bin/test", arguments: [flag, path], timeout: 15)
+                    guard result.exited, result.exitCode == 0 || result.exitCode == 1, result.stdout.isEmpty, result.stderr.isEmpty else {
+                        receipt(result, stage: .inspectArtifacts)
+                        throw PommeMDMEnrollmentError.cleanupFailed
+                    }
+                    if result.exitCode == 0 { return true }
                 }
-                if result.exitCode == 0 { return true }
+                return false
             }
-            return false
-        }
-        var present: [String] = []
-        let ownedPaths = journal.ownedArtifacts.filter { $0 != artifacts.profile || journal.stagedProfileOwned }
-        for path in ownedPaths where try await exists(path) { present.append(path) }
-        guard !present.isEmpty else { return }
-        let hasBootstrap = present.contains(artifacts.bootstrap)
-        if hasBootstrap {
-            let signature = try await runMDMGuestProcess(reference: reference, path: "/usr/bin/codesign",
-                arguments: ["--verify", "--strict", "-R", PommeAgentArtifactStore.signingRequirement, artifacts.bootstrap], timeout: 30)
-            guard signature.exitedSuccessfully else { throw PommeMDMEnrollmentError.cleanupFailed }
-            let chmod = try await runMDMGuestProcess(reference: reference, path: "/bin/chmod", arguments: ["700", artifacts.bootstrap], timeout: 15)
-            guard chmod.exitedSuccessfully else { throw PommeMDMEnrollmentError.cleanupFailed }
-        }
-        let staging = MDMStagingBootstrap(reference: reference, requestID: artifacts.workspace.requestID, transferred: hasBootstrap)
-        if !hasBootstrap { _ = try await staging.prepare() }
-        for path in present where path != artifacts.bootstrap {
-            if path == artifacts.workspace.helperPath {
-                let chmod = try await runMDMGuestProcess(reference: reference, path: "/bin/chmod", arguments: ["600", path], timeout: 15)
+            stage = .inspectArtifacts
+            var present: [String] = []
+            let ownedPaths = journal.ownedArtifacts.filter { $0 != artifacts.profile || journal.stagedProfileOwned }
+            for path in ownedPaths where try await exists(path) { present.append(path) }
+            PommeCore.log("MDM cleanup inventory: owned=\(ownedPaths.count), present=\(present.count).")
+            guard !present.isEmpty else { return }
+            let hasBootstrap = present.contains(artifacts.bootstrap)
+            if hasBootstrap {
+                stage = .verifyBootstrap
+                let signature = try await runMDMGuestProcess(reference: reference, path: "/usr/bin/codesign",
+                    arguments: PommeMDMCleanupFailure.verificationArguments(path: artifacts.bootstrap), timeout: 30)
+                receipt(signature, stage: stage)
+                guard signature.exitedSuccessfully else { throw PommeMDMEnrollmentError.cleanupFailed }
+                stage = .setBootstrapMode
+                let chmod = try await runMDMGuestProcess(reference: reference, path: "/bin/chmod", arguments: ["700", artifacts.bootstrap], timeout: 15)
+                receipt(chmod, stage: stage)
                 guard chmod.exitedSuccessfully else { throw PommeMDMEnrollmentError.cleanupFailed }
             }
-            try PommeMDMEnrollmentAgentResponse.requireCleanup(await staging.cleanup(path))
+            let staging = MDMStagingBootstrap(reference: reference, requestID: artifacts.workspace.requestID, transferred: hasBootstrap)
+            stage = .prepareBootstrap
+            if !hasBootstrap { _ = try await staging.prepare() }
+            for (index, path) in present.enumerated() where path != artifacts.bootstrap {
+                if path == artifacts.workspace.helperPath {
+                    stage = .setHelperMode
+                    let chmod = try await runMDMGuestProcess(reference: reference, path: "/bin/chmod", arguments: ["600", path], timeout: 15)
+                    receipt(chmod, stage: stage)
+                    guard chmod.exitedSuccessfully else { throw PommeMDMEnrollmentError.cleanupFailed }
+                }
+                stage = .removeArtifact
+                PommeCore.log("MDM cleanup artifact: index=\(index), event=begin.")
+                try PommeMDMEnrollmentAgentResponse.requireCleanup(await staging.cleanup(path))
+                PommeCore.log("MDM cleanup artifact: index=\(index), event=removed.")
+            }
+            stage = .removeBootstrap
+            try await staging.remove()
+            stage = .verifyAbsence
+            for path in ownedPaths where try await exists(path) { throw PommeMDMEnrollmentError.cleanupFailed }
+            PommeCore.log("MDM cleanup completed: verifiedAbsent=\(ownedPaths.count).")
+        } catch {
+            PommeCore.log("MDM cleanup failed: stage=\(stage.rawValue). Remaining artifacts retained.")
+            // Preserve this classification so the workflow cannot authorize a retry
+            // while a guest helper may still be running.
+            if (error as? PommeMDMEnrollmentError) == .helperProcessTerminationUnproven { throw error }
+            throw PommeMDMCleanupFailure(stage: stage)
         }
-        try await staging.remove()
-        for path in ownedPaths where try await exists(path) { throw PommeMDMEnrollmentError.cleanupFailed }
     }
 
     private static func mdmHelperEnrollment(
@@ -1899,7 +2002,8 @@ enum PommeApplication {
         enrollmentMode: MDMEnrollmentMode,
         lease: VMBundleMutationLease,
         operationID: UUID,
-        progress: PommeMDMWorkflowProgress
+        progress: PommeMDMWorkflowProgress,
+        onHelperResult: @escaping @Sendable (JSONValue) async throws -> Void
     ) async throws -> PommeOperationResult {
         guard timeout.isFinite, timeout >= 1, timeout <= 300 else {
             throw RunnerError.invalidControlCommand("mdm.enroll timeout")
@@ -1972,7 +2076,12 @@ enum PommeApplication {
                 expectedExecutableDigest: expectedDigest,
                 staging: staging,
                 workspace: workspace,
-                onLaunch: { try progress.record(enrollmentDispatched: true) }
+                onLaunch: {
+                    // Consume clean retry evidence at the actual launch boundary.
+                    // Staging or signing failures have not started a new import.
+                    try progress.record(enrollmentDispatched: true, failure: .outcomeUnknown)
+                },
+                onHelperResult: onHelperResult
             )
             let state = makeLiveMDMStatePort(reference: reference)
             let transaction = PommeMDMEnrollmentTransaction(
@@ -1985,16 +2094,9 @@ enum PommeApplication {
                 expectedExecutableDigest: expectedDigest,
                 temporaryHelper: temporaryHelper
             )
-            let enrolled: PommeMDMEnrollmentTransactionResult
-            do {
-                enrolled = try await transaction.execute()
-            } catch {
-                let original = error
-                if (error as? PommeMDMEnrollmentError) == .helperProcessTerminationUnproven { throw error }
-                do { try await staging.remove() }
-                catch { throw PommeMDMEnrollmentError.cleanupFailed }
-                throw original
-            }
+            // A failure retains the bootstrap and enrollment artifacts at the
+            // failure boundary. Only a successful transaction cleans them.
+            let enrolled = try await transaction.execute()
             try await staging.remove()
             let agent: [String: Any] = [
                 "role": GuestAgentStatusV1.Role.normal.rawValue,
@@ -2484,7 +2586,8 @@ enum PommeApplication {
         expectedExecutableDigest: String,
         staging: MDMStagingBootstrap,
         workspace: PommeMDMTemporaryHelperWorkspace,
-        onLaunch: @escaping @Sendable () throws -> Void
+        onLaunch: @escaping @Sendable () throws -> Void,
+        onHelperResult: @escaping @Sendable (JSONValue) async throws -> Void
     ) -> any PommeMDMTemporaryHelperTransport {
         PommeMDMTemporaryHelperHost(dependencies: .init(
             canonicalArtifact: {
@@ -2542,6 +2645,7 @@ enum PommeApplication {
                     }
                     throw PommeMDMEnrollmentError.enrollmentOutcomeUnknown
                 }
+                PommeCore.log("MDM helper process receipt: exit=\(process.exitCode ?? -1), exited=\(process.exited), timedOut=\(process.timedOut), cancelled=\(process.cancelled), outputComplete=\(process.outputComplete), stdoutBytes=\(process.stdout.count), stderrBytes=\(process.stderr.count).")
                 guard process.stderr.isEmpty,
                       process.stdout.count <= mdmTemporaryHelperOutputLimit,
                       process.exited,
@@ -2578,34 +2682,27 @@ enum PommeApplication {
                    PommeMDMPrivateHelper.FailureCode(rawValue: code) != nil {
                     PommeCore.log("MDM helper closed failure: \(code).")
                 }
+                do { try await onHelperResult(value) }
+                catch { throw PommeMDMEnrollmentError.enrollmentOutcomeUnknown }
                 return value
             },
             cleanup: { workspace in
-                var failed = false
-                do {
-                    _ = try await runMDMGuestProcess(
-                        reference: reference,
-                        path: "/bin/chmod",
-                        arguments: ["600", workspace.helperPath],
-                        timeout: 15
-                    )
-                } catch {
-                    failed = true
-                }
+                let chmod = try await runMDMGuestProcess(
+                    reference: reference,
+                    path: "/bin/chmod",
+                    arguments: ["600", workspace.helperPath],
+                    timeout: 15
+                )
+                guard chmod.exitedSuccessfully else { throw PommeMDMEnrollmentError.cleanupFailed }
 
                 // Each artifact is a known UUID-derived direct child. The
                 // authenticated staging operation proves owner, group, mode,
                 // regular-file identity, unlink, fsync, and post-removal
                 // absence; no recursive or generic delete is reachable here.
                 for path in [workspace.helperPath, workspace.entitlementsPath, workspace.requestPath] {
-                    do {
-                        let value = try await staging.cleanup(path)
-                        try PommeMDMEnrollmentAgentResponse.requireCleanup(value)
-                    } catch {
-                        failed = true
-                    }
+                    let value = try await staging.cleanup(path)
+                    try PommeMDMEnrollmentAgentResponse.requireCleanup(value)
                 }
-                if failed { throw PommeMDMEnrollmentError.cleanupFailed }
             },
             now: Date.init
         ), workspace: workspace)

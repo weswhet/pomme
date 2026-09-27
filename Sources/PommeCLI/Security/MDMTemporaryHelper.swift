@@ -180,6 +180,14 @@ struct PommeMDMTemporaryHelperRequest: Codable, Equatable, Sendable {
     }
 }
 
+/// A validated, completed helper failure. Legacy responses never prove a safe retry.
+struct PommeMDMHelperFailure: Error, LocalizedError, Sendable {
+    let error: PommeMDMEnrollmentError
+    let failureStage: GuestMDMDiagnostics.Stage?
+    let beforeIdentityImport: Bool
+    var errorDescription: String? { error.localizedDescription }
+}
+
 struct PommeMDMTemporaryHelperResult: Equatable, Sendable {
     let profileIdentifier: String
 
@@ -193,10 +201,27 @@ struct PommeMDMTemporaryHelperResult: Equatable, Sendable {
         self.profileIdentifier = profileIdentifier
     }
 
-    static func decode(_ value: JSONValue) throws -> Self {
-        guard let object = value.objectValue else {
+    static func decode(_ value: JSONValue, detailedFailure: Bool = false) throws -> Self {
+        guard var object = value.objectValue else {
             throw PommeMDMEnrollmentError.enrollmentFailed
         }
+        let diagnostics = try GuestMDMDiagnostics.validated(from: object)
+        let stage = object["failureStage"]?.stringValue.flatMap(GuestMDMDiagnostics.Stage.init(rawValue:))
+        let beforeImport: Bool
+        if object["identityImportAttempted"] == .bool(false),
+           stage?.precedesIdentityImport == true,
+           case .array(let records)? = diagnostics {
+            beforeImport = records.allSatisfy {
+                guard let raw = $0.objectValue?["stage"]?.stringValue,
+                      let recordedStage = GuestMDMDiagnostics.Stage(rawValue: raw) else { return false }
+                return recordedStage.precedesIdentityImport
+            }
+        } else {
+            beforeImport = false
+        }
+        object.removeValue(forKey: "identityImportAttempted")
+        object.removeValue(forKey: "diagnostics")
+        object.removeValue(forKey: "failureStage")
         if Set(object.keys) == ["completed", "profileIdentifier"],
            object["completed"] == .bool(true),
            let identifier = object["profileIdentifier"]?.stringValue {
@@ -212,6 +237,14 @@ struct PommeMDMTemporaryHelperResult: Equatable, Sendable {
               let errorCode = object["errorCode"]?.stringValue,
               PommeMDMPrivateHelper.FailureCode(rawValue: errorCode) != nil else {
             throw PommeMDMEnrollmentError.enrollmentFailed
+        }
+        let classification: PommeMDMEnrollmentError = errorCode == PommeMDMPrivateHelper.FailureCode.enrollmentOutcomeUnknown.rawValue
+            ? .enrollmentOutcomeUnknown : .enrollmentFailed
+        if detailedFailure {
+            throw PommeMDMHelperFailure(
+                error: classification, failureStage: stage,
+                beforeIdentityImport: beforeImport && errorCode == PommeMDMPrivateHelper.FailureCode.enrollmentFailed.rawValue
+            )
         }
         if errorCode == PommeMDMPrivateHelper.FailureCode.enrollmentOutcomeUnknown.rawValue {
             throw PommeMDMEnrollmentError.enrollmentOutcomeUnknown
@@ -410,19 +443,19 @@ struct PommeMDMTemporaryHelperHost: PommeMDMTemporaryHelperTransport {
                     request,
                     requestReceipt.sha256,
                     timeout
-                )
+                ),
+                detailedFailure: true
             )
         } catch {
             primaryError = error
         }
 
-        let helperProcessMayStillExist = (primaryError as? PommeMDMEnrollmentError)
-            == .helperProcessTerminationUnproven
-        if prepared, !helperProcessMayStillExist {
+        // A failure retains the exact helper artifacts for diagnosis and agent updates.
+        if let primaryError { throw primaryError }
+        if prepared {
             do { try await dependencies.cleanup(workspace) }
             catch { throw PommeMDMEnrollmentError.cleanupFailed }
         }
-        if let primaryError { throw primaryError }
         guard let result else { throw PommeMDMEnrollmentError.enrollmentFailed }
         return result
     }
@@ -490,5 +523,23 @@ enum PommeMDMTemporaryHelperSecurityGate {
               amfi.objectValue?["amfiDisabled"] == .bool(true) else {
             throw PommeMDMEnrollmentError.baselineCaptureFailed
         }
+    }
+}
+
+
+/// Closed cleanup stages keep errors useful without including guest output or paths.
+struct PommeMDMCleanupFailure: LocalizedError {
+    enum Stage: String {
+        case authenticate, inspectArtifacts, verifyBootstrap, setBootstrapMode
+        case prepareBootstrap, setHelperMode, removeArtifact, removeBootstrap, verifyAbsence
+    }
+    let stage: Stage
+    var errorDescription: String? {
+        "MDM staging cleanup failed at \(stage.rawValue). The VM and remaining artifacts were preserved."
+    }
+
+    static func verificationArguments(path: String, requirement: String = PommeAgentArtifactStore.signingRequirement) -> [String] {
+        // codesign interprets a bare requirement as a filename. '=' selects inline syntax.
+        ["--verify", "--strict", "-R", "=" + requirement, path]
     }
 }

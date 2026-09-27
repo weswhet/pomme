@@ -153,14 +153,25 @@ handoff described below; failure to establish that session stops navigation. A
 retry that already has all native autologin proofs skips the setter and session
 handoff.
 
-Fresh-owner completion reads the native guest build and exact owner preference
-types before writing. For the owner's CurrentUser/AnyHost preferences,
+Fresh-owner preparation configures and verifies native automatic login, writes
+and verifies the system completion markers (including `.AppleSetupDone`), then
+reboots and authenticates the normal agent. It waits for the exact owner console
+identity before writing per-user preferences. The reboot is a planned step
+before completion.
+
+After that login, fresh-owner completion reads the native guest build and exact
+owner preference types before writing. For the owner's CurrentUser/AnyHost
+preferences,
 `LastSeenBuddyBuildVersion` must be an explicit string matching the current
 build and `MiniBuddyLaunch` an explicit boolean `false`; every changed value
-is read back. A missing key is accepted only with the bounded positive native
-timestamped multiline diagnostic. Pomme then rechecks and closes the exact
+is read back. Commands run as the owner through `sudo -n -H -u`. A missing key
+is accepted only with the bounded positive native timestamped multiline
+diagnostic. Pomme then rechecks and closes the exact
 previously running owner Setup Assistant process before its final preference
-readbacks.
+readbacks. These preferences and `.AppleSetupDone` do not by themselves prove
+that Setup Assistant has finished. The workflow still requires the full stable
+desktop proof before recording `autologinVerified` or starting a security change.
+A failed completion command exits without automatically rebooting and retrying.
 
 Pomme requires native automatic-login status to report the account-bound
 diagnostic `Automatic login user: pomme` (with the native timestamp prefix
@@ -225,7 +236,10 @@ verified receipt afterward. Important terminal boundaries include
 `noMutationVerified`, `restorationPending`, and `restorationComplete`.
 
 If a process stops after an intent, rerun the same operation with the same
-requested final state. Resume observes the guest again and reconciles a
+requested final state. A retained `autologinIntent` restarts the owner-login
+sequence from native autologin and marker reconciliation, including its planned
+reboot. Individual completion stages are not durable resume checkpoints.
+Resume observes the guest again and reconciles a
 matching `securityMutationIntent` without repeating the owner or security
 write. A `restorationPending` retry uses the durable receipt booleans and only
 completes restoration when the observed state is still consistent.
@@ -234,8 +248,10 @@ An unfinished journal for a different operation fails at `begin` with a
 conflict before owner, Recovery, or VM effects start. Identity, operation, and
 requested-final-state changes are rejected rather than rewriting the retained
 request. A failed operation retains its journal and progress for inspection
-and retry, and attempts to restore the run state captured at workflow start;
-the successful `--final-state` target is used only after the workflow completes.
+and retry. A fresh-owner preparation failure leaves the VM in its failure state,
+without automatically restoring its prior run state. Other security failures
+may attempt to restore the run state captured at workflow start; the successful
+`--final-state` target is used only after the workflow completes.
 If cleanup cannot be proven complete, the workflow returns
 `restorationIncomplete` and does not restore or boot the VM; inspect the VM and
 repeat the retained operation only after the cleanup state is understood.

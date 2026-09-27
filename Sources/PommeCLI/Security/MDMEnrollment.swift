@@ -168,106 +168,75 @@ struct PommeMDMEnrollmentTransaction: Sendable {
             throw PommeMDMEnrollmentError.baselineCaptureFailed
         }
 
-        // Once a baseline exists, a staging cleanup is attempted even if the
-        // prepare operation itself fails: the guest may have created the
-        // directory before its response was lost.
-        var operationError: PommeMDMEnrollmentError?
+        // Failed enrollment retains guest artifacts and the current VM state.
         var transactionResult: PommeMDMEnrollmentTransactionResult?
+        let prepared = try await agent.perform(.prepareStaging)
+        try PommeMDMEnrollmentAgentResponse.requireStagingReady(prepared)
+
+        let receipt: PommeMDMProfileTransferReceipt
         do {
-            let prepared = try await agent.perform(.prepareStaging)
-            try PommeMDMEnrollmentAgentResponse.requireStagingReady(prepared)
-
-            let receipt: PommeMDMProfileTransferReceipt
-            do {
-                receipt = try await agent.transferProfile(from: profileURL, to: destination)
-            } catch let error as PommeMDMEnrollmentError {
-                throw error == .invalidTransfer ? error : .transferFailed
-            } catch {
-                throw PommeMDMEnrollmentError.transferFailed
-            }
-            guard receipt.destination == destination else {
-                throw PommeMDMEnrollmentError.invalidTransfer
-            }
-
-            if let temporaryHelper {
-                do {
-                    let response = try await temporaryHelper.enroll(
-                        profile: receipt,
-                        mode: enrollmentMode,
-                        baseline: baseline,
-                        timeout: timeout
-                    )
-                    transactionResult = .init(
-                        profileIdentifier: response.profileIdentifier,
-                        transferredBytes: receipt.bytes,
-                        transferredSHA256: receipt.sha256,
-                        agentCapabilities: description.capabilities.sorted()
-                    )
-                } catch let error as PommeMDMEnrollmentError {
-                    throw error
-                } catch {
-                    throw PommeMDMEnrollmentError.enrollmentFailed
-                }
-            } else {
-                let enrollment: JSONValue
-                do {
-                    enrollment = try await agent.perform(
-                        .enroll(profilePath: destination, timeout: timeout)
-                    )
-                } catch {
-                    throw PommeMDMEnrollmentError.enrollmentFailed
-                }
-                let response = try PommeMDMEnrollmentAgentResponse.enrollment(enrollment)
-                transactionResult = .init(
-                    profileIdentifier: response.profileIdentifier,
-                    transferredBytes: receipt.bytes,
-                    transferredSHA256: receipt.sha256,
-                    agentCapabilities: description.capabilities.sorted()
-                )
-            }
-            // Legacy persistent-agent enrollment is retained for existing
-            // protocol-v1 guests. It has no private helper mode field, so it
-            // performs approval only for the explicitly selected supervised
-            // mode. New helper requests carry the mode and approve internally.
-            if temporaryHelper == nil, enrollmentMode == .supervised,
-               let identifier = transactionResult?.profileIdentifier {
-                let approval = try await agent.perform(
-                    .approve(profileIdentifier: identifier, timeout: timeout)
-                )
-                try PommeMDMEnrollmentAgentResponse.approval(approval)
-            }
+            receipt = try await agent.transferProfile(from: profileURL, to: destination)
         } catch let error as PommeMDMEnrollmentError {
-            operationError = error
+            throw error == .invalidTransfer ? error : .transferFailed
         } catch {
-            operationError = .stagingPreparationFailed
+            throw PommeMDMEnrollmentError.transferFailed
+        }
+        guard receipt.destination == destination else {
+            throw PommeMDMEnrollmentError.invalidTransfer
         }
 
-        // Cleanup and restoration are intentionally independent.  A cleanup
-        // failure must not prevent restoration, and a restoration failure is
-        // always the highest-precedence error because the VM's security/run
-        // state is then unknown.
-        var cleanupError = false
-        if operationError != .helperProcessTerminationUnproven {
+        if let temporaryHelper {
+            let response = try await temporaryHelper.enroll(
+                profile: receipt,
+                mode: enrollmentMode,
+                baseline: baseline,
+                timeout: timeout
+            )
+            transactionResult = .init(
+                profileIdentifier: response.profileIdentifier,
+                transferredBytes: receipt.bytes,
+                transferredSHA256: receipt.sha256,
+                agentCapabilities: description.capabilities.sorted()
+            )
+        } else {
+            let enrollment: JSONValue
             do {
-                let cleaned = try await agent.perform(.cleanup(profilePath: destination))
-                try PommeMDMEnrollmentAgentResponse.requireCleanup(cleaned)
+                enrollment = try await agent.perform(
+                    .enroll(profilePath: destination, timeout: timeout)
+                )
             } catch {
-                cleanupError = true
+                throw PommeMDMEnrollmentError.enrollmentFailed
             }
+            let response = try PommeMDMEnrollmentAgentResponse.enrollment(enrollment)
+            transactionResult = .init(
+                profileIdentifier: response.profileIdentifier,
+                transferredBytes: receipt.bytes,
+                transferredSHA256: receipt.sha256,
+                agentCapabilities: description.capabilities.sorted()
+            )
+        }
+        // Legacy persistent-agent enrollment is retained for existing
+        // protocol-v1 guests. It has no private helper mode field, so it
+        // performs approval only for the explicitly selected supervised
+        // mode. New helper requests carry the mode and approve internally.
+        if temporaryHelper == nil, enrollmentMode == .supervised,
+           let identifier = transactionResult?.profileIdentifier {
+            let approval = try await agent.perform(
+                .approve(profileIdentifier: identifier, timeout: timeout)
+            )
+            try PommeMDMEnrollmentAgentResponse.approval(approval)
         }
 
-        var restorationError = false
-        do { try await state.restoreBaseline(baseline) }
-        catch { restorationError = true }
         do {
+            let cleaned = try await agent.perform(.cleanup(profilePath: destination))
+            try PommeMDMEnrollmentAgentResponse.requireCleanup(cleaned)
+        } catch { throw PommeMDMEnrollmentError.cleanupFailed }
+        do {
+            try await state.restoreBaseline(baseline)
             guard try await state.verifyBaseline(baseline) else {
                 throw PommeMDMEnrollmentError.restorationFailed
             }
-        } catch { restorationError = true }
-
-        if restorationError { throw PommeMDMEnrollmentError.restorationFailed }
-        if cleanupError { throw PommeMDMEnrollmentError.cleanupFailed }
-        if let operationError { throw operationError }
+        } catch { throw PommeMDMEnrollmentError.restorationFailed }
         guard let transactionResult else {
             throw PommeMDMEnrollmentError.enrollmentFailed
         }

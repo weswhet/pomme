@@ -4,6 +4,127 @@ import Synchronization
 
 @Suite("Pomme normal guest owner preparation")
 struct PommeSecurityOwnerPreparationTests {
+  @Test("Post-login preferences require the same verified owner and retain setup markers on failure", arguments: ["success", "writeFailure", "identityDrift"])
+  func postLoginOwnerCompletion(mode: String) async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID), freshnessRequirements: .verifiedFresh,
+      executeGuest: { request in
+        if request.arguments.contains("write"), request.arguments.contains("LastSeenBuddyBuildVersion") {
+          #expect(fixture.setupDone)
+        }
+        return try fixture.execute(request)
+      }, executePrivatePTY: fixture.executePTY)
+    let verified = try await preparation.verifyOwner(password: "opaque-owner-secret")
+    _ = try await preparation.configureLogin(password: "opaque-owner-secret", deferOwnerPreferences: true)
+    #expect(fixture.setupDone)
+    #expect(fixture.setupAssistantBuildPreference == nil)
+    if mode == "writeFailure" { fixture.setupAssistantBuildWriteExit = 1 }
+    let expected = PommeSecurityOwnerVerification(
+      username: verified.username, generatedUID: mode == "identityDrift" ? UUID() : verified.generatedUID,
+      uniqueID: verified.uniqueID, passwordVerified: true, isAdministrator: true,
+      secureTokenEnabled: true, isAPFSVolumeOwner: true, startupVolumeGroupUUID: verified.startupVolumeGroupUUID)
+    if mode == "success" {
+      try await preparation.completeFreshOwnerAfterLogin(password: "opaque-owner-secret", expected: expected)
+      #expect(fixture.setupAssistantBuildPreference == "25G83")
+      #expect(fixture.miniBuddyLaunchPreference == false)
+    } else if mode == "identityDrift" {
+      await #expect(throws: PommeSecurityWorkflowJournalError.immutableRequestMismatch) {
+        try await preparation.completeFreshOwnerAfterLogin(password: "opaque-owner-secret", expected: expected)
+      }
+      #expect(fixture.setupAssistantBuildPreference == nil)
+    } else {
+      await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
+        try await preparation.completeFreshOwnerAfterLogin(password: "opaque-owner-secret", expected: expected)
+      }
+      #expect(fixture.miniBuddyLaunchPreference == nil)
+    }
+    #expect(fixture.setupDone)
+  }
+
+  @Test("Marker-first lab writes setup markers without per-user preferences", arguments: [false, true])
+  func markerFirstDefersPreferences(alreadyConfigured: Bool) async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    if !alreadyConfigured { fixture.autoLoginStatusOutput = "Automatic login is OFF.\n" }
+    fixture.setupAssistantBuildWriteExit = 1
+    fixture.miniBuddyLaunchWriteExit = 1
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: fixture.execute, executePrivatePTY: fixture.executePTY)
+    _ = try await preparation.configureLogin(
+      password: "opaque-owner-secret", deferOwnerPreferences: true)
+    #expect(fixture.setupDone)
+    #expect(fixture.setupAssistantBuildPreference == nil)
+    #expect(fixture.miniBuddyLaunchPreference == nil)
+    #expect(fixture.ptyCommands.contains { $0.arguments.contains("-autologin") } == !alreadyConfigured)
+  }
+
+  @Test("Lab setter failure stops before completion and is never retried")
+  func labSetterFailureStopsImmediately() async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    fixture.autoLoginStatusOutput = "Automatic login is OFF.\n"
+    let calls = Mutex(0)
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: fixture.execute, executePrivatePTY: fixture.executePTY)
+    await #expect(throws: PommeSecurityOwnerPreparationError.privatePTYUnavailable) {
+      try await preparation.configureLogin(password: "opaque-owner-secret", labSetter: { _ in
+        calls.withLock { $0 += 1 }
+        throw PommeSecurityOwnerPreparationError.privatePTYUnavailable
+      })
+    }
+    #expect(calls.withLock { $0 } == 1)
+    #expect(!fixture.setupDone)
+    #expect(!fixture.ptyCommands.contains { $0.arguments.contains("-autologin") })
+  }
+
+  @Test("Lab setter retains common readback and Setup Assistant completion", arguments: [false, true])
+  func labSetterSharedCompletion(rejectReadback: Bool) async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    fixture.autoLoginStatusOutput = "Automatic login is OFF.\n"
+    let calls = Mutex(0)
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: fixture.execute, executePrivatePTY: fixture.executePTY)
+    let setter: @Sendable (String) async throws -> Void = { password in
+      #expect(password == "opaque-owner-secret")
+      calls.withLock { $0 += 1 }
+      fixture.autoLoginStatusOutput = rejectReadback
+        ? "Automatic login is OFF.\n" : "Automatic login user: pomme\n"
+    }
+    if rejectReadback {
+      await #expect(throws: PommeSecurityOwnerPreparationError.autoLoginVerificationFailed) {
+        try await preparation.configureLogin(password: "opaque-owner-secret", labSetter: setter)
+      }
+      #expect(!fixture.setupDone)
+    } else {
+      _ = try await preparation.configureLogin(password: "opaque-owner-secret", labSetter: setter)
+      #expect(fixture.setupDone)
+    }
+    #expect(calls.withLock { $0 } == 1)
+    #expect(!fixture.ptyCommands.contains { $0.arguments.contains("-autologin") })
+  }
+
+  @Test("MDM bootstrap-token keys are recognized but never prove a local account owner")
+  func mdmBootstrapTokenAPFSUser() throws {
+    let fixture = OwnerPreparationFixture()
+    fixture.apfsOutput = fixture.pipePrefixedAPFSUsers
+      .replacingOccurrences(of: "Recovery User", with: "MDM Bootstrap Token External Key")
+      .replacingOccurrences(of: "Volume Owner: No", with: "Volume Owner: Yes")
+    let preparation = PommeSecurityOwnerPreparation(
+      identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
+      freshnessRequirements: .verifiedFresh,
+      executeGuest: fixture.execute, executePrivatePTY: fixture.executePTY)
+    let probe = try preparation.probe()
+    #expect(probe.evidence.apfsUsers.count == 2)
+    #expect(probe.evidence.apfsLocalOwners.count == 1)
+    #expect(probe.evidence.apfsLocalOwners.first?.generatedUID == fixture.generatedUID)
+    #expect(!probe.freshness.isVerifiedFresh)
+  }
+
   @Test("Initial build type classification reuses the existing read and preserves the write failure", arguments: ["domain", "pair", "known", "unchanged"])
   func initialBuildTypeClassification(mode: String) async throws {
     let fixture = OwnerPreparationFixture(existingOwner: true)
@@ -560,28 +681,26 @@ struct PommeSecurityOwnerPreparationTests {
         if phase == .ownerCompletion, event == .receipt { completionReceipts.withLock { $0 += 1 } }
       }
     )
-    let initial = try await preparation.verifyOwner(password: "opaque-owner-secret")
-    let recovery = PommeSecurityFreshOwnerPreferenceRecovery(
-      restartAndAuthenticate: {
-        restarts.withLock { $0 += 1 }
-        fixture.miniBuddyLaunchWriteExit = 0
-        fixture.autoLoginStatusOutput = "Automatic login user: _mbsetupuser\n"
-        if mode == "invalidContext" { fixture.setupAssistantProcessUID = 501 }
-      },
-      verifyOwner: { try await preparation.verifyOwner(password: "opaque-owner-secret") },
-      recordVerification: { _ in },
-      configureLogin: { attempt in
-        _ = try await preparation.configureLogin(password: "opaque-owner-secret", attempt: attempt)
+    func resumeExplicitly() async throws {
+      await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
+        try await preparation.configureLogin(password: "opaque-owner-secret")
       }
-    )
+      // Simulate a separately requested retry of an older retained journal.
+      restarts.withLock { $0 += 1 }
+      fixture.miniBuddyLaunchWriteExit = 0
+      fixture.autoLoginStatusOutput = "Automatic login user: _mbsetupuser\n"
+      if mode == "invalidContext" { fixture.setupAssistantProcessUID = 501 }
+      _ = try await preparation.verifyOwner(password: "opaque-owner-secret")
+      _ = try await preparation.configureLogin(password: "opaque-owner-secret", attempt: .afterPreferenceRestart)
+    }
     if mode == "success" {
-      try await recovery.run(initialVerification: initial)
+      try await resumeExplicitly()
       #expect(fixture.setupDone)
       #expect(fixture.miniBuddyLaunchPreference == false)
     } else {
       let expected: PommeSecurityOwnerPreparationError = mode == "invalidContext"
         ? .setupAssistantContextUnavailable : .autoLoginVerificationFailed
-      await #expect(throws: expected) { try await recovery.run(initialVerification: initial) }
+      await #expect(throws: expected) { try await resumeExplicitly() }
       #expect(fixture.setupDone == false)
       #expect(fixture.miniBuddyLaunchPreference == nil)
     }
@@ -794,28 +913,23 @@ struct PommeSecurityOwnerPreparationTests {
       }, executePrivatePTY: fixture.executePTY,
       autoLoginTrace: { event in trace.withLock { $0.append(event) } }
     )
-    let initial = try await preparation.verifyOwner(password: "opaque-owner-secret")
-    let recovery = PommeSecurityFreshOwnerPreferenceRecovery(
-      restartAndAuthenticate: {
-        restartCount.withLock { $0 += 1 }
-        fixture.miniBuddyLaunchWriteExit = 0
-        switch mode {
-        case "otherOwner": fixture.autoLoginStatusOutput = "Automatic login user: private-other-owner\n"
-        case "offOwner": fixture.autoLoginStatusOutput = "Automatic login user: OFF\n"
-        case "rootOwner": fixture.autoLoginStatusOutput = "Automatic login user: root\n"
-        case "preferenceCase", "preferenceSetup", "preferenceOff", "preferenceRoot", "preferenceOther":
-          fixture.autoLoginStatusOutput = "Automatic login user: pomme\n"
-        default: fixture.autoLoginStatusOutput = "private-post-restart-malformed-status\n"
-        }
-      },
-      verifyOwner: { try await preparation.verifyOwner(password: "opaque-owner-secret") },
-      recordVerification: { _ in },
-      configureLogin: { attempt in
-        _ = try await preparation.configureLogin(password: "opaque-owner-secret", attempt: attempt)
-      }
-    )
+    await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
+      try await preparation.configureLogin(password: "opaque-owner-secret")
+    }
+    // An explicit later attempt must reject changed native evidence.
+    restartCount.withLock { $0 += 1 }
+    fixture.miniBuddyLaunchWriteExit = 0
+    switch mode {
+    case "otherOwner": fixture.autoLoginStatusOutput = "Automatic login user: private-other-owner\n"
+    case "offOwner": fixture.autoLoginStatusOutput = "Automatic login user: OFF\n"
+    case "rootOwner": fixture.autoLoginStatusOutput = "Automatic login user: root\n"
+    case "preferenceCase", "preferenceSetup", "preferenceOff", "preferenceRoot", "preferenceOther":
+      fixture.autoLoginStatusOutput = "Automatic login user: pomme\n"
+    default: fixture.autoLoginStatusOutput = "private-post-restart-malformed-status\n"
+    }
+    _ = try await preparation.verifyOwner(password: "opaque-owner-secret")
     await #expect(throws: PommeSecurityOwnerPreparationError.autoLoginVerificationFailed) {
-      try await recovery.run(initialVerification: initial)
+      try await preparation.configureLogin(password: "opaque-owner-secret", attempt: .afterPreferenceRestart)
     }
     #expect(restartCount.withLock { $0 } == 1)
     let rejection: PommeAutoLoginReadbackTrace

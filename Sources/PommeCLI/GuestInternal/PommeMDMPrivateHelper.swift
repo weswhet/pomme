@@ -185,6 +185,13 @@ enum PommeMDMPrivateHelper {
     /// Runs the hidden entrypoint and writes exactly one redacted JSON result.
     /// The caller must terminate the process with the returned exit code.
     static func run(arguments: [String], dependencies: Dependencies = .init()) -> Int32 {
+        GuestMDMDiagnostics.$current.withValue(GuestMDMDiagnostics.Collector()) {
+            runCollected(arguments: arguments, dependencies: dependencies)
+        }
+    }
+
+    private static func runCollected(arguments: [String], dependencies: Dependencies) -> Int32 {
+        GuestMDMDiagnostics.record(.helperValidation)
         do {
             guard geteuid() == 0 else { throw Failure.notRoot }
             guard arguments.count == 3,
@@ -369,8 +376,23 @@ enum PommeMDMPrivateHelper {
     }
 
     private static func emit(_ output: Output) {
-        guard JSONSerialization.isValidJSONObject(output.object),
-              let data = try? JSONSerialization.data(withJSONObject: output.object, options: [.sortedKeys]) else {
+        var object = output.object
+        if let collector = GuestMDMDiagnostics.current,
+           let stage = collector.failureStage.flatMap(GuestMDMDiagnostics.Stage.init(rawValue:)) {
+            switch output {
+            case .failure: collector.record(stage, event: .failed)
+            case .success: collector.record(stage, event: .succeeded)
+            }
+        }
+        if let diagnostics = GuestMDMDiagnostics.current,
+           let encoded = try? JSONEncoder().encode(diagnostics.value),
+           let records = try? JSONSerialization.jsonObject(with: encoded) {
+            object["diagnostics"] = records
+            object["identityImportAttempted"] = diagnostics.identityImportAttempted
+            if case .failure = output { object["failureStage"] = diagnostics.failureStage }
+        }
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else {
             return
         }
         var line = data

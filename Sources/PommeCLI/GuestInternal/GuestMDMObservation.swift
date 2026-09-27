@@ -57,10 +57,12 @@ struct GuestMDMObservation {
         guard maximumOutputBytes > 0, maximumOutputBytes <= Self.defaultMaximumOutputBytes else {
             throw GuestMDMObservationError.invalidOutputLimit
         }
+        GuestMDMDiagnostics.record(.profilesCommand)
         let output = try profilesShowRunner(timeout, maximumOutputBytes)
         guard output.count <= maximumOutputBytes else {
             throw GuestMDMObservationError.outputTooLarge
         }
+        GuestMDMDiagnostics.record(.profilesParse)
         do {
             return try MDMEnrollmentEvidenceParser.parseInstalledProfileIdentity(
                 fromProfilesShow: output
@@ -154,6 +156,7 @@ struct GuestMDMObservation {
         // The loop has proved process termination and both pipes reached EOF.
         // Reap the child without introducing an unbounded wait.
         process.waitUntilExit()
+        GuestMDMDiagnostics.record(.profilesCommand, status: Int64(process.terminationStatus), flags: errorOutput.isEmpty ? 0 : 1)
         guard process.terminationReason == .exit, process.terminationStatus == 0 else {
             throw GuestMDMObservationError.commandFailed
         }

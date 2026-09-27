@@ -25,8 +25,15 @@ enum PommeMDMEnrollmentPhase: String, Codable, CaseIterable, Sendable {
     fileprivate var index: Int { Self.allCases.firstIndex(of: self)! }
 }
 
+enum PommeMDMEnrollmentFailure: String, Codable, Sendable {
+    case beforeDispatch
+    case beforeIdentityImport
+    case outcomeUnknown
+    case restoration
+}
+
 struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
-    static let schemaVersion = 4
+    static let schemaVersion = 5
 
     let schema: Int
     let generation: UInt64
@@ -52,6 +59,8 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
     /// Base64 string when it was present. `nil` means capture has not run.
     let configuredBootArguments: Data?
     let helperTerminationUnproven: Bool
+    /// Redacted failure disposition; the phase remains at the failed operation.
+    let failure: PommeMDMEnrollmentFailure?
     /// Set before transferring a profile into an operation-owned guest path.
     /// Once true, cleanup may remove that path; a caller-provided path is
     /// never inferred to be owned by this journal.
@@ -82,6 +91,7 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         configuredBootArguments: Data? = nil,
         helperTerminationUnproven: Bool = false,
         stagedProfileOwned: Bool = false,
+        failure: PommeMDMEnrollmentFailure? = nil,
         ownedArtifacts: [String],
         phase: PommeMDMEnrollmentPhase,
         profileIdentifier: String? = nil,
@@ -125,6 +135,7 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         self.configuredBootArguments = configuredBootArguments
         self.helperTerminationUnproven = helperTerminationUnproven
         self.stagedProfileOwned = stagedProfileOwned
+        self.failure = failure
         self.ownedArtifacts = ownedArtifacts.sorted()
         self.phase = phase
         self.profileIdentifier = profileIdentifier
@@ -136,7 +147,7 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         case schema, generation, identity, profile, agentSHA256, enrollmentMode
         case originalRunState, sipWasDisabled, amfiWasDisabled, pendingChild, sipChangeRequested, amfiChangeRequested
         case enrollmentDispatched, enrollmentVerified, normalBootArguments, configuredBootArguments
-        case helperTerminationUnproven, stagedProfileOwned, ownedArtifacts, phase
+        case helperTerminationUnproven, stagedProfileOwned, ownedArtifacts, phase, failure
         case profileIdentifier, createdAt, updatedAt
     }
 
@@ -145,8 +156,10 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         let keys = Set(raw.allKeys.map(\.stringValue))
         let version = try raw.decode(Int.self, forKey: MDMJournalCodingKey(stringValue: "schema")!)
         let currentKeys = Set(CodingKeys.allCases.map(\.stringValue))
-        let schema3Keys = currentKeys.subtracting([CodingKeys.stagedProfileOwned.stringValue])
+        let schema4Keys = currentKeys.subtracting([CodingKeys.failure.stringValue])
+        let schema3Keys = schema4Keys.subtracting([CodingKeys.stagedProfileOwned.stringValue])
         guard (version == Self.schemaVersion && keys == currentKeys)
+                || (version == 4 && keys == schema4Keys)
                 || (version == 3 && keys == schema3Keys) else {
             throw PommeMDMEnrollmentWorkflowError.malformedJournal
         }
@@ -159,7 +172,7 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         // safely resume as unowned. Never infer ownership after intent.
         let schema3PreTransfer = phase.index < PommeMDMEnrollmentPhase.enrollmentIntent.index
             && !enrollmentDispatched
-        guard version == Self.schemaVersion
+        guard version >= 4
                 || phase == .restorationComplete
                 || schema3PreTransfer else {
             throw PommeMDMEnrollmentWorkflowError.malformedJournal
@@ -181,14 +194,20 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
             normalBootArguments: values.decodeIfPresent(Data.self, forKey: .normalBootArguments),
             configuredBootArguments: values.decodeIfPresent(Data.self, forKey: .configuredBootArguments),
             helperTerminationUnproven: values.decode(Bool.self, forKey: .helperTerminationUnproven),
-            stagedProfileOwned: version == Self.schemaVersion
+            stagedProfileOwned: version >= 4
                 ? values.decode(Bool.self, forKey: .stagedProfileOwned) : false,
+            failure: version >= 5 ? values.decodeIfPresent(PommeMDMEnrollmentFailure.self, forKey: .failure) : nil,
             ownedArtifacts: values.decode([String].self, forKey: .ownedArtifacts),
             phase: phase,
             profileIdentifier: values.decodeIfPresent(String.self, forKey: .profileIdentifier),
             createdAt: values.decode(Date.self, forKey: .createdAt),
             updatedAt: values.decode(Date.self, forKey: .updatedAt)
         )
+    }
+
+    var canRetryEnrollment: Bool {
+        failure == .beforeIdentityImport && phase == .enrollmentIntent
+            && enrollmentDispatched && pendingChild == nil && !helperTerminationUnproven && !enrollmentVerified
     }
 
     func replacing(
@@ -202,6 +221,7 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         normalBootArguments: Data? = nil, configuredBootArguments: Data? = nil,
         helperTerminationUnproven: Bool? = nil,
         stagedProfileOwned: Bool? = nil,
+        failure: PommeMDMEnrollmentFailure? = nil,
         at date: Date
     ) throws -> Self {
         let nextPending = pendingChild ?? self.pendingChild
@@ -243,6 +263,7 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
             configuredBootArguments: nextConfiguredArguments,
             helperTerminationUnproven: nextTermination,
             stagedProfileOwned: nextStagedProfileOwned,
+            failure: failure ?? (enrollmentVerified == true ? nil : self.failure),
             ownedArtifacts: ownedArtifacts, phase: phase,
             profileIdentifier: profileIdentifier ?? self.profileIdentifier,
             createdAt: createdAt, updatedAt: date
@@ -376,6 +397,7 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         try values.encode(configuredBootArguments, forKey: .configuredBootArguments)
         try values.encode(helperTerminationUnproven, forKey: .helperTerminationUnproven)
         try values.encode(stagedProfileOwned, forKey: .stagedProfileOwned)
+        try values.encode(failure, forKey: .failure)
         try values.encode(ownedArtifacts, forKey: .ownedArtifacts)
         try values.encode(phase, forKey: .phase)
         try values.encode(profileIdentifier, forKey: .profileIdentifier)
@@ -527,6 +549,7 @@ struct PommeMDMEnrollmentJournalStore: Sendable {
         configuredBootArguments: Data? = nil,
         helperTerminationUnproven: Bool? = nil,
         stagedProfileOwned: Bool? = nil,
+        failure: PommeMDMEnrollmentFailure? = nil,
         sipWasDisabled: Bool? = nil,
         amfiWasDisabled: Bool? = nil,
         lease: VMBundleMutationLease,
@@ -564,6 +587,7 @@ struct PommeMDMEnrollmentJournalStore: Sendable {
             configuredBootArguments: configuredBootArguments,
             helperTerminationUnproven: helperTerminationUnproven,
             stagedProfileOwned: stagedProfileOwned,
+            failure: failure,
             at: now
         )
         try write(updated)

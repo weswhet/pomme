@@ -1,8 +1,24 @@
 import Foundation
+import Security
 import Testing
 
 @Suite("Temporary MDM helper host contract")
 struct MDMTemporaryHelperTests {
+    @Test("Cleanup signature verification uses inline requirements and rejects mismatches")
+    func cleanupInlineRequirement() throws {
+        for (requirement, succeeds) in [("anchor apple", true), ("identifier \"invalid.pomme.test\"", false)] {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+            process.arguments = PommeMDMCleanupFailure.verificationArguments(path: "/usr/bin/true", requirement: requirement)
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            process.waitUntilExit()
+            #expect((process.terminationStatus == 0) == succeeds)
+        }
+        #expect(PommeMDMCleanupFailure(stage: .verifyBootstrap).errorDescription?.contains("verifyBootstrap") == true)
+    }
+
     @Test("Workspace paths are fixed UUID-derived direct children of MDM staging")
     func workspacePaths() throws {
         let identifier = try #require(UUID(uuidString: "12345678-1234-1234-1234-123456789abc"))
@@ -87,8 +103,8 @@ struct MDMTemporaryHelperTests {
         }
     }
 
-    @Test("Host stages, signs, request-binds, launches, and independently cleans exact helper artifacts")
-    func hostTransactionOrderingAndCleanup() async throws {
+    @Test("Host cleans successful helpers and preserves every failed helper", arguments: [false, true])
+    func hostTransactionOrderingAndCleanup(fail: Bool) async throws {
         let artifact = try PommeMDMTemporaryHelperArtifact(
             source: URL(fileURLWithPath: "/tmp/canonical-pomme"),
             sha256: String(repeating: "a", count: 64)
@@ -128,6 +144,7 @@ struct MDMTemporaryHelperTests {
             },
             launch: { _, request, _, _ in
                 await recorder.append("launch:\(request.helperSHA256):\(request.mode.rawValue)")
+                if fail { throw PommeMDMEnrollmentError.enrollmentFailed }
                 return .object([
                     "completed": .bool(true),
                     "profileIdentifier": .string("com.example.mdm")
@@ -137,15 +154,18 @@ struct MDMTemporaryHelperTests {
             now: { Date(timeIntervalSince1970: 1_000) }
         ), workspace: reservedWorkspace)
 
-        let result = try await host.enroll(
-            profile: profile,
-            mode: .supervised,
-            baseline: capturedBaseline,
-            timeout: 60
-        )
-        #expect(result.profileIdentifier == "com.example.mdm")
+        do {
+            let result = try await host.enroll(
+                profile: profile, mode: .supervised, baseline: capturedBaseline, timeout: 60
+            )
+            #expect(!fail)
+            #expect(result.profileIdentifier == "com.example.mdm")
+        } catch {
+            #expect(fail)
+            #expect(error as? PommeMDMEnrollmentError == .enrollmentFailed)
+        }
         let values = await recorder.values()
-        #expect(values.count == 7)
+        #expect(values.count == (fail ? 6 : 7))
         #expect(values[0] == "prepare")
         #expect(values[1] == "file:\(reservedWorkspace.helperPath)")
         #expect(values[2] == "data:\(reservedWorkspace.entitlementsPath)")
@@ -153,7 +173,111 @@ struct MDMTemporaryHelperTests {
         #expect(values[4] == "data:\(reservedWorkspace.requestPath)")
         #expect(values[5].hasPrefix("launch:"))
         #expect(values[5].hasSuffix(":supervised"))
-        #expect(values[6] == "cleanup")
+        if !fail { #expect(values[6] == "cleanup") }
+        else { #expect(!values.contains("cleanup")) }
+    }
+
+    @Test("Keychain failure diagnostics contain stage, numeric status, and flags only")
+    func keychainDiagnostics() throws {
+        let collector = GuestMDMDiagnostics.Collector()
+        GuestMDMDiagnostics.$current.withValue(collector) {
+            #expect(throws: GuestInternalError.self) {
+                _ = try GuestMDMIdentityKeychain.select(operations: .init(
+                    open: { _ in (errSecSuccess, 1) },
+                    status: { _ in (errSecSuccess, SecKeychainStatus(0)) },
+                    unlockPrivate: { _ in errSecSuccess }
+                ))
+            }
+        }
+        #expect(collector.failureStage == "privateKeychainStatus")
+        #expect(!collector.identityImportAttempted)
+        let envelope: JSONValue = .object([
+            "completed": .bool(false), "errorCode": .string("enrollment-failed"),
+            "diagnostics": collector.value,
+            "failureStage": .string("privateKeychainStatus"),
+            "identityImportAttempted": .bool(false)
+        ])
+        #expect(try GuestMDMDiagnostics.validated(from: envelope) == collector.value)
+        do {
+            _ = try PommeMDMTemporaryHelperResult.decode(envelope, detailedFailure: true)
+            Issue.record("Expected a completed helper failure")
+        } catch let failure as PommeMDMHelperFailure {
+            #expect(failure.error == .enrollmentFailed)
+            #expect(failure.failureStage == .privateKeychainStatus)
+            #expect(failure.beforeIdentityImport)
+        }
+        let encoded = String(decoding: try JSONEncoder().encode(collector.value), as: UTF8.self)
+        #expect(!encoded.contains("MCXPrivate"))
+        #expect(!encoded.contains("/Library/"))
+    }
+
+    @Test("Diagnostics reject arbitrary strings, surplus fields, and contradictory import proof")
+    func diagnosticsRejectUnsafeData() throws {
+        let safe: [String: JSONValue] = [
+            "stage": .string("pkcs12Import"), "event": .string("begin"), "elapsedMillis": .integer(0)
+        ]
+        var unsafe = safe
+        unsafe["message"] = .string("secret profile or native error")
+        for record in [unsafe, safe.merging(["stage": .string("private profile bytes")]) { _, new in new }] {
+            #expect(throws: PommeMDMEnrollmentError.self) {
+                _ = try GuestMDMDiagnostics.validated(from: .object(["diagnostics": .array([.object(record)])]))
+            }
+        }
+        #expect(throws: PommeMDMEnrollmentError.self) {
+            _ = try GuestMDMDiagnostics.validated(from: .object([
+                "diagnostics": .array([.object(safe)]), "identityImportAttempted": .bool(false)
+            ]))
+        }
+    }
+
+    @Test("Legacy and ambiguous helper failures cannot authorize another identity import")
+    func retryProofRequiresCompletedPreImportFailure() throws {
+        for code in ["enrollment-failed", "enrollment-outcome-unknown"] {
+            do {
+                _ = try PommeMDMTemporaryHelperResult.decode(.object([
+                    "completed": .bool(false), "errorCode": .string(code)
+                ]), detailedFailure: true)
+                Issue.record("Expected helper failure")
+            } catch let failure as PommeMDMHelperFailure {
+                #expect(!failure.beforeIdentityImport)
+                #expect(failure.error == (code == "enrollment-failed" ? .enrollmentFailed : .enrollmentOutcomeUnknown))
+            }
+        }
+    }
+
+    @Test("Post-import and XPC stages cannot prove a safe retry", arguments: ["xpcInstall", "identityAttachment", "privateKeyReference"])
+    func postImportStageCannotAuthorizeRetry(stage: String) throws {
+        do {
+            _ = try PommeMDMTemporaryHelperResult.decode(.object([
+                "completed": .bool(false), "errorCode": .string("enrollment-failed"),
+                "identityImportAttempted": .bool(false), "failureStage": .string(stage),
+                "diagnostics": .array([.object([
+                    "stage": .string(stage), "event": .string("failed"), "elapsedMillis": .integer(0)
+                ])])
+            ]), detailedFailure: true)
+            Issue.record("Expected helper failure")
+        } catch let failure as PommeMDMHelperFailure {
+            #expect(!failure.beforeIdentityImport)
+            #expect(failure.error == .enrollmentFailed)
+        }
+    }
+
+    @Test("XPC failure records its stage and retains unknown-outcome classification")
+    func xpcDiagnostics() throws {
+        let collector = GuestMDMDiagnostics.Collector()
+        GuestMDMDiagnostics.$current.withValue(collector) {
+            do {
+                _ = try GuestMDMEnrollment(
+                    request: { _, _ in throw GuestInternalError.mdm("private native reply") },
+                    profileArchiveOverride: Data([1])
+                ).enroll(profilePath: "\(GuestMDMEnrollment.stagingDirectory)/test.mobileconfig")
+                Issue.record("Expected XPC failure")
+            } catch GuestInternalError.mdmOutcomeUnknown {
+                #expect(collector.failureStage == "xpcSetup")
+            } catch { Issue.record("Unexpected error classification") }
+        }
+        let encoded = String(decoding: try JSONEncoder().encode(collector.value), as: UTF8.self)
+        #expect(!encoded.contains("private native reply"))
     }
 
     private func makeBaseline(

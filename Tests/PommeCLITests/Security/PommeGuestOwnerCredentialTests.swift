@@ -44,6 +44,19 @@ struct PommeGuestOwnerCredentialTests {
         return (account, password)
     }
 
+    @Test("Apple autologin padding after the NUL terminator is not password data")
+    func nonzeroAutologinPadding() throws {
+        for padding: [UInt8] in [[0xff, 0xfe, 0x80], [0x61, 0x62, 0x63], [0, 0, 0]] {
+            let clear = Array("padded-✓".utf8) + [0] + padding
+            let encoded = Data(clear.enumerated().map { index, byte in byte ^ kcpasswordKeyBytes[index % kcpasswordKeyBytes.count] })
+            let result = try makeReader(bytes: encoded).read(payload: .object([:]))
+            #expect(receipt(result)?.password == "padded-✓")
+        }
+        let invalid: [UInt8] = [0xff, 0, 0x61]
+        let encoded = Data(invalid.enumerated().map { index, byte in byte ^ kcpasswordKeyBytes[index % kcpasswordKeyBytes.count] })
+        #expect(kcpasswordString(from: encoded) == nil)
+    }
+
     @Test("Recovers the automatic-login account and its password from the guest artifact")
     func recoversCredential() throws {
         let result = try makeReader().read(payload: .object([:]))

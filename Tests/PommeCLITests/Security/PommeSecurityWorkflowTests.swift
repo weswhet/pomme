@@ -1,8 +1,34 @@
 import Foundation
 import Testing
+import Synchronization
 
 @Suite("Pomme security workflow engine", .serialized)
 struct PommeSecurityWorkflowTests {
+    @Test("An explicit fresh-owner retry repeats the ordered sequence after a retained failure")
+    func explicitFreshOwnerRetry() async throws {
+        let events = Mutex<[String]>([])
+        let failPreferences = Mutex(true)
+        let record: @Sendable (String) -> Void = { stage in events.withLock { $0.append(stage) } }
+        let sequence = PommeSecurityFreshOwnerLoginSequence(
+            configureLoginAndMarkers: { record("configure") },
+            restartAndAuthenticate: { record("restart") },
+            verifyOwnerConsole: { record("console") },
+            completeOwnerPreferences: {
+                record("preferences")
+                if failPreferences.withLock({ $0 }) {
+                    throw PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)
+                }
+            },
+            verifyDesktop: { record("desktop") })
+        await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
+            try await sequence.run()
+        }
+        #expect(events.withLock { $0 } == ["configure", "restart", "console", "preferences"])
+        failPreferences.withLock { $0 = false }
+        try await sequence.run() // A separately requested attempt, never a catch-path retry.
+        #expect(events.withLock { $0 } == ["configure", "restart", "console", "preferences", "configure", "restart", "console", "preferences", "desktop"])
+    }
+
     @Test("Failed autologin intent resumes the same transaction and releases security ownership on success")
     func retainedAutologinFailureResumes() async throws {
         let harness = try WorkflowHarness()
@@ -32,7 +58,7 @@ struct PommeSecurityWorkflowTests {
         } catch {
             #expect(error as? WorkflowDependencyFailure == .prepareOwner)
         }
-        #expect(failed.events == [.observe, .prepareOwner, .restore(.stopped)])
+        #expect(failed.events == [.observe, .prepareOwner])
         #expect(try harness.store.load(lease: lease) == retained)
         #expect(throws: PommeSecurityWorkflowJournalError.conflictingOperation) {
             _ = try harness.progress(operation: .amfiEnable, originalRunState: .stopped,
@@ -109,168 +135,35 @@ struct PommeSecurityWorkflowTests {
             startedFreshBoot: false, currentBootIdentity: nil, provenBootIdentity: proven))
     }
 
-    @Test("Fresh-owner preference completion retries once after bounded initialization failure")
-    func freshOwnerPreferenceRetryAfterInitializationFailure() async throws {
-        let trace = FreshOwnerPreferenceRecoveryTrace()
-        let verification = freshOwnerVerification()
-        let coordinator = PommeSecurityFreshOwnerPreferenceRecovery(
-            restartAndAuthenticate: {
-                trace.record(.restart)
-            },
-            verifyOwner: {
-                trace.record(.verify)
-                return verification
-            },
-            recordVerification: { value in
-                trace.recorded(value)
-            },
-            configureLogin: { attempt in
-                trace.attempt(attempt)
-                #expect(trace.events == (attempt == .initial ? [] : [.configure, .restart, .verify, .record]))
-                if trace.configureAttempt() == 1 {
-                    throw PommeSecurityOwnerPreparationError.commandFailed(
-                        .ownerCompletion, exitCode: 1)
-                }
-            }
-        )
-
-        try await coordinator.run(initialVerification: verification)
-
-        #expect(trace.events == [.configure, .restart, .verify, .record, .configure])
-        #expect(trace.recordedVerifications == [verification])
-        #expect(trace.attempts == [.initial, .afterPreferenceRestart])
-    }
-
-    @Test("Fresh-owner preference completion bounds a second initialization failure")
-    func freshOwnerPreferenceRetryStopsAfterSecondFailure() async throws {
-        let trace = FreshOwnerPreferenceRecoveryTrace()
-        let verification = freshOwnerVerification()
-        let expected = PommeSecurityOwnerPreparationError.commandFailed(
-            .ownerCompletion, exitCode: 1)
-        let coordinator = PommeSecurityFreshOwnerPreferenceRecovery(
-            restartAndAuthenticate: {
-                trace.record(.restart)
-            },
-            verifyOwner: {
-                trace.record(.verify)
-                return verification
-            },
-            recordVerification: { value in
-                trace.recorded(value)
-            },
-            configureLogin: { _ in
-                _ = trace.configureAttempt()
-                throw expected
-            }
-        )
-
-        do {
-            try await coordinator.run(initialVerification: verification)
-            Issue.record("A second owner-completion failure unexpectedly succeeded")
-        } catch {
-            #expect(error as? PommeSecurityOwnerPreparationError == expected)
-        }
-        #expect(trace.events == [.configure, .restart, .verify, .record, .configure])
-        #expect(trace.recordedVerifications == [verification])
-    }
-
-    @Test("Restart attempt is not issued before authentication, verification, and durable record succeed", arguments: ["restart", "verify", "record"])
-    func freshOwnerPreferenceAttemptAdmission(failure: String) async throws {
-        let trace = FreshOwnerPreferenceRecoveryTrace()
-        let verification = freshOwnerVerification()
-        let expected = PommeSecurityOwnerPreparationError.phaseCallbackFailed
-        let recovery = PommeSecurityFreshOwnerPreferenceRecovery(
-            restartAndAuthenticate: {
-                trace.record(.restart)
-                if failure == "restart" { throw expected }
-            },
-            verifyOwner: {
-                trace.record(.verify)
-                if failure == "verify" { throw expected }
-                return verification
-            },
-            recordVerification: { _ in
-                trace.record(.record)
-                throw expected
-            },
-            configureLogin: { attempt in
-                trace.attempt(attempt)
-                trace.record(.configure)
+    @Test("Fresh-owner ordering stops at the first failure without retry", arguments: ["none", "configure", "restart", "console", "preferences", "desktop"])
+    func freshOwnerSequence(failure: String) async throws {
+        let events = Mutex<[String]>([])
+        let messages = Mutex<[String]>([])
+        let record: @Sendable (String) throws -> Void = { stage in
+            events.withLock { $0.append(stage) }
+            if stage == failure {
                 throw PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)
             }
-        )
-        await #expect(throws: expected) { try await recovery.run(initialVerification: verification) }
-        #expect(trace.attempts == [.initial])
-        let events: [FreshOwnerPreferenceRecoveryTrace.Event] = failure == "restart"
-            ? [.configure, .restart] : failure == "verify"
-            ? [.configure, .restart, .verify] : [.configure, .restart, .verify, .record]
-        #expect(trace.events == events)
-    }
-
-    @Test("Non-owner-completion failures do not restart the VM")
-    func freshOwnerPreferenceRetryRejectsOtherErrors() async throws {
-        let trace = FreshOwnerPreferenceRecoveryTrace()
-        let verification = freshOwnerVerification()
-        let expected = PommeSecurityOwnerPreparationError.commandFailed(.autoLogin, exitCode: 1)
-        let coordinator = PommeSecurityFreshOwnerPreferenceRecovery(
-            restartAndAuthenticate: {
-                trace.record(.restart)
-            },
-            verifyOwner: {
-                trace.record(.verify)
-                return verification
-            },
-            recordVerification: { value in
-                trace.recorded(value)
-            },
-            configureLogin: { _ in
-                trace.record(.configure)
-                throw expected
-            }
-        )
-
-        do {
-            try await coordinator.run(initialVerification: verification)
-            Issue.record("A non-owner-completion failure unexpectedly succeeded")
-        } catch {
-            #expect(error as? PommeSecurityOwnerPreparationError == expected)
         }
-        #expect(trace.events == [.configure])
-        #expect(trace.recordedVerifications.isEmpty)
-    }
-
-    @Test("GeneratedUID drift prevents owner-completion retry and journal rewrite")
-    func freshOwnerPreferenceRetryRejectsGeneratedUIDDrift() async throws {
-        let trace = FreshOwnerPreferenceRecoveryTrace()
-        let verification = freshOwnerVerification()
-        let drifted = freshOwnerVerification(
-            generatedUID: UUID(uuidString: "bbbbbbbb-cccc-dddd-eeee-ffffffffffff")!)
-        let coordinator = PommeSecurityFreshOwnerPreferenceRecovery(
-            restartAndAuthenticate: {
-                trace.record(.restart)
-            },
-            verifyOwner: {
-                trace.record(.verify)
-                return drifted
-            },
-            recordVerification: { value in
-                trace.recorded(value)
-            },
-            configureLogin: { _ in
-                trace.record(.configure)
-                throw PommeSecurityOwnerPreparationError.commandFailed(
-                    .ownerCompletion, exitCode: 1)
+        let sequence = PommeSecurityFreshOwnerLoginSequence(
+            configureLoginAndMarkers: { try record("configure") },
+            restartAndAuthenticate: { try record("restart") },
+            verifyOwnerConsole: { try record("console") },
+            completeOwnerPreferences: { try record("preferences") },
+            verifyDesktop: { try record("desktop") },
+            log: { line in messages.withLock { $0.append(line) } })
+        let order = ["configure", "restart", "console", "preferences", "desktop"]
+        if failure == "none" {
+            try await sequence.run()
+            #expect(events.withLock { $0 } == order)
+        } else {
+            await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
+                try await sequence.run()
             }
-        )
-
-        do {
-            try await coordinator.run(initialVerification: verification)
-            Issue.record("GeneratedUID drift unexpectedly succeeded")
-        } catch {
-            #expect(error as? PommeSecurityWorkflowJournalError == .immutableRequestMismatch)
+            let index = try #require(order.firstIndex(of: failure))
+            #expect(events.withLock { $0 } == Array(order.prefix(index + 1)))
+            #expect(messages.withLock { $0.last?.contains("no automatic retry") } == true)
         }
-        #expect(trace.events == [.configure, .restart, .verify])
-        #expect(trace.recordedVerifications.isEmpty)
     }
 
     @Test("A matching state completes as a no-op before owner preparation")
@@ -543,7 +436,7 @@ struct PommeSecurityWorkflowTests {
         }
     }
 
-    @Test("Every dependency failure retains progress and restores the original state")
+    @Test("Dependency failures retain progress; owner-preparation failure preserves the current VM state")
     func dependencyFailuresRestoreOriginalState() async throws {
         for failure in WorkflowDependencyFailure.allCases {
             let harness = try WorkflowHarness()
@@ -586,9 +479,9 @@ struct PommeSecurityWorkflowTests {
                     #expect(error as? WorkflowDependencyFailure == failure)
                 }
             }
-            let expectedRestoreAttempts = failure == .restore ? 2 : 1
+            let expectedRestoreAttempts = failure == .prepareOwner ? 0 : failure == .restore ? 2 : 1
             #expect(recorder.restoreStates.count == expectedRestoreAttempts)
-            #expect(recorder.restoreStates == (failure == .restore
+            #expect(recorder.restoreStates == (failure == .prepareOwner ? [] : failure == .restore
                 ? [.stopped, .running(.normal)] : [.running(.normal)]))
             #expect(try harness.store.load(lease: lease).phase != .restorationComplete)
         }
@@ -1084,7 +977,7 @@ struct PommeSecurityWorkflowTests {
         }
     }
 
-    @Test("Retained normal AMFI checkpoint failures restore the original state")
+    @Test("Retained normal AMFI failures preserve owner failures and restore later failures")
     func retainedAMFINormalCheckpointFailuresRestoreOriginalState() async throws {
         let cases: [(String, WorkflowDependencyFailure?, ConfiguredAMFIRecoveryFailure?)] = [
             ("owner", .prepareOwner, nil),
@@ -1150,7 +1043,7 @@ struct PommeSecurityWorkflowTests {
             #expect(recorder.count(.recoverConfiguredAMFI) == (ownerFailure ? 0 : 1))
             #expect(recorder.count(.mutate) == 0)
             #expect(recorder.count(.verifyNormalBoot) == (verificationFailure || restoreFailure ? 1 : 0))
-            #expect(recorder.restoreStates == (restoreFailure
+            #expect(recorder.restoreStates == (ownerFailure ? [] : restoreFailure
                 ? [.stopped, .running(.normal)] : [.running(.normal)]))
 
             let journal = try harness.store.load(lease: lease)
@@ -1229,7 +1122,7 @@ struct PommeSecurityWorkflowTests {
                 #expect(recorder.count(.recoverConfiguredAMFI) == (dependencyFailure == nil ? 1 : 0))
                 #expect(recorder.count(.mutate) == 0)
                 #expect(recorder.count(.verifyNormalBoot) == 0)
-                #expect(recorder.restoreStates == [.running(.normal)])
+                #expect(recorder.restoreStates == (dependencyFailure == .prepareOwner ? [] : [.running(.normal)]))
 
                 let journal = try harness.store.load(lease: lease)
                 #expect(journal.phase == retryPhase)
@@ -1455,69 +1348,6 @@ private final class WorkflowRecorder: @unchecked Sendable {
     func count(_ event: Event) -> Int {
         events.filter { $0 == event }.count
     }
-}
-
-private final class FreshOwnerPreferenceRecoveryTrace: @unchecked Sendable {
-    enum Event: Equatable, Sendable {
-        case configure
-        case restart
-        case verify
-        case record
-    }
-
-    private let lock = NSLock()
-    private var values: [Event] = []
-    private var verificationValues: [PommeSecurityOwnerVerification] = []
-    private var attemptValues: [PommeSecurityOwnerPreparation.LoginAttempt] = []
-
-    var attempts: [PommeSecurityOwnerPreparation.LoginAttempt] { lock.withLock { attemptValues } }
-
-    func attempt(_ value: PommeSecurityOwnerPreparation.LoginAttempt) {
-        lock.withLock { attemptValues.append(value) }
-    }
-
-    var events: [Event] {
-        lock.withLock { values }
-    }
-
-    var recordedVerifications: [PommeSecurityOwnerVerification] {
-        lock.withLock { verificationValues }
-    }
-
-    func record(_ event: Event) {
-        lock.withLock { values.append(event) }
-    }
-
-    func recorded(_ verification: PommeSecurityOwnerVerification) {
-        lock.withLock {
-            values.append(.record)
-            verificationValues.append(verification)
-        }
-    }
-
-    func configureAttempt() -> Int {
-        lock.withLock {
-            values.append(.configure)
-            return values.reduce(into: 0) { count, event in
-                if event == .configure { count += 1 }
-            }
-        }
-    }
-}
-
-private func freshOwnerVerification(
-    generatedUID: UUID = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!
-) -> PommeSecurityOwnerVerification {
-    PommeSecurityOwnerVerification(
-        username: "pomme",
-        generatedUID: generatedUID,
-        uniqueID: 501,
-        passwordVerified: true,
-        isAdministrator: true,
-        secureTokenEnabled: true,
-        isAPFSVolumeOwner: true,
-        startupVolumeGroupUUID: UUID(uuidString: "99999999-8888-7777-6666-555555555555")!
-    )
 }
 
 private struct WorkflowHarness: Sendable {
