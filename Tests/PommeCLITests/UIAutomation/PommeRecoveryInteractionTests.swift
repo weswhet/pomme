@@ -33,6 +33,50 @@ struct PommeRecoveryLanguageActivationTests {
     #expect(await port.inputs == [.key(.right), .key(.right), .key(.return), .key(.return)])
   }
 
+  @Test("27 Options may enter stable Utilities directly and complete the menu route")
+  func optionsAdvancesDirectlyToUtilities() async throws {
+    let menuEvents = PommeRecoveryNavigationRoute.experimentalLanguageActivation.eventTrace.dropFirst(5)
+    let port = LanguageActivationPort(frames: prefixFrames(post: .recoveryUtilities)
+      + menuEvents.flatMap { [$0.preEventFrame, $0.preEventFrame, $0.postEventFrame, $0.postEventFrame] })
+    var interaction = try PommeTahoeRecoveryInteraction(evidence: evidence())
+    for _ in 0..<(3 + menuEvents.count) { try await interaction.advance(using: port) }
+    #expect(await port.inputs == [
+      .key(.right), .key(.right), .key(.return), .key(.controlF2),
+      .key(.right), .key(.right), .key(.right), .key(.right), .key(.down), .key(.shiftCommandT),
+    ])
+    #expect(await port.frameCount == 0)
+  }
+
+  @Test("Options requires stable known postconditions and never replays on failure")
+  func directUtilitiesRequiresStableProof() async throws {
+    for pair: [PommeRecoveryFrame] in [
+      [.recoveryUtilities, .languageEnglishActive], [.recoveryUtilities, .unknown], [.unknown, .unknown],
+    ] {
+      let port = LanguageActivationPort(frames: Array(prefixFrames(post: .recoveryUtilities).dropLast(2)) + pair)
+      var interaction = try PommeTahoeRecoveryInteraction(evidence: evidence())
+      for _ in 0..<2 { try await interaction.advance(using: port) }
+      for _ in 0..<2 {
+        await #expect(throws: PommeRecoveryInteractionError.recoveryCleanupRequired(.recoveryCleanupRequired)) {
+          try await interaction.advance(using: port)
+        }
+      }
+      #expect(await port.inputs == [.key(.right), .key(.right), .key(.return)])
+    }
+  }
+
+  @Test("neighboring 27 build does not inherit the direct Utilities branch")
+  func neighboringBuildRejectsDirectUtilities() async throws {
+    let port = LanguageActivationPort(frames: prefixFrames(post: .recoveryUtilities))
+    let neighbor = try evidence(build: "26A429")
+    #expect(try PommeRecoveryProfileSelector.inputForAttempt(for: neighbor).route == .reviewedMenus)
+    var interaction = try PommeTahoeRecoveryInteraction(evidence: neighbor)
+    for _ in 0..<2 { try await interaction.advance(using: port) }
+    await #expect(throws: PommeRecoveryInteractionError.recoveryCleanupRequired(.recoveryCleanupRequired)) {
+      try await interaction.advance(using: port)
+    }
+    #expect(await port.inputs == [.key(.right), .key(.right), .key(.return)])
+  }
+
   @Test("lost focus or unknown selection immediately before Return emits no Return")
   func staleActiveProofCannotAuthorizeReturn() async throws {
     for frame in [PommeRecoveryFrame.languageEnglishInactive, .languageEnglish, .unknown] {
@@ -116,9 +160,9 @@ struct PommeRecoveryLanguageActivationTests {
                                    englishConfidence: 0.5) == .unknown)
   }
 
-  private func evidence() throws -> PommeRecoveryProfileEvidence {
-    let descriptor = try PommeRecoveryProfileSelector.descriptor(version: "27.0", build: "26A428")
-    return .init(build: .experimental(version: "27.0", build: "26A428"), locale: .english,
+  private func evidence(build: String = "26A428") throws -> PommeRecoveryProfileEvidence {
+    let descriptor = try PommeRecoveryProfileSelector.descriptor(version: "27.0", build: build)
+    return .init(build: .experimental(version: "27.0", build: build), locale: .english,
                  geometry: .pixels1280x800, privateHostABI: .qualifiedRecoveryInputV1,
                  manifestHash: .experimentalProfile(descriptor.digest), ownership: .verified)
   }

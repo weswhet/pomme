@@ -1006,6 +1006,57 @@ struct PommeSecurityNormalAgent: Sendable {
     return integer
   }
 
+  static func ownerConsoleMatches(_ result: GuestCommandResult, username: String, uniqueID: UInt32) -> Bool {
+    result.exited && !result.detached && !result.timedOut && result.signal == nil
+      && result.exitCode == 0 && !result.stdoutTruncated && !result.stderrTruncated
+      && result.stderr.isEmpty
+      && String(data: result.stdout, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) == "\(username):\(uniqueID)"
+  }
+
+  /// Proves the owner is logged in before changing per-user preferences.
+  /// A valid nonmatching console can become ready; command/transport failure
+  /// ends this attempt immediately, without cleanup or another command.
+  func verifyOwnerConsole(username: String, uniqueID: UInt32, timeout: TimeInterval = 90) async throws {
+    guard !username.isEmpty, uniqueID > 0, timeout.isFinite, timeout >= 15, timeout <= 120 else {
+      throw PommeSecurityWorkflowError.ownerLoginUnverified
+    }
+    let now: @Sendable () -> ContinuousClock.Instant
+    let sleep: @Sendable (TimeInterval) async throws -> Void
+    if let desktopProofHooks {
+      now = desktopProofHooks.now
+      sleep = desktopProofHooks.sleep
+    } else {
+      now = { ContinuousClock.now }
+      sleep = { try await Task.sleep(for: .seconds($0)) }
+    }
+    let deadline = now().advanced(by: .seconds(timeout))
+    while Self.remaining(until: deadline, now: now()) >= 15 {
+      try Task.checkCancellation()
+      let result = try execute(
+        .init(path: "/usr/bin/stat", arguments: ["-f", "%Su:%u", "/dev/console"], timeout: 15),
+        proofStage: .console, remainingBudget: Self.remaining(until: deadline, now: now()))
+      guard now() < deadline, result.exited, !result.detached, !result.timedOut,
+        result.signal == nil, result.exitCode == 0,
+        !result.stdoutTruncated, !result.stderrTruncated, result.stderr.isEmpty else {
+        PommeCore.log("Owner console proof failed: command status or bounded response was invalid; no retry.", vmName: reference.displayName)
+        throw PommeSecurityWorkflowError.ownerLoginUnverified
+      }
+      guard let text = String(data: result.stdout, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+        throw PommeSecurityWorkflowError.ownerLoginUnverified
+      }
+      let fields = text.split(separator: ":", omittingEmptySubsequences: false)
+      guard fields.count == 2, fields[0].range(of: "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$", options: .regularExpression) != nil,
+        !fields[1].isEmpty, fields[1].allSatisfy({ $0.isASCII && $0.isNumber }), UInt32(fields[1]) != nil else {
+        PommeCore.log("Owner console proof failed: malformed account or UID response; no retry.", vmName: reference.displayName)
+        throw PommeSecurityWorkflowError.ownerLoginUnverified
+      }
+      if Self.ownerConsoleMatches(result, username: username, uniqueID: uniqueID) { return }
+      try await sleep(1)
+    }
+    PommeCore.log("Owner console proof failed: exact owner and UID did not match before the deadline; VM retained.", vmName: reference.displayName)
+    throw PommeSecurityWorkflowError.ownerLoginUnverified
+  }
+
   func verifyConsoleLogin(username: String, uniqueID: UInt32, timeout: TimeInterval = 120)
     async throws
   {

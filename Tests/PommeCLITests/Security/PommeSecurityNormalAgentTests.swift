@@ -4,6 +4,42 @@ import Synchronization
 
 @Suite("Security normal-agent response decoding")
 struct PommeSecurityNormalAgentTests {
+  @Test("Owner console proof polls only valid mismatches and stops on failures", arguments: ["match", "wrongName", "wrongUID", "malformed", "timeout", "transport", "signal", "unexited", "truncated", "stderr"])
+  func ownerConsoleProof(mode: String) async throws {
+    let calls = Mutex(0)
+    let now = Mutex(ContinuousClock.now)
+    let agent = PommeSecurityNormalAgent(
+      reference: .init(name: "test", bundle: .init(rootURL: URL(fileURLWithPath: "/tmp/pomme-test"))),
+      expectedExecutableDigest: String(repeating: "a", count: 64),
+      desktopProofHooks: .init(execute: { request, _ in
+        calls.withLock { $0 += 1 }
+        #expect(request.path == "/usr/bin/stat")
+        if mode == "transport" { throw POSIXError(.ETIMEDOUT) }
+        var terminal: [String: JSONValue] = [
+          "exited": .bool(mode != "unexited"), "outputComplete": .bool(true),
+          "exitCode": .integer(0), "timedOut": .bool(mode == "timeout"),
+          "stdoutTruncated": .bool(mode == "truncated")
+        ]
+        if mode == "signal" { terminal["signal"] = .integer(9) }
+        let output = mode == "malformed" ? "unparseable" : mode == "wrongName" ? "other:501\n" : mode == "wrongUID" ? "owner:502\n" : "owner:501\n"
+        return .object(["result": .object(terminal), "streamFrames": .array([
+          .object(["stream": .string(mode == "stderr" ? "stderr" : "stdout"),
+                   "dataBase64": .string(Data(output.utf8).base64EncodedString())])
+        ])])
+      }, status: { _, _ in Issue.record("Owner console proof must not clean up or retry failures"); return .null },
+      now: { now.withLock { $0 } }, sleep: { interval in now.withLock { $0 = $0.advanced(by: .seconds(interval)) } })
+    )
+    if mode == "match" {
+      try await agent.verifyOwnerConsole(username: "owner", uniqueID: 501, timeout: 17)
+      #expect(calls.withLock { $0 } == 1)
+    } else {
+      await #expect(throws: (any Error).self) {
+        try await agent.verifyOwnerConsole(username: "owner", uniqueID: 501, timeout: 17)
+      }
+      #expect(calls.withLock { $0 } == (["wrongName", "wrongUID"].contains(mode) ? 3 : 1))
+    }
+  }
+
   @Test("Outer desktop transport logs closed failure kinds", arguments: ["deadline", "rejected", "noHelper", "protocol"])
   func desktopOuterTransportDiagnostic(kind: String) async throws {
     let messages = Mutex<[String]>([])

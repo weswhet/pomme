@@ -182,9 +182,13 @@ pomme agent repair dev --final-state previous
 pomme agent repair dev --final-state previous --debug
 ```
 
-Repair is Recovery-only. Agent status reports a closed `guestAgent` object with
-connection state, `normal` or `recovery` role, protocol version, executable
-digest, capabilities, and update state.
+Repair installs the agent through Recovery. If provisioning is complete and the
+connected normal agent has the required protocol and capabilities and its SHA-256
+matches the host CLI, `agent repair` reports that the agent is already healthy
+and exits with status 0 without changing the VM or provisioning journal.
+Agent status reports a closed `guestAgent` object with connection state, `normal`
+or `recovery` role, protocol version, executable digest, capabilities, and update
+state.
 
 Guest process and file examples:
 
@@ -249,15 +253,19 @@ boot-argument writes use the authenticated normal agent with SIP disabled.
 Disable SIP before changing AMFI, and restore AMFI before re-enabling SIP. Security
 workflows are state-first: status and an already-satisfied no-op observe the
 guest without requesting or transmitting an owner password. Success restores
-the requested `--final-state`; failure restores the run state captured at the
-start when that state can be safely proved, otherwise the journal is retained
-and restoration is reported incomplete. `--force` confirms the fresh-owner
+the requested `--final-state`. A fresh-owner preparation failure preserves the current
+VM state for inspection. Other security failures may restore the run state captured
+at the start when that state can be safely proved; otherwise, the journal is
+retained and restoration is reported incomplete. `--force` confirms the fresh-owner
 branch only; it does not override credentials, ownership, native login
 protections, or cleanup barriers. MDM requires verified normal-agent
 capabilities. `mdm VM --profile FILE` defaults to supervised, user-approved
 enrollment. It prepares SIP and AMFI automatically when needed, verifies the
 installed profile, approval, and supervision, then restores the original
-security settings and VM run state. `--enrollment-mode unapproved` selects
+security settings and VM run state on success. If enrollment fails, Pomme exits
+nonzero immediately and preserves the current SIP/AMFI settings, VM run state,
+staged files, and journal for debugging. It does not poll for enrollment or
+perform automatic cleanup after that failure. `--enrollment-mode unapproved` selects
 enrollment without approval or supervision. Remote Login and Screen Sharing
 are explicit, capability-gated operations.
 
@@ -267,13 +275,26 @@ For a VM that starts with SIP and AMFI enabled:
 pomme mdm dev --profile ./enrollment.mobileconfig
 # Or request unapproved enrollment:
 pomme mdm dev --profile ./enrollment.mobileconfig --enrollment-mode unapproved
+# Include detailed enrollment diagnostics:
+pomme mdm dev --profile ./enrollment.mobileconfig --debug --format json
 ```
 
 The profile remains required when upgrading an existing unapproved enrollment.
 A matching enrollment is reused; an already-satisfied request avoids security
 changes. Conflicting profiles and downgrades from approved or supervised
-enrollment are rejected. Repeat the same command and mode to resume interrupted
-work from its journal. The former `mdm enroll` and `mdm approve` commands are
+enrollment are rejected. Diagnostics identify the failing guest stage and include
+elapsed times, numeric status codes, and Keychain status flags without profile
+contents or credentials. Structured output includes `result.failureStage` and
+`result.diagnostics` when the helper returns them, plus
+`result.failureStatePreserved` and `result.retryAllowed` on failure.
+
+After rebuilding and installing Pomme, repeat the same command, profile, and mode
+to inspect retained work. Each enrollment attempt stages a helper from the
+current host CLI, so a guest enrollment fix does not require replacing the
+persistent agent. A failure proved to occur before identity import can retry
+after checking the retained state and cleaning its owned staging files. Unknown
+outcomes remain protected against automatic reinstallation. The former
+`mdm enroll` and `mdm approve` commands are
 removed. These modes use Pomme's profile enrollment flow; they do not implement
 Apple User Enrollment or Automated Device Enrollment.
 

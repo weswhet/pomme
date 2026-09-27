@@ -184,53 +184,49 @@ enum PommeRecoveryNavigationInput: Equatable, Sendable {
 /// One immutable, closed Recovery navigation transition. The input contract
 /// validates the observed frames around every event before and after delivery.
 struct PommeRecoveryNavigationEvent: Equatable, Sendable {
+    struct AlternatePostcondition: Equatable, Sendable {
+        let frame: PommeRecoveryFrame
+        let nextEventIndex: Int
+    }
+
     let preEventFrame: PommeRecoveryFrame
     let input: PommeRecoveryNavigationInput
     var key: PommeRecoveryVirtualKey? { input.key }
     let postEventFrame: PommeRecoveryFrame
-    /// A bounded experimental branch that is accepted only after the same
-    /// two-frame post-input observation as the primary transition. The
-    /// optional next index skips the recorded language chooser; it never
-    /// authorizes an additional input.
-    let alternatePostEventFrame: PommeRecoveryFrame?
-    let alternateNextEventIndex: Int?
+    /// Bounded experimental branches require the same two stable observations
+    /// as the primary transition. Each branch skips to an existing event and
+    /// never authorizes an additional input.
+    let alternatePostconditions: [AlternatePostcondition]
 
     init(
         preEventFrame: PommeRecoveryFrame,
         key: PommeRecoveryVirtualKey,
         postEventFrame: PommeRecoveryFrame,
-        alternatePostEventFrame: PommeRecoveryFrame? = nil,
-        alternateNextEventIndex: Int? = nil
+        alternatePostconditions: [AlternatePostcondition] = []
     ) {
         self.init(preEventFrame: preEventFrame, input: .key(key), postEventFrame: postEventFrame,
-                  alternatePostEventFrame: alternatePostEventFrame,
-                  alternateNextEventIndex: alternateNextEventIndex)
+                  alternatePostconditions: alternatePostconditions)
     }
 
     init(
         preEventFrame: PommeRecoveryFrame,
         input: PommeRecoveryNavigationInput,
         postEventFrame: PommeRecoveryFrame,
-        alternatePostEventFrame: PommeRecoveryFrame? = nil,
-        alternateNextEventIndex: Int? = nil
+        alternatePostconditions: [AlternatePostcondition] = []
     ) {
         self.preEventFrame = preEventFrame
         self.input = input
         self.postEventFrame = postEventFrame
-        self.alternatePostEventFrame = alternatePostEventFrame
-        self.alternateNextEventIndex = alternateNextEventIndex
+        self.alternatePostconditions = alternatePostconditions
     }
 
     var acceptedPostEventFrames: [PommeRecoveryFrame] {
-        [postEventFrame] + (alternatePostEventFrame.map { [$0] } ?? [])
+        [postEventFrame] + alternatePostconditions.map(\.frame)
     }
 
     func nextEventIndex(after frame: PommeRecoveryFrame, defaultIndex: Int) -> Int? {
         if frame == postEventFrame { return defaultIndex }
-        guard frame == alternatePostEventFrame,
-              let alternateNextEventIndex
-        else { return nil }
-        return alternateNextEventIndex
+        return alternatePostconditions.first { $0.frame == frame }?.nextEventIndex
     }
 }
 
@@ -256,10 +252,14 @@ enum PommeRecoveryNavigationRoute: Equatable, Sendable {
                 .init(preEventFrame: .startupIntermediate, key: .right, postEventFrame: .startupOptionsActivated),
                 .init(preEventFrame: .startupOptionsActivated, key: .return,
                       postEventFrame: .languageEnglishInactive,
-                      alternatePostEventFrame: .languageEnglishActive, alternateNextEventIndex: 4),
+                      alternatePostconditions: [
+                        .init(frame: .languageEnglishActive, nextEventIndex: 4),
+                        // 27.0/26A428 can enter Utilities directly after Options.
+                        .init(frame: .recoveryUtilities, nextEventIndex: 5),
+                      ]),
                 .init(preEventFrame: .languageEnglishInactive, input: .activateLanguageChooser,
                       postEventFrame: .languageEnglishActive,
-                      alternatePostEventFrame: .recoveryUtilities, alternateNextEventIndex: 5),
+                      alternatePostconditions: [.init(frame: .recoveryUtilities, nextEventIndex: 5)]),
                 .init(preEventFrame: .languageEnglishActive, key: .return, postEventFrame: .recoveryUtilities),
             ] + Array(Self.reviewedMenus.eventTrace.dropFirst(4))
         case .reviewedMenus:
@@ -282,7 +282,7 @@ enum PommeRecoveryNavigationRoute: Equatable, Sendable {
                 .init(preEventFrame: .startupIntermediate, key: .right, postEventFrame: .startupOptionsActivated),
                 .init(preEventFrame: .startupOptionsActivated, key: .return,
                       postEventFrame: .languageEnglish,
-                      alternatePostEventFrame: .recoveryUtilities, alternateNextEventIndex: 4),
+                      alternatePostconditions: [.init(frame: .recoveryUtilities, nextEventIndex: 4)]),
                 .init(preEventFrame: .languageEnglish, key: .return, postEventFrame: .recoveryUtilities),
                 .init(preEventFrame: .recoveryUtilities, key: .shiftCommandT, postEventFrame: .terminal),
             ]
@@ -294,8 +294,7 @@ enum PommeRecoveryNavigationRoute: Equatable, Sendable {
                     preEventFrame: .startupOptionsActivated,
                     key: .return,
                     postEventFrame: .languageEnglish,
-                    alternatePostEventFrame: .recoveryUtilities,
-                    alternateNextEventIndex: 4
+                    alternatePostconditions: [.init(frame: .recoveryUtilities, nextEventIndex: 4)]
                 ),
                 .init(preEventFrame: .languageEnglish, key: .return, postEventFrame: .recoveryUtilities),
                 .init(preEventFrame: .recoveryUtilities, key: .controlF2, postEventFrame: .applicationMenu),

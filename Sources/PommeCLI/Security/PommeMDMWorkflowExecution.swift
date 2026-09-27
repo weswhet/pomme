@@ -56,6 +56,10 @@ struct PommeMDMWorkflowSecurityBaseline: Sendable {
     let activeBootArguments: Data
     var configuredBootArguments: Data = Data("\"\"".utf8)
 
+    static func childAllowsRestorationReconciliation(_ phase: PommeSecurityWorkflowPhase?) -> Bool {
+        phase == nil || phase == .restorationComplete || phase == .preflightRejected
+    }
+
     static func validateOriginalAMFI(sipDisabled: Bool, activeBootArguments: Data,
         state: PommeSecurityWorkflowState) throws {
         // An AMFI enable receipt was captured while SIP was disabled. A
@@ -111,7 +115,8 @@ final class PommeMDMWorkflowProgress: @unchecked Sendable {
         configuredBootArguments: Data? = nil,
         helperTerminationUnproven: Bool? = nil,
         sipWasDisabled: Bool? = nil,
-        amfiWasDisabled: Bool? = nil
+        amfiWasDisabled: Bool? = nil,
+        failure: PommeMDMEnrollmentFailure? = nil
     ) throws {
         try lock.withLock {
             value = try store.update(
@@ -120,7 +125,7 @@ final class PommeMDMWorkflowProgress: @unchecked Sendable {
                 enrollmentDispatched: enrollmentDispatched, enrollmentVerified: enrollmentVerified,
                 normalBootArguments: normalBootArguments, configuredBootArguments: configuredBootArguments,
                 helperTerminationUnproven: helperTerminationUnproven,
-                stagedProfileOwned: stagedProfileOwned,
+                stagedProfileOwned: stagedProfileOwned, failure: failure,
                 sipWasDisabled: sipWasDisabled, amfiWasDisabled: amfiWasDisabled, lease: lease
             )
         }
@@ -138,10 +143,11 @@ struct PommeMDMWorkflowDependencies: Sendable {
     let verifySecurity: @Sendable (PommeMDMEnrollmentJournal) async throws -> Void
     let restoreRunState: @Sendable (VMRunStateSnapshot) async throws -> Void
     let awaitEnrollment: @Sendable () async throws -> PommeMDMObservedEnrollment
+    var restorationAlreadyVerified: @Sendable (PommeMDMEnrollmentJournal) async throws -> Bool = { _ in false }
     var reportSecurityFailure: @Sendable (PommeSecurityWorkflowError) async -> Void = { _ in }
 }
 
-/// One parent transaction owns preparation, enrollment and compensation. Child
+/// One parent transaction owns preparation, enrollment and successful restoration. Child
 /// Recovery journals keep their native deadlines and exact AMFI restoration.
 struct PommeMDMWorkflowExecution: Sendable {
     let progress: PommeMDMWorkflowProgress
@@ -149,8 +155,7 @@ struct PommeMDMWorkflowExecution: Sendable {
 
     func run(preflightError: (any Error)? = nil) async throws -> PommeMDMObservedEnrollment {
         do {
-            // Missing source bytes cannot authorize enrollment, but must not
-            // prevent compensation for a retained, identity-bound operation.
+            // A failed preflight preserves retained work without guest effects.
             if let preflightError { throw preflightError }
             if progress.journal.phase == .restorationComplete,
                progress.journal.enrollmentDispatched, !progress.journal.enrollmentVerified {
@@ -158,6 +163,7 @@ struct PommeMDMWorkflowExecution: Sendable {
             }
             try await dependencies.requireHelperStopped()
             try progress.record(helperTerminationUnproven: false)
+            try await reconcileCompletedRestoration()
             if let pending = progress.journal.pendingChild { try await child(pending) }
             try await dependencies.ensureNormal()
             let before = try await dependencies.observe()
@@ -166,7 +172,8 @@ struct PommeMDMWorkflowExecution: Sendable {
             // A previous launch may still have committed after losing its
             // reply. Only an observed installed profile permits an upgrade;
             // absence never authorizes replaying that installation.
-            if initial.enrollmentDispatched, !initial.enrollmentVerified, disposition == .install {
+            if initial.enrollmentDispatched, !initial.enrollmentVerified, disposition == .install,
+               !initial.canRetryEnrollment {
                 throw PommeMDMWorkflowFailure.outcomeUnknown
             }
 
@@ -207,17 +214,13 @@ struct PommeMDMWorkflowExecution: Sendable {
                         try progress.record(helperTerminationUnproven: true)
                         throw error
                     }
-                    guard progress.journal.enrollmentDispatched else { throw error }
-                    // Query state before interpreting a lost helper reply.
-                    let observed = try await dependencies.awaitEnrollment()
-                    try observed.requireRequestedState(profile: initial.profile, mode: initial.enrollmentMode)
+                    throw error
                 }
                 let observed = try await dependencies.awaitEnrollment()
                 try observed.requireRequestedState(profile: initial.profile, mode: initial.enrollmentMode)
                 try progress.record(enrollmentVerified: true)
             }
-            let cleanupComplete = try await restore()
-            guard cleanupComplete else { throw PommeMDMEnrollmentError.cleanupFailed }
+            try await restore()
             let restored = try await dependencies.awaitEnrollment()
             try restored.requireRequestedState(profile: progress.journal.profile, mode: progress.journal.enrollmentMode)
             try progress.record(phase: .runStateRestorationIntent)
@@ -226,41 +229,20 @@ struct PommeMDMWorkflowExecution: Sendable {
             return restored
         } catch {
             if let failure = error as? PommeSecurityWorkflowError { await dependencies.reportSecurityFailure(failure) }
-            let primary: Error = Task.isCancelled ? CancellationError() : error
-            // A baseline-only Recovery session has no child workflow to
-            // resume. Its failed cleanup cannot be repaired by booting normal
-            // macOS for artifact cleanup or run-state restoration.
-            if progress.journal.pendingChild == nil,
-               (error as? PommeRecoverySessionError) == .cleanupFailed
-                || (error as? PommeLiveRecoveryIntegration.Error) == .cleanupFailed
-                || (error as? PommeSecurityWorkflowError) == .restorationIncomplete {
-                throw PommeMDMWorkflowFailure.restorationIncomplete
+            // Preserve the first failure and the exact guest state. No polling,
+            // cleanup, security changes, or run-state changes occur after it.
+            let failure: PommeMDMEnrollmentFailure
+            if let helper = error as? PommeMDMHelperFailure,
+               helper.beforeIdentityImport, !progress.journal.helperTerminationUnproven {
+                failure = .beforeIdentityImport
+            } else if progress.journal.canRetryEnrollment {
+                failure = .beforeIdentityImport
+            } else {
+                failure = progress.journal.enrollmentVerified ? .restoration
+                    : (progress.journal.enrollmentDispatched ? .outcomeUnknown : .beforeDispatch)
             }
-            // Cancellation must not immediately cancel compensation. The
-            // detached task is awaited while the original VM lease is held.
-            do {
-                try await Task.detached {
-                    var restorationError: Error?
-                    var cleanupComplete = false
-                    do { cleanupComplete = try await restore() }
-                    catch {
-                        if let failure = error as? PommeSecurityWorkflowError { await dependencies.reportSecurityFailure(failure) }
-                        if (error as? PommeMDMEnrollmentError) == .helperProcessTerminationUnproven
-                            || (error as? PommeSecurityWorkflowError) == .restorationIncomplete
-                            || (error as? PommeRecoverySessionError) == .cleanupFailed
-                            || (error as? PommeLiveRecoveryIntegration.Error) == .cleanupFailed {
-                            throw error
-                        }
-                        restorationError = error
-                    }
-                    if restorationError == nil { try progress.record(phase: .runStateRestorationIntent) }
-                    try await dependencies.restoreRunState(progress.journal.originalRunState)
-                    if let restorationError { throw restorationError }
-                    guard cleanupComplete else { throw PommeMDMEnrollmentError.cleanupFailed }
-                    try progress.record(phase: .restorationComplete)
-                }.value
-            } catch { throw PommeMDMWorkflowFailure.restorationIncomplete }
-            throw primary
+            try progress.record(failure: failure)
+            throw error
         }
     }
 
@@ -272,16 +254,22 @@ struct PommeMDMWorkflowExecution: Sendable {
         try progress.record(pendingChild: .some(nil))
     }
 
-    private func restore() async throws -> Bool {
+    private func reconcileCompletedRestoration() async throws {
+        guard progress.journal.phase == .securityRestorationIntent,
+              try await dependencies.restorationAlreadyVerified(progress.journal) else { return }
+        try progress.record(phase: .securityRestored, pendingChild: .some(nil))
+    }
+
+    private func restore() async throws {
         try await dependencies.requireHelperStopped()
         try progress.record(helperTerminationUnproven: false)
         // A retained Recovery child must finish its cleanup barriers before
         // any normal-guest artifact operation can boot the VM.
+        try await reconcileCompletedRestoration()
         if let pending = progress.journal.pendingChild { try await child(pending) }
-        // Cleanup and restoration are independent once helper termination is
-        // proved. Retain cleanup failure until both restoration attempts end.
-        var cleanupFailed = false
-        do { try await dependencies.cleanup() } catch { cleanupFailed = true }
+        do { try await dependencies.cleanup() }
+        catch let failure as PommeMDMCleanupFailure { throw failure }
+        catch { throw PommeMDMEnrollmentError.cleanupFailed }
         if ![.securityRestored, .runStateRestorationIntent, .restorationComplete].contains(progress.journal.phase) {
             try progress.record(phase: .securityRestorationIntent)
             if progress.journal.amfiChangeRequested { try await child(.amfiEnable) }
@@ -291,6 +279,5 @@ struct PommeMDMWorkflowExecution: Sendable {
         try await dependencies.ensureNormal()
         if progress.journal.sipWasDisabled != nil { try await dependencies.verifySecurity(progress.journal) }
         if progress.journal.phase == .securityRestorationIntent { try progress.record(phase: .securityRestored) }
-        return !cleanupFailed
     }
 }

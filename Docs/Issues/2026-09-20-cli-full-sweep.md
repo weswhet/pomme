@@ -133,6 +133,23 @@ repair" is the expected, healthy answer, so `pomme agent repair || handle` in a
 script treats a healthy VM as a failure. Compare `sessions list` with no
 sessions, which is rc 0.
 
+The original reproduction had a completed provisioning journal but a
+disconnected guest agent. Journal completion alone does not establish current
+agent health.
+
+**September 23 change:** When provisioning is complete and the normal agent is
+connected, supports the required protocol and capabilities, and reports the same
+SHA-256 as the host CLI, `agent repair` reports that the agent is already healthy
+and exits with status 0. This check leaves the VM and provisioning journal
+unchanged. A disconnected agent or a digest mismatch does not qualify for this
+success result; the original disconnected reproduction remains outside this fix.
+
+Live validation on fresh macOS 26.6.2 and 27.0 clones found and fixed an
+`Int64` protocol-version decoding mismatch in the first build. With the
+corrected signed CLI, both connected agents matched the host executable SHA-256;
+text and JSON repair exited 0, and each VM's provisioning journal stayed
+unchanged. Both disposable clones were removed after verification.
+
 ### 7. `restart` does not report how it stopped the guest — Low
 
 `stop --format json` carries `stopMethod` (`guest-stopped` on a healthy guest,
@@ -264,6 +281,14 @@ Not established: whether SIP was left partially modified. `sip status` was not
 re-run after the failures, and attempt 2 did create an owner account and finish
 Setup Assistant on the guest, so the fixture was no longer pristine when
 attempt 3 ran.
+
+**Follow-up 2026-09-24:** Fresh clones from the protected macOS 26 and 27 base
+templates completed independently verified SIP disable and enable cycles. The
+26 run required one matching resume after an intermittent console transport
+timeout. The 27 run exposed and then passed a bounded Recovery route fix for
+Startup Options advancing directly to Utilities. A separate schema 1
+SIP-owner Keychain cleanup gap remains open. See
+[the live follow-up](2026-09-24-sip-base-clone-follow-up.md).
 
 ---
 

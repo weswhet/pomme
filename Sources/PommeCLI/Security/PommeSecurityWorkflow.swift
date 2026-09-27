@@ -156,7 +156,7 @@ enum PommeSecurityWorkflow {
           try await recoverConfiguredAMFIDisable(
             progress: progress, dependencies: dependencies)
         default:
-          let credentials = try await dependencies.prepareOwner(progress)
+          let credentials = try await prepareOwnerPreservingFailure(progress: progress, dependencies: dependencies)
           if progress.journal.phase != .securityMutationIntent {
             try progress.advance(.securityMutationIntent)
           }
@@ -190,6 +190,10 @@ enum PommeSecurityWorkflow {
       return result(progress: progress, noOp: noOp, normalBootVerified: normalBootVerified)
     } catch {
       let primary = error
+      if let preparation = error as? OwnerPreparationFailure {
+        dependencies.log("Owner preparation failed at \(progress.journal.phase.rawValue); VM state and journal retained without failure restoration or retry.")
+        throw preparation.underlying
+      }
       // A failed Recovery cleanup barrier is not permission to boot.
       if (error as? PommeRecoverySessionError) == .cleanupFailed
         || (error as? PommeLiveRecoveryIntegration.Error) == .cleanupFailed
@@ -227,6 +231,10 @@ enum PommeSecurityWorkflow {
       return result(progress: progress, noOp: false, normalBootVerified: true)
     } catch {
       let primary = error
+      if let preparation = error as? OwnerPreparationFailure {
+        dependencies.log("Owner preparation failed at \(progress.journal.phase.rawValue); VM state and journal retained without failure restoration or retry.")
+        throw preparation.underlying
+      }
       // A failed Recovery cleanup barrier is not permission to boot.
       if (error as? PommeRecoverySessionError) == .cleanupFailed
         || (error as? PommeLiveRecoveryIntegration.Error) == .cleanupFailed
@@ -242,6 +250,17 @@ enum PommeSecurityWorkflow {
     }
   }
 
+  private struct OwnerPreparationFailure: Error {
+    let underlying: any Error
+  }
+
+  private static func prepareOwnerPreservingFailure(
+    progress: PommeSecurityWorkflowProgress, dependencies: PommeSecurityWorkflowDependencies
+  ) async throws -> PommeGuestSecurityCredentials {
+    do { return try await dependencies.prepareOwner(progress) }
+    catch { throw OwnerPreparationFailure(underlying: error) }
+  }
+
   private static func recoverConfiguredAMFIDisable(
     progress: PommeSecurityWorkflowProgress,
     dependencies: PommeSecurityWorkflowDependencies
@@ -249,7 +268,7 @@ enum PommeSecurityWorkflow {
     guard let recoverConfiguredAMFI = dependencies.recoverConfiguredAMFI else {
       throw PommeSecurityWorkflowError.incompleteTransaction
     }
-    let credentials = try await dependencies.prepareOwner(progress)
+    let credentials = try await prepareOwnerPreservingFailure(progress: progress, dependencies: dependencies)
     let output = try await recoverConfiguredAMFI(credentials)
     guard output.objectValue?["verified"] == .bool(true),
           output.objectValue?["amfiDisabled"] == .bool(true) else {

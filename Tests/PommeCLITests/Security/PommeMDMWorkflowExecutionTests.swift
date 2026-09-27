@@ -3,6 +3,35 @@ import Testing
 
 @Suite("Pomme MDM workflow execution")
 struct PommeMDMWorkflowExecutionTests {
+    @Test("Only absent, completed, or no-effect rejected children permit restoration reconciliation")
+    func restorationChildBarrier() {
+        #expect(PommeMDMWorkflowSecurityBaseline.childAllowsRestorationReconciliation(nil))
+        for phase in PommeSecurityWorkflowPhase.allCases {
+            #expect(PommeMDMWorkflowSecurityBaseline.childAllowsRestorationReconciliation(phase)
+                == (phase == .restorationComplete || phase == .preflightRejected))
+        }
+    }
+
+    @Test("Verified restored state clears stale pending restoration without repeating security changes")
+    func completedRestorationReconciliation() async throws {
+        let fixture = try WorkflowFixture.make()
+        defer { fixture.remove() }
+        let progress = try fixture.progress(mode: .supervised, originalRunState: .running(.normal),
+            sipWasDisabled: false, amfiWasDisabled: false, phase: .enrollmentIntent,
+            sipChangeRequested: true, amfiChangeRequested: true, enrollmentDispatched: true)
+        try progress.record(phase: .securityRestorationIntent, pendingChild: .some(.amfiEnable), enrollmentVerified: true)
+        let events = EventRecorder()
+        let verified = fixture.observed(enrolled: true, userApproved: true, supervised: true)
+        let execution = makeExecution(fixture: fixture, progress: progress, events: events,
+            restoredStates: RunStateRecorder(), observations: [verified], awaited: [verified],
+            baseline: makeBaseline(sipDisabled: false, amfiDisabled: false, activeByte: 1),
+            restorationAlreadyVerified: true)
+        #expect(try await execution.run() == verified)
+        #expect(securityOperations(await events.values()).isEmpty)
+        #expect(progress.journal.pendingChild == nil)
+        #expect(progress.journal.phase == .restorationComplete)
+    }
+
     @Test("Only an enabled AMFI completion record can defer its proof until SIP preparation")
     func enabledReceiptAfterSIPRestoration() throws {
         let completed = PommeSecurityWorkflowState(disabled: false, baselinePresent: true,
@@ -35,7 +64,7 @@ struct PommeMDMWorkflowExecutionTests {
         let execution = makeExecution(fixture: fixture, progress: progress, events: events,
             restoredStates: restored, observations: [], awaited: [],
             baseline: makeBaseline(sipDisabled: false, amfiDisabled: false, activeByte: 1))
-        await #expect(throws: PommeMDMWorkflowFailure.restorationIncomplete) {
+        await #expect(throws: PommeSecurityWorkflowError.restorationIncomplete) {
             _ = try await execution.run(preflightError: PommeSecurityWorkflowError.restorationIncomplete)
         }
         #expect(await events.values().isEmpty)
@@ -58,14 +87,14 @@ struct PommeMDMWorkflowExecutionTests {
             baseline: makeBaseline(sipDisabled: false, amfiDisabled: false, activeByte: 1),
             failingSecurityOperation: .amfiEnable,
             securityFailure: PommeSecurityWorkflowError.restorationIncomplete)
-        await expectWorkflowFailure(execution, expected: .restorationIncomplete)
+        await #expect(throws: PommeSecurityWorkflowError.restorationIncomplete) { _ = try await execution.run() }
         #expect(await restored.values().isEmpty)
         #expect(!securityOperations(await events.values()).contains(.sipEnable))
         #expect(progress.journal.pendingChild == .amfiEnable)
     }
 
-    @Test("A missing source profile compensates retained security work without enrollment")
-    func missingSourceStillCompensates() async throws {
+    @Test("A missing source profile preserves retained security work without guest effects")
+    func missingSourcePreservesState() async throws {
         let fixture = try WorkflowFixture.make()
         defer { fixture.remove() }
         let progress = try fixture.progress(mode: .supervised, originalRunState: .stopped,
@@ -79,10 +108,10 @@ struct PommeMDMWorkflowExecutionTests {
         await #expect(throws: PommeMDMEnrollmentError.invalidProfile) {
             _ = try await execution.run(preflightError: PommeMDMEnrollmentError.invalidProfile)
         }
-        #expect(securityOperations(await events.values()) == [.amfiEnable, .sipEnable])
-        #expect(!(await events.values()).contains("enroll"))
-        #expect(await restored.values() == [.stopped])
-        #expect(progress.journal.phase == .restorationComplete)
+        #expect(await events.values().isEmpty)
+        #expect(await restored.values().isEmpty)
+        #expect(progress.journal.phase == .enrollmentIntent)
+        #expect(progress.journal.failure == .beforeDispatch)
     }
 
     @Test("A completed unknown dispatch resumes approval only after exact installed evidence")
@@ -202,7 +231,7 @@ struct PommeMDMWorkflowExecutionTests {
         #expect(securityOperations(recorded).isEmpty)
         #expect(!recorded.contains("captureSecurity"))
         #expect(!recorded.contains("enroll"))
-        #expect(await restoredStates.values() == [.stopped])
+        #expect(await restoredStates.values().isEmpty)
     }
 
     @Test("A conflicting installed profile is rejected before any security effect")
@@ -233,11 +262,11 @@ struct PommeMDMWorkflowExecutionTests {
         #expect(securityOperations(recorded).isEmpty)
         #expect(!recorded.contains("captureSecurity"))
         #expect(!recorded.contains("enroll"))
-        #expect(await restoredStates.values() == [.running(.recovery)])
+        #expect(await restoredStates.values().isEmpty)
     }
 
-    @Test("A lost enrollment reply is accepted only after verified installed evidence")
-    func lostReplyUsesVerifiedState() async throws {
+    @Test("A failed helper exits immediately without checking evidence or restoring state")
+    func failedHelperPreservesState() async throws {
         let fixture = try WorkflowFixture.make()
         defer { fixture.remove() }
         let progress = try fixture.progress(
@@ -254,15 +283,65 @@ struct PommeMDMWorkflowExecutionTests {
             fixture: fixture, progress: progress, events: events, restoredStates: restoredStates,
             observations: [existing, existing], awaited: [verified, verified, verified],
             baseline: makeBaseline(sipDisabled: false, amfiDisabled: false, activeByte: 6),
-            enrollError: .injected, dispatchOnEnroll: false
+            enrollError: WorkflowTestError.injected, dispatchOnEnroll: false
         )
 
-        let result = try await execution.run()
+        await #expect(throws: WorkflowTestError.injected) { _ = try await execution.run() }
+        let recorded = await events.values()
+        #expect(recorded.last == "enroll")
+        #expect(!recorded.contains("awaitEnrollment"))
+        #expect(!recorded.contains("cleanup"))
+        #expect(securityOperations(recorded).isEmpty)
+        #expect(await restoredStates.values().isEmpty)
+        #expect(progress.journal.failure == .outcomeUnknown)
+        #expect(progress.journal.enrollmentDispatched)
+        #expect(!progress.journal.enrollmentVerified)
+        #expect(try fixture.store.loadIfPresent(lease: fixture.lease) == progress.journal)
+    }
 
-        #expect(result == verified)
-        #expect(await events.values().filter { $0 == "enroll" }.count == 1)
-        #expect(securityOperations(await events.values()) == [.amfiEnable, .sipEnable])
-        #expect(await restoredStates.values() == [.stopped])
+    @Test("A proven failure before identity import permits one explicit retry")
+    func cleanFailurePermitsExplicitRetry() async throws {
+        let fixture = try WorkflowFixture.make()
+        defer { fixture.remove() }
+        let progress = try fixture.progress(mode: .supervised, originalRunState: .stopped,
+            sipWasDisabled: false, amfiWasDisabled: false, phase: .enrollmentIntent,
+            sipChangeRequested: true, amfiChangeRequested: true)
+        let absent = fixture.observed(enrolled: false, userApproved: false, supervised: false, installed: false)
+        let events = EventRecorder()
+        let restored = RunStateRecorder()
+        let failure = PommeMDMHelperFailure(error: .enrollmentFailed,
+            failureStage: .profileRead, beforeIdentityImport: true)
+        let failed = makeExecution(fixture: fixture, progress: progress, events: events,
+            restoredStates: restored, observations: [absent, absent], awaited: [],
+            baseline: makeBaseline(sipDisabled: false, amfiDisabled: false, activeByte: 1),
+            enrollError: failure)
+        await #expect(throws: PommeMDMHelperFailure.self) { _ = try await failed.run() }
+        #expect((await events.values()).last == "enroll")
+        #expect(progress.journal.canRetryEnrollment)
+        #expect(try fixture.store.loadIfPresent(lease: fixture.lease)?.canRetryEnrollment == true)
+
+        // Preparation can fail before the next launch without consuming proof.
+        let preparationEvents = EventRecorder()
+        let preparation = makeExecution(fixture: fixture, progress: progress, events: preparationEvents,
+            restoredStates: restored, observations: [absent, absent], awaited: [],
+            baseline: makeBaseline(sipDisabled: false, amfiDisabled: false, activeByte: 1),
+            enrollError: WorkflowTestError.injected, dispatchOnEnroll: false)
+        await #expect(throws: WorkflowTestError.injected) { _ = try await preparation.run() }
+        #expect(progress.journal.canRetryEnrollment)
+        #expect((await preparationEvents.values()).last == "enroll")
+
+        // A lost reply on that explicit retry must consume the old proof.
+        let retryEvents = EventRecorder()
+        let retry = makeExecution(fixture: fixture, progress: progress, events: retryEvents,
+            restoredStates: restored, observations: [absent, absent], awaited: [],
+            baseline: makeBaseline(sipDisabled: false, amfiDisabled: false, activeByte: 1),
+            enrollError: WorkflowTestError.injected)
+        await #expect(throws: WorkflowTestError.injected) { _ = try await retry.run() }
+        #expect((await retryEvents.values()).last == "enroll")
+        #expect(!progress.journal.canRetryEnrollment)
+        #expect(progress.journal.failure == .outcomeUnknown)
+        #expect(await restored.values().isEmpty)
+        #expect(securityOperations(await retryEvents.values()).isEmpty)
     }
 
     @Test("An absent state after dispatch is unknown and never reinstalls")
@@ -288,12 +367,12 @@ struct PommeMDMWorkflowExecutionTests {
 
         let recorded = await events.values()
         #expect(!recorded.contains("enroll"))
-        #expect(securityOperations(recorded) == [.amfiEnable, .sipEnable])
-        #expect(await restoredStates.values() == [.stopped])
+        #expect(securityOperations(recorded).isEmpty)
+        #expect(await restoredStates.values().isEmpty)
     }
 
-    @Test("Cancellation runs compensation while preserving the original run state")
-    func cancellationCompensates() async throws {
+    @Test("Cancellation preserves guest state without compensation")
+    func cancellationPreservesState() async throws {
         let fixture = try WorkflowFixture.make()
         defer { fixture.remove() }
         let progress = try fixture.progress(mode: .supervised, originalRunState: .running(.normal),
@@ -321,17 +400,18 @@ struct PommeMDMWorkflowExecutionTests {
             _ = try await task.value
             Issue.record("Cancellation unexpectedly completed the enrollment workflow.")
         } catch {
-            // The primary cancellation is intentionally preserved after compensation.
+            // The original cancellation is preserved.
         }
 
         let recorded = await events.values()
-        #expect(recorded.contains("cleanup"))
-        #expect(securityOperations(recorded) == [.sipDisable, .amfiDisable, .amfiEnable, .sipEnable])
-        #expect(await restoredStates.values() == [.running(.normal)])
+        #expect(recorded.last == "enroll")
+        #expect(!recorded.contains("cleanup"))
+        #expect(securityOperations(recorded) == [.sipDisable, .amfiDisable])
+        #expect(await restoredStates.values().isEmpty)
     }
 
-    @Test("Cleanup failure still restores security and the original run state")
-    func cleanupFailureRestoresRunState() async throws {
+    @Test("Cleanup failure stops before security or run state restoration")
+    func cleanupFailureStopsImmediately() async throws {
         let fixture = try WorkflowFixture.make()
         defer { fixture.remove() }
         let progress = try fixture.progress(mode: .supervised, originalRunState: .paused(previousBootMode: .normal),
@@ -357,8 +437,9 @@ struct PommeMDMWorkflowExecutionTests {
             Issue.record("Unexpected workflow error: \(error)")
         }
 
-        #expect(await events.count("cleanup") == 2)
-        #expect(await restoredStates.values() == [.paused(previousBootMode: .normal)])
+        #expect(await events.count("cleanup") == 1)
+        #expect((await events.values()).last == "cleanup")
+        #expect(await restoredStates.values().isEmpty)
     }
 
     @Test("AMFI restoration failure is a barrier to SIP enable")
@@ -379,12 +460,12 @@ struct PommeMDMWorkflowExecutionTests {
             failingSecurityOperation: .amfiEnable
         )
 
-        await expectWorkflowFailure(execution, expected: .restorationIncomplete)
+        await #expect(throws: WorkflowTestError.injected) { _ = try await execution.run() }
 
         let operations = securityOperations(await events.values())
         #expect(operations.contains(.amfiEnable))
         #expect(!operations.contains(.sipEnable))
-        #expect(await restoredStates.values() == [.stopped])
+        #expect(await restoredStates.values().isEmpty)
     }
 
     @Test("A retained pending child is resumed before enrollment")
@@ -456,10 +537,11 @@ struct PommeMDMWorkflowExecutionTests {
         baseline: PommeMDMWorkflowSecurityBaseline,
         failingSecurityOperation: PommeSecurityWorkflowOperation? = nil,
         securityFailure: (any Error)? = nil,
-        enrollError: WorkflowTestError? = nil,
+        enrollError: (any Error)? = nil,
         dispatchOnEnroll: Bool = true,
         enrollSuspends: Bool = false,
-        cleanupFailures: Int = 0
+        cleanupFailures: Int = 0,
+        restorationAlreadyVerified: Bool = false
     ) -> PommeMDMWorkflowExecution {
         let observationQueue = ObservationQueue(observations)
         let awaitQueue = ObservationQueue(awaited)
@@ -484,7 +566,7 @@ struct PommeMDMWorkflowExecutionTests {
                 },
                 enroll: {
                     await events.append("enroll")
-                    if dispatchOnEnroll { try progress.record(enrollmentDispatched: true) }
+                    if dispatchOnEnroll { try progress.record(enrollmentDispatched: true, failure: .outcomeUnknown) }
                     if enrollSuspends {
                         try await Task.sleep(nanoseconds: 60_000_000_000)
                     }
@@ -507,7 +589,8 @@ struct PommeMDMWorkflowExecutionTests {
                 awaitEnrollment: {
                     await events.append("awaitEnrollment")
                     return try await awaitQueue.next()
-                }
+                },
+                restorationAlreadyVerified: { _ in restorationAlreadyVerified }
             )
         )
     }
