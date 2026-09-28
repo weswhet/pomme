@@ -35,6 +35,10 @@ struct PommeMDMReadinessTests {
         #expect(created.blockers.isEmpty)
         #expect(created.nextPreparation == .create)
         #expect(!created.warnings.contains(.creationOptionsIgnored))
+        var unusable = missing
+        unusable.creationProblem = "No template named base."
+        #expect(plan(unusable) { $0.creationSourceSupplied = true }.blockers
+            == [.creationUnavailable("No template named base.")])
     }
 
     @Test("Creation options on an existing VM are ignored with a warning")

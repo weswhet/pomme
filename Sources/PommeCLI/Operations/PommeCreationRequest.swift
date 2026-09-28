@@ -80,6 +80,26 @@ struct PommeCreationRequest: Equatable, Sendable {
         )
     }
 
+    /// A host-only check of the source, without resolving a version over
+    /// the network: a named template must exist and fit the requested disk
+    /// size, and a restore image must be a readable file.
+    var hostProblem: String? {
+        switch source {
+        case .template(let name):
+            do { _ = try Self.templateManifest(name, diskSize: diskSize) } catch { return error.localizedDescription }
+        case .restoreImage(let path):
+            let absolute = PommeCore.absoluteHostPath(path)
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: absolute, isDirectory: &isDirectory), !isDirectory.boolValue,
+                  FileManager.default.isReadableFile(atPath: absolute) else {
+                return "The restore image \(path) is not a readable file."
+            }
+        case .version:
+            break
+        }
+        return nil
+    }
+
     /// Template creates inherit the template's disk size. An explicit size
     /// other than the default must match it, because the cloned image already
     /// carries its APFS container geometry.

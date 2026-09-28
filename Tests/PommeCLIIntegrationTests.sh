@@ -329,6 +329,47 @@ expect_failure "MDM rejects invalid mode" "$runner" mdm missing --profile missin
 expect_failure "MDM rejects removed enroll syntax" "$runner" mdm enroll missing --profile missing
 expect_failure "MDM rejects removed approve syntax" "$runner" mdm approve missing --profile-identifier missing
 expect_failure "MDM rejects removed acknowledgement" "$runner" mdm missing --profile missing --acknowledge-synthetic-approval
+expect_success "MDM any-state help" "$runner" mdm --help
+if grep -q -- '--final-security' "$work/stdout" && grep -q -- '--dry-run' "$work/stdout" \
+  && grep -q -- '--from-template' "$work/stdout" && grep -q -- '--skip-server-preflight' "$work/stdout"; then
+  pass "MDM exposes any-state preparation options"
+else
+  fail "MDM exposes any-state preparation options"
+fi
+expect_failure "MDM rejects invalid final security" "$runner" mdm missing --profile missing --final-security enabled
+expect_failure "MDM rejects a Recovery creation boot" "$runner" mdm missing --profile missing --from-template base --boot recovery
+expect_failure "MDM rejects conflicting creation sources" "$runner" mdm missing --profile missing --from-template base --latest
+# A plain-HTTP server keeps the dry run offline: HTTP has no TLS to probe.
+cat >"$work/mdm-http.mobileconfig" <<'PROFILE'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>PayloadType</key><string>Configuration</string>
+<key>PayloadIdentifier</key><string>com.example.contract</string>
+<key>PayloadUUID</key><string>11111111-2222-3333-4444-555555555555</string>
+<key>PayloadVersion</key><integer>1</integer>
+<key>PayloadContent</key><array><dict>
+<key>PayloadType</key><string>com.apple.mdm</string>
+<key>PayloadIdentifier</key><string>com.example.contract.mdm</string>
+<key>PayloadUUID</key><string>22222222-3333-4444-5555-666666666666</string>
+<key>PayloadVersion</key><integer>1</integer>
+<key>ServerURL</key><string>http://mdm.invalid/mdm</string>
+</dict></array>
+</dict></plist>
+PROFILE
+chmod 600 "$work/mdm-http.mobileconfig"
+expect_exit_1 "MDM dry run blocks a missing VM without a creation source" \
+  "$runner" mdm contract-missing --profile "$work/mdm-http.mobileconfig" --dry-run --format json
+if python3 -c 'import json,sys; p=json.load(sys.stdin); r=p["result"]["readiness"]; assert p["ok"] is False; assert r["vmExists"] is False; assert [b["code"] for b in r["blockers"]]==["vmMissing"]; assert p["result"]["serverTrust"]["result"]=="notApplicable"; assert [s["status"] for s in p["steps"]]==["blocked"]' <"$work/stdout"; then
+  pass "MDM dry run reports vmMissing without touching the VM store"
+else
+  fail "MDM dry run reports vmMissing without touching the VM store"
+fi
+if [[ ! -e "$POMME_APP_SUPPORT_DIR/VMs/contract-missing.bundle" ]]; then
+  pass "MDM dry run creates no VM bundle"
+else
+  fail "MDM dry run creates no VM bundle"
+fi
 expect_failure "unknown root command is rejected" "$runner" definitely-not-a-command
 
 expect_success "tools expose UI capability discovery" "$runner" tools --format json

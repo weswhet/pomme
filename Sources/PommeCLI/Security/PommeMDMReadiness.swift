@@ -195,6 +195,8 @@ enum PommeMDMReadiness {
         var securityBaselineSupported: Bool?
         var enrollment: Enrollment?
         var serverTrust: MDMServerTrustDecision?
+        /// Why the requested creation source cannot be used, when known.
+        var creationProblem: String?
     }
 
     enum Step: Equatable, Sendable {
@@ -228,6 +230,7 @@ enum PommeMDMReadiness {
     enum Blocker: Equatable, Sendable {
         case mutationInProgress
         case vmMissing
+        case creationUnavailable(String)
         case provisioning(PommeProvisioningReadiness.Blocked)
         case pendingSnapshotRestore
         case runStateUnknown
@@ -243,6 +246,7 @@ enum PommeMDMReadiness {
             switch self {
             case .mutationInProgress: "mutationInProgress"
             case .vmMissing: "vmMissing"
+            case .creationUnavailable: "creationUnavailable"
             case .provisioning(let reason): "provisioning.\(reason.code)"
             case .pendingSnapshotRestore: "pendingSnapshotRestore"
             case .runStateUnknown: "runStateUnknown"
@@ -262,6 +266,8 @@ enum PommeMDMReadiness {
                 "Another Pomme operation is changing this VM. Wait for it to finish."
             case .vmMissing:
                 "The VM does not exist. Add --from-template, --version, --latest, or --restore-image to create it."
+            case .creationUnavailable(let reason):
+                "The VM cannot be created as requested: \(reason)"
             case .provisioning(.unmanaged):
                 "The VM bundle has no Pomme creation journal."
             case .provisioning(.invalidJournal):
@@ -332,7 +338,13 @@ enum PommeMDMReadiness {
         if request.finalSecurity == .disabled { warnings.append(.finalSecurityDisabled) }
 
         if !facts.vmExists {
-            if request.creationSourceSupplied { steps.append(.create) } else { blockers.append(.vmMissing) }
+            if !request.creationSourceSupplied {
+                blockers.append(.vmMissing)
+            } else if let problem = facts.creationProblem {
+                blockers.append(.creationUnavailable(problem))
+            } else {
+                steps.append(.create)
+            }
         } else {
             if request.creationOptionsSupplied { warnings.append(.creationOptionsIgnored) }
             switch facts.provisioning {

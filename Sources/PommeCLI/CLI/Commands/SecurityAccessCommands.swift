@@ -130,11 +130,12 @@ struct AMFIDisableCommand: AsyncParsableCommand {
     }
 }
 
-/// Enrolls a VM in MDM while restoring its original security and run state.
+/// Brings a VM from any state to the requested MDM enrollment.
 struct MDMCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mdm",
-        abstract: "Enroll a VM in MDM and restore its security and run state."
+        abstract: "Enroll a VM in MDM from any state: create or finish it, finish retained SIP/AMFI work, prepare only the security enrollment needs, and enroll.",
+        discussion: "Repeat the same command to resume after a failure. Creation options apply only when the VM does not exist."
     )
 
     @Argument var name: String?
@@ -148,23 +149,73 @@ struct MDMCommand: AsyncParsableCommand {
     var finalSecurity: MDMFinalSecurity = .restore
     @Flag(help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
     var force = false
+    @Flag(name: .customLong("dry-run"), help: "Report the detected state and planned steps without changing the VM.")
+    var dryRun = false
+    @Flag(name: .customLong("skip-server-preflight"), help: "Do not stop when the host cannot validate the MDM server's certificate.")
+    var skipServerPreflight = false
+
+    @Option(name: .customLong("from-template"), help: "If the VM is missing, clone it from this template.")
+    var fromTemplate: String?
+    @Option(name: .customLong("version"), help: "If the VM is missing, install this macOS version, build, or 'latest'.")
+    var version: String?
+    @Flag(name: .customLong("latest"), help: "If the VM is missing, install the latest signed macOS. Same as --version latest.")
+    var latest = false
+    @Option(name: .customLong("restore-image"), help: "If the VM is missing, install from this local IPSW.")
+    var restoreImage: String?
+    @Option(name: .customLong("ipsw-device"), help: "Apple silicon Mac identifier used to resolve --version.")
+    var ipswDevice: String?
+    @Option(name: .customLong("memory"), help: "Guest memory for a created VM (default 8GB).")
+    var memory: String?
+    @Option(name: .customLong("disk-size"), help: "Disk size for a created VM (default 60GB; a template supplies its own).")
+    var diskSize: String?
+    @Option(name: .customLong("boot"), help: "State of a created VM before enrollment, and after it: normal (default) or none.")
+    var boot: CLIBootMode?
+
     @OptionGroup var timeout: TimeoutOptions
     @OptionGroup var output: GlobalOptions
 
-    func validate() throws {
+    mutating func validate() throws {
         let value = try timeout.value()
         guard value.isFinite, (1...300).contains(value) else {
             throw ValidationError("--timeout must be between 1 and 300 seconds.")
         }
+        if latest {
+            if let version, version != "latest" {
+                throw ValidationError("Choose either --latest or --version.")
+            }
+            version = "latest"
+        }
+        if boot == .recovery {
+            throw ValidationError("--boot for MDM creation must be normal or none.")
+        }
+        try PommeCreationRequest.validate(
+            version: version, restoreImage: restoreImage, fromTemplate: fromTemplate, ipswDevice: ipswDevice,
+            diskSize: diskSize ?? PommeCreationRequest.defaultDiskSize,
+            memory: memory ?? PommeCreationRequest.defaultMemory)
+    }
+
+    /// The creation that applies only when the VM is missing.
+    var creation: PommeCreationRequest? {
+        PommeCreationRequest.source(version: version, restoreImage: restoreImage, fromTemplate: fromTemplate,
+                                    ipswDevice: ipswDevice).map {
+            .init(source: $0, diskSize: diskSize ?? PommeCreationRequest.defaultDiskSize,
+                  memory: memory ?? PommeCreationRequest.defaultMemory, boot: boot ?? .normal)
+        }
+    }
+
+    var creationOptionsSupplied: Bool {
+        creation != nil || ipswDevice != nil || memory != nil || diskSize != nil || boot != nil
     }
 
     mutating func run() async throws {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
+        let request = PommeMDMCommandRequest(
+            name: target, profilePath: profile, guestPath: guestPath, timeout: try timeout.value(),
+            enrollmentMode: enrollmentMode, finalSecurity: finalSecurity, force: force, dryRun: dryRun,
+            skipServerPreflight: skipServerPreflight, creation: creation,
+            creationOptionsSupplied: creationOptionsSupplied, interactive: isatty(STDIN_FILENO) == 1)
         try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(output.debug) {
-            let result = try await PommeEnvironment.live().security.mdmEnroll(
-                target, profile, guestPath, timeout.value(), enrollmentMode, finalSecurity, force
-            )
-            try CLIOutputWriter.write(result, options: output)
+            try CLIOutputWriter.write(try await PommeEnvironment.live().security.mdm(request), options: output)
         }
     }
 }
