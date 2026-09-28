@@ -206,9 +206,15 @@ The user requested incorporating these findings into normal owner preparation.
 The production change keeps the native `sysadminctl` setter and its readbacks,
 then verifies the system completion markers and performs a planned normal reboot.
 After authentication and exact owner-console proof, it writes and reads back the
-two typed preferences as the owner. It retains the existing verified Setup
-Assistant process closure and full stable desktop check. Only that final proof
-can advance the journal to `autologinVerified`.
+two typed preferences as the owner. The full stable desktop check remains
+required. Only that final proof can advance the journal to `autologinVerified`.
+
+The macOS 26 lab observed that sending SIGTERM to the owner Setup Assistant
+produces MiniBuddy exit status 15 and logs the owner out. Owner completion no
+longer signals that process; process disappearance cannot establish a desktop.
+The previously observed preference persistence across reboot did not prevent
+MiniBuddy from launching, so this correction does not add a reboot retry or claim
+that preference maintenance alone completes MiniBuddy.
 
 The former automatic preference-error reboot/retry is removed from the normal
 path. A fresh-owner preparation failure retains the VM run state and journal for

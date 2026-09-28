@@ -35,7 +35,7 @@ struct PommeSecurityOwnerPreparationTests {
     let verified = try await preparation.verifyOwner(password: "opaque-owner-secret")
     if mode == "success" {
       try await preparation.completeFreshOwnerAfterLogin(password: "opaque-owner-secret", expected: verified)
-      #expect(!fixture.ownerSetupAssistantProcessPresent)
+      #expect(fixture.ownerSetupAssistantProcessPresent)
     } else {
       let expected: PommeSecurityOwnerPreparationError = mode == "failed"
         ? .buddyPreferencesFailed : .ownerCompletionVerificationFailed
@@ -45,6 +45,7 @@ struct PommeSecurityOwnerPreparationTests {
       #expect(fixture.ownerSetupAssistantProcessPresent)
     }
     #expect(calls.withLock { $0 } == 1)
+    #expect(!fixture.guestArguments.contains { $0.first == "-TERM" })
     #expect(!fixture.guestArguments.contains { $0.contains("/usr/bin/defaults") && $0.contains("write") })
     #expect(!fixture.setupDone)
   }
@@ -1177,8 +1178,8 @@ struct PommeSecurityOwnerPreparationTests {
     #expect(!fixture.setupDone)
   }
 
-  @Test("Fresh completion closes only an exact retained owner Setup Assistant")
-  func retainedOwnerSetupAssistantIsClosedByExactIdentity() async throws {
+  @Test("Fresh completion does not signal MiniBuddy and log the owner out")
+  func retainedOwnerSetupAssistantIsNotSignalled() async throws {
     let fixture = OwnerPreparationFixture()
     fixture.ownerSetupAssistantProcessPresent = true
     fixture.markCreated()
@@ -1191,11 +1192,9 @@ struct PommeSecurityOwnerPreparationTests {
 
     _ = try await preparation.configureLogin(password: "opaque-owner-secret")
 
-    #expect(!fixture.ownerSetupAssistantProcessPresent)
+    #expect(fixture.ownerSetupAssistantProcessPresent)
     #expect(
-      fixture.guestArguments.contains {
-        $0 == ["-TERM", "5252"]
-      })
+      !fixture.guestArguments.contains { $0.first == "-TERM" })
     #expect(fixture.setupDone)
   }
 

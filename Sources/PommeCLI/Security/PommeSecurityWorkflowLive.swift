@@ -304,7 +304,7 @@ struct PommeSecurityFreshOwnerLoginSequence: Sendable {
       ("normal-reboot-and-authentication", restartAndAuthenticate),
       ("owner-console-proof", verifyOwnerConsole),
       ("owner-agent-preference-receipt", verifyOwnerPreferences),
-      ("owner-revalidation-and-setup-assistant-closure", completeOwnerPreferences),
+      ("owner-revalidation-and-preference-receipt", completeOwnerPreferences),
       ("full-desktop-proof", verifyDesktop)
     ]
     for (stage, perform) in stages {
