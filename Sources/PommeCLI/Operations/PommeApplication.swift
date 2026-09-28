@@ -1339,7 +1339,7 @@ enum PommeApplication {
         try await sipWorkflow(name: name, action: action, finalState: finalState, force: force, lease: nil)
     }
 
-    private static func sipWorkflow(
+    static func sipWorkflow(
         name: String,
         action: SIPAction,
         finalState: VMFinalState,
@@ -1403,7 +1403,7 @@ enum PommeApplication {
         try await amfiWorkflow(name: name, action: action, finalState: finalState, force: force, lease: nil)
     }
 
-    private static func amfiWorkflow(
+    static func amfiWorkflow(
         name: String,
         action: AMFIAction,
         finalState: VMFinalState,
@@ -1604,12 +1604,12 @@ enum PommeApplication {
     static func mdmEnroll(
         name: String, profilePath: String, guestPath: String?, timeout: TimeInterval,
         enrollmentMode: MDMEnrollmentMode = .supervised, finalSecurity: MDMFinalSecurity = .restore,
-        force: Bool = false
+        force: Bool = false, lease inherited: VMBundleMutationLease? = nil
     ) async throws -> PommeOperationResult {
         guard timeout.isFinite, timeout >= 1, timeout <= 300 else {
             throw RunnerError.invalidControlCommand("mdm timeout must be between 1 and 300 seconds")
         }
-        return try await VMBundleMutationLease.withLease(name: name) { lease in
+        return try await VMBundleMutationLease.withLease(name: name, inherited: inherited) { lease in
             let reference = try namedReference(name)
             let profileURL = URL(fileURLWithPath: PommeCore.absoluteHostPath(profilePath))
             let plan = try PommeCore.securityProvisioningPlan(reference: reference)
@@ -1884,7 +1884,7 @@ enum PommeApplication {
         }
     }
 
-    private static func readMDMSourceProfile(_ url: URL) throws -> Data {
+    static func readMDMSourceProfile(_ url: URL) throws -> Data {
         let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw PommeMDMEnrollmentError.invalidProfile }
         defer { _ = Darwin.close(fd) }
@@ -1932,7 +1932,7 @@ enum PommeApplication {
         return (workspace, profiles[0], bootstrap)
     }
 
-    private static func observeMDMEnrollment(reference: VMReference, timeout: TimeInterval) async throws -> PommeMDMObservedEnrollment {
+    static func observeMDMEnrollment(reference: VMReference, timeout: TimeInterval) async throws -> PommeMDMObservedEnrollment {
         let deadline = Date().addingTimeInterval(timeout)
         func capture(_ path: String, _ arguments: [String], acceptsDaemonDiagnostic: Bool = false) async throws -> Data {
             guard deadline.timeIntervalSinceNow >= 1 else { throw PommeMDMWorkflowFailure.evidenceUnavailable }
@@ -1964,7 +1964,7 @@ enum PommeApplication {
         return .init(installed: installed, status: status, supervised: supervision.isSupervised)
     }
 
-    private static func observeMDMNormalSecurity(reference: VMReference, timeout: TimeInterval) async throws -> (sipDisabled: Bool, arguments: Data, configured: Data) {
+    static func observeMDMNormalSecurity(reference: VMReference, timeout: TimeInterval) async throws -> (sipDisabled: Bool, arguments: Data, configured: Data) {
         let sip = try await runMDMGuestProcess(reference: reference, path: "/usr/bin/csrutil", arguments: ["status"], timeout: timeout)
         let args = try await runMDMGuestProcess(reference: reference, path: "/usr/sbin/sysctl", arguments: ["-n", "kern.bootargs"], timeout: timeout)
         let nvram = try await runMDMGuestProcess(reference: reference, path: "/usr/sbin/nvram", arguments: ["-xp"], timeout: timeout)
@@ -2248,7 +2248,7 @@ enum PommeApplication {
         return .hostCommandFailed(message ?? "The authenticated PommeAgent operation did not complete.")
     }
 
-    private static func authenticatedMDMAgentDescription(
+    static func authenticatedMDMAgentDescription(
         reference: VMReference,
         timeout: TimeInterval
     ) async throws -> MDMEnrollmentAgentDescription {
@@ -3166,7 +3166,7 @@ enum PommeApplication {
         )
     }
 
-    private static func mdmResult(
+    static func mdmResult(
         title: String,
         operation: String,
         reference: VMReference,
