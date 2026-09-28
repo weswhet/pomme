@@ -8,7 +8,16 @@ struct MDMCommandTests {
         #expect(command.name == "dev")
         #expect(command.profile == "enrollment.mobileconfig")
         #expect(command.enrollmentMode == .supervised)
+        #expect(command.finalSecurity == .restore)
         #expect(!command.force)
+    }
+
+    @Test(arguments: MDMFinalSecurity.allCases)
+    func explicitFinalSecurity(_ value: MDMFinalSecurity) throws {
+        let command = try MDMCommand.parse([
+            "dev", "--profile", "enrollment.mobileconfig", "--final-security", value.rawValue
+        ])
+        #expect(command.finalSecurity == value)
     }
 
     @Test(arguments: ["supervised", "unapproved"])
@@ -42,6 +51,7 @@ struct MDMCommandTests {
     @Test(arguments: [
         ["dev"],
         ["dev", "--profile", "p", "--enrollment-mode", "automatic"],
+        ["dev", "--profile", "p", "--final-security", "enabled"],
         ["enroll", "dev", "--profile", "p"],
         ["approve", "dev", "--profile-identifier", "p"],
         ["dev", "--profile", "p", "--acknowledge-synthetic-approval"]

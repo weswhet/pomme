@@ -56,6 +56,35 @@ struct PommeMDMWorkflowSecurityBaseline: Sendable {
     let activeBootArguments: Data
     var configuredBootArguments: Data = Data("\"\"".utf8)
 
+    /// The SIP state a finished enrollment must prove. `disabled` keeps only
+    /// what this workflow disabled switched off; untouched settings, including
+    /// every setting of an already-satisfied enrollment, stay as found.
+    static func expectedFinalSIPDisabled(_ journal: PommeMDMEnrollmentJournal) -> Bool? {
+        guard let original = journal.sipWasDisabled else { return nil }
+        return journal.finalSecurity == .disabled && journal.sipChangeRequested ? true : original
+    }
+
+    static func expectedFinalAMFIDisabled(_ journal: PommeMDMEnrollmentJournal) -> Bool? {
+        guard let original = journal.amfiWasDisabled else { return nil }
+        return journal.finalSecurity == .disabled && journal.amfiChangeRequested ? true : original
+    }
+
+    /// Normal-boot evidence for the requested final security. A restored or
+    /// untouched AMFI setting must reproduce the captured boot arguments
+    /// exactly; one this workflow left disabled needs only the override.
+    static func finalSecurityMatches(
+        _ journal: PommeMDMEnrollmentJournal,
+        sipDisabled: Bool, activeBootArguments: Data, configuredBootArguments: Data
+    ) -> Bool {
+        guard let sip = expectedFinalSIPDisabled(journal), sipDisabled == sip,
+              let amfi = expectedFinalAMFIDisabled(journal) else { return false }
+        if amfi, journal.amfiWasDisabled == false {
+            return PommeBootArguments.containsOverride(activeBootArguments)
+        }
+        return activeBootArguments == journal.normalBootArguments
+            && configuredBootArguments == journal.configuredBootArguments
+    }
+
     static func childAllowsRestorationReconciliation(_ phase: PommeSecurityWorkflowPhase?) -> Bool {
         phase == nil || phase == .restorationComplete || phase == .preflightRejected
     }
@@ -272,9 +301,11 @@ struct PommeMDMWorkflowExecution: Sendable {
         catch { throw PommeMDMEnrollmentError.cleanupFailed }
         if ![.securityRestored, .runStateRestorationIntent, .restorationComplete].contains(progress.journal.phase) {
             try progress.record(phase: .securityRestorationIntent)
-            if progress.journal.amfiChangeRequested { try await child(.amfiEnable) }
-            // An AMFI failure throws above and is a barrier to re-enabling SIP.
-            if progress.journal.sipChangeRequested { try await child(.sipEnable) }
+            if progress.journal.finalSecurity == .restore {
+                if progress.journal.amfiChangeRequested { try await child(.amfiEnable) }
+                // An AMFI failure throws above and is a barrier to re-enabling SIP.
+                if progress.journal.sipChangeRequested { try await child(.sipEnable) }
+            }
         }
         try await dependencies.ensureNormal()
         if progress.journal.sipWasDisabled != nil { try await dependencies.verifySecurity(progress.journal) }

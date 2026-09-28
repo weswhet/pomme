@@ -1602,7 +1602,8 @@ enum PommeApplication {
 
     static func mdmEnroll(
         name: String, profilePath: String, guestPath: String?, timeout: TimeInterval,
-        enrollmentMode: MDMEnrollmentMode = .supervised, force: Bool = false
+        enrollmentMode: MDMEnrollmentMode = .supervised, finalSecurity: MDMFinalSecurity = .restore,
+        force: Bool = false
     ) async throws -> PommeOperationResult {
         guard timeout.isFinite, timeout >= 1, timeout <= 300 else {
             throw RunnerError.invalidControlCommand("mdm timeout must be between 1 and 300 seconds")
@@ -1647,7 +1648,7 @@ enum PommeApplication {
             let profileDestination = try MDMProfileStaging.destination(requestedPath: guestPath)
             let journal = try store.begin(
                 identity: identity, profile: profile, agentSHA256: plan.normalAgent.executableDigest,
-                enrollmentMode: enrollmentMode,
+                enrollmentMode: enrollmentMode, finalSecurity: finalSecurity,
                 originalRunState: PommeCore.stableVMRunState(reference: reference),
                 ownedArtifacts: [workspace.helperPath, workspace.requestPath, workspace.entitlementsPath,
                     "/private/var/db/pomme-mdm-bootstrap-\(requestID.uuidString.lowercased()).bin", profileDestination],
@@ -1754,9 +1755,9 @@ enum PommeApplication {
                 requireHelperStopped: { try await requireMDMHelpersStopped(reference: reference, journal: progress.journal) },
                 verifySecurity: { baseline in
                     let observed = try await observeMDMNormalSecurity(reference: reference, timeout: timeout)
-                    guard observed.sipDisabled == baseline.sipWasDisabled,
-                          observed.arguments == baseline.normalBootArguments,
-                          observed.configured == baseline.configuredBootArguments else {
+                    guard PommeMDMWorkflowSecurityBaseline.finalSecurityMatches(baseline,
+                        sipDisabled: observed.sipDisabled, activeBootArguments: observed.arguments,
+                        configuredBootArguments: observed.configured) else {
                         throw PommeMDMWorkflowFailure.restorationIncomplete
                     }
                 },
@@ -1792,16 +1793,18 @@ enum PommeApplication {
                         return false
                     }
                     PommeCore.log("MDM restoration reconciliation: child phase=\(childPhase?.rawValue ?? "none"); checking exact baseline.")
-                    guard baseline.sipWasDisabled != nil, baseline.amfiWasDisabled != nil else { return false }
+                    guard let expectedAMFI = PommeMDMWorkflowSecurityBaseline.expectedFinalAMFIDisabled(baseline) else {
+                        return false
+                    }
                     let normal = try await observeMDMNormalSecurity(reference: reference, timeout: timeout)
-                    guard normal.sipDisabled == baseline.sipWasDisabled,
-                          normal.arguments == baseline.normalBootArguments,
-                          normal.configured == baseline.configuredBootArguments else {
-                        PommeCore.log("MDM restoration reconciliation: normal security differs from baseline.")
+                    guard PommeMDMWorkflowSecurityBaseline.finalSecurityMatches(baseline,
+                        sipDisabled: normal.sipDisabled, activeBootArguments: normal.arguments,
+                        configuredBootArguments: normal.configured) else {
+                        PommeCore.log("MDM restoration reconciliation: normal security differs from the requested final state.")
                         return false
                     }
                     guard let amfi = normalAgent.observeAMFIState(volumeGroupUUID: group),
-                          amfi.disabled == baseline.amfiWasDisabled else {
+                          amfi.disabled == expectedAMFI else {
                         PommeCore.log("MDM restoration reconciliation: authenticated AMFI evidence unavailable or mismatched.")
                         return false
                     }
@@ -1820,12 +1823,16 @@ enum PommeApplication {
             catch {
                 let retained = progress.journal
                 PommeCore.log("MDM failed at phase=\(retained.phase.rawValue). Preserving the current VM, SIP/AMFI settings, and diagnostic artifacts; no failure cleanup or restoration will run.")
+                let securityFinalized = [.securityRestored, .runStateRestorationIntent, .restorationComplete]
+                    .contains(retained.phase)
                 var details: [String: Any] = [
                     "enrollmentMode": enrollmentMode.rawValue, "profileIdentifier": profile.identifier,
                     "enrolled": NSNull(), "userApproved": NSNull(), "supervised": NSNull(),
                     "enrollmentOutcome": retained.enrollmentDispatched && !retained.enrollmentVerified
                         && !retained.canRetryEnrollment ? "unknown" : "incomplete",
-                    "securityRestored": [.securityRestored, .runStateRestorationIntent, .restorationComplete].contains(retained.phase),
+                    "finalSecurity": retained.finalSecurity.rawValue,
+                    "securityFinalized": securityFinalized,
+                    "securityRestored": securityFinalized && retained.finalSecurity == .restore,
                     "runStateRestored": retained.phase == .restorationComplete,
                     "artifactsCleaned": retained.phase == .restorationComplete,
                     "failureStatePreserved": true,
@@ -1848,10 +1855,17 @@ enum PommeApplication {
                 return mdmResult(title: "MDM enrollment", operation: "mdm", reference: reference, ok: false,
                     agent: [:], steps: [], result: details, error: error.localizedDescription)
             }
+            let finished = progress.journal
+            if finished.finalSecurity == .disabled {
+                PommeCore.log("MDM final security: disabled. SIP/AMFI settings this enrollment turned off remain off; re-enable with `pomme amfi enable` and then `pomme sip enable`.")
+            }
             var details: [String: Any] = [
                 "enrollmentMode": enrollmentMode.rawValue, "profileIdentifier": profile.identifier,
                 "enrolled": observed.status.enrolled, "userApproved": observed.status.userApproved,
-                "supervised": observed.supervised, "securityRestored": true,
+                "supervised": observed.supervised, "finalSecurity": finished.finalSecurity.rawValue,
+                "securityFinalized": true, "securityRestored": finished.finalSecurity == .restore,
+                "sipDisabled": PommeMDMWorkflowSecurityBaseline.expectedFinalSIPDisabled(finished) as Any? ?? NSNull(),
+                "amfiDisabled": PommeMDMWorkflowSecurityBaseline.expectedFinalAMFIDisabled(finished) as Any? ?? NSNull(),
                 "runStateRestored": true, "artifactsCleaned": true
             ]
             details.merge(await helperDiagnostics.snapshot().mapValues(\.publicValue)) { _, new in new }

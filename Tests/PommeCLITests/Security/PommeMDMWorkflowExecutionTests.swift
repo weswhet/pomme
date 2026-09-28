@@ -527,6 +527,117 @@ struct PommeMDMWorkflowExecutionTests {
         #expect(await restoredStates.values() == [scenario.runState])
     }
 
+    @Test("Disabled final security runs no restoration children for any original combination",
+          arguments: OriginalWorkflowScenario.allCases)
+    fileprivate func disabledFinalSecurityKeepsPreparation(scenario: OriginalWorkflowScenario) async throws {
+        let fixture = try WorkflowFixture.make()
+        defer { fixture.remove() }
+        let progress = try fixture.progress(
+            mode: .supervised, finalSecurity: .disabled, originalRunState: scenario.runState,
+            sipWasDisabled: scenario.sipWasDisabled, amfiWasDisabled: scenario.amfiWasDisabled
+        )
+        let events = EventRecorder()
+        let restoredStates = RunStateRecorder()
+        let final = fixture.observed(enrolled: true, userApproved: true, supervised: true)
+        let execution = makeExecution(
+            fixture: fixture, progress: progress, events: events, restoredStates: restoredStates,
+            observations: [fixture.observed(enrolled: false, userApproved: false, supervised: false, installed: false),
+                           fixture.observed(enrolled: false, userApproved: false, supervised: false, installed: false)],
+            awaited: [final, final],
+            baseline: makeBaseline(sipDisabled: scenario.sipWasDisabled,
+                                   amfiDisabled: scenario.amfiWasDisabled, activeByte: 13)
+        )
+
+        _ = try await execution.run()
+
+        var expected: [PommeSecurityWorkflowOperation] = []
+        if !scenario.sipWasDisabled { expected.append(.sipDisable) }
+        if !scenario.amfiWasDisabled { expected.append(.amfiDisable) }
+        let recorded = await events.values()
+        #expect(securityOperations(recorded) == expected)
+        #expect(recorded.contains("verifySecurity"))
+        #expect(await restoredStates.values() == [scenario.runState])
+        let journal = progress.journal
+        #expect(journal.phase == .restorationComplete)
+        #expect(PommeMDMWorkflowSecurityBaseline.expectedFinalSIPDisabled(journal) == true)
+        #expect(PommeMDMWorkflowSecurityBaseline.expectedFinalAMFIDisabled(journal) == true)
+    }
+
+    @Test("A satisfied enrollment with disabled final security leaves security as found")
+    func satisfiedDisabledFinalSecurityAvoidsSecurity() async throws {
+        let fixture = try WorkflowFixture.make()
+        defer { fixture.remove() }
+        let progress = try fixture.progress(mode: .supervised, finalSecurity: .disabled,
+                                            originalRunState: .stopped,
+                                            sipWasDisabled: nil, amfiWasDisabled: nil)
+        let events = EventRecorder()
+        let restoredStates = RunStateRecorder()
+        let satisfied = fixture.observed(enrolled: true, userApproved: true, supervised: true)
+        let execution = makeExecution(
+            fixture: fixture, progress: progress, events: events, restoredStates: restoredStates,
+            observations: [satisfied], awaited: [satisfied],
+            baseline: makeBaseline(sipDisabled: false, amfiDisabled: false, activeByte: 14)
+        )
+
+        _ = try await execution.run()
+
+        let recorded = await events.values()
+        #expect(securityOperations(recorded).isEmpty)
+        #expect(!recorded.contains("captureSecurity"))
+        #expect(!recorded.contains("verifySecurity"))
+        #expect(await restoredStates.values() == [.stopped])
+        #expect(PommeMDMWorkflowSecurityBaseline.expectedFinalSIPDisabled(progress.journal) == nil)
+    }
+
+    @Test("Final security evidence requires the baseline for restore and only prepared changes for disabled")
+    func finalSecurityMatchesTable() throws {
+        let fixture = try WorkflowFixture.make()
+        defer { fixture.remove() }
+        let original = Data("-v".utf8)
+        let originalConfigured = try PommeProvisioningCoding.encode(JSONValue.string(original.base64EncodedString()))
+        let overridden = Data("-v amfi_get_out_of_my_way=0x1".utf8)
+        let overriddenConfigured = try PommeProvisioningCoding.encode(JSONValue.string(overridden.base64EncodedString()))
+        func journal(_ finalSecurity: MDMFinalSecurity, sipWas: Bool, amfiWas: Bool,
+                     sipChanged: Bool, amfiChanged: Bool) throws -> PommeMDMEnrollmentJournal {
+            try PommeMDMEnrollmentJournal(
+                generation: 1, identity: fixture.identity, profile: fixture.profile,
+                agentSHA256: fixture.agentDigest, enrollmentMode: .supervised, finalSecurity: finalSecurity,
+                originalRunState: .stopped, sipWasDisabled: sipWas, amfiWasDisabled: amfiWas,
+                sipChangeRequested: sipChanged, amfiChangeRequested: amfiChanged,
+                normalBootArguments: original, configuredBootArguments: originalConfigured,
+                ownedArtifacts: [], phase: .securityRestorationIntent,
+                createdAt: fixture.date, updatedAt: fixture.date)
+        }
+        let restore = try journal(.restore, sipWas: false, amfiWas: false, sipChanged: true, amfiChanged: true)
+        #expect(PommeMDMWorkflowSecurityBaseline.finalSecurityMatches(restore, sipDisabled: false,
+            activeBootArguments: original, configuredBootArguments: originalConfigured))
+        #expect(!PommeMDMWorkflowSecurityBaseline.finalSecurityMatches(restore, sipDisabled: true,
+            activeBootArguments: original, configuredBootArguments: originalConfigured))
+        #expect(!PommeMDMWorkflowSecurityBaseline.finalSecurityMatches(restore, sipDisabled: false,
+            activeBootArguments: overridden, configuredBootArguments: overriddenConfigured))
+
+        let disabled = try journal(.disabled, sipWas: false, amfiWas: false, sipChanged: true, amfiChanged: true)
+        #expect(PommeMDMWorkflowSecurityBaseline.finalSecurityMatches(disabled, sipDisabled: true,
+            activeBootArguments: overridden, configuredBootArguments: overriddenConfigured))
+        #expect(!PommeMDMWorkflowSecurityBaseline.finalSecurityMatches(disabled, sipDisabled: false,
+            activeBootArguments: overridden, configuredBootArguments: overriddenConfigured))
+        #expect(!PommeMDMWorkflowSecurityBaseline.finalSecurityMatches(disabled, sipDisabled: true,
+            activeBootArguments: original, configuredBootArguments: originalConfigured))
+
+        // Only SIP was prepared: the untouched AMFI arguments must match exactly.
+        let sipOnly = try journal(.disabled, sipWas: false, amfiWas: true, sipChanged: true, amfiChanged: false)
+        #expect(PommeMDMWorkflowSecurityBaseline.finalSecurityMatches(sipOnly, sipDisabled: true,
+            activeBootArguments: original, configuredBootArguments: originalConfigured))
+        #expect(!PommeMDMWorkflowSecurityBaseline.finalSecurityMatches(sipOnly, sipDisabled: true,
+            activeBootArguments: overridden, configuredBootArguments: overriddenConfigured))
+
+        // Nothing was prepared: disabled final security leaves the found state.
+        let untouched = try journal(.disabled, sipWas: false, amfiWas: false, sipChanged: false, amfiChanged: false)
+        #expect(PommeMDMWorkflowSecurityBaseline.finalSecurityMatches(untouched, sipDisabled: false,
+            activeBootArguments: original, configuredBootArguments: originalConfigured))
+        #expect(PommeMDMWorkflowSecurityBaseline.expectedFinalAMFIDisabled(untouched) == false)
+    }
+
     private func makeExecution(
         fixture: WorkflowFixture,
         progress: PommeMDMWorkflowProgress,
@@ -703,6 +814,7 @@ private struct WorkflowFixture {
 
     func progress(
         mode: MDMEnrollmentMode,
+        finalSecurity: MDMFinalSecurity = .restore,
         originalRunState: VMRunStateSnapshot,
         sipWasDisabled: Bool?,
         amfiWasDisabled: Bool?,
@@ -714,7 +826,7 @@ private struct WorkflowFixture {
     ) throws -> PommeMDMWorkflowProgress {
         var journal = try store.begin(
             identity: identity, profile: profile, agentSHA256: agentDigest,
-            enrollmentMode: mode, originalRunState: originalRunState,
+            enrollmentMode: mode, finalSecurity: finalSecurity, originalRunState: originalRunState,
             sipWasDisabled: sipWasDisabled, amfiWasDisabled: amfiWasDisabled,
             ownedArtifacts: [], lease: lease, now: date
         )

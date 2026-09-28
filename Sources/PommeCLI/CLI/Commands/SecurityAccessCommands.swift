@@ -144,6 +144,8 @@ struct MDMCommand: AsyncParsableCommand {
     var guestPath: String?
     @Option(name: .customLong("enrollment-mode"), help: "Enrollment mode: supervised (user approved, default) or unapproved.")
     var enrollmentMode: MDMEnrollmentMode = .supervised
+    @Option(name: .customLong("final-security"), help: "SIP/AMFI after enrollment: restore (default) re-enables what enrollment disabled; disabled leaves it off.")
+    var finalSecurity: MDMFinalSecurity = .restore
     @Flag(help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
     var force = false
     @OptionGroup var timeout: TimeoutOptions
@@ -160,7 +162,7 @@ struct MDMCommand: AsyncParsableCommand {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
         try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(output.debug) {
             let result = try await PommeEnvironment.live().security.mdmEnroll(
-                target, profile, guestPath, timeout.value(), enrollmentMode, force
+                target, profile, guestPath, timeout.value(), enrollmentMode, finalSecurity, force
             )
             try CLIOutputWriter.write(result, options: output)
         }
