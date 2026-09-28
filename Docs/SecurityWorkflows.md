@@ -155,9 +155,9 @@ handoff.
 
 On every normal boot, the persistent guest agent detects the product version and
 build with `sw_vers` and queries the local Open Directory node for the exact
-`pomme` account. It checks immediately and every two seconds while the account
-or its home directory is absent. It validates the UID, GeneratedUID, and home
-before maintaining preferences; it does not wait for login or a GUI session.
+`pomme` account. It checks immediately and every two seconds while the account,
+home directory, or owner console session is absent. It validates the UID,
+GeneratedUID, and home before maintaining preferences.
 Recovery agents never run this task.
 
 The agent uses bounded `sudo -n -H -u pomme /usr/bin/defaults` commands to
@@ -187,17 +187,20 @@ the boot UUID, daemon PID, and run ID, plus owner discovery and revalidation,
 stage durations, command launcher PID and exit status, output byte counts,
 recognized error categories, and typed readback results. A launcher labelled
 `sudo` identifies the spawned process; it does not prove that `defaults` started.
-Unknown command output is redacted. Waiting logs appear on account/home state
-changes and at most once per minute while that state remains unchanged.
+Unknown command output is redacted. Waiting logs appear on account, home, and
+console state changes and at most once per minute while that state remains
+unchanged.
 History defaults to the last 10 minutes and includes info-level events. Use
 `--last 1h` for a wider window or `--level debug` to include debug events. Increase
 `--timeout` up to 300 seconds for larger queries. Installing the host CLI does
 not upgrade an existing guest agent or add new diagnostic events.
 
-Fresh-owner preparation requires a successful matching receipt after owner
-verification, before configuring native automatic login and system completion
-markers (including `.AppleSetupDone`). It reboots, authenticates the normal
-agent, and checks the new boot's receipt before continuing. Missing capability
+Fresh-owner preparation checks the agent capability after owner verification,
+then configures native automatic login and system completion markers (including
+`.AppleSetupDone`). It reboots, authenticates the normal agent, verifies the exact
+owner console, and checks the new boot's successful matching receipt before
+continuing. SSH bootstrap checks capability and owner identity before reboot;
+receipt verification occurs after the owner console is established. Missing capability
 requires an updated guest agent. Failed or mismatched receipts stop the workflow
 without an automatic retry, reboot, cleanup, or security restoration.
 

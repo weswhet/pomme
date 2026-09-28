@@ -76,7 +76,7 @@ struct PommeAgentDaemonTests {
             generatedUID: UUID().uuidString, homeDirectory: "/Users/pomme")
         let engine = PommeBuddyPreferencesMaintenance(dependencies: .init(
             bootSessionUUID: { "11111111-1111-1111-1111-111111111111" },
-            owner: { running ? owner : nil }, homeExists: { _ in true },
+            owner: { running ? owner : nil }, homeExists: { _ in true }, consoleIsOwner: { _ in true },
             command: { path, arguments in
                 if path == "/usr/bin/sw_vers" {
                     return .init(status: 0, stdout: arguments == ["-productVersion"] ? "27.0" : "26A428", stderr: "")

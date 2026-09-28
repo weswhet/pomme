@@ -42,20 +42,36 @@ struct PommeBuddyPreferencesTests {
         #expect(classify(String(repeating: "secret", count: 1000)) == "unknown-redacted")
     }
 
-    @Test("Account and home appearance are polled without a login dependency")
+    @Test("Account, home, and console ownership are polled before preference commands")
     func waitsForOwner() async {
         let fixture = BuddyFixture()
-        fixture.state.withLock { $0.absentQueries = 2; $0.absentHomes = 1 }
+        fixture.state.withLock { $0.absentQueries = 2; $0.absentHomes = 1; $0.absentConsoleQueries = 2 }
         let engine = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
         await engine.run()
         let status = await engine.status()
         #expect(status?.outcome == "succeeded")
         #expect(status?.owner == BuddyFixture.owner)
         fixture.state.withLock {
-            #expect($0.sleeps == 3)
+            #expect($0.sleeps == 5)
+            #expect($0.diagnostics.contains { $0.event == "owner-waiting" && $0.fields["state"] == "console-owner-absent" })
             #expect($0.writes.count == 2)
             #expect($0.saved.contains { $0.stage == "waitingForOwner" && $0.owner == nil })
         }
+    }
+
+    @Test("Stopping before console login preserves a restartable waiting receipt")
+    func consoleWaitRestart() async {
+        let fixture = BuddyFixture()
+        fixture.state.withLock { $0.consolePresent = false; $0.cancelSleep = true }
+        let first = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
+        await first.run()
+        #expect(await first.status()?.outcome == "waiting")
+        #expect(fixture.state.withLock { $0.writes.isEmpty && $0.receipt?.owner == nil })
+        fixture.state.withLock { $0.consolePresent = true; $0.cancelSleep = false }
+        let resumed = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
+        await resumed.run()
+        #expect(await resumed.status()?.outcome == "succeeded")
+        #expect(fixture.state.withLock { $0.writes.count == 2 })
     }
 
     @Test("Matching typed values do not write; the detected build replaces older builds")
@@ -174,6 +190,16 @@ struct PommeBuddyPreferencesTests {
     func ownerReplacement() async {
         let fixture = BuddyFixture()
         fixture.state.withLock { $0.replaceAfterWrite = true }
+        let engine = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
+        await engine.run()
+        #expect(await engine.status()?.error?.code == "owner-changed")
+        #expect(fixture.state.withLock { $0.writes.count == 1 })
+    }
+
+    @Test("Losing the owner console session stops subsequent preference commands")
+    func consoleSessionLost() async {
+        let fixture = BuddyFixture()
+        fixture.state.withLock { $0.loseConsoleAfterWrite = true }
         let engine = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
         await engine.run()
         #expect(await engine.status()?.error?.code == "owner-changed")
@@ -332,6 +358,9 @@ private final class BuddyFixture: Sendable {
         var owner = BuddyFixture.owner
         var absentQueries = 0
         var absentHomes = 0
+        var absentConsoleQueries = 0
+        var loseConsoleAfterWrite = false
+        var consolePresent = true
         var ownerError = false
         var writeFailure = false
         var writeError = "failure"
@@ -342,6 +371,7 @@ private final class BuddyFixture: Sendable {
         var missingMessage: String?
         var writeOutput = ""
         var sleeps = 0
+        var cancelSleep = false
         var values: [String: (String, String)] = [:]
         var writes: [String] = []
         var commands: [[String]] = []
@@ -360,6 +390,15 @@ private final class BuddyFixture: Sendable {
         }, homeExists: { _ in self.state.withLock {
             if $0.absentHomes > 0 { $0.absentHomes -= 1; return false }
             return true
+        } }, consoleIsOwner: { _ in self.state.withLock {
+            if $0.absentConsoleQueries > 0 {
+                $0.absentConsoleQueries -= 1
+                #expect($0.receipt?.outcome == "waiting")
+                #expect($0.receipt?.owner == nil)
+                #expect($0.commands.allSatisfy { $0.first == "/usr/bin/sw_vers" })
+                return false
+            }
+            return $0.consolePresent
         } }, command: { path, args in
             self.state.withLock { state in
                 state.commands.append([path] + args)
@@ -375,6 +414,7 @@ private final class BuddyFixture: Sendable {
                     if state.writeFailure { return .init(status: 9, stdout: "", stderr: state.writeError) }
                     state.values[key] = (args[8] == "-bool" ? "boolean" : "string", state.corruptReadback ? "26A888" : (args[8] == "-bool" ? "0" : args[9]))
                     if state.replaceAfterWrite { state.owner.generatedUID = UUID().uuidString }
+                    if state.loseConsoleAfterWrite { state.consolePresent = false }
                     return .init(status: 0, stdout: state.writeOutput, stderr: "")
                 }
                 guard let value = state.values[key] else {
@@ -388,7 +428,10 @@ private final class BuddyFixture: Sendable {
                 $0.receipt = receipt
                 $0.saved.append(receipt)
             }
-        }, sleep: { self.state.withLock { $0.sleeps += 1 } },
+        }, sleep: { try self.state.withLock {
+            $0.sleeps += 1
+            if $0.cancelSleep { throw CancellationError() }
+        } },
            diagnostic: { event in self.state.withLock { $0.diagnostics.append(event) } },
            uptime: { self.state.withLock { Double($0.sleeps * 2) } })
     }
