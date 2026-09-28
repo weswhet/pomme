@@ -5,6 +5,51 @@ import Testing
 
 @Suite("Guest Buddy preferences")
 struct PommeBuddyPreferencesTests {
+    @Test("Only the first preference read gets the login readiness budget")
+    func initialReadBudget() async {
+        let fixture = BuddyFixture()
+        fixture.state.withLock { $0.values = ["LastSeenBuddyBuildVersion": ("string", "25G1"), "MiniBuddyLaunch": ("boolean", "1")] }
+        var dependencies = fixture.dependencies
+        let command = dependencies.command
+        let calls = Mutex<[(String, TimeInterval)]>([])
+        dependencies.instrumentedCommand = { path, arguments, timeout, _ in
+            calls.withLock { $0.append((arguments.joined(separator: " "), timeout)) }
+            return try await command(path, arguments)
+        }
+        await PommeBuddyPreferencesMaintenance(dependencies: dependencies).run()
+        let captured = calls.withLock { $0 }
+        let preferences = captured.filter { $0.0.contains("/usr/bin/defaults") }
+        #expect(preferences.count == 10)
+        #expect(preferences.reduce(0) { $0 + $1.1 } == 195)
+        #expect(PommeBuddyPreferencesBudget.receipt == 210)
+        #expect(PommeBuddyPreferencesBudget.receiptPollCount == 106)
+        #expect(captured.filter { $0.1 == 60 }.map { $0.0 } == [
+            "-n -H -u pomme /usr/bin/defaults read-type com.apple.SetupAssistant LastSeenBuddyBuildVersion"
+        ])
+        #expect(captured.filter { $0.1 != 60 }.allSatisfy { $0.1 == 15 })
+        #expect(fixture.state.withLock { $0.receipt?.outcome } == "succeeded")
+    }
+
+    @Test("An initial read timeout remains terminal for the boot")
+    func initialReadTimeoutDoesNotReplay() async {
+        let fixture = BuddyFixture()
+        var dependencies = fixture.dependencies
+        let command = dependencies.command
+        let attempts = Mutex(0)
+        dependencies.instrumentedCommand = { path, arguments, timeout, _ in
+            if timeout == PommeBuddyPreferencesBudget.initialRead {
+                attempts.withLock { $0 += 1 }
+                throw PommeBuddyPreferencesFailure(code: "command-timeout", numericCode: nil)
+            }
+            return try await command(path, arguments)
+        }
+        await PommeBuddyPreferencesMaintenance(dependencies: dependencies).run()
+        await PommeBuddyPreferencesMaintenance(dependencies: dependencies).run()
+        #expect(attempts.withLock { $0 } == 1)
+        #expect(fixture.state.withLock { $0.receipt?.error?.code } == "command-timeout")
+        #expect(fixture.state.withLock { $0.writes.isEmpty })
+    }
+
     @Test("Diagnostics establish owner validation before writes and redact output")
     func diagnostics() async {
         let fixture = BuddyFixture()
@@ -261,7 +306,7 @@ struct PommeBuddyPreferencesCommandTests {
     func nativeDiagnostics() async throws {
         let events = Mutex<[PommeBuddyPreferencesDiagnostic]>([])
         let command = try #require(PommeBuddyPreferencesDependencies.live.instrumentedCommand)
-        let result = try await command("/bin/sh", ["-c", "printf 'secret'; exit 7"], { event in
+        let result = try await command("/bin/sh", ["-c", "printf 'secret'; exit 7"], 15, { event in
             events.withLock { $0.append(event) }
         })
         #expect(result.status == 7)
@@ -324,14 +369,15 @@ struct PommeBuddyPreferencesCommandTests {
             try? FileManager.default.removeItem(at: directory)
         }
         let start = ContinuousClock.now
+        let command = try #require(PommeBuddyPreferencesDependencies.live.instrumentedCommand)
         do {
-            _ = try await PommeBuddyPreferencesDependencies.live.command(
-                "/bin/sh", ["-c", "/bin/sleep 60 & child=$!; printf '%s %s' \"$$\" \"$child\" > \"$1\"; wait", "buddy-test", record.path])
+            _ = try await command(
+                "/bin/sh", ["-c", "/bin/sleep 60 & child=$!; printf '%s %s' \"$$\" \"$child\" > \"$1\"; wait", "buddy-test", record.path], 1, { _ in })
             Issue.record("Expected a timeout failure")
         } catch let failure as PommeBuddyPreferencesFailure {
             #expect(failure.code == "command-timeout")
         }
-        #expect(start.duration(to: .now) < .seconds(20))
+        #expect(start.duration(to: .now) < .seconds(5))
         let pids = try String(contentsOf: record, encoding: .utf8)
             .split(separator: " ").compactMap { Int32($0) }
         try #require(pids.count == 2 && pids.allSatisfy { $0 > 1 })

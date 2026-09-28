@@ -1143,8 +1143,10 @@ struct PommeSecurityOwnerPreparation: Sendable {
     }
     let build = try nativeIdentity("/usr/bin/sw_vers", ["-buildVersion"])
     let version = try nativeIdentity("/usr/bin/sw_vers", ["-productVersion"])
-    let deadline = now() + 120
-    for _ in 0..<61 {
+    // One initial read may take 60 seconds; the remaining nine commands
+    // retain their 15-second bounds, with room for receipt polling.
+    let deadline = now() + PommeBuddyPreferencesBudget.receipt
+    for _ in 0..<PommeBuddyPreferencesBudget.receiptPollCount {
       try Task.checkCancellation()
       if let status = try readBuddyPreferencesStatus() {
         guard UUID(uuidString: status.bootSessionUUID) == UUID(uuidString: boot),

@@ -79,6 +79,14 @@ struct PommeBuddyPreferencesCommandResult: Sendable {
     var stderr: String
 }
 
+enum PommeBuddyPreferencesBudget {
+    static let command: TimeInterval = 15
+    static let initialRead: TimeInterval = 60
+    // Each of two keys can require type/value reads, a write, and type/value readback.
+    static let receipt: TimeInterval = initialRead + 9 * command + 15
+    static let receiptPollCount = Int(receipt / 2) + 1
+}
+
 struct PommeBuddyPreferencesDependencies: Sendable {
     var bootSessionUUID: @Sendable () throws -> String
     var owner: @Sendable () throws -> PommeBuddyPreferencesOwner?
@@ -90,7 +98,7 @@ struct PommeBuddyPreferencesDependencies: Sendable {
     var sleep: @Sendable () async throws -> Void
     var diagnostic: @Sendable (PommeBuddyPreferencesDiagnostic) -> Void = PommeBuddyPreferencesDiagnostic.log
     var uptime: @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
-    var instrumentedCommand: (@Sendable (String, [String], @escaping @Sendable (PommeBuddyPreferencesDiagnostic) -> Void) async throws -> PommeBuddyPreferencesCommandResult)? = nil
+    var instrumentedCommand: (@Sendable (String, [String], TimeInterval, @escaping @Sendable (PommeBuddyPreferencesDiagnostic) -> Void) async throws -> PommeBuddyPreferencesCommandResult)? = nil
 
     static var live: Self {
         .init(bootSessionUUID: PommeBuddyPreferencesSystem.bootSessionUUID,
@@ -103,8 +111,8 @@ struct PommeBuddyPreferencesDependencies: Sendable {
               load: PommeBuddyPreferencesSystem.load,
               save: PommeBuddyPreferencesSystem.save,
               sleep: { try await Task.sleep(for: .seconds(2)) },
-              instrumentedCommand: { path, args, sink in
-                  try await Task.detached { try PommeBuddyPreferencesSystem.command(path, args, diagnostic: sink) }.value
+              instrumentedCommand: { path, args, timeout, sink in
+                  try await Task.detached { try PommeBuddyPreferencesSystem.command(path, args, timeout: timeout, diagnostic: sink) }.value
               })
     }
 }
@@ -115,6 +123,7 @@ actor PommeBuddyPreferencesMaintenance {
     private let dependencies: PommeBuddyPreferencesDependencies
     private var receipt: PommeBuddyPreferencesStatus?
     private var started = false
+    private var initialPreferenceRead = true
     private var stageStarted = ContinuousClock.now
     private let runID = UUID().uuidString
     private var lastWaitingState: String?
@@ -278,10 +287,19 @@ actor PommeBuddyPreferencesMaintenance {
               try checkedHome(current), try dependencies.consoleIsOwner(current) else { emit("owner-revalidation-failed", error: true); throw failure("owner-changed") }
         emit("owner-revalidated", ["uid": String(current.uid), "home_valid": "true", "operation": arguments[0], "key": arguments[2]])
         return try await command("/usr/bin/sudo", ["-n", "-H", "-u", "pomme", "/usr/bin/defaults"] + arguments,
-                                 operation: arguments[0], domain: arguments[1], key: arguments[2])
+                                 operation: arguments[0], domain: arguments[1], key: arguments[2],
+                                 timeout: consumePreferenceTimeout(operation: arguments[0]))
     }
 
-    private func command(_ path: String, _ args: [String], operation: String, domain: String = "none", key: String = "none") async throws -> PommeBuddyPreferencesCommandResult {
+    private func consumePreferenceTimeout(operation: String) -> TimeInterval {
+        // Console ownership can precede cfprefsd readiness during first login.
+        // Give only the first read-type extra time; never replay a failed attempt.
+        guard initialPreferenceRead, operation == "read-type" else { return PommeBuddyPreferencesBudget.command }
+        initialPreferenceRead = false
+        return PommeBuddyPreferencesBudget.initialRead
+    }
+
+    private func command(_ path: String, _ args: [String], operation: String, domain: String = "none", key: String = "none", timeout: TimeInterval = PommeBuddyPreferencesBudget.command) async throws -> PommeBuddyPreferencesCommandResult {
         let start = ContinuousClock.now
         let context = ["operation": operation, "key": key, "launcher": path == "/usr/bin/sudo" ? "sudo" : "sw_vers",
                        "boot": receipt.flatMap { UUID(uuidString: $0.bootSessionUUID)?.uuidString } ?? "unknown",
@@ -293,10 +311,10 @@ actor PommeBuddyPreferencesMaintenance {
             event.fields.merge(context) { _, context in context }
             sink(event)
         }
-        commandSink(.init(event: "command-launch"))
+        commandSink(.init(event: "command-launch", fields: ["timeout_seconds": String(timeout)]))
         do {
             let result: PommeBuddyPreferencesCommandResult
-            if let instrumented = dependencies.instrumentedCommand { result = try await instrumented(path, args, commandSink) }
+            if let instrumented = dependencies.instrumentedCommand { result = try await instrumented(path, args, timeout, commandSink) }
             else { result = try await dependencies.command(path, args) }
             commandSink(.init(event: "command-result", fields: ["exit_code": String(result.status), "stdout_bytes": String(result.stdout.utf8.count), "stderr_bytes": String(result.stderr.utf8.count), "stderr_class": PommeBuddyPreferencesDiagnostic.stderrClassification(result.stderr, domain: domain, key: key), "duration": String(describing: start.duration(to: .now))], isError: result.status != 0))
             return result
@@ -480,7 +498,7 @@ private enum PommeBuddyPreferencesSystem {
         guard fsync(directory) == 0 else { throw issue("receipt-directory-sync", errno) }
     }
 
-    static func command(_ path: String, _ arguments: [String], diagnostic: @Sendable (PommeBuddyPreferencesDiagnostic) -> Void = { _ in }) throws -> PommeBuddyPreferencesCommandResult {
+    static func command(_ path: String, _ arguments: [String], timeout: TimeInterval = PommeBuddyPreferencesBudget.command, diagnostic: @Sendable (PommeBuddyPreferencesDiagnostic) -> Void = { _ in }) throws -> PommeBuddyPreferencesCommandResult {
         var output: [Int32] = [0, 0], errors: [Int32] = [0, 0]
         guard pipe(&output) == 0 else { throw issue("command-pipe", errno) }
         defer { close(output[0]); close(output[1]) }
@@ -525,7 +543,7 @@ private enum PommeBuddyPreferencesSystem {
         var buffers = [Data(), Data()], ended = [false, false]
         var status: Int32 = 0
         var reaped = false
-        let deadline = ProcessInfo.processInfo.systemUptime + 15
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
         do {
             for fd in descriptors {
                 let flags = fcntl(fd, F_GETFL)
