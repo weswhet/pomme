@@ -288,9 +288,9 @@ extension PommeSecurityWorkflow {
 /// Every stage runs once per explicitly requested attempt. A failure preserves
 /// the phase at the caller and never triggers a reboot or a second preference write.
 struct PommeSecurityFreshOwnerLoginSequence: Sendable {
-  let verifyInitialPreferences: @Sendable () async throws -> Void
+  let verifyPreferencesCapability: @Sendable () async throws -> Void
   let configureLoginAndMarkers: @Sendable () async throws -> Void
-  let verifyRebootPreferences: @Sendable () async throws -> Void
+  let verifyOwnerPreferences: @Sendable () async throws -> Void
   let restartAndAuthenticate: @Sendable () async throws -> Void
   let verifyOwnerConsole: @Sendable () async throws -> Void
   let completeOwnerPreferences: @Sendable () async throws -> Void
@@ -299,11 +299,11 @@ struct PommeSecurityFreshOwnerLoginSequence: Sendable {
 
   func run() async throws {
     let stages: [(String, @Sendable () async throws -> Void)] = [
-      ("initial-agent-preference-receipt", verifyInitialPreferences),
+      ("agent-preference-capability", verifyPreferencesCapability),
       ("autologin-and-system-markers", configureLoginAndMarkers),
       ("normal-reboot-and-authentication", restartAndAuthenticate),
-      ("reboot-agent-preference-receipt", verifyRebootPreferences),
       ("owner-console-proof", verifyOwnerConsole),
+      ("owner-agent-preference-receipt", verifyOwnerPreferences),
       ("owner-revalidation-and-setup-assistant-closure", completeOwnerPreferences),
       ("full-desktop-proof", verifyDesktop)
     ]
@@ -572,13 +572,13 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
         vmName: reference.displayName)
       if labStrategy == nil {
         try await PommeSecurityFreshOwnerLoginSequence(
-          verifyInitialPreferences: {
-            _ = try await helper.waitForBuddyPreferences(expected: verified)
+          verifyPreferencesCapability: {
+            _ = try normal.buddyPreferencesStatus()
           },
           configureLoginAndMarkers: {
             _ = try await helper.configureLogin(password: credential.password, deferOwnerPreferences: true)
           },
-          verifyRebootPreferences: {
+          verifyOwnerPreferences: {
             _ = try await helper.waitForBuddyPreferences(expected: verified)
           },
           restartAndAuthenticate: {
@@ -601,7 +601,7 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
         return try .init(username: credential.reference.account, password: credential.password)
       }
       if let labStrategy {
-        _ = try await helper.waitForBuddyPreferences(expected: verified)
+        _ = try normal.buddyPreferencesStatus()
         let setter: (@Sendable (String) async throws -> Void)?
         if labStrategy == .legacy {
           setter = { @Sendable password in
@@ -611,7 +611,7 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
           setter = nil
         }
         if labStrategy == .markerfirst {
-          PommeCore.log("Marker-first lab: agent preferences verified; configuring native autologin and Setup Assistant markers.", vmName: reference.displayName)
+          PommeCore.log("Marker-first lab: agent capability verified; configuring native autologin and Setup Assistant markers.", vmName: reference.displayName)
         }
         _ = try await helper.configureLogin(
           password: credential.password, labSetter: setter,
@@ -623,6 +623,7 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
       try await PommeCore.restoreStableVMRunState(.stopped, reference: reference)
       try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
       try await normal.authenticate()
+      try await normal.verifyOwnerConsole(username: verified.username, uniqueID: verified.uniqueID)
       _ = try await helper.waitForBuddyPreferences(expected: verified)
       if labStrategy == .markerfirst {
         PommeCore.log("Marker-first lab: reboot and agent preferences verified; checking the owner console.", vmName: reference.displayName)
@@ -647,6 +648,7 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
       PommeCore.log(
         "Revalidating the normal desktop for owner \(account) before security mutation.",
         vmName: reference.displayName)
+      try await normal.verifyOwnerConsole(username: verified.username, uniqueID: verified.uniqueID)
       _ = try await helper.waitForBuddyPreferences(expected: verified)
       try await normal.verifyConsoleLogin(username: verified.username, uniqueID: verified.uniqueID)
     }

@@ -10,9 +10,9 @@ struct PommeSecurityWorkflowTests {
         let failPreferences = Mutex(true)
         let record: @Sendable (String) -> Void = { stage in events.withLock { $0.append(stage) } }
         let sequence = PommeSecurityFreshOwnerLoginSequence(
-            verifyInitialPreferences: { record("initial-receipt") },
+            verifyPreferencesCapability: { record("capability") },
             configureLoginAndMarkers: { record("configure") },
-            verifyRebootPreferences: { record("reboot-receipt") },
+            verifyOwnerPreferences: { record("owner-receipt") },
             restartAndAuthenticate: { record("restart") },
             verifyOwnerConsole: { record("console") },
             completeOwnerPreferences: {
@@ -25,10 +25,10 @@ struct PommeSecurityWorkflowTests {
         await #expect(throws: PommeSecurityOwnerPreparationError.commandFailed(.ownerCompletion, exitCode: 1)) {
             try await sequence.run()
         }
-        #expect(events.withLock { $0 } == ["initial-receipt", "configure", "restart", "reboot-receipt", "console", "preferences"])
+        #expect(events.withLock { $0 } == ["capability", "configure", "restart", "console", "owner-receipt", "preferences"])
         failPreferences.withLock { $0 = false }
         try await sequence.run() // A separately requested attempt, never a catch-path retry.
-        #expect(events.withLock { $0 } == ["initial-receipt", "configure", "restart", "reboot-receipt", "console", "preferences", "initial-receipt", "configure", "restart", "reboot-receipt", "console", "preferences", "desktop"])
+        #expect(events.withLock { $0 } == ["capability", "configure", "restart", "console", "owner-receipt", "preferences", "capability", "configure", "restart", "console", "owner-receipt", "preferences", "desktop"])
     }
 
     @Test("Failed autologin intent resumes the same transaction and releases security ownership on success")
@@ -137,7 +137,7 @@ struct PommeSecurityWorkflowTests {
             startedFreshBoot: false, currentBootIdentity: nil, provenBootIdentity: proven))
     }
 
-    @Test("Fresh-owner ordering stops at the first failure without retry", arguments: ["none", "initial-receipt", "configure", "restart", "reboot-receipt", "console", "preferences", "desktop"])
+    @Test("Fresh-owner receipt follows owner console and stops at the first failure without retry", arguments: ["none", "capability", "configure", "restart", "console", "owner-receipt", "preferences", "desktop"])
     func freshOwnerSequence(failure: String) async throws {
         let events = Mutex<[String]>([])
         let messages = Mutex<[String]>([])
@@ -148,15 +148,15 @@ struct PommeSecurityWorkflowTests {
             }
         }
         let sequence = PommeSecurityFreshOwnerLoginSequence(
-            verifyInitialPreferences: { try record("initial-receipt") },
+            verifyPreferencesCapability: { try record("capability") },
             configureLoginAndMarkers: { try record("configure") },
-            verifyRebootPreferences: { try record("reboot-receipt") },
+            verifyOwnerPreferences: { try record("owner-receipt") },
             restartAndAuthenticate: { try record("restart") },
             verifyOwnerConsole: { try record("console") },
             completeOwnerPreferences: { try record("preferences") },
             verifyDesktop: { try record("desktop") },
             log: { line in messages.withLock { $0.append(line) } })
-        let order = ["initial-receipt", "configure", "restart", "reboot-receipt", "console", "preferences", "desktop"]
+        let order = ["capability", "configure", "restart", "console", "owner-receipt", "preferences", "desktop"]
         if failure == "none" {
             try await sequence.run()
             #expect(events.withLock { $0 } == order)
