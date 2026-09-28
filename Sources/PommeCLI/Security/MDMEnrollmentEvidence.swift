@@ -390,6 +390,32 @@ enum MDMEnrollmentEvidenceParser {
 
     // MARK: Private parsing helpers
 
+    /// Parses the endpoints and certificate payloads that decide whether the
+    /// guest can trust the MDM server. PKCS#12 and every other payload type
+    /// are ignored; certificate payloads must decode as certificates.
+    static func parseTrustMaterial(fromMobileconfig data: Data) throws -> MDMProfileTrustMaterial {
+        let root = try propertyListDictionary(data, maximumBytes: maximumProfileBytes)
+        let serverURL = try profileIdentity(from: root).serverURL
+        let payloads = root["PayloadContent"] as? [[String: Any]] ?? []
+        let mdm = payloads.first { $0["PayloadType"] as? String == "com.apple.mdm" }
+        let checkInURL = try (mdm?["CheckInURL"] as? String).map(validServerURL)
+        var certificates: [Data] = []
+        for payload in payloads {
+            guard let type = payload["PayloadType"] as? String,
+                  MDMProfileTrustMaterial.certificatePayloadTypes.contains(type) else { continue }
+            guard let content = payload["PayloadContent"] as? Data,
+                  let decoded = MDMProfileTrustMaterial.certificates(fromPayloadContent: content) else {
+                throw MDMEnrollmentEvidenceError.malformedEvidence
+            }
+            certificates.append(contentsOf: decoded)
+            guard certificates.count <= MDMProfileTrustMaterial.maximumCertificates else {
+                throw MDMEnrollmentEvidenceError.malformedEvidence
+            }
+        }
+        guard let server = URL(string: serverURL) else { throw MDMEnrollmentEvidenceError.malformedEvidence }
+        return .init(serverURL: server, checkInURL: checkInURL.flatMap(URL.init(string:)), certificates: certificates)
+    }
+
     private static func profileIdentity(from profile: [String: Any]) throws -> (identifier: String, uuid: UUID, serverURL: String) {
         guard let identifier = profile["PayloadIdentifier"] as? String,
               let uuidValue = profile["PayloadUUID"] as? String,
