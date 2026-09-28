@@ -196,7 +196,6 @@ enum PommeSecurityOwnerPreparationError: Error, LocalizedError, Equatable, Senda
   case ownerCompletionVerificationFailed
   case buddyPreferencesAgentRequired
   case buddyPreferencesFailed
-  case setupAssistantProcessCleanupFailed
   case privatePTYUnavailable
   case phaseCallbackFailed
 
@@ -243,8 +242,6 @@ enum PommeSecurityOwnerPreparationError: Error, LocalizedError, Equatable, Senda
       return "Guest Buddy preference maintenance failed; the VM and diagnostics were retained."
     case .ownerCompletionVerificationFailed:
       return "The fresh normal guest owner completion state could not be verified."
-    case .setupAssistantProcessCleanupFailed:
-      return "The retained owner Setup Assistant process could not be closed safely."
     case .privatePTYUnavailable:
       return "The private normal guest PTY is unavailable."
     case .phaseCallbackFailed:
@@ -503,8 +500,6 @@ struct PommeSecurityOwnerPreparation: Sendable {
   private static let setupDonePath = "/var/db/.AppleSetupDone"
   private static let diagnosticsSetupDonePath = "/var/db/.AppleDiagnosticsSetupDone"
   private static let setupTermsOfServicePath = "/var/db/.AppleSetupTermsOfService"
-  private static let ownerPreferenceOutputLimit = 4 * 1024
-  private static let ownerSetupAssistantCleanupTimeout: TimeInterval = 5
   // A malformed APFS observation can be transient immediately after account
   // creation. Re-observe the complete read-only evidence set for a bounded
   // interval; this is scoped to the fresh create path and never replays
@@ -1095,8 +1090,9 @@ struct PommeSecurityOwnerPreparation: Sendable {
     }
   }
 
-  /// Revalidates the owner and the agent's current-boot receipt before closing
-  /// retained Setup Assistant. Full desktop proof remains required.
+  /// Revalidates the owner and the agent's current-boot receipt. Full desktop
+  /// proof remains required: a preference receipt does not prove MiniBuddy has
+  /// completed, and signalling MiniBuddy can log the owner out.
   func completeFreshOwnerAfterLogin(
     password: String, expected: PommeSecurityOwnerVerification
   ) async throws {
@@ -1124,7 +1120,6 @@ struct PommeSecurityOwnerPreparation: Sendable {
     else { throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed }
 
     _ = try await waitForBuddyPreferences(expected: verification)
-    try await closeRetainedOwnerSetupAssistant(ownerUID: verification.uniqueID)
   }
 
   /// Status reads never initiate preference maintenance. The independent native
@@ -1198,85 +1193,6 @@ struct PommeSecurityOwnerPreparation: Sendable {
       try await waitForFreshOwnerAPFS(2)
     }
     throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
-  }
-
-  /// A previous interrupted attempt may leave Setup Assistant running as the
-  /// newly created owner. Only the exact owner UID, executable path, PID, and
-  /// start identity may be terminated. The native `_mbsetupuser` process and
-  /// every unrelated helper are outside this cleanup boundary.
-  private func closeRetainedOwnerSetupAssistant(ownerUID: UInt32) async throws {
-    do {
-      let listed = try run(
-        .init(executable: "/bin/ps", arguments: ["-axo", "pid=,uid=,lstart=,comm="]),
-        kind: .setupAssistant,
-        acceptedExitCodes: [0]
-      )
-      let processes = try Self.parseProcessIdentities(listed)
-      let candidates = processes.filter {
-        $0.userID == ownerUID && $0.executablePath == Self.setupAssistantExecutablePath
-      }
-      guard candidates.count <= 1 else {
-        throw PommeSecurityOwnerPreparationError.setupAssistantProcessCleanupFailed
-      }
-      guard let candidate = candidates.first else { return }
-
-      guard let rechecked = try ownerSetupAssistantProcess(candidate.processID) else {
-        return
-      }
-      guard rechecked == candidate else {
-        throw PommeSecurityOwnerPreparationError.setupAssistantProcessCleanupFailed
-      }
-      let signal = try execute(
-        .init(executable: "/bin/kill", arguments: ["-TERM", String(candidate.processID)])
-      )
-      guard signal.output.utf8.count <= Self.ownerPreferenceOutputLimit,
-        signal.exitCode == 0 || signal.exitCode == 1
-      else { throw PommeSecurityOwnerPreparationError.setupAssistantProcessCleanupFailed }
-
-      let clock = ContinuousClock()
-      let deadline = clock.now.advanced(by: .seconds(Self.ownerSetupAssistantCleanupTimeout))
-      while clock.now < deadline {
-        guard let current = try ownerSetupAssistantProcess(candidate.processID) else { return }
-        guard current == candidate else {
-          throw PommeSecurityOwnerPreparationError.setupAssistantProcessCleanupFailed
-        }
-        try Task.checkCancellation()
-        try await Task.sleep(for: .milliseconds(100))
-      }
-      throw PommeSecurityOwnerPreparationError.setupAssistantProcessCleanupFailed
-    } catch let error as PommeSecurityOwnerPreparationError {
-      if case .setupAssistantProcessCleanupFailed = error { throw error }
-      throw PommeSecurityOwnerPreparationError.setupAssistantProcessCleanupFailed
-    } catch {
-      throw PommeSecurityOwnerPreparationError.setupAssistantProcessCleanupFailed
-    }
-  }
-
-  private func ownerSetupAssistantProcess(_ processID: Int32) throws
-    -> SetupAssistantProcessIdentity?
-  {
-    let result = try execute(
-      .init(
-        executable: "/bin/ps",
-        arguments: ["-p", String(processID), "-o", "pid=,uid=,lstart=,comm="])
-    )
-    guard result.output.utf8.count <= Self.ownerPreferenceOutputLimit else {
-      throw PommeSecurityOwnerPreparationError.setupAssistantProcessCleanupFailed
-    }
-    if result.exitCode == 1,
-      result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-      result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    {
-      return nil
-    }
-    guard result.exitCode == 0,
-      result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    else { throw PommeSecurityOwnerPreparationError.setupAssistantProcessCleanupFailed }
-    let processes = try Self.parseProcessIdentities(result.stdout)
-    guard processes.count == 1, let process = processes.first,
-      process.processID == processID
-    else { throw PommeSecurityOwnerPreparationError.setupAssistantProcessCleanupFailed }
-    return process
   }
 
   private func finishSetupAssistant(
