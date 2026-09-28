@@ -27,7 +27,7 @@ struct GuestOperations: Sendable {
 struct VMSecurity: Sendable {
     let sip: @Sendable (String, SIPAction, VMFinalState, Bool) async throws -> PommeOperationResult
     let amfi: @Sendable (String, AMFIAction, VMFinalState, Bool) async throws -> PommeOperationResult
-    let mdmEnroll: @Sendable (String, String, String?, TimeInterval, MDMEnrollmentMode, Bool) async throws -> PommeOperationResult
+    let mdmEnroll: @Sendable (String, String, String?, TimeInterval, MDMEnrollmentMode, MDMFinalSecurity, Bool) async throws -> PommeOperationResult
 }
 
 struct PommeEnvironment: Sendable {
@@ -65,7 +65,7 @@ struct PommeEnvironment: Sendable {
                 mdmEnroll: {
                     try await PommeApplication.mdmEnroll(
                         name: $0, profilePath: $1, guestPath: $2, timeout: $3,
-                        enrollmentMode: $4, force: $5
+                        enrollmentMode: $4, finalSecurity: $5, force: $6
                     )
                 }
             )

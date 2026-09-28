@@ -33,7 +33,7 @@ enum PommeMDMEnrollmentFailure: String, Codable, Sendable {
 }
 
 struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
-    static let schemaVersion = 5
+    static let schemaVersion = 6
 
     let schema: Int
     let generation: UInt64
@@ -43,6 +43,8 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
     let profile: MDMEnrollmentProfileIdentity
     let agentSHA256: String
     let enrollmentMode: MDMEnrollmentMode
+    /// Schema 5 and earlier journals decode as `.restore`, their only behavior.
+    let finalSecurity: MDMFinalSecurity
     let originalRunState: VMRunStateSnapshot
     /// Captured only after the intent journal is durable. A stopped, paused,
     /// or Recovery VM must never be booted merely to populate these fields
@@ -79,6 +81,7 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         profile: MDMEnrollmentProfileIdentity,
         agentSHA256: String,
         enrollmentMode: MDMEnrollmentMode,
+        finalSecurity: MDMFinalSecurity = .restore,
         originalRunState: VMRunStateSnapshot,
         sipWasDisabled: Bool? = nil,
         amfiWasDisabled: Bool? = nil,
@@ -123,6 +126,7 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         self.profile = profile
         self.agentSHA256 = agentSHA256.lowercased()
         self.enrollmentMode = enrollmentMode
+        self.finalSecurity = finalSecurity
         self.originalRunState = originalRunState
         self.sipWasDisabled = sipWasDisabled
         self.amfiWasDisabled = amfiWasDisabled
@@ -144,7 +148,7 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
-        case schema, generation, identity, profile, agentSHA256, enrollmentMode
+        case schema, generation, identity, profile, agentSHA256, enrollmentMode, finalSecurity
         case originalRunState, sipWasDisabled, amfiWasDisabled, pendingChild, sipChangeRequested, amfiChangeRequested
         case enrollmentDispatched, enrollmentVerified, normalBootArguments, configuredBootArguments
         case helperTerminationUnproven, stagedProfileOwned, ownedArtifacts, phase, failure
@@ -156,9 +160,11 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         let keys = Set(raw.allKeys.map(\.stringValue))
         let version = try raw.decode(Int.self, forKey: MDMJournalCodingKey(stringValue: "schema")!)
         let currentKeys = Set(CodingKeys.allCases.map(\.stringValue))
-        let schema4Keys = currentKeys.subtracting([CodingKeys.failure.stringValue])
+        let schema5Keys = currentKeys.subtracting([CodingKeys.finalSecurity.stringValue])
+        let schema4Keys = schema5Keys.subtracting([CodingKeys.failure.stringValue])
         let schema3Keys = schema4Keys.subtracting([CodingKeys.stagedProfileOwned.stringValue])
         guard (version == Self.schemaVersion && keys == currentKeys)
+                || (version == 5 && keys == schema5Keys)
                 || (version == 4 && keys == schema4Keys)
                 || (version == 3 && keys == schema3Keys) else {
             throw PommeMDMEnrollmentWorkflowError.malformedJournal
@@ -183,6 +189,8 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
             profile: values.decode(MDMEnrollmentProfileIdentity.self, forKey: .profile),
             agentSHA256: values.decode(String.self, forKey: .agentSHA256),
             enrollmentMode: values.decode(MDMEnrollmentMode.self, forKey: .enrollmentMode),
+            finalSecurity: version >= 6
+                ? values.decode(MDMFinalSecurity.self, forKey: .finalSecurity) : .restore,
             originalRunState: values.decode(VMRunStateSnapshot.self, forKey: .originalRunState),
             sipWasDisabled: values.decodeIfPresent(Bool.self, forKey: .sipWasDisabled),
             amfiWasDisabled: values.decodeIfPresent(Bool.self, forKey: .amfiWasDisabled),
@@ -254,7 +262,7 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         }
         return try Self.init(
             generation: generation + 1, identity: identity, profile: profile,
-            agentSHA256: agentSHA256, enrollmentMode: enrollmentMode,
+            agentSHA256: agentSHA256, enrollmentMode: enrollmentMode, finalSecurity: finalSecurity,
             originalRunState: originalRunState, sipWasDisabled: sipWasDisabled ?? self.sipWasDisabled,
             amfiWasDisabled: amfiWasDisabled ?? self.amfiWasDisabled,
             pendingChild: nextPending, sipChangeRequested: nextSIPChange,
@@ -274,12 +282,14 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         identity: PommeSecurityWorkflowIdentity,
         profile: MDMEnrollmentProfileIdentity,
         agentSHA256: String,
-        enrollmentMode: MDMEnrollmentMode
+        enrollmentMode: MDMEnrollmentMode,
+        finalSecurity: MDMFinalSecurity
     ) -> Bool {
         self.identity.matches(identity)
             && self.profile == profile
             && self.agentSHA256 == agentSHA256.lowercased()
             && self.enrollmentMode == enrollmentMode
+            && self.finalSecurity == finalSecurity
     }
 
     private static func isDigest(_ value: String) -> Bool {
@@ -385,6 +395,7 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         try values.encode(profile, forKey: .profile)
         try values.encode(agentSHA256, forKey: .agentSHA256)
         try values.encode(enrollmentMode, forKey: .enrollmentMode)
+        try values.encode(finalSecurity, forKey: .finalSecurity)
         try values.encode(originalRunState, forKey: .originalRunState)
         try values.encode(sipWasDisabled, forKey: .sipWasDisabled)
         try values.encode(amfiWasDisabled, forKey: .amfiWasDisabled)
@@ -417,6 +428,7 @@ enum PommeMDMEnrollmentWorkflowError: Error, Equatable, LocalizedError, Sendable
     case leaseRequired
     case journalIdentityMismatch
     case unfinishedModeConflict
+    case unfinishedFinalSecurityConflict
     case incompleteEnrollmentOutcome
     case malformedJournal
     case unsafeJournal
@@ -430,6 +442,7 @@ enum PommeMDMEnrollmentWorkflowError: Error, Equatable, LocalizedError, Sendable
         case .leaseRequired: "MDM enrollment requires the VM mutation lease."
         case .journalIdentityMismatch: "The retained MDM enrollment belongs to another VM or request."
         case .unfinishedModeConflict: "An unfinished MDM enrollment uses a different enrollment mode."
+        case .unfinishedFinalSecurityConflict: "An unfinished MDM enrollment uses a different --final-security value. Repeat it with its original value."
         case .incompleteEnrollmentOutcome: "A prior MDM enrollment was dispatched without verified outcome. Inspect evidence before retrying."
         case .malformedJournal: "The retained MDM enrollment journal is malformed."
         case .unsafeJournal: "The retained MDM enrollment journal is unsafe."
@@ -475,6 +488,7 @@ struct PommeMDMEnrollmentJournalStore: Sendable {
         profile: MDMEnrollmentProfileIdentity,
         agentSHA256: String,
         enrollmentMode: MDMEnrollmentMode,
+        finalSecurity: MDMFinalSecurity = .restore,
         originalRunState: VMRunStateSnapshot,
         sipWasDisabled: Bool? = nil,
         amfiWasDisabled: Bool? = nil,
@@ -498,13 +512,16 @@ struct PommeMDMEnrollmentJournalStore: Sendable {
                 guard retained.enrollmentMode == enrollmentMode else {
                     throw PommeMDMEnrollmentWorkflowError.unfinishedModeConflict
                 }
+                guard retained.finalSecurity == finalSecurity else {
+                    throw PommeMDMEnrollmentWorkflowError.unfinishedFinalSecurityConflict
+                }
                 return retained
             }
         }
         let journal = try PommeMDMEnrollmentJournal(
             generation: ((try loadIfPresent(lease: lease))?.generation ?? 0) + 1,
             identity: identity, profile: profile, agentSHA256: agentSHA256,
-            enrollmentMode: enrollmentMode, originalRunState: originalRunState,
+            enrollmentMode: enrollmentMode, finalSecurity: finalSecurity, originalRunState: originalRunState,
             sipWasDisabled: sipWasDisabled, amfiWasDisabled: amfiWasDisabled,
             ownedArtifacts: ownedArtifacts, phase: .captured, createdAt: now, updatedAt: now
         )

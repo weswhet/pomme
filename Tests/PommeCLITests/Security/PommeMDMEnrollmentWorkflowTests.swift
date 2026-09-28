@@ -37,6 +37,7 @@ struct PommeMDMEnrollmentWorkflowTests {
         var object = try fixture.onDiskObject()
         object["schema"] = 4
         object.removeValue(forKey: "failure")
+        object.removeValue(forKey: "finalSecurity")
         try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
             .write(to: fixture.store.journalURL)
         let loaded = try #require(try fixture.store.loadIfPresent(lease: fixture.lease))
@@ -48,6 +49,82 @@ struct PommeMDMEnrollmentWorkflowTests {
         #expect(try fixture.store.loadIfPresent(lease: fixture.lease) == failed)
         #expect(failed.phase == initial.phase)
         #expect(failed.failure == .beforeDispatch)
+    }
+
+    @Test("Schema 5 decodes as restore and the next write upgrades it to schema 6")
+    func schema5DecodesAsRestore() throws {
+        let fixture = try Fixture.make()
+        defer { fixture.remove() }
+        _ = try fixture.store.begin(identity: fixture.identity, profile: fixture.profile,
+            agentSHA256: fixture.digest, enrollmentMode: .supervised, originalRunState: .stopped,
+            ownedArtifacts: [], lease: fixture.lease)
+        var object = try fixture.onDiskObject()
+        object["schema"] = 5
+        object.removeValue(forKey: "finalSecurity")
+        try fixture.writeOnDisk(object)
+        let loaded = try #require(try fixture.store.loadIfPresent(lease: fixture.lease))
+        #expect(loaded.finalSecurity == .restore)
+        _ = try fixture.store.update(loaded, phase: .existingEnrollmentChecked, lease: fixture.lease)
+        #expect(try fixture.onDiskSchema() == 6)
+        #expect(try fixture.onDiskObject()["finalSecurity"] as? String == "restore")
+    }
+
+    @Test("Schema 6 round-trips its final security")
+    func schema6RoundTripsFinalSecurity() throws {
+        let fixture = try Fixture.make()
+        defer { fixture.remove() }
+        let initial = try fixture.store.begin(identity: fixture.identity, profile: fixture.profile,
+            agentSHA256: fixture.digest, enrollmentMode: .supervised, finalSecurity: .disabled,
+            originalRunState: .stopped, ownedArtifacts: [], lease: fixture.lease)
+        #expect(initial.finalSecurity == .disabled)
+        let loaded = try #require(try fixture.store.loadIfPresent(lease: fixture.lease))
+        #expect(loaded == initial)
+        let advanced = try fixture.store.update(loaded, phase: .existingEnrollmentChecked, lease: fixture.lease)
+        #expect(advanced.finalSecurity == .disabled)
+    }
+
+    @Test("A schema and key set that disagree about final security are malformed",
+          arguments: [(6, false), (5, true)])
+    func finalSecurityKeyMustMatchSchema(schema: Int, includeFinalSecurity: Bool) throws {
+        let fixture = try Fixture.make()
+        defer { fixture.remove() }
+        _ = try fixture.store.begin(identity: fixture.identity, profile: fixture.profile,
+            agentSHA256: fixture.digest, enrollmentMode: .supervised, originalRunState: .stopped,
+            ownedArtifacts: [], lease: fixture.lease)
+        var object = try fixture.onDiskObject()
+        object["schema"] = schema
+        if !includeFinalSecurity { object.removeValue(forKey: "finalSecurity") }
+        try fixture.writeOnDisk(object)
+        #expect(throws: PommeMDMEnrollmentWorkflowError.malformedJournal) {
+            _ = try fixture.store.loadIfPresent(lease: fixture.lease)
+        }
+    }
+
+    @Test("An unfinished operation rejects a final security change, while a completed one permits it")
+    func finalSecurityInterlock() throws {
+        let fixture = try Fixture.make()
+        defer { fixture.remove() }
+        _ = try fixture.store.begin(identity: fixture.identity, profile: fixture.profile,
+            agentSHA256: fixture.digest, enrollmentMode: .unapproved, finalSecurity: .disabled,
+            originalRunState: .stopped, ownedArtifacts: [], lease: fixture.lease)
+        #expect(throws: PommeMDMEnrollmentWorkflowError.unfinishedFinalSecurityConflict) {
+            _ = try fixture.store.begin(identity: fixture.identity, profile: fixture.profile,
+                agentSHA256: fixture.digest, enrollmentMode: .unapproved, finalSecurity: .restore,
+                originalRunState: .stopped, ownedArtifacts: [], lease: fixture.lease)
+        }
+        let resumed = try fixture.store.begin(identity: fixture.identity, profile: fixture.profile,
+            agentSHA256: fixture.digest, enrollmentMode: .unapproved, finalSecurity: .disabled,
+            originalRunState: .stopped, ownedArtifacts: [], lease: fixture.lease)
+        #expect(resumed.finalSecurity == .disabled)
+        let restoration = try fixture.store.update(resumed, phase: .securityRestorationIntent, lease: fixture.lease)
+        let restored = try fixture.store.update(restoration, phase: .securityRestored, lease: fixture.lease)
+        let runState = try fixture.store.update(restored, phase: .runStateRestorationIntent, lease: fixture.lease)
+        _ = try fixture.store.update(runState, phase: .restorationComplete, lease: fixture.lease)
+        let next = try fixture.store.begin(identity: fixture.identity, profile: fixture.profile,
+            agentSHA256: fixture.digest, enrollmentMode: .unapproved, finalSecurity: .restore,
+            originalRunState: .stopped, ownedArtifacts: [], lease: fixture.lease)
+        #expect(next.finalSecurity == .restore)
+        #expect(next.phase == .captured)
     }
 
     @Test("An explicit restoration failure survives verified enrollment")
@@ -312,9 +389,15 @@ struct PommeMDMEnrollmentWorkflowTests {
             object["schema"] = 3
             object.removeValue(forKey: "stagedProfileOwned")
             object.removeValue(forKey: "failure")
+            object.removeValue(forKey: "finalSecurity")
             let legacy = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
             try legacy.write(to: store.journalURL, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: store.journalURL.path)
+        }
+
+        func writeOnDisk(_ object: [String: Any]) throws {
+            try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+                .write(to: store.journalURL)
         }
 
         func onDiskObject() throws -> [String: Any] {

@@ -19,6 +19,20 @@ enum MDMEnrollmentMode: String, Codable, Sendable, CaseIterable, ExpressibleByAr
     }
 }
 
+/// The SIP/AMFI state a successful enrollment leaves behind.
+///
+/// `restore` re-enables exactly what the workflow disabled. `disabled` keeps
+/// what the workflow disabled switched off; settings it never changed stay as
+/// they were found.
+enum MDMFinalSecurity: String, Codable, Sendable, CaseIterable, ExpressibleByArgument {
+    case restore
+    case disabled
+
+    init?(argument: String) {
+        self.init(rawValue: argument)
+    }
+}
+
 /// The non-secret identity extracted from the enrollment mobileconfig.
 ///
 /// The digest covers the original profile bytes. It lets the caller retain a
