@@ -1250,9 +1250,10 @@ enum PommeApplication {
         restoreArgs: [String],
         diskSize: String,
         memory: String,
-        startMode: StartMode
+        startMode: StartMode,
+        lease inherited: VMBundleMutationLease? = nil
     ) async throws -> PommeOperationResult {
-        try await VMBundleMutationLease.withLease(name: name) { lease in
+        try await VMBundleMutationLease.withLease(name: name, inherited: inherited) { lease in
         let reference = try namedReference(name, requireExists: false)
         let bundleExists = FileManager.default.fileExists(atPath: reference.bundle.rootURL.path)
         guard !bundleExists else {

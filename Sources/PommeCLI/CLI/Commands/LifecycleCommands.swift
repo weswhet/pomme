@@ -144,27 +144,12 @@ struct CreateCommand: AsyncParsableCommand {
                 throw ValidationError("Direct creation requires a VM name.")
             }
             _ = try validateVMName(name)
-            if fromTemplate != nil, version != nil || restoreImage != nil || ipswDevice != nil {
-                throw ValidationError("--from-template cannot be combined with --version, --latest, --restore-image, or --ipsw-device.")
-            }
-            if version != nil, restoreImage != nil {
-                throw ValidationError("Choose either --version or --restore-image.")
-            }
-            if let restoreImage, restoreImage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                throw ValidationError("--restore-image requires a file path.")
-            }
-            if restoreImage != nil, ipswDevice != nil {
-                throw ValidationError("--ipsw-device is available only with --version.")
-            }
-            try IPSWDeviceIdentifier.validate(ipswDevice, flag: "--ipsw-device")
             if parallel {
                 throw ValidationError("--parallel is available only with --config.")
             }
-            for (flag, value) in [("--disk-size", diskSize), ("--memory", memory)] {
-                guard let bytes = ByteSizeParser.parse(value), bytes > 0 else {
-                    throw ValidationError("\(flag) requires a valid size greater than zero.")
-                }
-            }
+            try PommeCreationRequest.validate(
+                version: version, restoreImage: restoreImage, fromTemplate: fromTemplate,
+                ipswDevice: ipswDevice, diskSize: diskSize, memory: memory)
         }
     }
 
@@ -191,11 +176,22 @@ struct CreateCommand: AsyncParsableCommand {
         // check is the same whether or not the image is at hand.
         let memoryBytes = ByteSizeParser.parse(memory) ?? 0
         try PommeCore.validateProvisionalMemoryFloor(memoryBytes)
-        if let fromTemplate {
-            try await runFromTemplate(fromTemplate, vmName: vmName, memoryBytes: memoryBytes)
+        if !dryRun {
+            guard let source = PommeCreationRequest.source(
+                version: version, restoreImage: restoreImage, fromTemplate: fromTemplate, ipswDevice: ipswDevice
+            ) else {
+                throw ValidationError("Direct creation requires --version or a verified --restore-image.")
+            }
+            let result = try await PommeCreationRequest(
+                source: source, diskSize: diskSize, memory: memory, boot: boot
+            ).create(name: vmName)
+            try CLIOutputWriter.write(result, options: output)
             return
         }
-        let restoreArguments: [String]
+        if let fromTemplate {
+            try await writeTemplateDryRun(fromTemplate, vmName: vmName, memoryBytes: memoryBytes)
+            return
+        }
         var selectedProfile: PommeCreateRecoveryProfileDescriptor?
         var resolvedLocalRestoreImage: PommeLocalRestoreImageIdentity?
         var resolvedFirmware: IPSWMEFirmware?
@@ -207,150 +203,106 @@ struct CreateCommand: AsyncParsableCommand {
             resolvedFirmware = firmware
             let profile = try PommeRecoveryProfileSelector.select(for: firmware)
             selectedProfile = profile
-            if profile.qualification == .experimental {
-                PommeCore.log(
-                    "Warning: macOS \(firmware.version) (\(firmware.buildid)) has not been qualified for Recovery automation; creation will attempt it with observed-screen checks.",
-                    vmName: vmName
-                )
-            }
-            restoreArguments = ["--version", firmware.buildid]
-                + (ipswDevice.map { ["--ipsw-device", $0] } ?? [])
+            PommeCreationRequest.warnIfExperimental(profile, version: firmware.version,
+                                                    build: firmware.buildid, vmName: vmName)
         } else if let restoreImage {
-            restoreArguments = ["--restore-image", restoreImage]
-            if dryRun {
-                let identity = try await PommeCore.inspectLocalRestoreImage(path: restoreImage)
-                selectedProfile = identity.recoveryProfile
-                resolvedLocalRestoreImage = identity
-                if identity.recoveryProfile.qualification == .experimental {
-                    PommeCore.log(
-                        "Warning: macOS \(identity.version) (\(identity.build)) has not been qualified for Recovery automation; creation will attempt it with observed-screen checks.",
-                        vmName: vmName
-                    )
-                }
-            }
+            let identity = try await PommeCore.inspectLocalRestoreImage(path: restoreImage)
+            selectedProfile = identity.recoveryProfile
+            resolvedLocalRestoreImage = identity
+            PommeCreationRequest.warnIfExperimental(identity.recoveryProfile, version: identity.version,
+                                                    build: identity.build, vmName: vmName)
         } else {
             throw ValidationError("Direct creation requires --version or a verified --restore-image.")
         }
-        if dryRun {
-            guard let selectedProfile else {
-                throw RunnerError.hostCommandFailed("Pomme could not qualify the requested restore image.")
-            }
-            let dryRunVersion: Any
-            let dryRunRestoreImage: Any
-            let memorySource: PommeCore.DryRunRestoreSource
-            if let resolvedLocalRestoreImage {
-                dryRunVersion = resolvedLocalRestoreImage.version
-                dryRunRestoreImage = resolvedLocalRestoreImage.canonicalPath
-                memorySource = .localImage(path: resolvedLocalRestoreImage.canonicalPath)
-            } else if let resolvedFirmware {
-                dryRunVersion = version as Any
-                dryRunRestoreImage = restoreImage as Any
-                memorySource = .firmware(resolvedFirmware)
-            } else {
-                throw RunnerError.hostCommandFailed("Pomme could not resolve a restore image source for the dry run.")
-            }
-            let memoryCheck = try await PommeCore.dryRunMemoryCheck(
-                memoryBytes: memoryBytes,
-                source: memorySource,
-                vmName: vmName
-            )
-            var payload: [String: Any] = [
-                "ok": true,
-                "dryRun": true,
-                "name": vmName,
-                "version": dryRunVersion,
-                "restoreImage": dryRunRestoreImage,
-                "ipswDevice": ipswDevice as Any,
-                "diskSize": diskSize,
-                "memory": memory,
-                "memoryMinimum": memoryCheck.payload,
-                "boot": boot.rawValue,
-                "recoveryProfile": [
-                    "id": selectedProfile.id,
-                    "version": selectedProfile.version,
-                    "build": selectedProfile.build,
-                    "qualification": selectedProfile.qualification.rawValue,
-                    "digest": selectedProfile.digest
-                ]
-            ]
-            payload.merge(PommeCore.provisioningDisclosure(virtualization:
-                PommeCore.usesVirtualizationProvisioning(guestVersion: selectedProfile.version,
-                    firstBootEligible: true))) { _, new in new }
-            try CLIOutputWriter.write(
-                payload: payload,
-                text: "Would create \(vmName) (disk \(diskSize), memory \(memory), boot \(boot.rawValue)).",
-                options: output
-            )
-            return
+        guard let selectedProfile else {
+            throw RunnerError.hostCommandFailed("Pomme could not qualify the requested restore image.")
         }
-
-        let result = try await PommeApplication.create(
-            name: vmName,
-            restoreArgs: restoreArguments,
-            diskSize: diskSize,
-            memory: memory,
-            startMode: boot.startMode
+        let dryRunVersion: Any
+        let dryRunRestoreImage: Any
+        let memorySource: PommeCore.DryRunRestoreSource
+        if let resolvedLocalRestoreImage {
+            dryRunVersion = resolvedLocalRestoreImage.version
+            dryRunRestoreImage = resolvedLocalRestoreImage.canonicalPath
+            memorySource = .localImage(path: resolvedLocalRestoreImage.canonicalPath)
+        } else if let resolvedFirmware {
+            dryRunVersion = version as Any
+            dryRunRestoreImage = restoreImage as Any
+            memorySource = .firmware(resolvedFirmware)
+        } else {
+            throw RunnerError.hostCommandFailed("Pomme could not resolve a restore image source for the dry run.")
+        }
+        let memoryCheck = try await PommeCore.dryRunMemoryCheck(
+            memoryBytes: memoryBytes,
+            source: memorySource,
+            vmName: vmName
         )
-        try CLIOutputWriter.write(result, options: output)
+        var payload: [String: Any] = [
+            "ok": true,
+            "dryRun": true,
+            "name": vmName,
+            "version": dryRunVersion,
+            "restoreImage": dryRunRestoreImage,
+            "ipswDevice": ipswDevice as Any,
+            "diskSize": diskSize,
+            "memory": memory,
+            "memoryMinimum": memoryCheck.payload,
+            "boot": boot.rawValue,
+            "recoveryProfile": [
+                "id": selectedProfile.id,
+                "version": selectedProfile.version,
+                "build": selectedProfile.build,
+                "qualification": selectedProfile.qualification.rawValue,
+                "digest": selectedProfile.digest
+            ]
+        ]
+        payload.merge(PommeCore.provisioningDisclosure(virtualization:
+            PommeCore.usesVirtualizationProvisioning(guestVersion: selectedProfile.version,
+                firstBootEligible: true))) { _, new in new }
+        try CLIOutputWriter.write(
+            payload: payload,
+            text: "Would create \(vmName) (disk \(diskSize), memory \(memory), boot \(boot.rawValue)).",
+            options: output
+        )
         }
     }
 
-    /// Template creates inherit the template's disk size. An explicit
-    /// `--disk-size` is accepted only when it matches, because the cloned
-    /// image already carries its APFS container geometry.
-    private func runFromTemplate(_ templateName: String, vmName: String, memoryBytes: UInt64) async throws {
-        let manifest = try PommeTemplateStore.manifest(for: templateName)
-        let templateDiskSize = "\(manifest.diskSizeBytes / (1 << 20))MB"
-        if diskSize != "60GB", ByteSizeParser.parse(diskSize) != manifest.diskSizeBytes {
-            throw PommeTemplateError.diskSizeMismatch(
-                template: manifest.diskSizeBytes,
-                requested: ByteSizeParser.parse(diskSize) ?? 0
-            )
-        }
+    /// Prints the template creation plan; real creation goes through
+    /// `PommeCreationRequest`, which applies the same disk-size rule.
+    private func writeTemplateDryRun(_ templateName: String, vmName: String, memoryBytes: UInt64) async throws {
+        let manifest = try PommeCreationRequest.templateManifest(templateName, diskSize: diskSize)
         let descriptor = try PommeRecoveryProfileSelector.descriptor(version: manifest.version, build: manifest.build)
-        if dryRun {
-            let memoryCheck = try await PommeCore.dryRunMemoryCheck(
-                memoryBytes: memoryBytes,
-                source: .template(manifest),
-                vmName: vmName
-            )
-            var payload: [String: Any] = [
-                "ok": true,
-                "dryRun": true,
-                "name": vmName,
-                "template": manifest.name,
-                "version": manifest.version,
-                "build": manifest.build,
-                "diskSize": manifest.diskSizeBytes,
-                "memory": memory,
-                "memoryMinimum": memoryCheck.payload,
-                "boot": boot.rawValue,
-                "recoveryProfile": [
-                    "id": descriptor.id,
-                    "version": descriptor.version,
-                    "build": descriptor.build,
-                    "qualification": descriptor.qualification.rawValue,
-                    "digest": descriptor.digest
-                ]
-            ]
-            payload.merge(PommeCore.provisioningDisclosure(virtualization:
-                PommeCore.usesVirtualizationProvisioning(guestVersion: manifest.version,
-                    firstBootEligible: !manifest.isProvisioned))) { _, new in new }
-            try CLIOutputWriter.write(
-                payload: payload,
-                text: "Would create \(vmName) from template \(manifest.name) (macOS \(manifest.version) \(manifest.build), disk \(manifest.diskSizeBytes / (1 << 30))GB, memory \(memory), boot \(boot.rawValue)).",
-                options: output
-            )
-            return
-        }
-        let result = try await PommeApplication.create(
-            name: vmName,
-            restoreArgs: ["--from-template", manifest.name],
-            diskSize: templateDiskSize,
-            memory: memory,
-            startMode: boot.startMode
+        let memoryCheck = try await PommeCore.dryRunMemoryCheck(
+            memoryBytes: memoryBytes,
+            source: .template(manifest),
+            vmName: vmName
         )
-        try CLIOutputWriter.write(result, options: output)
+        var payload: [String: Any] = [
+            "ok": true,
+            "dryRun": true,
+            "name": vmName,
+            "template": manifest.name,
+            "version": manifest.version,
+            "build": manifest.build,
+            "diskSize": manifest.diskSizeBytes,
+            "memory": memory,
+            "memoryMinimum": memoryCheck.payload,
+            "boot": boot.rawValue,
+            "recoveryProfile": [
+                "id": descriptor.id,
+                "version": descriptor.version,
+                "build": descriptor.build,
+                "qualification": descriptor.qualification.rawValue,
+                "digest": descriptor.digest
+            ]
+        ]
+        payload.merge(PommeCore.provisioningDisclosure(virtualization:
+            PommeCore.usesVirtualizationProvisioning(guestVersion: manifest.version,
+                firstBootEligible: !manifest.isProvisioned))) { _, new in new }
+        try CLIOutputWriter.write(
+            payload: payload,
+            text: "Would create \(vmName) from template \(manifest.name) (macOS \(manifest.version) \(manifest.build), disk \(manifest.diskSizeBytes / (1 << 30))GB, memory \(memory), boot \(boot.rawValue)).",
+            options: output
+        )
     }
 }
 
