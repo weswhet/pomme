@@ -193,7 +193,30 @@ enum MDMServerTrustProbe {
     /// Completes a TLS handshake and records the presented chain. The
     /// server-trust challenge is cancelled, so no HTTP request is sent.
     static func live(_ url: URL, timeout: TimeInterval) async -> MDMServerTrustObservation {
-        guard url.scheme?.lowercased() == "https" else { return .unreachable }
+        await withCheckedContinuation { continuation in
+            start(url, timeout: timeout) { continuation.resume(returning: $0) }
+        }
+    }
+
+    /// The same probe for synchronous callers such as the guest helper,
+    /// which already waits on its private daemon requests the same way.
+    static func blocking(_ url: URL, timeout: TimeInterval) -> MDMServerTrustObservation {
+        let semaphore = DispatchSemaphore(value: 0)
+        let result = ObservationBox()
+        start(url, timeout: timeout) { observation in
+            result.set(observation)
+            semaphore.signal()
+        }
+        // URLSession enforces the timeout; this bound only guards against a
+        // completion that never arrives.
+        guard semaphore.wait(timeout: .now() + timeout + 5) == .success else { return .unreachable }
+        return result.value ?? .unreachable
+    }
+
+    private static func start(
+        _ url: URL, timeout: TimeInterval, completion: @escaping @Sendable (MDMServerTrustObservation) -> Void
+    ) {
+        guard url.scheme?.lowercased() == "https" else { return completion(.unreachable) }
         let delegate = TrustCaptureDelegate()
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = timeout
@@ -202,12 +225,20 @@ enum MDMServerTrustProbe {
         configuration.httpCookieStorage = nil
         configuration.urlCredentialStorage = nil
         let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
         request.httpMethod = "HEAD"
-        _ = try? await session.data(for: request)
-        guard let chain = delegate.chain, !chain.isEmpty else { return .unreachable }
-        return .presented(chain)
+        session.dataTask(with: request) { _, _, _ in
+            session.invalidateAndCancel()
+            guard let chain = delegate.chain, !chain.isEmpty else { return completion(.unreachable) }
+            completion(.presented(chain))
+        }.resume()
+    }
+
+    private final class ObservationBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var observation: MDMServerTrustObservation?
+        var value: MDMServerTrustObservation? { lock.withLock { observation } }
+        func set(_ value: MDMServerTrustObservation) { lock.withLock { observation = value } }
     }
 
     private final class TrustCaptureDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
@@ -217,14 +248,15 @@ enum MDMServerTrustProbe {
         var chain: [Data]? { lock.withLock { captured } }
 
         func urlSession(
-            _ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge
-        ) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+            _ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+            completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+        ) {
             if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
                let trust = challenge.protectionSpace.serverTrust {
                 let certificates = SecTrustCopyCertificateChain(trust) as? [SecCertificate] ?? []
                 lock.withLock { captured = certificates.map { SecCertificateCopyData($0) as Data } }
             }
-            return (.cancelAuthenticationChallenge, nil)
+            completionHandler(.cancelAuthenticationChallenge, nil)
         }
     }
 }
@@ -237,18 +269,34 @@ enum MDMServerTrustPreflight {
         timeout: TimeInterval = MDMServerTrustProbe.defaultTimeout,
         probe: Probe = { await MDMServerTrustProbe.live($0, timeout: $1) }, verifyDate: Date? = nil
     ) async -> MDMServerTrustReport {
-        var reports: [MDMServerTrustEndpointReport] = []
-        for url in material.endpoints {
-            let endpoint = MDMServerEndpoint(url)
-            guard endpoint.scheme == "https" else {
-                reports.append(.init(endpoint: endpoint, decision: .notApplicable))
-                continue
-            }
-            let decision = MDMServerTrustEvaluator.evaluate(
-                await probe(url, timeout), host: endpoint.host, profileCertificates: material.certificates,
-                defaultAnchors: defaultAnchors, verifyDate: verifyDate)
-            reports.append(.init(endpoint: endpoint, decision: decision))
+        var observations: [String: MDMServerTrustObservation] = [:]
+        for url in material.endpoints where MDMServerEndpoint(url).scheme == "https" {
+            observations[MDMServerEndpoint(url).key] = await probe(url, timeout)
         }
-        return .init(endpoints: reports)
+        return report(material, defaultAnchors: defaultAnchors, verifyDate: verifyDate) {
+            observations[MDMServerEndpoint($0).key] ?? .unreachable
+        }
+    }
+
+    static func runBlocking(
+        _ material: MDMProfileTrustMaterial, defaultAnchors: MDMServerTrustEvaluator.DefaultAnchors,
+        timeout: TimeInterval = MDMServerTrustProbe.defaultTimeout
+    ) -> MDMServerTrustReport {
+        report(material, defaultAnchors: defaultAnchors, verifyDate: nil) {
+            MDMServerTrustProbe.blocking($0, timeout: timeout)
+        }
+    }
+
+    private static func report(
+        _ material: MDMProfileTrustMaterial, defaultAnchors: MDMServerTrustEvaluator.DefaultAnchors,
+        verifyDate: Date?, observe: (URL) -> MDMServerTrustObservation
+    ) -> MDMServerTrustReport {
+        .init(endpoints: material.endpoints.map { url in
+            let endpoint = MDMServerEndpoint(url)
+            guard endpoint.scheme == "https" else { return .init(endpoint: endpoint, decision: .notApplicable) }
+            return .init(endpoint: endpoint, decision: MDMServerTrustEvaluator.evaluate(
+                observe(url), host: endpoint.host, profileCertificates: material.certificates,
+                defaultAnchors: defaultAnchors, verifyDate: verifyDate))
+        })
     }
 }
