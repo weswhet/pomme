@@ -584,6 +584,43 @@ struct PommeCore {
         return plan
     }
 
+    /// Classifies the creation transaction for planning. Unlike the loaders
+    /// used to run it, this never creates a journal key or advances a
+    /// generation high-water mark.
+    static func provisioningReadiness(reference: VMReference) -> PommeProvisioningReadiness {
+        let bundle = reference.bundle
+        let schema: Int?
+        do { schema = try provisioningSchemaIfPresent(bundle: bundle) }
+        catch { return .blocked(schema: nil, reason: .invalidJournal) }
+        guard let schema else { return .blocked(schema: nil, reason: .unmanaged) }
+        let keyURL = provisioningKeyURL(bundle: bundle)
+        guard isRegularFile(keyURL) else { return .blocked(schema: schema, reason: .invalidJournal) }
+        do {
+            if schema == 2 {
+                let key = try PommeSSHBootstrap.privateRead(keyURL, owner: geteuid(), allowedModes: [0o600])
+                let journal = try provisioningV2Repository(bundle: bundle, key: key).inspect()
+                guard journal.plan.vm.bundlePath == reference.standardizedPath,
+                      reference.name == nil || journal.plan.vm.name == reference.name else {
+                    return .blocked(schema: 2, reason: .invalidJournal)
+                }
+                return PommeProvisioningReadinessClassifier.classify(v2: journal) {
+                    try provisioningWasDispatched(plan: journal.plan)
+                }
+            }
+            let key = try Data(contentsOf: keyURL, options: .mappedIfSafe)
+            guard key.count >= 32 else { return .blocked(schema: 1, reason: .invalidJournal) }
+            let journal = try provisioningRepository(bundleURL: bundle.rootURL,
+                signer: PommeProvisioningJournalSigner(key: key)).load()
+            guard journal.plan.vm.bundlePath == reference.standardizedPath,
+                  reference.name == nil || journal.plan.vm.name == reference.name else {
+                return .blocked(schema: 1, reason: .invalidJournal)
+            }
+            return PommeProvisioningReadinessClassifier.classify(v1: journal)
+        } catch {
+            return .blocked(schema: schema, reason: .invalidJournal)
+        }
+    }
+
     static func expectedProvisionedAgentDigest(reference: VMReference) throws -> String {
         try loadOwnedProvisioningPlan(reference: reference).normalAgent.executableDigest
     }

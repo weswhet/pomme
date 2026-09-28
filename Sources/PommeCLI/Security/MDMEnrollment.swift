@@ -38,6 +38,24 @@ enum MDMProfileStaging {
     }
 }
 
+enum MDMAgentReadiness: Equatable, Sendable {
+    case ready
+    /// Not an authenticated, attested persistent agent on protocol v1.
+    case unattested
+    /// A different executable than the one creation pinned.
+    case digestMismatch
+    case missingCapabilities([String])
+
+    var code: String {
+        switch self {
+        case .ready: "ready"
+        case .unattested: "unattested"
+        case .digestMismatch: "digestMismatch"
+        case .missingCapabilities: "missingCapabilities"
+        }
+    }
+}
+
 /// MDM accepts evidence only from an authenticated, connected normal PommeAgent
 /// using the closed protocol-v1 capability contract.
 enum MDMEnrollmentAgentGate {
@@ -49,29 +67,18 @@ enum MDMEnrollmentAgentGate {
         _ agent: MDMEnrollmentAgentDescription,
         expectedExecutableDigest: String? = nil
     ) throws -> [String: Any] {
-        guard agent.connected,
-              agent.authenticated,
-              agent.role == MDMEnrollmentAgentDescription.normalRole,
-              agent.protocolName == MDMEnrollmentAgentDescription.protocolName,
-              agent.protocolVersion == MDMEnrollmentAgentDescription.protocolVersion,
-              isAttestedDigest(agent.executableDigest) else {
+        switch classify(agent, expectedExecutableDigest: expectedExecutableDigest) {
+        case .ready:
+            break
+        case .unattested:
             throw RunnerError.hostCommandFailed(
                 "MDM enrollment requires an authenticated, attested persistent PommeAgent using protocol v1."
             )
-        }
-        if let expectedExecutableDigest {
-            guard isAttestedDigest(expectedExecutableDigest),
-                  agent.executableDigest == expectedExecutableDigest.lowercased() else {
-                throw RunnerError.hostCommandFailed(
-                    "MDM enrollment requires the expected signed PommeAgent executable."
-                )
-            }
-        }
-
-        let missing = MDMEnrollmentAgentDescription.requiredCapabilities
-            .subtracting(agent.capabilities)
-            .sorted()
-        guard missing.isEmpty else {
+        case .digestMismatch:
+            throw RunnerError.hostCommandFailed(
+                "MDM enrollment requires the expected signed PommeAgent executable."
+            )
+        case .missingCapabilities:
             throw RunnerError.hostCommandFailed(
                 "MDM enrollment requires verified PommeAgent enrollment and maintenance capabilities."
             )
@@ -84,6 +91,31 @@ enum MDMEnrollmentAgentGate {
             "version": agent.protocolVersion,
             "capabilities": MDMEnrollmentAgentDescription.requiredCapabilities.sorted()
         ]
+    }
+
+    /// The same closed policy as `verify`, as a value a planner can report.
+    static func classify(
+        _ agent: MDMEnrollmentAgentDescription,
+        expectedExecutableDigest: String? = nil
+    ) -> MDMAgentReadiness {
+        guard agent.connected,
+              agent.authenticated,
+              agent.role == MDMEnrollmentAgentDescription.normalRole,
+              agent.protocolName == MDMEnrollmentAgentDescription.protocolName,
+              agent.protocolVersion == MDMEnrollmentAgentDescription.protocolVersion,
+              isAttestedDigest(agent.executableDigest) else {
+            return .unattested
+        }
+        if let expectedExecutableDigest {
+            guard isAttestedDigest(expectedExecutableDigest),
+                  agent.executableDigest == expectedExecutableDigest.lowercased() else {
+                return .digestMismatch
+            }
+        }
+        let missing = MDMEnrollmentAgentDescription.requiredCapabilities
+            .subtracting(agent.capabilities)
+            .sorted()
+        return missing.isEmpty ? .ready : .missingCapabilities(missing)
     }
 
     private static func isAttestedDigest(_ value: String?) -> Bool {

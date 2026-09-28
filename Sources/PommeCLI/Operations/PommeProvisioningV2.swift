@@ -207,6 +207,24 @@ struct PommeFileProvisioningV2JournalRepository: PommeProvisioningV2JournalRepos
         return journal
     }
 
+    /// `load` without its one recoverable high-water write, for callers that
+    /// must only observe. A pending advance is reported, not performed.
+    func inspect() throws -> PommeProvisioningV2Journal {
+        let fd = open(journalURL.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw PommeProvisioningV2Error.unsafeRepository }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        try validateFile(fd)
+        let data = try handle.readToEnd() ?? Data()
+        guard data.count <= 4 * 1024 * 1024 else { throw PommeProvisioningV2Error.invalidJournal }
+        let journal = try JSONDecoder().decode(PommeProvisioningV2Journal.self, from: data)
+        try signer.verify(journal)
+        let highWater = try loadHighWater()
+        guard journal.generation == highWater || (highWater < UInt64.max && journal.generation == highWater + 1) else {
+            throw PommeProvisioningV2Error.generationFailure
+        }
+        return journal
+    }
+
     func commit(_ journal: PommeProvisioningV2Journal, replacing generation: UInt64) throws {
         let current = try load()
         guard generation < UInt64.max, current.generation == generation,
