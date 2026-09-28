@@ -21,9 +21,11 @@ final class PommeLogSignalController: @unchecked Sendable {
     private let queue: DispatchQueue
     private let interruptSource: DispatchSourceSignal
     private let terminateSource: DispatchSourceSignal
-    private let previousInterruptHandler: sig_t
-    private let previousTerminateHandler: sig_t
-    private let previousPipeHandler: sig_t
+    // SIG_DFL is a null function pointer; preserve it without implicitly
+    // unwrapping Darwin.signal's optional return value.
+    private let previousInterruptHandler: sig_t?
+    private let previousTerminateHandler: sig_t?
+    private let previousPipeHandler: sig_t?
 
     init() {
         let storage = PommeLogSignalStorage()
