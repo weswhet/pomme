@@ -7,6 +7,7 @@ import Security
 enum GuestMDMDiagnostics {
     enum Stage: String, CaseIterable, Sendable {
         case helperValidation, profileValidation, profileRead, profileIdentity, installedProfileObservation
+        case serverTrustProbe, serverTrustEvaluation, certificatePayloadSelection
         case profilesCommand, profilesParse, frameworkLoad, profileDictionary, profileInitialization
         case identityPayload, interactionPolicy, privateKeychainOpen, privateKeychainStatus, privateKeychainUnlock, privateKeychainCredential, privateKeychainFallback
         case systemKeychainOpen, systemKeychainStatus, certificateSnapshot, keySnapshot
@@ -16,7 +17,8 @@ enum GuestMDMDiagnostics {
         var precedesIdentityImport: Bool {
             switch self {
             case .helperValidation, .profileValidation, .profileRead, .profileIdentity,
-                 .installedProfileObservation, .profilesCommand, .profilesParse,
+                 .installedProfileObservation, .serverTrustProbe, .serverTrustEvaluation,
+                 .certificatePayloadSelection, .profilesCommand, .profilesParse,
                  .frameworkLoad, .profileDictionary, .profileInitialization,
                  .identityPayload, .interactionPolicy, .privateKeychainOpen,
                  .privateKeychainStatus, .privateKeychainUnlock, .privateKeychainCredential, .privateKeychainFallback, .systemKeychainOpen, .systemKeychainStatus,
@@ -598,6 +600,24 @@ enum GuestMDMIdentityKeychain {
     }
 }
 
+enum GuestMDMCertificateInclusion: Equatable, Sendable {
+    case omitted
+    case included
+}
+
+extension MDMServerTrustDecision {
+    /// Closed numeric code for helper diagnostics.
+    var diagnosticStatus: Int64 {
+        switch self {
+        case .publicTrust: 0
+        case .profileRootTrust: 1
+        case .untrusted: 2
+        case .unreachable: 3
+        case .notApplicable: 4
+        }
+    }
+}
+
 struct GuestMDMEnrollment {
     static let stagingDirectory = "/private/var/db/pomme-mdm-enrollment"
     var requestTimeout: TimeInterval = 60
@@ -612,6 +632,11 @@ struct GuestMDMEnrollment {
     var installedProfileObservation: ((MDMEnrollmentProfileIdentity, TimeInterval) throws -> MDMInstalledProfileIdentity?)?
     /// Test-only proof that identity import was not reached on a conflict.
     var identityImportObserver: (() -> Void)?
+    /// Decides how this guest can trust the profile's MDM server. The
+    /// production default probes each endpoint with the guest's own trust.
+    var serverTrust: (MDMProfileTrustMaterial) -> MDMServerTrustReport = {
+        MDMServerTrustPreflight.runBlocking($0, defaultAnchors: .platformDefault)
+    }
 
     private struct ObservationContext {
         let expected: MDMEnrollmentProfileIdentity
@@ -625,7 +650,8 @@ struct GuestMDMEnrollment {
         profileArchiveOverride: Data? = nil,
         profileIdentityOverride: MDMEnrollmentProfileIdentity? = nil,
         installedProfileObservation: ((MDMEnrollmentProfileIdentity, TimeInterval) throws -> MDMInstalledProfileIdentity?)? = nil,
-        identityImportObserver: (() -> Void)? = nil
+        identityImportObserver: (() -> Void)? = nil,
+        serverTrust: ((MDMProfileTrustMaterial) -> MDMServerTrustReport)? = nil
     ) {
         self.requestTimeout = requestTimeout
         self.request = request
@@ -633,6 +659,7 @@ struct GuestMDMEnrollment {
         self.profileIdentityOverride = profileIdentityOverride
         self.installedProfileObservation = installedProfileObservation
         self.identityImportObserver = identityImportObserver
+        if let serverTrust { self.serverTrust = serverTrust }
     }
 
     /// Dispatcher-facing typed operations. The persistent PommeAgent owns the
@@ -690,9 +717,13 @@ struct GuestMDMEnrollment {
             archive = profileArchiveOverride
             expectedProfileIdentifier = observationContext?.expected.identifier
         } else {
+            let sourceData = try observationContext?.sourceData
+                ?? Data(contentsOf: URL(fileURLWithPath: validatedProfile.path))
+            let certificates = try certificateInclusion(profileData: sourceData)
             let built = try buildProfileArchiveWithIdentity(
                 profilePath: validatedProfile.path,
-                profileData: observationContext?.sourceData
+                profileData: sourceData,
+                certificates: certificates
             )
             archive = built.archive
             expectedProfileIdentifier = built.profileIdentifier
@@ -868,7 +899,48 @@ struct GuestMDMEnrollment {
         )
     }
 
-    private func buildProfileArchiveWithIdentity(profilePath: String, profileData: Data? = nil) throws -> (
+    /// Whether the archive carries the profile's certificate payloads. They
+    /// are included only when the guest cannot already trust the server and
+    /// the profile's own roots can; otherwise enrollment stops here, before
+    /// any identity import or daemon request, so a retry remains safe.
+    func certificateInclusion(profileData: Data) throws -> GuestMDMCertificateInclusion {
+        GuestMDMDiagnostics.record(.serverTrustProbe)
+        let material: MDMProfileTrustMaterial
+        do { material = try MDMEnrollmentEvidenceParser.parseTrustMaterial(fromMobileconfig: profileData) }
+        catch { throw GuestInternalError.mdm("The enrollment profile's server or certificate payloads are invalid.") }
+        let report = serverTrust(material)
+        GuestMDMDiagnostics.record(.serverTrustEvaluation, status: report.decision.diagnosticStatus)
+        let inclusion: GuestMDMCertificateInclusion
+        switch report.decision {
+        case .publicTrust, .notApplicable:
+            inclusion = .omitted
+        case .profileRootTrust:
+            inclusion = .included
+        case .untrusted:
+            throw GuestInternalError.mdm("The guest cannot trust the MDM server with its own or the profile's certificates.")
+        case .unreachable:
+            throw GuestInternalError.mdm("The guest could not complete a TLS handshake with the MDM server.")
+        }
+        GuestMDMDiagnostics.record(.certificatePayloadSelection, status: inclusion == .included ? 1 : 0)
+        return inclusion
+    }
+
+    /// The payloads sent to the daemon: always the single MDM payload, and
+    /// the certificate payloads first when they are needed for server trust.
+    /// Identity (PKCS#12) and all other payloads are never forwarded.
+    static func archivePayloads(
+        from payloads: [[String: Any]], certificates: GuestMDMCertificateInclusion
+    ) -> [[String: Any]] {
+        let mdm = payloads.filter { $0["PayloadType"] as? String == "com.apple.mdm" }
+        guard certificates == .included else { return mdm }
+        return payloads.filter {
+            ($0["PayloadType"] as? String).map(MDMProfileTrustMaterial.certificatePayloadTypes.contains) == true
+        } + mdm
+    }
+
+    private func buildProfileArchiveWithIdentity(
+        profilePath: String, profileData: Data? = nil, certificates: GuestMDMCertificateInclusion = .omitted
+    ) throws -> (
         archive: Data,
         importedIdentity: ImportedMDMIdentity,
         profileIdentifier: String
@@ -901,7 +973,7 @@ struct GuestMDMEnrollment {
         let payloads = dictionary["PayloadContent"] as? [[String: Any]] ?? []
         let mdmPayloads = payloads.filter { $0["PayloadType"] as? String == "com.apple.mdm" }
         guard mdmPayloads.count == 1 else { throw GuestInternalError.mdm("Enrollment profile must contain exactly one com.apple.mdm payload.") }
-        mdmOnly["PayloadContent"] = mdmPayloads
+        mdmOnly["PayloadContent"] = Self.archivePayloads(from: payloads, certificates: certificates)
 
         guard let profileClass = NSClassFromString("CPProfile") else {
             throw GuestInternalError.mdm("CPProfile is unavailable.")
