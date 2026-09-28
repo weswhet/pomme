@@ -268,21 +268,55 @@ VM state for inspection. Other security failures may restore the run state captu
 at the start when that state can be safely proved; otherwise, the journal is
 retained and restoration is reported incomplete. `--force` confirms the fresh-owner
 branch only; it does not override credentials, ownership, native login
-protections, or cleanup barriers. MDM requires verified normal-agent
-capabilities. `mdm VM --profile FILE` defaults to supervised, user-approved
-enrollment. It prepares SIP and AMFI automatically when needed, verifies the
-installed profile, approval, and supervision, then restores the original
-security settings and VM run state on success. If enrollment fails, Pomme exits
-nonzero immediately and preserves the current SIP/AMFI settings, VM run state,
-staged files, and journal for debugging. It does not poll for enrollment or
-perform automatic cleanup after that failure. `--enrollment-mode unapproved` selects
-enrollment without approval or supervision. Remote Login and Screen Sharing
-are explicit, capability-gated operations.
+protections, or cleanup barriers. Remote Login and Screen Sharing are
+explicit, capability-gated operations.
 
-For a VM that starts with SIP and AMFI enabled:
+`mdm VM --profile FILE` takes a VM from any state to the requested enrollment.
+It works out what is missing from the VM's retained state and runs only those
+steps, in order, under one mutation lease:
+
+1. Create the VM when it does not exist (`--from-template`, `--version`,
+   `--latest`, or `--restore-image`, with `--memory`, `--disk-size`, and
+   `--boot none|normal`). These options are ignored once the VM exists.
+2. Resume an incomplete creation, which installs and verifies the agent.
+3. Finish a retained standalone `sip` or `amfi` operation with its own
+   operation and final state.
+4. Enroll: boot normal macOS, verify the pinned agent, read SIP and AMFI, and
+   disable only what enrollment needs. On a fresh VM without an owner, the SIP
+   step creates the `pomme` owner, which needs `--force` or a confirmation.
+
+Enrollment defaults to supervised, user-approved enrollment;
+`--enrollment-mode unapproved` selects enrollment without approval or
+supervision. It verifies the installed profile, approval, and supervision, then
+restores the original SIP/AMFI settings and VM run state. `--final-security
+disabled` instead leaves what this enrollment disabled switched off; re-enable
+later with `pomme amfi enable` and then `pomme sip enable`.
+
+Before touching the VM, the host checks the profile's MDM server. When the
+host reaches it and neither Apple's roots nor the profile's own certificate
+payloads validate it, a command that could still install the profile stops
+(`--skip-server-preflight` skips this when the guest already trusts the
+server); an unreachable server only warns. Inside the guest, the enrollment helper checks again
+before importing the identity. When only the profile's roots validate the
+server, their certificate payloads are installed with the MDM payload, so a
+private-CA server needs no manual trust setup.
+
+Each step keeps its own journal. If one fails, Pomme exits nonzero and
+preserves the current SIP/AMFI settings, VM run state, staged files, and
+journals; it does not poll for enrollment or clean up automatically. Repeat the
+same command, profile, mode, and `--final-security` to resume. States that
+cannot be resumed safely, such as a dispatched first boot without a receipt, a
+pinned agent that lacks MDM capabilities, or a retained enrollment for a
+different request, stop before any effect with a named blocker. `--dry-run`
+reports the detected state and planned steps without changing the VM.
 
 ```sh
-pomme mdm dev --profile ./enrollment.mobileconfig
+# Create from a template if needed and enroll, whatever state the VM is in:
+pomme mdm dev --profile ./enrollment.mobileconfig --from-template base --memory 4GB --force
+# See what it would do first:
+pomme mdm dev --profile ./enrollment.mobileconfig --from-template base --dry-run
+# Leave SIP and AMFI disabled afterwards:
+pomme mdm dev --profile ./enrollment.mobileconfig --final-security disabled
 # Or request unapproved enrollment:
 pomme mdm dev --profile ./enrollment.mobileconfig --enrollment-mode unapproved
 # Include detailed enrollment diagnostics:
@@ -294,9 +328,11 @@ A matching enrollment is reused; an already-satisfied request avoids security
 changes. Conflicting profiles and downgrades from approved or supervised
 enrollment are rejected. Diagnostics identify the failing guest stage and include
 elapsed times, numeric status codes, and Keychain status flags without profile
-contents or credentials. Structured output includes `result.failureStage` and
-`result.diagnostics` when the helper returns them, plus
-`result.failureStatePreserved` and `result.retryAllowed` on failure.
+contents or credentials. Structured output lists each step with its status in
+`steps` and includes `result.readiness` (detected state, blockers, and
+warnings), `result.serverTrust`, `result.failureStage` and `result.diagnostics`
+when the helper returns them, plus `result.failureStatePreserved` and
+`result.retryAllowed` on failure.
 
 After rebuilding and installing Pomme, repeat the same command, profile, and mode
 to inspect retained work. Each enrollment attempt stages a helper from the

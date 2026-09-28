@@ -373,6 +373,43 @@ SIP uses the normal agent's exact `csrutil status` read-back for its normal-boot
 check. Its `enforcementVerified` field can be true only after that check and a
 verified normal boot.
 
+## MDM from any state
+
+`pomme mdm` composes the workflows above rather than adding a new security
+path. Before enrollment it may create the VM, resume its creation journal, or
+finish a retained standalone SIP/AMFI journal with that journal's own operation
+and final state. The finish step runs outside the MDM child scope, so
+`requireMDMWorkflowAvailable` still refuses it while an MDM journal is
+unfinished; a retained SIP/AMFI journal that is the MDM journal's
+`pendingChild` is instead resumed by the MDM engine. A retained SIP/AMFI
+journal for a different operation while an MDM journal is unfinished is a
+`competingSecurityOperation` blocker. Planning reads journals without writing:
+it never creates a provisioning key or advances a V2 high-water mark.
+
+Security preparation is unchanged: the engine reads SIP and AMFI in normal
+macOS and runs `sipDisable`, then `amfiDisable`, only for what is enabled. With
+the default `--final-security restore`, restoration runs `amfiEnable` before
+`sipEnable` and must reproduce the captured baseline exactly. With
+`--final-security disabled`, the journal still records
+`securityRestorationIntent` but runs no enable children; verification then
+requires SIP disabled if this enrollment disabled it and the AMFI override if
+this enrollment added it, while settings it never changed must still match the
+baseline. An already-satisfied enrollment changes nothing in either mode. The
+value is part of MDM journal schema 6 and cannot change while that journal is
+unfinished.
+
+Server trust is decided before any identity import. The host checks the
+profile's endpoints against Apple's built-in roots only, so host trust settings
+cannot stand in for the guest's, and then against the profile's self-signed
+certificate payloads. The temporary guest helper repeats the check with the
+guest's full trust. If the guest already trusts the server, the enrollment
+archive carries only the MDM payload. If only the profile's roots validate it,
+the `com.apple.security.root`, `pkcs1`, and `pem` payloads travel in the same
+private install; PKCS#12 and other payloads never do. An untrusted or
+unreachable server fails at a stage that precedes identity import, so the
+retained journal permits a retry. Pomme does not edit trust settings or the
+authorization database.
+
 ## Live qualification status
 
 The complete AMFI disable/enable configuration cycle passed on a new disposable

@@ -12,3 +12,17 @@ Release publication remains disabled. A `v0.1.0` tag and package publication
 require green CI, independent review of the Tahoe and Sequoia live qualification
 matrices, and the clean disposable-VM qualification described in
 `Docs/Qualification.md`.
+
+## MDM from any state
+
+`pomme mdm VM --profile FILE` now creates a missing VM, resumes incomplete
+creation, finishes a retained standalone SIP/AMFI operation, and then enrolls,
+repeating safely after any failure. `--dry-run` reports the plan,
+`--final-security disabled` keeps the SIP/AMFI changes enrollment made, and
+certificate payloads from the profile are installed when only they validate
+the MDM server.
+
+The MDM enrollment journal is now schema 6. Schema 3–5 journals are read
+with `--final-security restore` and rewritten as schema 6 on their next
+update; an older Pomme cannot read a schema-6 journal, so finish retained MDM
+work before downgrading.
