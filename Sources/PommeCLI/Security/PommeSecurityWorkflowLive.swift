@@ -718,6 +718,8 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
           command: command, password: password)
       },
       readBuddyPreferencesStatus: { try normal.buddyPreferencesStatus() },
+      readDirectory: { try normal.localDirectory() },
+      verifyPassword: { try normal.verifyDirectoryPassword(username: $0, password: $1) },
       reportPhase: { phase, event in
         PommeCore.log(
           "Owner preparation: \(phase.rawValue) \(event.rawValue).",

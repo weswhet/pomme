@@ -4,6 +4,93 @@ import Synchronization
 
 @Suite("Pomme normal guest owner preparation")
 struct PommeSecurityOwnerPreparationTests {
+  /// The fixture's own directory data, as the agent's native read returns it.
+  private func nativeSnapshot(of fixture: OwnerPreparationFixture) throws -> PommeGuestDirectorySnapshot {
+    func dscl(_ arguments: [String]) throws -> String {
+      String(decoding: try fixture.execute(.init(path: "/usr/bin/dscl", arguments: arguments, timeout: 15)).stdout,
+             as: UTF8.self)
+    }
+    var users: [String: [String: String]] = [:]
+    for attribute in ["UniqueID", "GeneratedUID"] {
+      for line in try dscl([".", "-list", "/Users", attribute]).split(whereSeparator: \.isNewline) {
+        let fields = line.split(separator: " ").map(String.init)
+        users[fields[0], default: ["RecordName": fields[0]]][attribute] = fields.count > 1 ? fields[1] : nil
+      }
+    }
+    // The fixture answers any unknown read with the owner's record, so only
+    // keep a read whose record is the one requested.
+    for name in users.keys {
+      var record: [String: String] = [:]
+      for field in try dscl([".", "-read", "/Users/\(name)"] + PommeGuestDirectorySnapshot.attributes)
+        .split(whereSeparator: \.isNewline) {
+        guard let separator = field.firstIndex(of: ":") else { continue }
+        record[String(field[..<separator])] = field[field.index(after: separator)...]
+          .trimmingCharacters(in: .whitespaces)
+      }
+      if record["RecordName"] == name { users[name]?.merge(record) { _, read in read } }
+    }
+    return PommeGuestDirectorySnapshot(users: users)
+  }
+
+  @Test("Native directory evidence verifies the owner exactly like dscl, without guest dscl")
+  func nativeDirectoryParity() async throws {
+    let legacy = OwnerPreparationFixture(existingOwner: true)
+    let expected = try await PommeSecurityOwnerPreparation(
+      freshnessRequirements: .verifiedFresh, executeGuest: legacy.execute,
+      executePrivatePTY: legacy.executePTY
+    ).verifyOwner(password: "opaque-owner-secret")
+    #expect(legacy.ptyCommands.contains { $0.arguments == [".", "-authonly", "pomme"] })
+
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    let snapshot = try nativeSnapshot(of: fixture)
+    let baseline = fixture.guestPaths.count
+    let passwords = Mutex<[String]>([])
+    let preparation = PommeSecurityOwnerPreparation(
+      freshnessRequirements: .verifiedFresh, executeGuest: fixture.execute,
+      executePrivatePTY: fixture.executePTY,
+      readDirectory: { snapshot },
+      verifyPassword: { username, password in
+        #expect(username == "pomme")
+        passwords.withLock { $0.append(password) }
+        return true
+      })
+    let verified = try await preparation.verifyOwner(password: "opaque-owner-secret")
+
+    #expect(verified == expected)
+    #expect(!fixture.guestPaths.dropFirst(baseline).contains("/usr/bin/dscl"))
+    #expect(!fixture.ptyCommands.contains { $0.executable == "/usr/bin/dscl" })
+    #expect(passwords.withLock { $0 } == ["opaque-owner-secret"])
+  }
+
+  @Test("A native password rejection fails verification without the PTY")
+  func nativePasswordRejection() async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    let snapshot = try nativeSnapshot(of: fixture)
+    let preparation = PommeSecurityOwnerPreparation(
+      freshnessRequirements: .verifiedFresh, executeGuest: fixture.execute,
+      executePrivatePTY: fixture.executePTY,
+      readDirectory: { snapshot }, verifyPassword: { _, _ in false })
+    await #expect(throws: PommeSecurityOwnerPreparationError.passwordVerificationFailed) {
+      _ = try await preparation.verifyOwner(password: "wrong")
+    }
+    #expect(!fixture.ptyCommands.contains { $0.executable == "/usr/bin/dscl" })
+  }
+
+  @Test("A native snapshot with a malformed record fails closed like dscl output would")
+  func nativeMalformedRecord() async throws {
+    let fixture = OwnerPreparationFixture(existingOwner: true)
+    var users = try nativeSnapshot(of: fixture).users
+    users["pomme"]?["UniqueID"] = "not-a-number"
+    let malformed = PommeGuestDirectorySnapshot(users: users)
+    let preparation = PommeSecurityOwnerPreparation(
+      freshnessRequirements: .verifiedFresh, executeGuest: fixture.execute,
+      executePrivatePTY: fixture.executePTY,
+      readDirectory: { malformed }, verifyPassword: { _, _ in true })
+    await #expect(throws: PommeSecurityOwnerPreparationError.self) {
+      _ = try await preparation.verifyOwner(password: "opaque-owner-secret")
+    }
+  }
+
   @Test("Buddy receipts must match the current boot, OS, and verified owner", arguments: [
     "success", "failed", "boot", "build", "version", "uid", "guid", "home", "account", "missingOwner", "unknownOutcome",
     "successStage", "waitingStage", "runningStage", "waitingError", "runningError", "successError",

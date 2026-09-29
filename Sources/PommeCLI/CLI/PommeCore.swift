@@ -2684,7 +2684,9 @@ struct PommeCore {
                     expectedExecutableDigest: plan.normalAgent.executableDigest,
                     command: command, password: secret, provisioningVerification: true)
             },
-            readBuddyPreferencesStatus: { try normal.buddyPreferencesStatus() })
+            readBuddyPreferencesStatus: { try normal.buddyPreferencesStatus() },
+            readDirectory: { try normal.localDirectory() },
+            verifyPassword: { try normal.verifyDirectoryPassword(username: $0, password: $1) })
         let proof = try await preparation.verifyFrameworkProvisionedOwner(password: password,
             expectedGeneratedUID: owner.generatedUID)
         try await normal.verifyOwnerConsole(username: owner.account, uniqueID: proof.owner.uniqueID)
@@ -3050,7 +3052,15 @@ struct PommeCore {
         guard status.capabilities.contains("buddy.preferences.status") else {
             throw PommeSecurityOwnerPreparationError.buddyPreferencesAgentRequired
         }
-        let currentOwner = try await PommeBootstrapBuddyPreferences.readOwner { request in
+        let currentOwner: PommeBuddyPreferencesOwner
+        if status.capabilities.contains(PommeGuestDirectory.readUsersOperation) {
+            // Native OpenDirectory read in the agent: no guest process.
+            let response = try await coordinator.performCorrelated(
+                operation: PommeGuestDirectory.readUsersOperation, payload: .object([:]))
+            currentOwner = try PommeBootstrapBuddyPreferences.owner(
+                from: PommeGuestDirectorySnapshot(result: response.result.publicValue))
+        } else {
+        currentOwner = try await PommeBootstrapBuddyPreferences.readOwner { request in
             try request.validate()
             let result = try await PommeForegroundExecution.run(
                 payload: JSONValue(any: request.agentPayload()), timeout: request.timeout,
@@ -3067,6 +3077,7 @@ struct PommeCore {
                 throw PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
             }
             return try PommeSecurityNormalAgent.decodeCompletedCommand(object)
+        }
         }
         guard expectedUID == nil || currentOwner.uid == expectedUID,
               expectedGeneratedUID == nil || UUID(uuidString: currentOwner.generatedUID) == expectedGeneratedUID else {

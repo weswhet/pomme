@@ -550,6 +550,12 @@ struct PommeSecurityOwnerPreparation: Sendable {
   let identity: PommeSecurityOwnerIdentity
   let freshnessRequirements: PommeSecurityOwnerFreshnessRequirements
   private let readBuddyPreferencesStatus: @Sendable () throws -> PommeBuddyPreferencesStatus?
+  /// Native OpenDirectory local users from the agent; nil when the pinned
+  /// agent predates that operation, which keeps its `dscl` evidence path.
+  private let readDirectory: @Sendable () throws -> PommeGuestDirectorySnapshot?
+  /// Native OpenDirectory password check; nil when unsupported, which keeps
+  /// the private-PTY `dscl -authonly` path.
+  private let verifyPassword: @Sendable (String, String) async throws -> Bool?
   private let executeGuest: GuestCommandExecutor
   private let executePrivatePTY: PrivatePTYExecutor
   private let reportPhase: PhaseReporter
@@ -565,6 +571,8 @@ struct PommeSecurityOwnerPreparation: Sendable {
     readBuddyPreferencesStatus: @escaping @Sendable () throws -> PommeBuddyPreferencesStatus? = {
       throw PommeSecurityOwnerPreparationError.buddyPreferencesAgentRequired
     },
+    readDirectory: @escaping @Sendable () throws -> PommeGuestDirectorySnapshot? = { nil },
+    verifyPassword: @escaping @Sendable (String, String) async throws -> Bool? = { _, _ in nil },
     reportPhase: @escaping PhaseReporter = { _, _ in },
     waitForFreshOwnerAPFS: @escaping @Sendable (TimeInterval) async throws -> Void = {
       interval in
@@ -579,6 +587,8 @@ struct PommeSecurityOwnerPreparation: Sendable {
     self.identity = identity
     self.freshnessRequirements = freshnessRequirements
     self.readBuddyPreferencesStatus = readBuddyPreferencesStatus
+    self.readDirectory = readDirectory
+    self.verifyPassword = verifyPassword
     self.executeGuest = executeGuest
     self.executePrivatePTY = executePrivatePTY
     self.reportPhase = reportPhase
@@ -765,6 +775,10 @@ struct PommeSecurityOwnerPreparation: Sendable {
   }
 
   private func authenticateOwner(password: String) async throws {
+    if let verified = try await verifyPassword(identity.username, password) {
+      guard verified else { throw PommeSecurityOwnerPreparationError.passwordVerificationFailed }
+      return
+    }
     let authCommand = PommeSecurityOwnerPTYCommand(
       executable: "/usr/bin/dscl",
       arguments: [".", "-authonly", identity.username]
@@ -2226,6 +2240,11 @@ struct PommeSecurityOwnerPreparation: Sendable {
     kind: PommeSecurityOwnerCommandKind,
     acceptedExitCodes: Set<Int32>
   ) throws -> String {
+    // Directory reads come from the agent's native OpenDirectory records
+    // when it supports them; no dscl process is started in that case.
+    if command.executable == "/usr/bin/dscl", let snapshot = try readDirectory() {
+      return try snapshot.dsclOutput(command.arguments)
+    }
     let result = try execute(command)
     guard acceptedExitCodes.contains(result.exitCode) else {
       throw PommeSecurityOwnerPreparationError.commandFailed(kind, exitCode: Int(result.exitCode))

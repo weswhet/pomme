@@ -1449,6 +1449,50 @@ struct PommeSecurityNormalAgent: Sendable {
       .contains(PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation)
   }
 
+  /// Capabilities of the pinned persistent agent, from an authenticated describe.
+  private func pinnedCapabilities() throws -> Set<String> {
+    let described = try PommeCore.sendControlObject([
+      "command": "agent.perform", "operation": "agent.describe", "payload": [:],
+    ], bundle: reference.bundle, timeout: 15)
+    guard described["ok"] as? Bool == true,
+      let description = described["result"] as? [String: Any],
+      description["role"] as? String == "persistent",
+      description["protocol"] as? String == PommeAgentProtocol.name,
+      Self.integerValue(description["version"]) == Int64(PommeAgentProtocol.version),
+      description["executableSHA256"] as? String == expectedExecutableDigest,
+      let capabilities = description["capabilities"] as? [String]
+    else { throw PommeSecurityWorkflowError.agentUnverified }
+    return Set(capabilities)
+  }
+
+  /// Local users through the agent's native OpenDirectory read, or nil when
+  /// the pinned agent predates it and the caller must use its `dscl` path.
+  func localDirectory() throws -> PommeGuestDirectorySnapshot? {
+    guard try pinnedCapabilities().contains(PommeGuestDirectory.readUsersOperation) else { return nil }
+    let response = try PommeCore.sendControlObject([
+      "command": "agent.perform", "operation": PommeGuestDirectory.readUsersOperation, "payload": [:],
+    ], bundle: reference.bundle, timeout: 30)
+    guard response["ok"] as? Bool == true, let result = response["result"] else {
+      throw PommeSecurityOwnerPreparationError.evidenceUnavailable(.localUsers)
+    }
+    return try PommeGuestDirectorySnapshot(result: result)
+  }
+
+  /// Verifies the owner password with OpenDirectory in the guest, or returns
+  /// nil when the pinned agent predates it. The password travels only in the
+  /// authenticated request and is never logged.
+  func verifyDirectoryPassword(username: String, password: String) throws -> Bool? {
+    guard try pinnedCapabilities().contains(PommeGuestDirectory.verifyPasswordOperation) else { return nil }
+    let response = try PommeCore.sendControlObject([
+      "command": "agent.perform", "operation": PommeGuestDirectory.verifyPasswordOperation,
+      "payload": ["username": username, "password": password],
+    ], bundle: reference.bundle, timeout: 30)
+    guard response["ok"] as? Bool == true, let result = response["result"] as? [String: Any],
+      Set(result.keys) == ["verified"], let verified = result["verified"] as? Bool
+    else { throw PommeSecurityOwnerPreparationError.privatePTYUnavailable }
+    return verified
+  }
+
   /// Reads the daemon's boot receipt. This operation cannot initiate maintenance.
   func buddyPreferencesStatus() throws -> PommeBuddyPreferencesStatus? {
     let described = try PommeCore.sendControlObject([
