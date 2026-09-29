@@ -287,6 +287,7 @@ extension PommeSecurityWorkflow {
 
 /// Every stage runs once per explicitly requested attempt. A failure preserves
 /// the phase at the caller and never triggers a reboot or a second preference write.
+/// The Buddy preference stages are advisory: their failure is logged and skipped.
 struct PommeSecurityFreshOwnerLoginSequence: Sendable {
   let verifyPreferencesCapability: @Sendable () async throws -> Void
   let configureLoginAndMarkers: @Sendable () async throws -> Void
@@ -298,17 +299,21 @@ struct PommeSecurityFreshOwnerLoginSequence: Sendable {
   var log: @Sendable (String) -> Void = { _ in }
 
   func run() async throws {
-    let stages: [(String, @Sendable () async throws -> Void)] = [
-      ("agent-preference-capability", verifyPreferencesCapability),
-      ("autologin-and-system-markers", configureLoginAndMarkers),
-      ("normal-reboot-and-authentication", restartAndAuthenticate),
-      ("owner-console-proof", verifyOwnerConsole),
-      ("owner-agent-preference-receipt", verifyOwnerPreferences),
-      ("owner-revalidation-and-preference-receipt", completeOwnerPreferences),
-      ("full-desktop-proof", verifyDesktop)
+    let stages: [(String, Bool, @Sendable () async throws -> Void)] = [
+      ("agent-preference-capability", true, verifyPreferencesCapability),
+      ("autologin-and-system-markers", false, configureLoginAndMarkers),
+      ("normal-reboot-and-authentication", false, restartAndAuthenticate),
+      ("owner-console-proof", false, verifyOwnerConsole),
+      ("owner-agent-preference-receipt", true, verifyOwnerPreferences),
+      ("owner-revalidation-and-preference-receipt", true, completeOwnerPreferences),
+      ("full-desktop-proof", false, verifyDesktop)
     ]
-    for (stage, perform) in stages {
+    for (stage, advisory, perform) in stages {
       log("Fresh-owner stage started: \(stage).")
+      if advisory {
+        try await PommeBuddyPreferencesGate.failOpen(stage, log: log) { try await perform() }
+        continue
+      }
       do { try await perform() } catch {
         log("Fresh-owner stage failed: \(stage). State retained; no automatic retry or failure restart.")
         throw error
@@ -601,7 +606,9 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
         return try .init(username: credential.reference.account, password: credential.password)
       }
       if let labStrategy {
-        _ = try normal.buddyPreferencesStatus()
+        try await PommeBuddyPreferencesGate.failOpen("capability check", log: { PommeCore.log($0, vmName: reference.displayName) }) {
+          _ = try normal.buddyPreferencesStatus()
+        }
         let setter: (@Sendable (String) async throws -> Void)?
         if labStrategy == .legacy {
           setter = { @Sendable password in
@@ -624,7 +631,9 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
       try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
       try await normal.authenticate()
       try await normal.verifyOwnerConsole(username: verified.username, uniqueID: verified.uniqueID)
-      _ = try await helper.waitForBuddyPreferences(expected: verified)
+      try await PommeBuddyPreferencesGate.failOpen("receipt", log: { PommeCore.log($0, vmName: reference.displayName) }) {
+        _ = try await helper.waitForBuddyPreferences(expected: verified)
+      }
       if labStrategy == .markerfirst {
         PommeCore.log("Marker-first lab: reboot and agent preferences verified; checking the owner console.", vmName: reference.displayName)
         try await PommeAutologinComparison.verifyOwnerConsole(
@@ -649,7 +658,9 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
         "Revalidating the normal desktop for owner \(account) before security mutation.",
         vmName: reference.displayName)
       try await normal.verifyOwnerConsole(username: verified.username, uniqueID: verified.uniqueID)
-      _ = try await helper.waitForBuddyPreferences(expected: verified)
+      try await PommeBuddyPreferencesGate.failOpen("receipt", log: { PommeCore.log($0, vmName: reference.displayName) }) {
+        _ = try await helper.waitForBuddyPreferences(expected: verified)
+      }
       try await normal.verifyConsoleLogin(username: verified.username, uniqueID: verified.uniqueID)
     }
     return try .init(username: credential.reference.account, password: credential.password)

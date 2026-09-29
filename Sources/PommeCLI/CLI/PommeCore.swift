@@ -2689,7 +2689,9 @@ struct PommeCore {
             expectedGeneratedUID: owner.generatedUID)
         try await normal.verifyOwnerConsole(username: owner.account, uniqueID: proof.owner.uniqueID)
         checkpoint(.buddyPreferences)
-        _ = try await preparation.waitForBuddyPreferences(expected: proof.owner)
+        try await PommeBuddyPreferencesGate.failOpen("receipt", log: { log($0, vmName: plan.vm.name) }) {
+            _ = try await preparation.waitForBuddyPreferences(expected: proof.owner)
+        }
         checkpoint(.desktopProof)
         // A newly provisioned desktop can take longer than an established security workflow.
         _ = try await normal.verifyConsoleLogin(
@@ -3031,6 +3033,18 @@ struct PommeCore {
     private static func verifyBootstrapBuddyPreferencesPrerequisites(
         coordinator: PommeAgentVSOCKCoordinator,
         expectedUID: UInt32? = nil, expectedGeneratedUID: UUID?
+    ) async throws {
+        // The owner is proved again by SSH UID verification before this and by
+        // the full owner proof in verifyNormalAgent after it.
+        try await PommeBuddyPreferencesGate.failOpen("bootstrap prerequisites", log: { log($0) }) {
+            try await requireBootstrapBuddyPreferencesPrerequisites(coordinator: coordinator,
+                expectedUID: expectedUID, expectedGeneratedUID: expectedGeneratedUID)
+        }
+    }
+
+    private static func requireBootstrapBuddyPreferencesPrerequisites(
+        coordinator: PommeAgentVSOCKCoordinator,
+        expectedUID: UInt32?, expectedGeneratedUID: UUID?
     ) async throws {
         let status = await coordinator.status()
         guard status.capabilities.contains("buddy.preferences.status") else {

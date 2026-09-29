@@ -155,3 +155,24 @@ struct PommeBootstrapBuddyPreferencesTests {
         #expect(reads.withLock { $0 } == 60)
     }
 }
+
+struct PommeBuddyPreferencesGateTests {
+    @Test("A Buddy failure is logged with its reason and does not stop the caller")
+    func failureIsLoggedAndSkipped() async throws {
+        let messages = Mutex<[String]>([])
+        try await PommeBuddyPreferencesGate.failOpen("receipt", log: { line in messages.withLock { $0.append(line) } }) {
+            throw PommeSecurityOwnerPreparationError.buddyPreferencesFailed
+        }
+        let logged = messages.withLock { $0 }
+        #expect(logged.count == 1)
+        #expect(logged[0].contains("receipt did not complete"))
+        #expect(logged[0].contains(PommeSecurityOwnerPreparationError.buddyPreferencesFailed.localizedDescription))
+    }
+
+    @Test("Cancellation still stops the caller")
+    func cancellationPropagates() async {
+        await #expect(throws: CancellationError.self) {
+            try await PommeBuddyPreferencesGate.failOpen("receipt", log: { _ in }) { throw CancellationError() }
+        }
+    }
+}
