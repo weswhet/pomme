@@ -402,13 +402,19 @@ Server trust is decided before any identity import. The host checks the
 profile's endpoints against Apple's built-in roots only, so host trust settings
 cannot stand in for the guest's, and then against the profile's self-signed
 certificate payloads. The temporary guest helper repeats the check with the
-guest's full trust. If the guest already trusts the server, the enrollment
-archive carries only the MDM payload. If only the profile's roots validate it,
-the `com.apple.security.root`, `pkcs1`, and `pem` payloads travel in the same
-private install; PKCS#12 and other payloads never do. An untrusted or
-unreachable server fails at a stage that precedes identity import, so the
-retained journal permits a retry. Pomme does not edit trust settings or the
-authorization database.
+guest's full trust. The enrollment archive always carries only the MDM
+payload. If only the profile's roots validate the server, the helper first
+installs the `com.apple.security.root`, `pkcs1`, and `pem` payloads as a
+separate configuration profile through the same private `InstallProfile`
+request, under the deterministic identifier
+`com.github.weswhet.pomme.mdm-trust.<profile UUID>`, and requires the guest's
+own trust to validate the server before importing the identity. (Certificate
+payloads carried inside the MDM archive are not trusted before the daemon's
+first check-in; the September 29 macOS 27 lab failed TLS with `-9802` that
+way.) PKCS#12 and other payloads are never forwarded. An untrusted or
+unreachable server, or a failed trust-profile install, stops at a stage that
+precedes identity import, so the retained journal permits a retry. Pomme does
+not edit trust settings or the authorization database.
 
 ## Live qualification status
 
