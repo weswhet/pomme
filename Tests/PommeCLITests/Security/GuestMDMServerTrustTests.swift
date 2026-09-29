@@ -66,29 +66,41 @@ struct GuestMDMServerTrustTests {
         }
     }
 
-    @Test("Archives carry the MDM payload, plus certificate payloads first when included, never PKCS#12")
-    func archivePayloadSelection() throws {
+    @Test("The trust profile carries only certificate payloads under a deterministic Pomme identity")
+    func trustProfileDictionary() throws {
         let profile = try MDMTrustFixtures.mobileconfig(certificatePayloads: [
             ("com.apple.security.root", MDMTrustFixtures.root),
             ("com.apple.security.pem", MDMTrustFixtures.pem([MDMTrustFixtures.root])),
             ("com.apple.security.pkcs1", MDMTrustFixtures.leaf),
         ])
-        let root = try #require(PropertyListSerialization.propertyList(from: profile, format: nil) as? [String: Any])
-        let payloads = try #require(root["PayloadContent"] as? [[String: Any]])
-
-        let omitted = GuestMDMEnrollment.archivePayloads(from: payloads, certificates: .omitted)
-        #expect(omitted.map { $0["PayloadType"] as? String } == ["com.apple.mdm"])
-
-        let included = GuestMDMEnrollment.archivePayloads(from: payloads, certificates: .included)
-        #expect(included.map { $0["PayloadType"] as? String } == [
-            "com.apple.security.root", "com.apple.security.pem", "com.apple.security.pkcs1", "com.apple.mdm",
+        let source = try #require(PropertyListSerialization.propertyList(from: profile, format: nil) as? [String: Any])
+        let trust = try #require(GuestMDMEnrollment.trustProfileDictionary(from: source))
+        let payloads = try #require(trust["PayloadContent"] as? [[String: Any]])
+        #expect(payloads.map { $0["PayloadType"] as? String } == [
+            "com.apple.security.root", "com.apple.security.pem", "com.apple.security.pkcs1",
         ])
-        #expect(!included.contains { $0["PayloadType"] as? String == "com.apple.security.pkcs12" })
+        #expect(trust["PayloadType"] as? String == "Configuration")
+        #expect(trust["PayloadIdentifier"] as? String
+            == GuestMDMEnrollment.trustProfilePrefix + "11111111-2222-3333-4444-555555555555")
+        let uuid = try #require((trust["PayloadUUID"] as? String).flatMap(UUID.init(uuidString:)))
+        #expect(uuid != UUID(uuidString: "11111111-2222-3333-4444-555555555555"))
+        // Deterministic, so a retry replaces the same profile.
+        #expect(GuestMDMEnrollment.trustProfileDictionary(from: source)?["PayloadUUID"] as? String
+            == trust["PayloadUUID"] as? String)
+        #expect(PropertyListSerialization.propertyList(trust, isValidFor: .xml))
+    }
+
+    @Test("A profile without certificate payloads has no trust profile")
+    func noCertificatesNoTrustProfile() throws {
+        let profile = try MDMTrustFixtures.mobileconfig(certificatePayloads: [])
+        let source = try #require(PropertyListSerialization.propertyList(from: profile, format: nil) as? [String: Any])
+        #expect(GuestMDMEnrollment.trustProfileDictionary(from: source) == nil)
     }
 
     @Test("New trust stages are closed diagnostics that precede identity import")
     func stagesPrecedeImport() {
-        for stage in [GuestMDMDiagnostics.Stage.serverTrustProbe, .serverTrustEvaluation, .certificatePayloadSelection] {
+        for stage in [GuestMDMDiagnostics.Stage.serverTrustProbe, .serverTrustEvaluation, .certificatePayloadSelection,
+                      .trustProfileInstall, .trustProfileVerification] {
             #expect(stage.precedesIdentityImport)
         }
     }

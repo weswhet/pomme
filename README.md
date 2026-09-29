@@ -298,8 +298,10 @@ payloads validate it, a command that could still install the profile stops
 (`--skip-server-preflight` skips this when the guest already trusts the
 server); an unreachable server only warns. Inside the guest, the enrollment helper checks again
 before importing the identity. When only the profile's roots validate the
-server, their certificate payloads are installed with the MDM payload, so a
-private-CA server needs no manual trust setup.
+server, their certificate payloads are installed first as a separate
+configuration profile, `com.github.weswhet.pomme.mdm-trust.<profile UUID>`, so a
+private-CA server needs no manual trust setup. That profile stays installed;
+remove it with `profiles remove -identifier` when it is no longer wanted.
 
 Each step keeps its own journal. If one fails, Pomme exits nonzero and
 preserves the current SIP/AMFI settings, VM run state, staged files, and

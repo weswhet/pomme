@@ -19,8 +19,9 @@ matrices, and the clean disposable-VM qualification described in
 creation, finishes a retained standalone SIP/AMFI operation, and then enrolls,
 repeating safely after any failure. `--dry-run` reports the plan,
 `--final-security disabled` keeps the SIP/AMFI changes enrollment made, and
-certificate payloads from the profile are installed when only they validate
-the MDM server.
+certificate payloads from the profile are installed as a separate
+`com.github.weswhet.pomme.mdm-trust.*` profile when only they validate the MDM
+server.
 
 The MDM enrollment journal is now schema 6. Schema 3–5 journals are read
 with `--final-security restore` and rewritten as schema 6 on their next
