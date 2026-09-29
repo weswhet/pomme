@@ -465,15 +465,23 @@ struct PommeSecurityNormalAgentTests {
       response(exitCode: Int64(-1)),
       response(exitCode: Int64(256)),
       response(exitCode: nil),
-      response(exitCode: Int64(0), exited: false),
-      response(exitCode: Int64(0), outputComplete: false),
-      response(exitCode: Int64(0), stdoutTruncated: true),
-      response(exitCode: Int64(0), stderrTruncated: true),
     ]
 
     for invalidResponse in invalidResponses {
       #expect(throws: PommeSecurityWorkflowError.agentUnverified) {
         try PommeSecurityNormalAgent.decodeCompletedCommand(invalidResponse)
+      }
+    }
+    // Well-formed results for a run that did not finish are reported as
+    // incomplete commands, not as agent identity failures.
+    for incomplete in [
+      response(exitCode: Int64(0), exited: false),
+      response(exitCode: Int64(0), outputComplete: false),
+      response(exitCode: Int64(0), stdoutTruncated: true),
+      response(exitCode: Int64(0), stderrTruncated: true),
+    ] {
+      #expect(throws: PommeSecurityWorkflowError.commandIncomplete) {
+        try PommeSecurityNormalAgent.decodeCompletedCommand(incomplete)
       }
     }
   }
