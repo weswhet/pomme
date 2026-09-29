@@ -73,6 +73,39 @@ struct PommeBuddyPreferencesDiagnostic: Sendable {
     }
 }
 
+/// The two fixed values maintenance manages. Only these types are written.
+enum PommeBuddyPreferenceValue: Equatable, Sendable {
+    case string(String)
+    case boolean(Bool)
+
+    init?(propertyListValue value: Any?) {
+        switch value {
+        // A property-list boolean decodes as NSNumber; check its exact type
+        // so that an integer 0 or 1 is not mistaken for a boolean.
+        case let number as NSNumber where CFGetTypeID(number) == CFBooleanGetTypeID():
+            self = .boolean(number.boolValue)
+        case let string as String:
+            self = .string(string)
+        default:
+            return nil
+        }
+    }
+
+    var propertyListValue: Any {
+        switch self {
+        case .string(let value): value
+        case .boolean(let value): value
+        }
+    }
+
+    var typeName: String {
+        switch self {
+        case .string: "string"
+        case .boolean: "boolean"
+        }
+    }
+}
+
 struct PommeBuddyPreferencesCommandResult: Sendable {
     var status: Int32
     var stdout: String
@@ -82,7 +115,8 @@ struct PommeBuddyPreferencesCommandResult: Sendable {
 enum PommeBuddyPreferencesBudget {
     static let command: TimeInterval = 15
     static let initialRead: TimeInterval = 60
-    // Each of two keys can require type/value reads, a write, and type/value readback.
+    // The host's receipt wait. Maintenance now runs only two OS-detection
+    // commands and writes preference files directly, so this is generous.
     static let receipt: TimeInterval = initialRead + 9 * command + 15
     static let receiptPollCount = Int(receipt / 2) + 1
 }
@@ -91,7 +125,10 @@ struct PommeBuddyPreferencesDependencies: Sendable {
     var bootSessionUUID: @Sendable () throws -> String
     var owner: @Sendable () throws -> PommeBuddyPreferencesOwner?
     var homeExists: @Sendable (PommeBuddyPreferencesOwner) throws -> Bool
-    var consoleIsOwner: @Sendable (PommeBuddyPreferencesOwner) throws -> Bool
+    /// Reads one key from the owner's preference file; nil when absent.
+    var readPreference: @Sendable (PommeBuddyPreferencesOwner, String, String) throws -> PommeBuddyPreferenceValue?
+    /// Merges one key into the owner's preference file.
+    var writePreference: @Sendable (PommeBuddyPreferencesOwner, String, String, PommeBuddyPreferenceValue) throws -> Void
     var command: @Sendable (String, [String]) async throws -> PommeBuddyPreferencesCommandResult
     var load: @Sendable () throws -> PommeBuddyPreferencesStatus?
     var save: @Sendable (PommeBuddyPreferencesStatus) throws -> Void
@@ -104,7 +141,12 @@ struct PommeBuddyPreferencesDependencies: Sendable {
         .init(bootSessionUUID: PommeBuddyPreferencesSystem.bootSessionUUID,
               owner: PommeBuddyPreferencesSystem.owner,
               homeExists: PommeBuddyPreferencesSystem.homeExists,
-              consoleIsOwner: PommeBuddyPreferencesSystem.consoleIsOwner,
+              readPreference: { owner, domain, key in
+                  try PommeBuddyCFPreferences.read(owner: owner, domain: domain, key: key)
+              },
+              writePreference: { owner, domain, key, value in
+                  try PommeBuddyCFPreferences.write(owner: owner, domain: domain, key: key, value: value)
+              },
               command: { path, args in
                   try await Task.detached { try PommeBuddyPreferencesSystem.command(path, args) }.value
               },
@@ -123,7 +165,6 @@ actor PommeBuddyPreferencesMaintenance {
     private let dependencies: PommeBuddyPreferencesDependencies
     private var receipt: PommeBuddyPreferencesStatus?
     private var started = false
-    private var initialPreferenceRead = true
     private var stageStarted = ContinuousClock.now
     private let runID = UUID().uuidString
     private var lastWaitingState: String?
@@ -219,24 +260,25 @@ actor PommeBuddyPreferencesMaintenance {
             receipt?.buildVersion = buildVersion
             emit("os-detected", ["product_version": receipt!.productVersion!, "build": receipt!.buildVersion!])
             try transition("waitingForOwner", outcome: "waiting")
+            // Preferences are set through cfprefsd for the named owner, so
+            // there is no need to wait for a login; the next login reads them.
             while true {
                 try Task.checkCancellation()
                 if let owner = try lookupOwner() {
-                    let homeReady = try checkedHome(owner)
-                    if homeReady, try dependencies.consoleIsOwner(owner) {
+                    if try checkedHome(owner) {
                         emit("owner-found", ["uid": String(owner.uid), "generated_uid": UUID(uuidString: owner.generatedUID)!.uuidString, "home": "/Users/pomme", "home_valid": "true"])
                         receipt?.owner = owner
                         break
                     }
-                    waiting(homeReady ? "console-owner-absent" : "home-absent")
+                    waiting("home-absent")
                 } else { waiting("account-absent") }
                 try await dependencies.sleep()
             }
             try transition("maintainingBuild", outcome: "running")
-            try await maintain(domain: "com.apple.SetupAssistant", key: "LastSeenBuddyBuildVersion",
-                               type: "string", value: receipt!.buildVersion!)
+            try maintain(domain: "com.apple.SetupAssistant", key: "LastSeenBuddyBuildVersion",
+                         value: .string(receipt!.buildVersion!))
             try transition("maintainingMiniBuddy", outcome: "running")
-            try await maintain(domain: "com.apple.loginwindow", key: "MiniBuddyLaunch", type: "boolean", value: "0")
+            try maintain(domain: "com.apple.loginwindow", key: "MiniBuddyLaunch", value: .boolean(false))
             try transition("complete", outcome: "succeeded")
         } catch {
             if error is CancellationError, receipt?.outcome == "waiting" {
@@ -256,7 +298,7 @@ actor PommeBuddyPreferencesMaintenance {
         emit("maintenance-finished", ["outcome": receipt?.outcome == "succeeded" ? "succeeded" : "failed", "duration": String(describing: start.duration(to: .now))])
     }
 
-    private static let failureCodes: Set<String> = ["cancelled", "maintenance-failed", "invalid-owner", "ambiguous-owner", "boot-query", "command-encoding", "command-output-limit", "command-pipe", "command-read", "command-signal", "command-signal-setup", "command-spawn", "command-spawn-init", "command-spawn-setup", "command-timeout", "command-wait", "directory-result", "console-query", "home-query", "interrupted-attempt", "invalid-boot-identity", "invalid-owner-attribute", "invalid-owner-uid", "invalid-receipt", "os-detection-failed", "owner-changed", "preference-boolean-invalid", "preference-build-invalid", "preference-read-failed", "preference-read-type-failed", "preference-readback-mismatch", "preference-type-mismatch", "preference-write-failed", "receipt-commit", "receipt-create", "receipt-directory-open", "receipt-directory-sync", "receipt-open", "root-required", "unsafe-home", "unsafe-receipt", "unsafe-receipt-directory"]
+    private static let failureCodes: Set<String> = ["cancelled", "maintenance-failed", "invalid-owner", "ambiguous-owner", "boot-query", "command-encoding", "command-output-limit", "command-pipe", "command-read", "command-signal", "command-signal-setup", "command-spawn", "command-spawn-init", "command-spawn-setup", "command-timeout", "command-wait", "directory-result", "console-query", "home-query", "interrupted-attempt", "invalid-boot-identity", "invalid-owner-attribute", "invalid-owner-uid", "invalid-receipt", "os-detection-failed", "owner-changed", "preference-boolean-invalid", "preference-build-invalid", "preference-read-failed", "preference-read-type-failed", "preference-readback-mismatch", "preference-type-mismatch", "preference-write-failed", "preference-file-invalid", "preference-file-open", "preference-file-read", "preference-file-write", "preference-file-publish", "preferences-directory", "preferences-session-online", "unsafe-preference-file", "unsafe-preferences-directory", "receipt-commit", "receipt-create", "receipt-directory-open", "receipt-directory-sync", "receipt-open", "root-required", "unsafe-home", "unsafe-receipt", "unsafe-receipt-directory"]
 
     private func failure(_ code: String, _ numeric: Int? = nil) -> PommeBuddyPreferencesFailure {
         .init(code: code, numericCode: numeric)
@@ -278,25 +320,6 @@ actor PommeBuddyPreferencesMaintenance {
               value.range(of: argument == "-buildVersion" ? "^[0-9]{2,3}[A-Z][0-9]+[a-z]?$" : "^[0-9]+(?:\\.[0-9]+){1,2}$", options: .regularExpression) != nil
         else { throw failure("os-detection-failed", Int(result.status)) }
         return value
-    }
-
-    private func defaults(_ arguments: [String]) async throws -> PommeBuddyPreferencesCommandResult {
-        // Revalidate immediately before every read/write so account replacement
-        // cannot silently redirect a username-based sudo command.
-        guard let current = try lookupOwner(), current == receipt?.owner,
-              try checkedHome(current), try dependencies.consoleIsOwner(current) else { emit("owner-revalidation-failed", error: true); throw failure("owner-changed") }
-        emit("owner-revalidated", ["uid": String(current.uid), "home_valid": "true", "operation": arguments[0], "key": arguments[2]])
-        return try await command("/usr/bin/sudo", ["-n", "-H", "-u", "pomme", "/usr/bin/defaults"] + arguments,
-                                 operation: arguments[0], domain: arguments[1], key: arguments[2],
-                                 timeout: consumePreferenceTimeout(operation: arguments[0]))
-    }
-
-    private func consumePreferenceTimeout(operation: String) -> TimeInterval {
-        // Console ownership can precede cfprefsd readiness during first login.
-        // Give only the first read-type extra time; never replay a failed attempt.
-        guard initialPreferenceRead, operation == "read-type" else { return PommeBuddyPreferencesBudget.command }
-        initialPreferenceRead = false
-        return PommeBuddyPreferencesBudget.initialRead
     }
 
     private func command(_ path: String, _ args: [String], operation: String, domain: String = "none", key: String = "none", timeout: TimeInterval = PommeBuddyPreferencesBudget.command) async throws -> PommeBuddyPreferencesCommandResult {
@@ -330,24 +353,6 @@ actor PommeBuddyPreferencesMaintenance {
         return code.flatMap { allowed.contains($0) ? $0 : nil } ?? "unknown-redacted"
     }
 
-    private func read(domain: String, key: String, type: String) async throws -> String? {
-        let kind = try await defaults(["read-type", domain, key])
-        if kind.status == 1, kind.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           Self.isMissing(kind.stderr, domain: domain, key: key) { return nil }
-        guard kind.status == 0 else { throw failure("preference-read-type-failed", Int(kind.status)) }
-        guard kind.stderr.isEmpty,
-              kind.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "Type is \(type)"
-        else { emit("preference-type-mismatch", ["key": key, "expected_type": type], error: true); throw failure("preference-type-mismatch") }
-        let result = try await defaults(["read", domain, key])
-        guard result.status == 0, result.stderr.isEmpty else {
-            throw failure("preference-read-failed", Int(result.status))
-        }
-        let value = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        if type == "boolean", value != "0", value != "1" { throw failure("preference-boolean-invalid") }
-        if type == "string", value.range(of: "^[0-9]{2,3}[A-Z][0-9]+[a-z]?$", options: .regularExpression) == nil { throw failure("preference-build-invalid") }
-        return value
-    }
-
     private func validateReceipt(_ value: PommeBuddyPreferencesStatus) throws {
         let waitingStages = ["detectingOS", "waitingForOwner"]
         let runningStages = ["maintainingBuild", "maintainingMiniBuddy"]
@@ -369,32 +374,35 @@ actor PommeBuddyPreferencesMaintenance {
         }
     }
 
-    private static func isMissing(_ output: String, domain: String, key: String) -> Bool {
-        guard output.utf8.count <= 4096 else { return false }
-        let lines = output.split(whereSeparator: \.isNewline).map {
-            String($0).trimmingCharacters(in: .whitespacesAndNewlines)
-        }.filter { !$0.isEmpty }
-        guard let message = lines.last,
-              lines.count == 1 || (lines.count == 2 && lines[0].range(
-                of: #"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ defaults\[\d+:\d+\]$"#,
-                options: .regularExpression) != nil) else { return false }
-        let domainMessage = "Domain \(domain) does not exist"
-        let pairMessage = "The domain/default pair of (\(domain), \(key)) does not exist"
-        return [domainMessage, domainMessage + ".", pairMessage, pairMessage + "."].contains(message)
-    }
-
-    private func maintain(domain: String, key: String, type: String, value: String) async throws {
-        if try await read(domain: domain, key: key, type: type) == value { emit("preference-matching-skipped", ["key": key]); return }
-        let result = try await defaults(["write", domain, key, type == "boolean" ? "-bool" : "-string",
-                                         type == "boolean" ? "false" : value])
-        guard result.status == 0, result.stderr.isEmpty, result.stdout.isEmpty else {
-            throw failure("preference-write-failed", Int(result.status))
+    /// Revalidates the owner, then sets one key in its user domain and
+    /// reads it back.
+    private func maintain(domain: String, key: String, value: PommeBuddyPreferenceValue) throws {
+        guard let current = try lookupOwner(), current == receipt?.owner, try checkedHome(current) else {
+            emit("owner-revalidation-failed", error: true)
+            throw failure("owner-changed")
         }
-        guard try await read(domain: domain, key: key, type: type) == value else {
-            emit("preference-readback-mismatch", ["key": key, "expected_type": type], error: true)
+        emit("owner-revalidated", ["uid": String(current.uid), "home_valid": "true", "key": key])
+        let existing: PommeBuddyPreferenceValue?
+        do { existing = try dependencies.readPreference(current, domain, key) }
+        catch { throw preferenceFailure(error, fallback: "preference-read-failed") }
+        if existing == value { emit("preference-matching-skipped", ["key": key]); return }
+        do { try dependencies.writePreference(current, domain, key, value) }
+        catch { throw preferenceFailure(error, fallback: "preference-write-failed") }
+        let written: PommeBuddyPreferenceValue?
+        do { written = try dependencies.readPreference(current, domain, key) }
+        catch { throw preferenceFailure(error, fallback: "preference-read-failed") }
+        guard written == value else {
+            emit("preference-readback-mismatch", ["key": key, "expected_type": value.typeName], error: true)
             throw failure("preference-readback-mismatch")
         }
-        emit("preference-readback-verified", ["key": key, "expected_type": type])
+        emit("preference-readback-verified", ["key": key, "expected_type": value.typeName])
+    }
+
+    private func preferenceFailure(_ error: any Error, fallback: String) -> PommeBuddyPreferencesFailure {
+        let issue = (error as? PommeBuddyPreferencesFailure) ?? failure(fallback, (error as NSError).code)
+        emit("preference-file-failed", ["failure": Self.failureCodes.contains(issue.code) ? issue.code : "unknown-redacted",
+                                        "numeric": String(issue.numericCode ?? 0)], error: true)
+        return issue
     }
 }
 
@@ -430,16 +438,6 @@ private enum PommeBuddyPreferencesSystem {
                                                      generatedUID: value(kODAttributeTypeGUID), homeDirectory: value(kODAttributeTypeNFSHomeDirectory))
         try identity.validate()
         return identity
-    }
-
-    static func consoleIsOwner(_ owner: PommeBuddyPreferencesOwner) throws -> Bool {
-        // Account creation precedes the first login. User defaults become ready
-        // only after that verified account owns the console session.
-        var info = stat()
-        guard lstat("/dev/console", &info) == 0, info.st_mode & S_IFMT == S_IFCHR else {
-            throw issue("console-query", errno)
-        }
-        return info.st_uid == owner.uid
     }
 
     static func homeExists(_ owner: PommeBuddyPreferencesOwner) throws -> Bool {
