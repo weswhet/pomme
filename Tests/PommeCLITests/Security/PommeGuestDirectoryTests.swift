@@ -26,14 +26,26 @@ struct PommeGuestDirectoryTests {
             == .object(["verified": .bool(false)]))
     }
 
-    @Test("Non-root agents, malformed payloads, and multi-valued attributes are refused")
+    @Test("Record-name aliases use the primary name and other multiple values are space-joined, like dscl")
+    func multipleValues() throws {
+        let directory = PommeGuestDirectory(effectiveUserID: { 0 }, readRecords: {
+            [["RecordName": ["root", "BUILTIN\\Local System"], "UniqueID": ["0"], "RealName": ["System", "Administrator"]]]
+        }, verify: { _, _ in true })
+        let users = try PommeGuestDirectorySnapshot(result: directory.perform(
+            operation: PommeGuestDirectory.readUsersOperation, payload: .object([:])).publicValue).users
+        #expect(users["root"]?["RecordName"] == "root")
+        #expect(users["root"]?["RealName"] == "System Administrator")
+        #expect(try PommeGuestDirectorySnapshot(users: users).dsclOutput([".", "-list", "/Users", "UniqueID"]) == "root 0\n")
+    }
+
+    @Test("Non-root agents, malformed payloads, and newline values are refused")
     func refusals() {
         let unprivileged = PommeGuestDirectory(effectiveUserID: { 501 }, readRecords: { records }, verify: { _, _ in true })
         #expect(throws: PommeAgentOperationError.self) {
             try unprivileged.perform(operation: PommeGuestDirectory.readUsersOperation, payload: .object([:]))
         }
         let directory = PommeGuestDirectory(effectiveUserID: { 0 }, readRecords: {
-            [["RecordName": ["pomme"], "UniqueID": ["501", "502"]]]
+            [["RecordName": ["pomme"], "RealName": ["Line\nbreak"]]]
         }, verify: { _, _ in true })
         #expect(throws: PommeAgentOperationError.self) {
             try directory.perform(operation: PommeGuestDirectory.readUsersOperation, payload: .object([:]))

@@ -54,18 +54,21 @@ struct PommeGuestDirectory: Sendable {
         }
     }
 
-    /// Every local user record, keyed by the public attribute names. An
-    /// attribute that is absent is omitted; a multi-valued or oversized one
-    /// is refused rather than truncated.
+    /// Every local user record, keyed by the public attribute names, in the
+    /// form `dscl` reports: the primary (first) record name, since system
+    /// records carry aliases such as `BUILTIN\\Local System`, and any other
+    /// multi-valued attribute joined by spaces for the host's strict parser
+    /// to judge. An absent attribute is omitted; an oversized one is refused.
     func users() throws -> [[String: JSONValue]] {
         let records = try readRecords()
         guard records.count <= Self.maximumUsers else { throw PommeAgentOperationError.invalid }
         return try records.map { record in
             var user: [String: JSONValue] = [:]
             for (name, _) in Self.attributes {
-                guard let values = record[name] else { continue }
-                guard values.count == 1, let value = values.first,
-                      value.utf8.count <= Self.maximumValueBytes, !value.contains("\0")
+                guard let values = record[name], !values.isEmpty else { continue }
+                let value = name == "RecordName" ? values[0] : values.joined(separator: " ")
+                guard value.utf8.count <= Self.maximumValueBytes, !value.contains("\0"),
+                      !value.contains(where: \.isNewline)
                 else { throw PommeAgentOperationError.invalid }
                 user[name] = .string(value)
             }
