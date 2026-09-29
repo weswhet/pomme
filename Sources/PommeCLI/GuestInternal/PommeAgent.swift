@@ -103,7 +103,7 @@ actor PommeAgent {
         "amfi.status", "amfi.disable", "amfi.enable"
     ]
     static let buddyPreferencesStatusOperation = "buddy.preferences.status"
-    static let persistentCapabilities = [buddyPreferencesStatusOperation, "agent.describe", "agent.health", "process.start", "process.status", "process.signal", "process.list", "process.output", "process.wait", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize", PommeGuestOwnerCredentialReader.operation, PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation] + terminalCapabilities + normalAMFIOperations
+    static let persistentCapabilities = [buddyPreferencesStatusOperation, "agent.describe", "agent.health", "process.start", "process.status", "process.signal", "process.list", "process.output", "process.wait", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize", PommeGuestOwnerCredentialReader.operation, PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation] + PommeGuestDirectory.operations + terminalCapabilities + normalAMFIOperations
     /// Detached-job logs retain their trailing bytes so an already streamed
     /// status response never makes `process.output` destructive. The agent
     /// keeps this bounded per channel and tells callers when earlier bytes
@@ -173,6 +173,7 @@ actor PommeAgent {
     private let recoverySecurity: PommeGuestRecoverySecurityOperations
     private let buddyPreferences: PommeBuddyPreferencesMaintenance?
     private let ownerCredential: PommeGuestOwnerCredentialReader
+    private let directory: PommeGuestDirectory
     private let terminalService: PommeTerminalService
     private let statusTraceSink: PommeAgentStatusTrace.Sink
     private let startTraceSink: PommeAgentStartTrace.Sink
@@ -184,6 +185,7 @@ actor PommeAgent {
          recoveryInstaller: PommeAgentRecoveryInstaller? = nil,
          recoverySecurity: PommeGuestRecoverySecurityOperations = .init(),
          ownerCredential: PommeGuestOwnerCredentialReader = .init(),
+         directory: PommeGuestDirectory = .init(),
          buddyPreferences: PommeBuddyPreferencesMaintenance? = nil,
          recoveredJournal: PommeAgentUpdateJournal? = nil,
          authority: PommeAgentAuthority = .standard,
@@ -196,6 +198,7 @@ actor PommeAgent {
         self.recoveryInstaller = role == .recovery ? (recoveryInstaller ?? PommeAgentRecoveryInstaller()) : nil
         self.recoverySecurity = recoverySecurity
         self.ownerCredential = ownerCredential
+        self.directory = directory
         self.buddyPreferences = role == .persistent ? buddyPreferences : nil
         self.statusTraceSink = statusTraceSink
         self.startTraceSink = startTraceSink
@@ -311,6 +314,11 @@ actor PommeAgent {
         case PommeGuestOwnerCredentialReader.operation:
             guard role == .persistent else { throw PommeAgentOperationError.invalid }
             return try ownerCredential.read(payload: request.payload)
+        // Native OpenDirectory reads and password checks replace guest dscl
+        // processes. A password is only verified, never stored or logged.
+        case PommeGuestDirectory.readUsersOperation, PommeGuestDirectory.verifyPasswordOperation:
+            guard role == .persistent else { throw PommeAgentOperationError.invalid }
+            return try directory.perform(operation: request.operation, payload: request.payload)
         case "process.start": return try start(request.payload, trace: startTrace)
         case "process.status": return try status(request.payload, trace: statusTrace)
         case "process.signal": return try signal(request.payload)

@@ -21,6 +21,18 @@ enum PommeBuddyPreferencesGate {
 /// Prevents bootstrap cleanup and reboot from passing an incomplete guest attempt.
 /// The caller supplies an authenticated status query; this helper never starts writes.
 enum PommeBootstrapBuddyPreferences {
+    /// The `pomme` owner from a native directory read, validated exactly as
+    /// the `dscl` path validates it.
+    static func owner(from snapshot: PommeGuestDirectorySnapshot) throws -> PommeBuddyPreferencesOwner {
+        let invalid = PommeSecurityOwnerPreparationError.ownerCompletionVerificationFailed
+        guard let record = snapshot.users["pomme"], let name = record["RecordName"],
+              let uidText = record["UniqueID"], let uid = UInt32(uidText), String(uid) == uidText,
+              let generatedUID = record["GeneratedUID"], let home = record["NFSHomeDirectory"] else { throw invalid }
+        let owner = PommeBuddyPreferencesOwner(account: name, uid: uid, generatedUID: generatedUID, homeDirectory: home)
+        do { try owner.validate() } catch { throw invalid }
+        return owner
+    }
+
     static func readOwner(
         execute: @Sendable (GuestCommandRequest) async throws -> GuestCommandResult
     ) async throws -> PommeBuddyPreferencesOwner {

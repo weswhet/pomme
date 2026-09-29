@@ -509,7 +509,10 @@ struct PommeAgentPerformRequest: Sendable {
             // Recovers the automatic-login owner credential Pomme configured,
             // for a VM cloned from a provisioned template. Root-only and
             // bounded inside the agent; it is named exactly, never by prefix.
-            "owner.credential.read"
+            "owner.credential.read",
+            // Native OpenDirectory local-user reads and owner password
+            // verification, named exactly like the credential read.
+            "directory.localUsers.read", "directory.password.verify"
         ]
         let prefixes = ["process.", "file.", "job.", "maintenance.", "remoteLogin.", "mdm.", "ui."]
         return exact.contains(operation) || prefixes.contains(where: operation.hasPrefix)
