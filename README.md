@@ -365,6 +365,12 @@ of the actual native automatic-login diagnostic remains pending. See
 [Security workflows](Docs/SecurityWorkflows.md) for the owner, journal, and
 retry rules.
 
+## Documentation site
+
+A local documentation site lives in [Website](Website/README.md). Run
+`npm install` and `npm run dev` in that directory, then open
+`http://localhost:4321`.
+
 ## Design
 
 - [Architecture](Docs/Architecture.md)
