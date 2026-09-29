@@ -1,5 +1,23 @@
 import Foundation
 
+/// Buddy preferences only suppress Setup Assistant panes after the owner logs
+/// in. They never gate provisioning, security changes, or MDM enrollment, so a
+/// failed receipt or capability check is logged and skipped. Cancellation
+/// still stops the caller.
+enum PommeBuddyPreferencesGate {
+    static func failOpen(
+        _ step: String, log: @Sendable (String) -> Void, _ body: () async throws -> Void
+    ) async throws {
+        do {
+            try await body()
+        } catch let error as CancellationError {
+            throw error
+        } catch {
+            log("Buddy preferences \(step) did not complete (\(error.localizedDescription)); continuing, because they do not gate provisioning, security, or MDM.")
+        }
+    }
+}
+
 /// Prevents bootstrap cleanup and reboot from passing an incomplete guest attempt.
 /// The caller supplies an authenticated status query; this helper never starts writes.
 enum PommeBootstrapBuddyPreferences {
