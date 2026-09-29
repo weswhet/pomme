@@ -129,10 +129,13 @@ struct PommeAgentOperationsTests {
         let jobID = try #require(UUID(uuidString: id))
         let requestID = UUID()
         var events: [PommeAgentStreamFrame] = []
-        for _ in 0..<128 where !events.contains(where: { $0.stream == .exit }) {
+        // A real child needs wall-clock time to exit; yielding alone can
+        // finish every poll before the process has run.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while !events.contains(where: { $0.stream == .exit }), ContinuousClock.now < deadline {
             events += try await agent.streamEvents(jobID: jobID, requestID: requestID)
             if !events.contains(where: { $0.stream == .exit }) {
-                await Task.yield()
+                try await Task.sleep(for: .milliseconds(10))
             }
         }
 
