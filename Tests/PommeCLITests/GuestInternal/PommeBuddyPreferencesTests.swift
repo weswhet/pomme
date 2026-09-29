@@ -5,63 +5,46 @@ import Testing
 
 @Suite("Guest Buddy preferences")
 struct PommeBuddyPreferencesTests {
-    @Test("Only the first preference read gets the login readiness budget")
-    func initialReadBudget() async {
+    @Test("Preferences are written directly; only OS detection runs a command")
+    func directWritesWithoutDefaults() async {
         let fixture = BuddyFixture()
-        fixture.state.withLock { $0.values = ["LastSeenBuddyBuildVersion": ("string", "25G1"), "MiniBuddyLaunch": ("boolean", "1")] }
-        var dependencies = fixture.dependencies
-        let command = dependencies.command
-        let calls = Mutex<[(String, TimeInterval)]>([])
-        dependencies.instrumentedCommand = { path, arguments, timeout, _ in
-            calls.withLock { $0.append((arguments.joined(separator: " "), timeout)) }
-            return try await command(path, arguments)
+        fixture.state.withLock { $0.values = ["LastSeenBuddyBuildVersion": .string("25G1"), "MiniBuddyLaunch": .boolean(true)] }
+        let engine = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
+        await engine.run()
+        #expect(await engine.status()?.outcome == "succeeded")
+        fixture.state.withLock {
+            #expect($0.commands.allSatisfy { $0.first == "/usr/bin/sw_vers" })
+            #expect($0.commands.count == 2)
+            #expect($0.writes == ["LastSeenBuddyBuildVersion", "MiniBuddyLaunch"])
+            #expect($0.values["LastSeenBuddyBuildVersion"] == .string("26A999"))
+            #expect($0.values["MiniBuddyLaunch"] == .boolean(false))
         }
-        await PommeBuddyPreferencesMaintenance(dependencies: dependencies).run()
-        let captured = calls.withLock { $0 }
-        let preferences = captured.filter { $0.0.contains("/usr/bin/defaults") }
-        #expect(preferences.count == 10)
-        #expect(preferences.reduce(0) { $0 + $1.1 } == 195)
         #expect(PommeBuddyPreferencesBudget.receipt == 210)
         #expect(PommeBuddyPreferencesBudget.receiptPollCount == 106)
-        #expect(captured.filter { $0.1 == 60 }.map { $0.0 } == [
-            "-n -H -u pomme /usr/bin/defaults read-type com.apple.SetupAssistant LastSeenBuddyBuildVersion"
-        ])
-        #expect(captured.filter { $0.1 != 60 }.allSatisfy { $0.1 == 15 })
-        #expect(fixture.state.withLock { $0.receipt?.outcome } == "succeeded")
     }
 
-    @Test("An initial read timeout remains terminal for the boot")
-    func initialReadTimeoutDoesNotReplay() async {
+    @Test("A preference file failure is terminal for the boot")
+    func fileFailureDoesNotReplay() async {
         let fixture = BuddyFixture()
-        var dependencies = fixture.dependencies
-        let command = dependencies.command
-        let attempts = Mutex(0)
-        dependencies.instrumentedCommand = { path, arguments, timeout, _ in
-            if timeout == PommeBuddyPreferencesBudget.initialRead {
-                attempts.withLock { $0 += 1 }
-                throw PommeBuddyPreferencesFailure(code: "command-timeout", numericCode: nil)
-            }
-            return try await command(path, arguments)
-        }
-        await PommeBuddyPreferencesMaintenance(dependencies: dependencies).run()
-        await PommeBuddyPreferencesMaintenance(dependencies: dependencies).run()
-        #expect(attempts.withLock { $0 } == 1)
-        #expect(fixture.state.withLock { $0.receipt?.error?.code } == "command-timeout")
-        #expect(fixture.state.withLock { $0.writes.isEmpty })
+        fixture.state.withLock { $0.writeFailure = true }
+        await PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies).run()
+        await PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies).run()
+        #expect(fixture.state.withLock { $0.writes } == ["LastSeenBuddyBuildVersion"])
+        #expect(fixture.state.withLock { $0.receipt?.error?.code } == "preference-file-write")
     }
 
-    @Test("Diagnostics establish owner validation before writes and redact output")
+    @Test("Diagnostics establish owner validation before writes and stay closed")
     func diagnostics() async {
         let fixture = BuddyFixture()
-        fixture.state.withLock { $0.writeFailure = true; $0.writeError = "secret-token\nprivate content" }
+        fixture.state.withLock { $0.writeFailure = true }
         await PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies).run()
         let events = fixture.state.withLock { $0.diagnostics }
         let found = events.firstIndex { $0.event == "owner-found" }
-        let write = events.firstIndex { $0.event == "command-launch" && $0.fields["operation"] == "write" }
-        #expect(found != nil && write != nil && found! < write!)
-        #expect(events.contains { $0.event == "owner-revalidated" && $0.fields["operation"] == "write" && $0.fields["uid"] == "501" })
-        #expect(events.contains { $0.event == "command-result" && $0.fields["operation"] == "write" && $0.fields["stderr_class"] == "unknown-redacted" && $0.fields["exit_code"] == "9" })
-        #expect(events.allSatisfy { !$0.message.contains("secret-token") && !$0.message.contains("private content") && $0.message.utf8.count < 2048 })
+        let revalidated = events.firstIndex { $0.event == "owner-revalidated" && $0.fields["key"] == "LastSeenBuddyBuildVersion" }
+        let failed = events.firstIndex { $0.event == "preference-file-failed" }
+        #expect(found != nil && revalidated != nil && failed != nil && found! < revalidated! && revalidated! < failed!)
+        #expect(events.contains { $0.event == "preference-file-failed" && $0.fields["failure"] == "preference-file-write" && $0.fields["numeric"] == "13" })
+        #expect(events.allSatisfy { $0.message.utf8.count < 2048 })
         #expect(events.allSatisfy { $0.fields["boot"] != nil && $0.fields["run_id"] != nil && $0.fields["daemon_pid"] != nil })
     }
 
@@ -81,48 +64,45 @@ struct PommeBuddyPreferencesTests {
             PommeBuddyPreferencesDiagnostic.stderrClassification($0, domain: "com.apple.SetupAssistant", key: "LastSeenBuddyBuildVersion")
         }
         #expect(classify("sudo: a password is required\n") == "sudo-password-required")
-        #expect(classify("2026-09-27 12:00:00.123 defaults[123:456] Could not write domain com.apple.SetupAssistant; exiting") == "defaults-write-domain-failed")
         #expect(classify("Could not write domain private.domain; exiting") == "unknown-redacted")
-        #expect(classify("sudo: a password is required\nsecret") == "unknown-redacted")
         #expect(classify(String(repeating: "secret", count: 1000)) == "unknown-redacted")
     }
 
-    @Test("Account, home, and console ownership are polled before preference commands")
-    func waitsForOwner() async {
+    @Test("Account and home are polled; no console login is required before writing")
+    func waitsForOwnerNotLogin() async {
         let fixture = BuddyFixture()
-        fixture.state.withLock { $0.absentQueries = 2; $0.absentHomes = 1; $0.absentConsoleQueries = 2 }
+        fixture.state.withLock { $0.absentQueries = 2; $0.absentHomes = 1 }
         let engine = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
         await engine.run()
         let status = await engine.status()
         #expect(status?.outcome == "succeeded")
         #expect(status?.owner == BuddyFixture.owner)
         fixture.state.withLock {
-            #expect($0.sleeps == 5)
-            #expect($0.diagnostics.contains { $0.event == "owner-waiting" && $0.fields["state"] == "console-owner-absent" })
+            #expect($0.sleeps == 3)
             #expect($0.writes.count == 2)
             #expect($0.saved.contains { $0.stage == "waitingForOwner" && $0.owner == nil })
         }
     }
 
-    @Test("Stopping before console login preserves a restartable waiting receipt")
-    func consoleWaitRestart() async {
+    @Test("Stopping before the account exists preserves a restartable waiting receipt")
+    func accountWaitRestart() async {
         let fixture = BuddyFixture()
-        fixture.state.withLock { $0.consolePresent = false; $0.cancelSleep = true }
+        fixture.state.withLock { $0.absentQueries = 1; $0.cancelSleep = true }
         let first = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
         await first.run()
         #expect(await first.status()?.outcome == "waiting")
         #expect(fixture.state.withLock { $0.writes.isEmpty && $0.receipt?.owner == nil })
-        fixture.state.withLock { $0.consolePresent = true; $0.cancelSleep = false }
+        fixture.state.withLock { $0.cancelSleep = false }
         let resumed = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
         await resumed.run()
         #expect(await resumed.status()?.outcome == "succeeded")
         #expect(fixture.state.withLock { $0.writes.count == 2 })
     }
 
-    @Test("Matching typed values do not write; the detected build replaces older builds")
+    @Test("Matching values do not write; the detected build replaces older builds")
     func matchingAndNewBuild() async {
         let fixture = BuddyFixture()
-        fixture.state.withLock { $0.values = ["LastSeenBuddyBuildVersion": ("string", "26A999"), "MiniBuddyLaunch": ("boolean", "0")] }
+        fixture.state.withLock { $0.values = ["LastSeenBuddyBuildVersion": .string("26A999"), "MiniBuddyLaunch": .boolean(false)] }
         await PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies).run()
         #expect(fixture.state.withLock { $0.writes.isEmpty })
         fixture.state.withLock { $0.boot = UUID().uuidString; $0.build = "27B123" }
@@ -132,7 +112,17 @@ struct PommeBuddyPreferencesTests {
         #expect(fixture.state.withLock { $0.writes == ["LastSeenBuddyBuildVersion"] })
     }
 
-    @Test("Malformed account identities fail before preference commands")
+    @Test("A value of the wrong type is replaced with the required type")
+    func wrongTypeIsReplaced() async {
+        let fixture = BuddyFixture()
+        fixture.state.withLock { $0.values = ["LastSeenBuddyBuildVersion": .boolean(true), "MiniBuddyLaunch": .string("0")] }
+        let engine = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
+        await engine.run()
+        #expect(await engine.status()?.outcome == "succeeded")
+        #expect(fixture.state.withLock { $0.values["MiniBuddyLaunch"] } == .boolean(false))
+    }
+
+    @Test("Malformed account identities fail before preference writes")
     func invalidIdentity() async {
         for owner in [
             PommeBuddyPreferencesOwner(account: "other", uid: 501, generatedUID: UUID().uuidString, homeDirectory: "/Users/pomme"),
@@ -159,21 +149,7 @@ struct PommeBuddyPreferencesTests {
         #expect(fixture.state.withLock { $0.sleeps == 0 && $0.writes.isEmpty })
     }
 
-    @Test("Wrong types and malformed boolean values stop maintenance")
-    func strictTypes() async {
-        for value in [("string", "false"), ("boolean", "false"), ("integer", "0")] {
-            let fixture = BuddyFixture()
-            fixture.state.withLock {
-                $0.values = ["LastSeenBuddyBuildVersion": ("string", "26A999"), "MiniBuddyLaunch": value]
-            }
-            let engine = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
-            await engine.run()
-            #expect(await engine.status()?.outcome == "failed")
-            #expect(fixture.state.withLock { $0.writes.isEmpty })
-        }
-    }
-
-    @Test("Command failures and readback failures stop before the next key")
+    @Test("Write failures and readback failures stop before the next key")
     func failedWrites() async {
         for corruptReadback in [false, true] {
             let fixture = BuddyFixture()
@@ -181,7 +157,7 @@ struct PommeBuddyPreferencesTests {
             let engine = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
             await engine.run()
             #expect(await engine.status()?.outcome == "failed")
-            #expect(await engine.status()?.error?.code == (corruptReadback ? "preference-readback-mismatch" : "preference-write-failed"))
+            #expect(await engine.status()?.error?.code == (corruptReadback ? "preference-readback-mismatch" : "preference-file-write"))
             #expect(fixture.state.withLock { $0.writes == ["LastSeenBuddyBuildVersion"] })
         }
     }
@@ -193,13 +169,11 @@ struct PommeBuddyPreferencesTests {
             fixture.state.withLock { $0.writeFailure = fails }
             let first = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
             await first.run()
-            let commandCount = fixture.state.withLock { $0.commands.count }
+            let counts = fixture.state.withLock { ($0.commands.count, $0.writes.count) }
             let second = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
             await second.run()
-            let firstStatus = await first.status()
-            let secondStatus = await second.status()
-            #expect(firstStatus == secondStatus)
-            #expect(fixture.state.withLock { $0.commands.count == commandCount })
+            #expect(await first.status() == second.status())
+            #expect(fixture.state.withLock { ($0.commands.count, $0.writes.count) } == counts)
         }
     }
 
@@ -217,7 +191,7 @@ struct PommeBuddyPreferencesTests {
             #expect(await engine.status()?.outcome == (outcome == "running" ? "failed" : "succeeded"))
             if outcome == "running" {
                 #expect(await engine.status()?.error?.code == "interrupted-attempt")
-                #expect(fixture.state.withLock { $0.commands.isEmpty })
+                #expect(fixture.state.withLock { $0.commands.isEmpty && $0.writes.isEmpty })
             }
         }
     }
@@ -231,7 +205,7 @@ struct PommeBuddyPreferencesTests {
         #expect(fixture.state.withLock { $0.commands.isEmpty && $0.saved.isEmpty })
     }
 
-    @Test("Replacing an owner between preference commands fails closed")
+    @Test("Replacing an owner between preference writes fails closed")
     func ownerReplacement() async {
         let fixture = BuddyFixture()
         fixture.state.withLock { $0.replaceAfterWrite = true }
@@ -241,40 +215,14 @@ struct PommeBuddyPreferencesTests {
         #expect(fixture.state.withLock { $0.writes.count == 1 })
     }
 
-    @Test("Losing the owner console session stops subsequent preference commands")
-    func consoleSessionLost() async {
+    @Test("A malformed detected build fails before any write")
+    func malformedBuild() async {
         let fixture = BuddyFixture()
-        fixture.state.withLock { $0.loseConsoleAfterWrite = true }
+        fixture.state.withLock { $0.build = "not-a-build" }
         let engine = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
         await engine.run()
-        #expect(await engine.status()?.error?.code == "owner-changed")
-        #expect(fixture.state.withLock { $0.writes.count == 1 })
-    }
-
-    @Test("Unrelated and extended missing-key messages are rejected")
-    func missingDiagnostics() async {
-        for message in ["The domain/default pair of (other, other) does not exist", "Domain com.apple.SetupAssistant does not exist\nextra", "permission does not exist"] {
-            let fixture = BuddyFixture()
-            fixture.state.withLock { $0.missingMessage = message }
-            let engine = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
-            await engine.run()
-            #expect(await engine.status()?.outcome == "failed")
-            #expect(fixture.state.withLock { $0.writes.isEmpty })
-        }
-    }
-
-    @Test("Malformed detected builds and nonempty write output are failures")
-    func strictCommandResults() async {
-        for malformedBuild in [false, true] {
-            let fixture = BuddyFixture()
-            fixture.state.withLock {
-                if malformedBuild { $0.build = "not-a-build" } else { $0.writeOutput = "unexpected" }
-            }
-            let engine = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
-            await engine.run()
-            #expect(await engine.status()?.outcome == "failed")
-            #expect(await engine.status()?.error?.code == (malformedBuild ? "os-detection-failed" : "preference-write-failed"))
-        }
+        #expect(await engine.status()?.error?.code == "os-detection-failed")
+        #expect(fixture.state.withLock { $0.writes.isEmpty })
     }
 
     @Test("Malformed terminal receipts fail without preference writes")
@@ -286,10 +234,10 @@ struct PommeBuddyPreferencesTests {
         let engine = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
         await engine.run()
         #expect(await engine.status()?.error?.code == "invalid-receipt")
-        #expect(fixture.state.withLock { $0.commands.isEmpty })
+        #expect(fixture.state.withLock { $0.commands.isEmpty && $0.writes.isEmpty })
     }
 
-    @Test("An undurable running receipt prevents preference commands")
+    @Test("An undurable running receipt prevents preference writes")
     func receiptFailure() async {
         let fixture = BuddyFixture()
         fixture.state.withLock { $0.failRunningSave = true }
@@ -297,6 +245,141 @@ struct PommeBuddyPreferencesTests {
         await engine.run()
         #expect(await engine.status()?.outcome == "failed")
         #expect(fixture.state.withLock { $0.writes.isEmpty })
+    }
+}
+
+@Suite("Buddy preference files")
+struct PommeBuddyPreferenceFilesTests {
+    private func home() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("pomme-buddy-home-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o755])
+        return url
+    }
+
+    @Test("A missing Library/Preferences is created and the value is written with owner-only access")
+    func createsPreferences() throws {
+        let home = try home()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try PommeBuddyPreferenceFiles.write(home: home.path, uid: getuid(), domain: "com.apple.loginwindow",
+                                            key: "MiniBuddyLaunch", value: .boolean(false), daemonRunning: { _ in false })
+        #expect(try PommeBuddyPreferenceFiles.read(home: home.path, uid: getuid(), domain: "com.apple.loginwindow",
+                                                   key: "MiniBuddyLaunch") == .boolean(false))
+        let file = home.appendingPathComponent("Library/Preferences/com.apple.loginwindow.plist")
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+        #expect((attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid())
+        #expect((attributes[.groupOwnerAccountID] as? NSNumber)?.uint32Value == 20)
+        let preferences = home.appendingPathComponent("Library/Preferences")
+        #expect((try FileManager.default.attributesOfItem(atPath: preferences.path)[.posixPermissions] as? NSNumber)?.intValue == 0o700)
+        // No temporary file is left behind.
+        #expect(try FileManager.default.contentsOfDirectory(atPath: preferences.path) == ["com.apple.loginwindow.plist"])
+    }
+
+    @Test("Writing merges into the existing file and keeps other keys")
+    func mergesExisting() throws {
+        let home = try home()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let preferences = home.appendingPathComponent("Library/Preferences")
+        try FileManager.default.createDirectory(at: preferences, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        let file = preferences.appendingPathComponent("com.apple.SetupAssistant.plist")
+        try PropertyListSerialization.data(fromPropertyList: ["Other": 7, "LastSeenBuddyBuildVersion": "25A1"],
+                                           format: .xml, options: 0).write(to: file)
+        try PommeBuddyPreferenceFiles.write(home: home.path, uid: getuid(), domain: "com.apple.SetupAssistant",
+                                            key: "LastSeenBuddyBuildVersion", value: .string("26A428"), daemonRunning: { _ in false })
+        let values = try #require(PropertyListSerialization.propertyList(from: Data(contentsOf: file), format: nil) as? [String: Any])
+        #expect(values["Other"] as? Int == 7)
+        #expect(values["LastSeenBuddyBuildVersion"] as? String == "26A428")
+    }
+
+    @Test("An absent file or domain reads as nil; integers are not booleans")
+    func readsStrictly() throws {
+        let home = try home()
+        defer { try? FileManager.default.removeItem(at: home) }
+        #expect(try PommeBuddyPreferenceFiles.read(home: home.path, uid: getuid(), domain: "com.apple.loginwindow",
+                                                   key: "MiniBuddyLaunch") == nil)
+        let preferences = home.appendingPathComponent("Library/Preferences")
+        try FileManager.default.createDirectory(at: preferences, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        try PropertyListSerialization.data(fromPropertyList: ["MiniBuddyLaunch": 0], format: .binary, options: 0)
+            .write(to: preferences.appendingPathComponent("com.apple.loginwindow.plist"))
+        #expect(try PommeBuddyPreferenceFiles.read(home: home.path, uid: getuid(), domain: "com.apple.loginwindow",
+                                                   key: "MiniBuddyLaunch") == nil)
+    }
+
+    @Test("Symlinked preference directories and files are refused")
+    func refusesSymlinks() throws {
+        let home = try home()
+        let target = try self.home()
+        defer {
+            try? FileManager.default.removeItem(at: home)
+            try? FileManager.default.removeItem(at: target)
+        }
+        try FileManager.default.createSymbolicLink(at: home.appendingPathComponent("Library"), withDestinationURL: target)
+        #expect(throws: PommeBuddyPreferencesFailure.self) {
+            try PommeBuddyPreferenceFiles.write(home: home.path, uid: getuid(), domain: "com.apple.loginwindow",
+                                                key: "MiniBuddyLaunch", value: .boolean(false), daemonRunning: { _ in false })
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: target.path).isEmpty)
+
+        try FileManager.default.removeItem(at: home.appendingPathComponent("Library"))
+        let preferences = home.appendingPathComponent("Library/Preferences")
+        try FileManager.default.createDirectory(at: preferences, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        let outside = target.appendingPathComponent("outside.plist")
+        try Data().write(to: outside)
+        try FileManager.default.createSymbolicLink(at: preferences.appendingPathComponent("com.apple.loginwindow.plist"),
+                                                   withDestinationURL: outside)
+        #expect(throws: PommeBuddyPreferencesFailure.self) {
+            try PommeBuddyPreferenceFiles.write(home: home.path, uid: getuid(), domain: "com.apple.loginwindow",
+                                                key: "MiniBuddyLaunch", value: .boolean(false), daemonRunning: { _ in false })
+        }
+        #expect(try Data(contentsOf: outside).isEmpty)
+    }
+
+    @Test("A running preferences daemon for the user blocks direct writes")
+    func refusesOnlineSession() throws {
+        let home = try home()
+        defer { try? FileManager.default.removeItem(at: home) }
+        #expect(throws: PommeBuddyPreferencesFailure(code: "preferences-session-online", numericCode: nil)) {
+            try PommeBuddyPreferenceFiles.write(home: home.path, uid: getuid(), domain: "com.apple.loginwindow",
+                                                key: "MiniBuddyLaunch", value: .boolean(false), daemonRunning: { _ in true })
+        }
+        #expect(!FileManager.default.fileExists(atPath: home.appendingPathComponent("Library").path))
+        // This test process's own user normally has a running cfprefsd.
+        #expect(PommeBuddyPreferenceFiles.userPreferencesDaemonRunning(uid: getuid()))
+        #expect(!PommeBuddyPreferenceFiles.userPreferencesDaemonRunning(uid: 4_000_000))
+    }
+
+    @Test("cfprefsd access is limited to the two Buddy domains")
+    func cfPreferencesDomainAllowlist() {
+        #expect(throws: PommeBuddyPreferencesFailure.self) {
+            try PommeBuddyCFPreferences.write(owner: BuddyFixture.owner, domain: "com.example.other",
+                                              key: "Key", value: .boolean(false))
+        }
+        #expect(throws: PommeBuddyPreferencesFailure.self) {
+            _ = try PommeBuddyCFPreferences.read(owner: BuddyFixture.owner, domain: "com.example.other", key: "Key")
+        }
+    }
+
+    @Test("Other domains, a group-writable home, and a wrong owner are refused")
+    func refusesUnsafeTargets() throws {
+        let home = try home()
+        defer { try? FileManager.default.removeItem(at: home) }
+        #expect(throws: PommeBuddyPreferencesFailure.self) {
+            try PommeBuddyPreferenceFiles.write(home: home.path, uid: getuid(), domain: "com.example.other",
+                                                key: "Key", value: .boolean(false), daemonRunning: { _ in false })
+        }
+        #expect(throws: PommeBuddyPreferencesFailure.self) {
+            try PommeBuddyPreferenceFiles.write(home: home.path, uid: getuid() + 1, domain: "com.apple.loginwindow",
+                                                key: "MiniBuddyLaunch", value: .boolean(false), daemonRunning: { _ in false })
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o775], ofItemAtPath: home.path)
+        #expect(throws: PommeBuddyPreferencesFailure.self) {
+            try PommeBuddyPreferenceFiles.write(home: home.path, uid: getuid(), domain: "com.apple.loginwindow",
+                                                key: "MiniBuddyLaunch", value: .boolean(false), daemonRunning: { _ in false })
+        }
     }
 }
 
@@ -404,21 +487,15 @@ private final class BuddyFixture: Sendable {
         var owner = BuddyFixture.owner
         var absentQueries = 0
         var absentHomes = 0
-        var absentConsoleQueries = 0
-        var loseConsoleAfterWrite = false
-        var consolePresent = true
         var ownerError = false
         var writeFailure = false
-        var writeError = "failure"
         var diagnostics: [PommeBuddyPreferencesDiagnostic] = []
         var corruptReadback = false
         var replaceAfterWrite = false
         var failRunningSave = false
-        var missingMessage: String?
-        var writeOutput = ""
         var sleeps = 0
         var cancelSleep = false
-        var values: [String: (String, String)] = [:]
+        var values: [String: PommeBuddyPreferenceValue] = [:]
         var writes: [String] = []
         var commands: [[String]] = []
         var receipt: PommeBuddyPreferencesStatus?
@@ -436,37 +513,22 @@ private final class BuddyFixture: Sendable {
         }, homeExists: { _ in self.state.withLock {
             if $0.absentHomes > 0 { $0.absentHomes -= 1; return false }
             return true
-        } }, consoleIsOwner: { _ in self.state.withLock {
-            if $0.absentConsoleQueries > 0 {
-                $0.absentConsoleQueries -= 1
-                #expect($0.receipt?.outcome == "waiting")
-                #expect($0.receipt?.owner == nil)
-                #expect($0.commands.allSatisfy { $0.first == "/usr/bin/sw_vers" })
-                return false
+        } }, readPreference: { owner, _, key in self.state.withLock {
+            #expect(owner == BuddyFixture.owner)
+            return $0.values[key]
+        } }, writePreference: { _, _, key, value in
+            try self.state.withLock { state in
+                #expect(state.receipt?.outcome == "running")
+                state.writes.append(key)
+                if state.writeFailure { throw PommeBuddyPreferencesFailure(code: "preference-file-write", numericCode: 13) }
+                state.values[key] = state.corruptReadback ? .string("26A888") : value
+                if state.replaceAfterWrite { state.owner.generatedUID = UUID().uuidString }
             }
-            return $0.consolePresent
-        } }, command: { path, args in
+        }, command: { path, args in
             self.state.withLock { state in
                 state.commands.append([path] + args)
-                if path == "/usr/bin/sw_vers" {
-                    return .init(status: 0, stdout: args == ["-buildVersion"] ? state.build : "27.0", stderr: "")
-                }
-                #expect(path == "/usr/bin/sudo")
-                #expect(Array(args.prefix(5)) == ["-n", "-H", "-u", "pomme", "/usr/bin/defaults"])
-                let operation = args[5], key = args[7]
-                if operation == "write" {
-                    #expect(state.receipt?.outcome == "running")
-                    state.writes.append(key)
-                    if state.writeFailure { return .init(status: 9, stdout: "", stderr: state.writeError) }
-                    state.values[key] = (args[8] == "-bool" ? "boolean" : "string", state.corruptReadback ? "26A888" : (args[8] == "-bool" ? "0" : args[9]))
-                    if state.replaceAfterWrite { state.owner.generatedUID = UUID().uuidString }
-                    if state.loseConsoleAfterWrite { state.consolePresent = false }
-                    return .init(status: 0, stdout: state.writeOutput, stderr: "")
-                }
-                guard let value = state.values[key] else {
-                    return .init(status: 1, stdout: "", stderr: state.missingMessage ?? "The domain/default pair of (\(args[6]), \(key)) does not exist")
-                }
-                return .init(status: 0, stdout: operation == "read-type" ? "Type is \(value.0)\n" : value.1 + "\n", stderr: "")
+                #expect(path == "/usr/bin/sw_vers")
+                return .init(status: 0, stdout: args == ["-buildVersion"] ? state.build : "27.0", stderr: "")
             }
         }, load: { self.state.withLock { $0.receipt } }, save: { receipt in
             try self.state.withLock {

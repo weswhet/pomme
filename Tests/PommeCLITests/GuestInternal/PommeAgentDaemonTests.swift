@@ -72,18 +72,18 @@ struct PommeAgentDaemonTests {
     @Test("authenticated transport stays responsive during Buddy waiting and running", arguments: [false, true])
     func buddyTransportRemainsResponsive(running: Bool) async throws {
         let reachedStage = Mutex(false)
+        let stored = Mutex<[String: PommeBuddyPreferenceValue]>([:])
         let owner = PommeBuddyPreferencesOwner(account: "pomme", uid: 501,
             generatedUID: UUID().uuidString, homeDirectory: "/Users/pomme")
         let engine = PommeBuddyPreferencesMaintenance(dependencies: .init(
             bootSessionUUID: { "11111111-1111-1111-1111-111111111111" },
-            owner: { running ? owner : nil }, homeExists: { _ in true }, consoleIsOwner: { _ in true },
-            command: { path, arguments in
-                if path == "/usr/bin/sw_vers" {
-                    return .init(status: 0, stdout: arguments == ["-productVersion"] ? "27.0" : "26A428", stderr: "")
-                }
+            owner: { running ? owner : nil }, homeExists: { _ in true }, readPreference: { _, _, key in stored.withLock { $0[key] } },
+            writePreference: { _, _, key, value in
+                stored.withLock { $0[key] = value }
                 reachedStage.withLock { $0 = true }
-                try await Task.sleep(for: .seconds(60))
-                throw CancellationError()
+            },
+            command: { _, arguments in
+                .init(status: 0, stdout: arguments == ["-productVersion"] ? "27.0" : "26A428", stderr: "")
             }, load: { nil }, save: { _ in }, sleep: {
                 reachedStage.withLock { $0 = true }
                 try await Task.sleep(for: .seconds(60))
@@ -114,7 +114,11 @@ struct PommeAgentDaemonTests {
             let envelope = try PommeAgentProtocol.decode(Data(reply.dropLast()))
             #expect(envelope.ok == true)
             if operation == PommeAgent.buddyPreferencesStatusOperation {
-                #expect(envelope.result?.objectValue?["outcome"] == .string(running ? "running" : "waiting"))
+                // Preference writes are brief native calls, so a running
+                // attempt may already have finished when status is read.
+                let outcome = envelope.result?.objectValue?["outcome"]
+                #expect(running ? [.string("running"), .string("succeeded")].contains(outcome)
+                                : outcome == .string("waiting"))
             }
         }
         maintenance.cancel()
