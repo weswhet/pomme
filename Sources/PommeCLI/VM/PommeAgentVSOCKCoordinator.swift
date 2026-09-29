@@ -81,6 +81,13 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
     // before a retry.
     static let normalAMFIExchangeTimeout: TimeInterval = 300
 
+    // The agent spawns the guest process before it replies. Right after a
+    // boot, macOS 27 guests took 3-6 seconds for a single spawn (September
+    // 29 lab), which exceeded the ordinary budget while the agent was
+    // healthy. Only operations that launch a process get this longer window;
+    // describe, health, status, and stream traffic keep the short budget.
+    static let processLaunchExchangeTimeout: TimeInterval = 30
+
     private enum Phase { case disconnected, connecting(PommeAgentVSOCKRole), connected(PommeAgentVSOCKRole), failed(PommeAgentVSOCKRole) }
 
     private let transport: any PommeAgentVSOCKTransport
@@ -110,7 +117,19 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
         if role == .normal, isNormalAMFIOperation(operation) {
             return normalAMFIExchangeTimeout
         }
+        if role == .normal, isProcessLaunchOperation(operation) {
+            return max(defaultTimeout, processLaunchExchangeTimeout)
+        }
         return defaultTimeout
+    }
+
+    private static func isProcessLaunchOperation(_ operation: String) -> Bool {
+        switch operation {
+        case "process.start", "terminal.create", "remoteLogin.set":
+            return true
+        default:
+            return false
+        }
     }
 
     private static func isRecoverySecurityOperation(_ operation: String) -> Bool {

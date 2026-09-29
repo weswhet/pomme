@@ -965,14 +965,21 @@ struct PommeSecurityNormalAgent: Sendable {
   /// after `JSONValue` has confirmed that the value is an integer, so Boolean,
   /// string, and fractional exit statuses fail closed.
   static func decodeCompletedCommand(_ response: [String: Any]) throws -> GuestCommandResult {
-    guard let terminal = response["result"] as? [String: Any],
-      terminal["exited"] as? Bool == true,
+    guard let terminal = response["result"] as? [String: Any] else {
+      throw PommeSecurityWorkflowError.agentUnverified
+    }
+    // A well-formed result for a run that did not finish cleanly is not an
+    // identity failure; report it as the incomplete command it is.
+    guard terminal["exited"] as? Bool == true,
       terminal["outputComplete"] as? Bool == true,
       terminal["timedOut"] as? Bool != true,
       terminal["cancelled"] as? Bool != true,
       terminal["stdoutTruncated"] as? Bool != true,
-      terminal["stderrTruncated"] as? Bool != true,
-      let rawCode = integerValue(terminal["exitCode"]),
+      terminal["stderrTruncated"] as? Bool != true
+    else {
+      throw PommeSecurityWorkflowError.commandIncomplete
+    }
+    guard let rawCode = integerValue(terminal["exitCode"]),
       rawCode >= 0, rawCode <= 255,
       let code = Int(exactly: rawCode),
       terminal["signal"] == nil,

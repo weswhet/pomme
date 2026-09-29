@@ -71,6 +71,7 @@ enum PommeSecurityWorkflowError: Error, LocalizedError, Equatable, Sendable {
   case confirmationRequired
   case confirmationDeclined
   case agentUnverified
+  case commandIncomplete
   case privateInputUnsupported
   case ownerLoginUnverified
   case normalBootUnverified
@@ -89,6 +90,8 @@ enum PommeSecurityWorkflowError: Error, LocalizedError, Equatable, Sendable {
     case .confirmationDeclined: "Owner account creation was declined; security is unchanged."
     case .agentUnverified:
       "The existing persistent Pomme agent could not be authenticated with its creation-pinned identity."
+    case .commandIncomplete:
+      "A guest command did not finish cleanly: it timed out, was cancelled, or its output was incomplete or truncated."
     case .privateInputUnsupported:
       "This VM's pinned agent does not support verified private password input. Owner preparation is unavailable; the agent and creation record were retained. Create a VM with this Pomme build to use this workflow."
     case .ownerLoginUnverified:

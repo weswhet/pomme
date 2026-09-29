@@ -119,6 +119,26 @@ struct PommeAgentVSOCKCoordinatorTests {
         #expect(PommeAgentVSOCKCoordinator.normalAMFIExchangeTimeout == 300)
     }
 
+    @Test("Only normal-role process launches get the longer launch budget")
+    func processLaunchBudget() {
+        let ordinary: TimeInterval = 5
+        let launch = PommeAgentVSOCKCoordinator.processLaunchExchangeTimeout
+        #expect(launch == 30)
+        for operation in ["process.start", "terminal.create", "remoteLogin.set"] {
+            #expect(PommeAgentVSOCKCoordinator.exchangeTimeout(
+                for: .normal, operation: operation, defaultTimeout: ordinary) == launch)
+            #expect(PommeAgentVSOCKCoordinator.exchangeTimeout(
+                for: .recoveryRuntime, operation: operation, defaultTimeout: ordinary) == ordinary)
+        }
+        for operation in ["agent.describe", "agent.health", "process.status", "process.signal", "file.write"] {
+            #expect(PommeAgentVSOCKCoordinator.exchangeTimeout(
+                for: .normal, operation: operation, defaultTimeout: ordinary) == ordinary)
+        }
+        // A caller that already asked for longer keeps its budget.
+        #expect(PommeAgentVSOCKCoordinator.exchangeTimeout(
+            for: .normal, operation: "process.start", defaultTimeout: 120) == 120)
+    }
+
     @Test("Recovery security error envelopes survive the extended exchange budget")
     func recoverySecurityErrorEnvelopeUsesExtendedTimeout() async throws {
         let transport = FakeTransport()
