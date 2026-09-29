@@ -9,8 +9,7 @@ struct PommeGuestOwnerCredentialTests {
     /// does, then lets each test spoil exactly one property.
     private func makeReader(
         euid: uid_t = 0,
-        autoLoginUser: String? = "pomme",
-        autoLoginStatus: Int32 = 0,
+        autoLoginUser: (any Sendable)? = "pomme",
         artifact: PommeGuestOwnerCredentialArtifact? = .init(
             isRegularFile: true, userID: 0, groupID: 0, mode: 0o600, linkCount: 1),
         bytes: Data? = nil
@@ -18,14 +17,7 @@ struct PommeGuestOwnerCredentialTests {
         let payload = bytes ?? kcpasswordData(for: Self.password)
         return .init(
             effectiveUserID: { euid },
-            runProcess: { executable, arguments in
-                #expect(executable == "/usr/bin/defaults")
-                #expect(arguments == [
-                    "read", "/Library/Preferences/com.apple.loginwindow", "autoLoginUser",
-                ])
-                let text = autoLoginUser.map { "\($0)\n" } ?? ""
-                return (autoLoginStatus, Data(text.utf8))
-            },
+            readAutoLoginUser: { autoLoginUser },
             readArtifact: { path in
                 #expect(path == "/etc/kcpassword")
                 return artifact
@@ -108,7 +100,8 @@ struct PommeGuestOwnerCredentialTests {
     func requiresAutoLoginAccount() {
         for reader in [
             makeReader(autoLoginUser: nil),
-            makeReader(autoLoginStatus: 1),
+            makeReader(autoLoginUser: 501),
+            makeReader(autoLoginUser: ["pomme"]),
             makeReader(autoLoginUser: "not a user name"),
         ] {
             #expect(throws: PommeGuestOwnerCredentialError.autoLoginUnavailable) {

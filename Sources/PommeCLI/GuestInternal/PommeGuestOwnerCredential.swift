@@ -97,7 +97,8 @@ struct PommeGuestOwnerCredentialArtifact: Equatable, Sendable {
 /// administrator with a Secure Token and APFS ownership before the credential
 /// is worth anything.
 struct PommeGuestOwnerCredentialReader: Sendable {
-    typealias ProcessRunner = @Sendable (String, [String]) throws -> (status: Int32, stdout: Data)
+    /// Reads the system login window's `autoLoginUser` value, or nil.
+    typealias AutoLoginReader = @Sendable () -> Any?
     typealias ArtifactReader = @Sendable (String) -> PommeGuestOwnerCredentialArtifact?
     typealias BytesReader = @Sendable (String) throws -> Data
 
@@ -112,18 +113,18 @@ struct PommeGuestOwnerCredentialReader: Sendable {
     static let maximumArtifactBytes = 4 * 1024
 
     private let effectiveUserID: @Sendable () -> uid_t
-    private let runProcess: ProcessRunner
+    private let readAutoLoginUser: AutoLoginReader
     private let readArtifact: ArtifactReader
     private let readBytes: BytesReader
 
     init(
         effectiveUserID: @escaping @Sendable () -> uid_t = { geteuid() },
-        runProcess: @escaping ProcessRunner = PommeGuestOwnerCredentialReader.runDefaults,
+        readAutoLoginUser: @escaping AutoLoginReader = PommeGuestOwnerCredentialReader.systemAutoLoginUser,
         readArtifact: @escaping ArtifactReader = { PommeGuestOwnerCredentialArtifact.read(at: $0) },
         readBytes: @escaping BytesReader = { try Data(contentsOf: URL(fileURLWithPath: $0)) }
     ) {
         self.effectiveUserID = effectiveUserID
-        self.runProcess = runProcess
+        self.readAutoLoginUser = readAutoLoginUser
         self.readArtifact = readArtifact
         self.readBytes = readBytes
     }
@@ -172,20 +173,7 @@ struct PommeGuestOwnerCredentialReader: Sendable {
     }
 
     private func autoLoginAccount() throws -> String {
-        let result: (status: Int32, stdout: Data)
-        do {
-            result = try runProcess(
-                "/usr/bin/defaults",
-                ["read", "/Library/Preferences/com.apple.loginwindow", "autoLoginUser"]
-            )
-        } catch {
-            throw PommeGuestOwnerCredentialError.autoLoginUnavailable
-        }
-        guard result.status == 0,
-              let text = String(data: result.stdout, encoding: .utf8)
-        else { throw PommeGuestOwnerCredentialError.autoLoginUnavailable }
-        let account = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard Self.isSafeAccount(account) else {
+        guard let account = readAutoLoginUser() as? String, Self.isSafeAccount(account) else {
             throw PommeGuestOwnerCredentialError.autoLoginUnavailable
         }
         return account
@@ -210,18 +198,12 @@ struct PommeGuestOwnerCredentialReader: Sendable {
         return password
     }
 
-    private static func runDefaults(
-        _ executable: String, _ arguments: [String]
-    ) throws -> (status: Int32, stdout: Data) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = Pipe()
-        try process.run()
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return (process.terminationStatus, data)
+    /// `/Library/Preferences/com.apple.loginwindow` through cfprefsd, as
+    /// root: the any-user, any-host domain, read natively instead of by
+    /// spawning `defaults`.
+    static func systemAutoLoginUser() -> Any? {
+        let domain = "com.apple.loginwindow" as CFString
+        _ = CFPreferencesSynchronize(domain, kCFPreferencesAnyUser, kCFPreferencesAnyHost)
+        return CFPreferencesCopyValue("autoLoginUser" as CFString, domain, kCFPreferencesAnyUser, kCFPreferencesAnyHost)
     }
 }
