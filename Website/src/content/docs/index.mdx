@@ -1,0 +1,84 @@
+---
+title: Pomme
+description: Pomme is a command-line tool for creating and controlling macOS virtual machines on Apple silicon.
+template: splash
+hero:
+  tagline: Create, provision, and automate macOS virtual machines on your Apple silicon Mac from the command line.
+  actions:
+    - text: Get started
+      link: /get-started/quickstart/
+      icon: right-arrow
+    - text: Command-line reference
+      link: /reference/cli/
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Pomme is a command-line tool for macOS virtual machines (VMs) on Apple silicon.
+It uses Apple's Virtualization framework to install macOS from a restore
+image, and then installs an authenticated guest agent so that you can run
+programs, open shells, and transfer files without a network connection or a
+window.
+
+:::caution[Pre-release]
+Pomme 0.1.0 is a development build. It isn't published, and its release
+qualification isn't complete. For details, see
+[Supported macOS versions](/concepts/os-qualification/).
+:::
+
+## What you can do with Pomme
+
+<CardGrid>
+	<Card title="Create VMs you can resume" icon="rocket">
+		Install macOS from a version, a build, or a local restore image. If creation
+		stops, run the same command with `--resume` to continue from the last
+		verified step.
+	</Card>
+	<Card title="Clone from templates" icon="document">
+		Restore macOS once into a template, then create new VMs from copy-on-write
+		clones of it instead of restoring the image again.
+	</Card>
+	<Card title="Work inside the guest" icon="seti:shell">
+		Run programs, open durable terminal sessions, run background jobs, copy
+		files, and read the guest agent's logs.
+	</Card>
+	<Card title="Change security settings" icon="setting">
+		Turn System Integrity Protection (SIP) and AMFI off and back on through
+		journaled workflows that you can resume after a failure.
+	</Card>
+	<Card title="Enroll in MDM" icon="approve-check">
+		Take a VM from any state to a supervised or unapproved mobile device
+		management (MDM) enrollment with
+		one command.
+	</Card>
+	<Card title="Automate everything" icon="puzzle">
+		Get JSON or JSONL output from every command, send keys and clicks to the
+		guest display, and take screenshots without a host window.
+	</Card>
+</CardGrid>
+
+## Start here
+
+<CardGrid>
+	<LinkCard
+		title="System requirements"
+		description="Check that your Mac can run Pomme."
+		href="/get-started/requirements/"
+	/>
+	<LinkCard
+		title="Install Pomme"
+		description="Build, sign, and install the pomme command."
+		href="/get-started/install/"
+	/>
+	<LinkCard
+		title="Quickstart"
+		description="Create your first VM, run a command in it, and delete it."
+		href="/get-started/quickstart/"
+	/>
+	<LinkCard
+		title="Architecture"
+		description="Learn how the pomme command, the helper, and the guest agent work together."
+		href="/concepts/architecture/"
+	/>
+</CardGrid>

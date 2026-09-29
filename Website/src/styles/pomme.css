@@ -1,0 +1,17 @@
+/* Pomme accent colors for Starlight's light and dark themes. */
+:root {
+	--sl-color-accent-low: #3b1016;
+	--sl-color-accent: #d6334a;
+	--sl-color-accent-high: #f7c6cd;
+}
+
+:root[data-theme='light'] {
+	--sl-color-accent-low: #fbe3e6;
+	--sl-color-accent: #b0182f;
+	--sl-color-accent-high: #5c0c18;
+}
+
+/* Keep wide flag tables readable. */
+.sl-markdown-content table code {
+	white-space: nowrap;
+}
