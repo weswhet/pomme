@@ -465,6 +465,7 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
     }
     let existing = preparation(
       username: authorization.username, progress: progress, priorProvisioningAbsent: false)
+    PommeProgressContext.sink?.step(vm: reference.displayName, "Verifying volume owner")
     let verified = try await existing.verifyOwner(password: authorization.password)
     try recordVerification(verified, progress: progress)
     // A recovered credential is Pomme's own generated secret, already proven
@@ -562,6 +563,7 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
       PommeCore.log(
         "Preparing and verifying owner \(account) through the persistent agent.",
         vmName: reference.displayName)
+      PommeProgressContext.sink?.step(vm: reference.displayName, "Creating volume owner")
       verified = try await helper.createOwner(
         password: credential.password, probe: probe, retryIntent: hadCreationIntent)
       try recordVerification(verified, progress: progress)
@@ -598,6 +600,7 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
             try await helper.completeFreshOwnerAfterLogin(password: credential.password, expected: verified)
           },
           verifyDesktop: {
+            PommeProgressContext.sink?.step(vm: reference.displayName, "Verifying owner login")
             try await normal.verifyConsoleLogin(username: verified.username, uniqueID: verified.uniqueID)
           },
           log: { PommeCore.log($0, vmName: reference.displayName) }
@@ -645,6 +648,7 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
       PommeCore.log(
         "Checking the console user and login session for \(account).",
         vmName: reference.displayName)
+      PommeProgressContext.sink?.step(vm: reference.displayName, "Verifying owner login")
       try await normal.verifyConsoleLogin(username: verified.username, uniqueID: verified.uniqueID)
       try progress.advance(.autologinVerified)
     } else if PommeSecurityWorkflow.freshOwnerDesktopProofRequired(
@@ -661,6 +665,7 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
       try await PommeBuddyPreferencesGate.failOpen("receipt", log: { PommeCore.log($0, vmName: reference.displayName) }) {
         _ = try await helper.waitForBuddyPreferences(expected: verified)
       }
+      PommeProgressContext.sink?.step(vm: reference.displayName, "Verifying owner login")
       try await normal.verifyConsoleLogin(username: verified.username, uniqueID: verified.uniqueID)
     }
     return try .init(username: credential.reference.account, password: credential.password)

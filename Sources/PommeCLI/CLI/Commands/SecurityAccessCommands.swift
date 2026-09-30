@@ -344,3 +344,15 @@ struct ScreenSharingDisableCommand: ParsableCommand {
         try screenSharingResult(name: target, action: .disable, output: output)
     }
 }
+
+extension SIPStatusCommand: CLIProgressCommand { var progressOptions: GlobalOptions { workflow.output } }
+
+extension SIPEnableCommand: CLIProgressCommand { var progressOptions: GlobalOptions { workflow.output } }
+
+extension SIPDisableCommand: CLIProgressCommand { var progressOptions: GlobalOptions { workflow.output } }
+
+extension AMFIStatusCommand: CLIProgressCommand { var progressOptions: GlobalOptions { workflow.output } }
+
+extension AMFIEnableCommand: CLIProgressCommand { var progressOptions: GlobalOptions { workflow.output } }
+
+extension AMFIDisableCommand: CLIProgressCommand { var progressOptions: GlobalOptions { workflow.output } }

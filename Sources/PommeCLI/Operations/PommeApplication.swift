@@ -81,6 +81,10 @@ private actor PommeMDMHelperDiagnostics {
 }
 
 enum PommeApplication {
+    static func progressWarning(_ message: String, vmName: String? = nil) {
+        PommeCore.warning(message, vmName: vmName)
+    }
+
     static func provisioningSummary(_ payload: [String: Any]) -> String {
         guard payload["guestProvisioning"] as? String == "virtualization" else { return "" }
         return " provisioning=virtualization agent=ssh-bootstrap account=pomme automaticLogin=enabled remoteLogin=off"
@@ -247,7 +251,8 @@ enum PommeApplication {
     }
 
     static func createResume(name: String) async throws -> PommeOperationResult {
-        try await currentProvisioningServices().resume(try validateVMName(name))
+        PommeProgressContext.sink?.step(vm: name, "Resuming creation")
+        return try await currentProvisioningServices().resume(try validateVMName(name))
     }
 
     static func agentStatus(name: String) async throws -> PommeOperationResult {
@@ -276,6 +281,7 @@ enum PommeApplication {
     }
 
     static func agentRepair(name: String, finalState: String) async throws -> PommeOperationResult {
+        PommeProgressContext.sink?.step(vm: name, "Repairing Pomme agent")
         guard finalState == PommeAgentRepairFinalState.previous.rawValue else {
             throw PommeProvisioningError.unavailableIntegration("agent repair final state")
         }
@@ -331,6 +337,7 @@ enum PommeApplication {
     ) throws -> PommeOperationResult {
         try VMBundleMutationLease.withLease(name: name, inherited: lease) { scope in
         let reference = try namedReference(name)
+        PommeProgressContext.sink?.step(vm: name, "Stopping VM")
         let statusPayload = try PommeCore.vmStatusPayload(reference: reference)
         if statusPayload["helperRunning"] as? Bool != true {
             return alreadyStoppedStopResult(reference: reference, statusPayload: statusPayload, force: force)
@@ -387,6 +394,7 @@ enum PommeApplication {
     static func pause(name: String, lease: VMBundleMutationLease? = nil) throws -> PommeOperationResult {
         try VMBundleMutationLease.withLease(name: name, inherited: lease) { _ in
         let reference = try namedReference(name)
+        PommeProgressContext.sink?.step(vm: name, "Pausing VM")
         let payload = try PommeCore.controlCommandPayload(.pause, reference: reference)
         return lifecycleResult(title: "Pause", command: .pause, reference: reference, payload: payload)
         }
@@ -395,6 +403,7 @@ enum PommeApplication {
     static func resume(name: String, lease: VMBundleMutationLease? = nil) throws -> PommeOperationResult {
         try VMBundleMutationLease.withLease(name: name, inherited: lease) { _ in
         let reference = try namedReference(name)
+        PommeProgressContext.sink?.step(vm: name, "Resuming VM")
         let payload = try PommeCore.controlCommandPayload(.resume, reference: reference)
         return lifecycleResult(title: "Resume", command: .resume, reference: reference, payload: payload)
         }
@@ -415,6 +424,7 @@ enum PommeApplication {
               let name = reference.name,
               (try? requireSnapshotLifecycleSucceeded(resume(name: name, lease: lease))) != nil
         else { return false }
+        PommeProgressContext.sink?.step(vm: name, "Waiting for Pomme agent")
         let deadline = Date().addingTimeInterval(Constants.resumedGuestAgentReadyTimeoutSeconds)
         while Date() < deadline {
             if let resumed = try? PommeCore.vmStatusPayload(reference: reference),
@@ -696,6 +706,7 @@ enum PommeApplication {
     static func boot(name: String, mode: BootMode, options: CLIOptions = CLIOptions(), lease: VMBundleMutationLease? = nil) throws -> PommeOperationResult {
         try VMBundleMutationLease.withLease(name: name, inherited: lease) { _ in
         let reference = try namedReference(name)
+        PommeProgressContext.sink?.step(vm: name, mode == .normal ? "Starting macOS" : "Starting Recovery")
         let payload = try PommeCore.stopAndStartPayload(
             reference: reference,
             bootMode: mode,
@@ -821,6 +832,7 @@ enum PommeApplication {
         name: String,
         request: GuestCommandRequest
     ) throws -> PommeOperationResult {
+        PommeProgressContext.sink?.step(vm: name, "Running \(URL(fileURLWithPath: request.path).lastPathComponent)")
         if request.pty {
             return try terminalSessionCreate(
                 name: name,
@@ -851,6 +863,8 @@ enum PommeApplication {
         debug: Bool
     ) throws {
         let reference = try namedReference(name)
+        let progressSink = PommeProgressContext.sink
+        progressSink?.step(vm: name, "Waiting for guest logs")
         let signals = PommeLogSignalController()
         let output = PommeLogOutputSink()
         var controlRequest = request
@@ -870,6 +884,7 @@ enum PommeApplication {
             bundle: reference.bundle,
             shouldCancel: { signals.cancellationRequested },
             onOutput: { descriptor, data in
+                if !data.isEmpty { progressSink?.suspend() }
                 try output.write(data, to: descriptor, shouldCancel: { signals.cancellationRequested })
             }
         )
@@ -895,6 +910,7 @@ enum PommeApplication {
         if response["ok"] as? Bool == false,
            let error = response["error"] as? String,
            !error.isEmpty {
+            progressSink?.suspend()
             try? FileHandle.standardError.write(contentsOf: Data((error + "\n").utf8))
         }
 
@@ -903,6 +919,7 @@ enum PommeApplication {
             default: response["ok"] as? Bool == false ? 1 : 0
         )
         if exitCode != 0, !output.wroteToStderr {
+            progressSink?.suspend()
             try? FileHandle.standardError.write(
                 contentsOf: Data("Guest log command exited with status \(exitCode).\n".utf8)
             )
@@ -919,6 +936,7 @@ enum PommeApplication {
         attach: Bool
     ) throws -> PommeOperationResult {
         let reference = try namedReference(name)
+        PommeProgressContext.sink?.step(vm: name, "Preparing terminal")
         var createPayload = payload
         let sessionID = UUID().uuidString.lowercased()
         createPayload["sessionID"] = sessionID
@@ -953,6 +971,7 @@ enum PommeApplication {
             throw RunnerError.invalidControlResponse("The terminal creation response did not include a session ID.")
         }
         if attach {
+            PommeProgressContext.sink?.suspend()
             if let session = created["session"] as? [String: Any],
                session["bootRole"] as? String == PommeDurableTerminalRole.recovery.rawValue {
                 let notice = "Notice: this Recovery terminal runs as unrestricted root and is outside Pomme's transactional SIP/AMFI guarantees.\n"
@@ -1034,6 +1053,7 @@ enum PommeApplication {
             ],
             bundle: reference.bundle
         )
+        PommeProgressContext.sink?.suspend()
         if inspection["bootRole"] as? String == PommeDurableTerminalRole.recovery.rawValue {
             let notice = "Notice: this Recovery terminal runs as unrestricted root and is outside Pomme's transactional SIP/AMFI guarantees.\n"
             FileHandle.standardError.write(Data(notice.utf8))
@@ -1129,18 +1149,31 @@ enum PommeApplication {
     private static func guestRequestUnchecked(name: String, request: GuestCLIRequest, title: String) throws -> PommeOperationResult {
         let reference = try namedReference(name)
         try request.validate()
+        let progressSink = PommeProgressContext.sink
+        switch request {
+        case .foreground(let command), .startBackground(let command):
+            progressSink?.step(vm: name, "Running \(URL(fileURLWithPath: command.path).lastPathComponent)")
+        case .remoteLogin:
+            progressSink?.step(vm: name, "Configuring Remote Login")
+        case .screenSharing:
+            progressSink?.step(vm: name, "Configuring Screen Sharing")
+        default: break
+        }
         let transfer = PommeGuestFileTransfer { operation, payload in
             try performAuthenticatedAgentOperation(reference: reference, operation: operation, payload: payload)
         }
         switch request {
         case .copy(let copy):
+            progressSink?.step(vm: name, "Copying files")
             let receipt = try transfer.copy(copy)
             return result(title: title, reference: reference, payload: receipt.payload,
                           text: "Copied \(receipt.bytes) bytes.")
         case .cat(let cat):
+            progressSink?.step(vm: name, "Reading guest file")
             let payload = try transfer.cat(cat)
             return result(title: title, reference: reference, payload: payload, text: "")
         case .jobWait(let jobID, let timeout):
+            progressSink?.step(vm: name, "Waiting for job")
             let waiter = PommeGuestJobWait(perform: { poll, remaining in
                 let deadline = ProcessInfo.processInfo.systemUptime + remaining
                 return try VMBundleMutationLease.withLease(name: name) { _ in
@@ -1255,6 +1288,7 @@ enum PommeApplication {
     ) async throws -> PommeOperationResult {
         try await VMBundleMutationLease.withLease(name: name, inherited: inherited) { lease in
         let reference = try namedReference(name, requireExists: false)
+        PommeProgressContext.sink?.step(vm: name, "Preparing VM creation")
         let bundleExists = FileManager.default.fileExists(atPath: reference.bundle.rootURL.path)
         guard !bundleExists else {
             throw RunnerError.hostCommandFailed(
@@ -1281,6 +1315,7 @@ enum PommeApplication {
 
     static func configuredCreate(plan: VMCreationPlan) async throws -> PommeOperationResult {
         try await VMBundleMutationLease.withLease(name: plan.name) { lease in
+        PommeProgressContext.sink?.step(vm: plan.name, "Preparing VM creation")
         var options = CLIOptions()
         options.vmName = plan.name
         options.create = true
@@ -1350,6 +1385,7 @@ enum PommeApplication {
             let reference = try namedReference(name)
             try requireMDMWorkflowAvailable(reference: reference, lease: acquiredLease)
             if action != .status {
+                PommeProgressContext.sink?.step(vm: name, action == .enable ? "Enabling SIP" : "Disabling SIP")
                 let operation: PommeSecurityWorkflowOperation = action == .enable ? .sipEnable : .sipDisable
                 let payload = try await PommeSecurityWorkflow.runLive(
                     reference: reference, operation: operation, finalState: finalState,
@@ -1417,6 +1453,7 @@ enum PommeApplication {
             let reference = try namedReference(name)
             try requireMDMWorkflowAvailable(reference: reference, lease: acquiredLease)
             if action != .status {
+                PommeProgressContext.sink?.step(vm: name, action == .enable ? "Enabling AMFI" : "Disabling AMFI")
                 let operation: PommeSecurityWorkflowOperation = action == .enable ? .amfiEnable : .amfiDisable
                 let payload = try await PommeSecurityWorkflow.runLive(
                     reference: reference, operation: operation, finalState: finalState,
@@ -1751,7 +1788,9 @@ enum PommeApplication {
             if let guestPath, guestPath != artifacts.profile {
                 throw PommeMDMEnrollmentWorkflowError.journalIdentityMismatch
             }
+            let progressSink = PommeProgressContext.sink
             let ensureNormal: @Sendable () async throws -> Void = {
+                progressSink?.step(vm: name, "Authenticating Pomme agent in macOS")
                 PommeCore.log("MDM phase: ensure normal macOS and authenticate the agent.")
                 try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
                 let description = try await authenticatedMDMAgentDescription(reference: reference, timeout: timeout)
@@ -1762,6 +1801,7 @@ enum PommeApplication {
                 if progress.journal.phase == .captured, !progress.journal.stagedProfileOwned {
                     try await requireMDMDestinationAbsent(reference: reference, destination: artifacts.profile)
                 }
+                progressSink?.step(vm: name, "Checking MDM enrollment")
                 PommeCore.log("MDM phase: observe installed profile, enrollment, and supervision.")
                 let value = try await observeMDMEnrollment(reference: reference, timeout: timeout)
                 PommeCore.log("MDM observation: enrolled=\(value.status.enrolled), userApproved=\(value.status.userApproved), supervised=\(value.supervised).")
@@ -1832,6 +1872,7 @@ enum PommeApplication {
                     }
                 },
                 enroll: {
+                    progressSink?.step(vm: name, "Preparing MDM enrollment")
                     PommeCore.log("MDM phase: prepare enrollment artifacts and dispatch the temporary helper.")
                     try await cleanupMDMArtifacts(reference: reference, journal: progress.journal)
                     _ = try await mdmHelperEnrollment(
@@ -1912,7 +1953,7 @@ enum PommeApplication {
             do { observed = try await PommeMDMWorkflowExecution(progress: progress, dependencies: dependencies).run(preflightError: sourceError) }
             catch {
                 let retained = progress.journal
-                PommeCore.log("MDM failed at phase=\(retained.phase.rawValue). Preserving the current VM, SIP/AMFI settings, and diagnostic artifacts; no failure cleanup or restoration will run.")
+                progressWarning("MDM failed at phase=\(retained.phase.rawValue). Preserving the current VM, SIP/AMFI settings, and diagnostic artifacts; no failure cleanup or restoration will run.", vmName: name)
                 let securityFinalized = [.securityRestored, .runStateRestorationIntent, .restorationComplete]
                     .contains(retained.phase)
                 var details: [String: Any] = [
@@ -1947,7 +1988,7 @@ enum PommeApplication {
             }
             let finished = progress.journal
             if finished.finalSecurity == .disabled {
-                PommeCore.log("MDM final security: disabled. SIP/AMFI settings this enrollment turned off remain off; re-enable with `pomme amfi enable` and then `pomme sip enable`.")
+                progressWarning("MDM final security: disabled. SIP/AMFI settings this enrollment turned off remain off; re-enable with `pomme amfi enable` and then `pomme sip enable`.", vmName: name)
             }
             var details: [String: Any] = [
                 "enrollmentMode": enrollmentMode.rawValue, "profileIdentifier": profile.identifier,

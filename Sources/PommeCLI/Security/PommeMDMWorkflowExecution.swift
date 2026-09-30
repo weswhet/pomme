@@ -195,6 +195,7 @@ struct PommeMDMWorkflowExecution: Sendable {
             try await reconcileCompletedRestoration()
             if let pending = progress.journal.pendingChild { try await child(pending) }
             try await dependencies.ensureNormal()
+            PommeProgressContext.sink?.step(vm: progress.journal.identity.vmName, "Checking MDM enrollment")
             let before = try await dependencies.observe()
             let initial = progress.journal
             let disposition = try before.disposition(profile: initial.profile, mode: initial.enrollmentMode)
@@ -237,6 +238,7 @@ struct PommeMDMWorkflowExecution: Sendable {
                 let ready = try await dependencies.observe()
                 _ = try ready.disposition(profile: initial.profile, mode: initial.enrollmentMode)
                 if progress.journal.phase == .securityPrepared { try progress.record(phase: .enrollmentIntent) }
+                PommeProgressContext.sink?.step(vm: progress.journal.identity.vmName, "Enrolling in MDM")
                 do { try await dependencies.enroll() }
                 catch {
                     if (error as? PommeMDMEnrollmentError) == .helperProcessTerminationUnproven {
@@ -245,14 +247,17 @@ struct PommeMDMWorkflowExecution: Sendable {
                     }
                     throw error
                 }
+                PommeProgressContext.sink?.step(vm: progress.journal.identity.vmName, "Waiting for MDM enrollment")
                 let observed = try await dependencies.awaitEnrollment()
                 try observed.requireRequestedState(profile: initial.profile, mode: initial.enrollmentMode)
                 try progress.record(enrollmentVerified: true)
             }
             try await restore()
+            PommeProgressContext.sink?.step(vm: progress.journal.identity.vmName, "Verifying MDM enrollment")
             let restored = try await dependencies.awaitEnrollment()
             try restored.requireRequestedState(profile: progress.journal.profile, mode: progress.journal.enrollmentMode)
             try progress.record(phase: .runStateRestorationIntent)
+            PommeProgressContext.sink?.step(vm: progress.journal.identity.vmName, "Restoring VM state")
             try await dependencies.restoreRunState(progress.journal.originalRunState)
             try progress.record(phase: .restorationComplete)
             return restored
@@ -296,6 +301,7 @@ struct PommeMDMWorkflowExecution: Sendable {
         // any normal-guest artifact operation can boot the VM.
         try await reconcileCompletedRestoration()
         if let pending = progress.journal.pendingChild { try await child(pending) }
+        PommeProgressContext.sink?.step(vm: progress.journal.identity.vmName, "Cleaning up MDM enrollment")
         do { try await dependencies.cleanup() }
         catch let failure as PommeMDMCleanupFailure { throw failure }
         catch { throw PommeMDMEnrollmentError.cleanupFailed }

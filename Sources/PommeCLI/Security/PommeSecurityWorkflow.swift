@@ -89,6 +89,7 @@ enum PommeSecurityWorkflow {
     var noOp = progress.journal.noMutationNeeded
     do {
       dependencies.log("Inspecting security state before owner preparation.")
+      PommeProgressContext.sink?.step(vm: progress.journal.identity.vmName, "Checking security state")
       let state = try await dependencies.observe()
       let matches = state.disabled == operation.requestsDisabled
       let baselineNeedsRestoration = operation == .amfiEnable && state.baselinePresent
@@ -125,7 +126,7 @@ enum PommeSecurityWorkflow {
       if [.noMutationVerified, .restorationPending].contains(phase) {
         guard matches, reconciled else { throw PommeSecurityWorkflowError.incompleteTransaction }
         if phase == .noMutationVerified { try progress.advance(.restorationPending) }
-        try await dependencies.restore(target)
+        try await restoreWithProgress(target, progress: progress, dependencies: dependencies)
         try progress.advance(.restorationComplete)
         return result(
           progress: progress, noOp: progress.journal.noMutationNeeded,
@@ -163,6 +164,8 @@ enum PommeSecurityWorkflow {
           dependencies.log(operation.isSIP
             ? "Applying the requested change in authenticated Recovery."
             : "Applying the journaled AMFI policy and normal-boot NVRAM stages.")
+          PommeProgressContext.sink?.step(vm: progress.journal.identity.vmName,
+            (operation.requestsDisabled ? "Disabling " : "Enabling ") + (operation.isSIP ? "SIP" : "AMFI"))
           let output = try await dependencies.mutate(credentials)
           guard output.objectValue?["verified"] == .bool(true) else {
             throw PommeSecurityWorkflowError.statusUnverified
@@ -178,19 +181,20 @@ enum PommeSecurityWorkflow {
         }
         if progress.journal.phase == .securityMutationVerified {
           dependencies.log("Verifying configuration after a normal boot.")
-          try await dependencies.verifyNormalBoot()
+          try await verifyNormalBootWithProgress(progress: progress, dependencies: dependencies)
           normalBootVerified = true
           try progress.advance(.normalBootVerified)
         }
       }
       try progress.advance(.restorationPending)
       dependencies.log("Restoring the requested VM run state.")
-      try await dependencies.restore(target)
+      try await restoreWithProgress(target, progress: progress, dependencies: dependencies)
       try progress.advance(.restorationComplete)
       return result(progress: progress, noOp: noOp, normalBootVerified: normalBootVerified)
     } catch {
       let primary = error
       if let preparation = error as? OwnerPreparationFailure {
+        PommeProgressContext.sink?.warning("Owner preparation failed; VM state and journal retained without failure restoration or retry.")
         dependencies.log("Owner preparation failed at \(progress.journal.phase.rawValue); VM state and journal retained without failure restoration or retry.")
         throw preparation.underlying
       }
@@ -201,6 +205,7 @@ enum PommeSecurityWorkflow {
       {
         throw PommeSecurityWorkflowError.restorationIncomplete
       }
+      PommeProgressContext.sink?.warning("Security progress was retained; restoring the VM run state after failure.")
       dependencies.log("Security progress was retained; restoring the VM run state after failure.")
       do { try await dependencies.restore(progress.journal.originalRunState) } catch {
         throw PommeSecurityWorkflowError.restorationIncomplete
@@ -222,16 +227,17 @@ enum PommeSecurityWorkflow {
       try await recoverConfiguredAMFIDisable(
         progress: progress, dependencies: dependencies)
       dependencies.log("Verifying configuration after a normal boot.")
-      try await dependencies.verifyNormalBoot()
+      try await verifyNormalBootWithProgress(progress: progress, dependencies: dependencies)
       try progress.advance(.normalBootVerified)
       try progress.advance(.restorationPending)
       dependencies.log("Restoring the requested VM run state.")
-      try await dependencies.restore(target)
+      try await restoreWithProgress(target, progress: progress, dependencies: dependencies)
       try progress.advance(.restorationComplete)
       return result(progress: progress, noOp: false, normalBootVerified: true)
     } catch {
       let primary = error
       if let preparation = error as? OwnerPreparationFailure {
+        PommeProgressContext.sink?.warning("Owner preparation failed; VM state and journal retained without failure restoration or retry.")
         dependencies.log("Owner preparation failed at \(progress.journal.phase.rawValue); VM state and journal retained without failure restoration or retry.")
         throw preparation.underlying
       }
@@ -242,6 +248,7 @@ enum PommeSecurityWorkflow {
       {
         throw PommeSecurityWorkflowError.restorationIncomplete
       }
+      PommeProgressContext.sink?.warning("Security progress was retained; restoring the VM run state after failure.")
       dependencies.log("Security progress was retained; restoring the VM run state after failure.")
       do { try await dependencies.restore(progress.journal.originalRunState) } catch {
         throw PommeSecurityWorkflowError.restorationIncomplete
@@ -257,6 +264,7 @@ enum PommeSecurityWorkflow {
   private static func prepareOwnerPreservingFailure(
     progress: PommeSecurityWorkflowProgress, dependencies: PommeSecurityWorkflowDependencies
   ) async throws -> PommeGuestSecurityCredentials {
+    PommeProgressContext.sink?.step(vm: progress.journal.identity.vmName, "Preparing volume owner")
     do { return try await dependencies.prepareOwner(progress) }
     catch { throw OwnerPreparationFailure(underlying: error) }
   }
@@ -269,6 +277,7 @@ enum PommeSecurityWorkflow {
       throw PommeSecurityWorkflowError.incompleteTransaction
     }
     let credentials = try await prepareOwnerPreservingFailure(progress: progress, dependencies: dependencies)
+    PommeProgressContext.sink?.step(vm: progress.journal.identity.vmName, "Reconciling AMFI configuration")
     let output = try await recoverConfiguredAMFI(credentials)
     guard output.objectValue?["verified"] == .bool(true),
           output.objectValue?["amfiDisabled"] == .bool(true) else {
@@ -277,6 +286,21 @@ enum PommeSecurityWorkflow {
     if progress.journal.phase == .securityMutationIntent {
       try progress.advance(.securityMutationVerified)
     }
+  }
+
+  private static func verifyNormalBootWithProgress(
+    progress: PommeSecurityWorkflowProgress, dependencies: PommeSecurityWorkflowDependencies
+  ) async throws {
+    PommeProgressContext.sink?.step(vm: progress.journal.identity.vmName, "Verifying security after normal boot")
+    try await dependencies.verifyNormalBoot()
+  }
+
+  private static func restoreWithProgress(
+    _ target: VMRunStateSnapshot, progress: PommeSecurityWorkflowProgress,
+    dependencies: PommeSecurityWorkflowDependencies
+  ) async throws {
+    PommeProgressContext.sink?.step(vm: progress.journal.identity.vmName, "Restoring VM state")
+    try await dependencies.restore(target)
   }
 
   private static func result(

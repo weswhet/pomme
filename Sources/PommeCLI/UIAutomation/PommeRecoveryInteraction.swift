@@ -93,6 +93,7 @@ enum PommeRecoveryTerminalLaunchDisposition: Equatable, Sendable {
 /// boundary.
 enum PommeRecoveryInteractionMilestone: String, Equatable, Sendable {
   case navigationStarted
+  case terminalLaunching
   case terminalVerified
   case capabilityProbeSubmitted
   case capabilityProbeVerified
@@ -130,7 +131,8 @@ struct PommeTahoeRecoveryInteraction: Sendable {
   /// disposition and never expose frame contents or input details.
   @discardableResult
   mutating func advance(
-    using port: some PommeRecoveryKeyboardPort
+    using port: some PommeRecoveryKeyboardPort,
+    onMilestone: @escaping @Sendable (PommeRecoveryInteractionMilestone) async -> Void = { _ in }
   ) async throws -> PommeRecoveryInteractionCleanupSignal {
     guard !cleanupRequired else {
       throw PommeRecoveryInteractionError.recoveryCleanupRequired(.recoveryCleanupRequired)
@@ -162,6 +164,9 @@ struct PommeTahoeRecoveryInteraction: Sendable {
     let receipt: PommeRecoveryDurableInputReceipt
     do {
       try Task.checkCancellation()
+      if navigationInput == .key(.shiftCommandT) {
+        await onMilestone(.terminalLaunching)
+      }
       receipt = try await port.deliverRecoveryInput(navigationInput)
     } catch {
       cleanupRequired = true
@@ -211,7 +216,7 @@ struct PommeTahoeRecoveryInteraction: Sendable {
     await onMilestone(.navigationStarted)
     while !isComplete {
       do {
-        _ = try await advance(using: port)
+        _ = try await advance(using: port, onMilestone: onMilestone)
       } catch let error as PommeRecoveryInteractionError {
         switch error {
         case .noInputDelivered:

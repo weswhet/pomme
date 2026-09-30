@@ -792,7 +792,7 @@ struct PommeCore {
             throw PommePrivatePTYRunner.Error.processTimedOut
         } catch {
             if !(error is PommeSecurityOwnerPreparationError) {
-                log(
+                warning(
                     "Private owner PTY failed: \(PommeSecurityPrivatePTYDiagnostic(error).rawValue).",
                     vmName: reference.displayName
                 )
@@ -841,6 +841,7 @@ struct PommeCore {
         _ desired: VMRunStateSnapshot,
         reference: VMReference
     ) async throws {
+        PommeProgressContext.sink?.step(vm: reference.name, "Restoring VM run state")
         let finalState: VMFinalState
         let captured: PommeRecoveryRunState
         switch desired {
@@ -1259,8 +1260,19 @@ struct PommeCore {
             sink(safe)
             return
         }
+        if let sink = PommeProgressContext.sink {
+            sink.diagnostic(safe)
+            return
+        }
         fputs("[\(Date().pommeISO8601String)] \(safe)\n", stderr)
         fflush(stderr)
+    }
+
+    static func warning(_ message: String, vmName: String? = nil) {
+        let text = vmName.map { "\($0) \(message)" } ?? message
+        if PommeLogContext.sink != nil { log(text) }
+        else if let sink = PommeProgressContext.sink { sink.warning(text) }
+        else { log(text) }
     }
 
     /// Attributes a diagnostic to one VM without sharing mutable target state.
@@ -1609,6 +1621,7 @@ struct PommeCore {
         bundle: BundleLayout,
         timeout: TimeInterval
     ) throws -> [String: Any] {
+        PommeProgressContext.sink?.suspend()
         let request = try makeControlRequest(from: payload)
         let record = try runtimeRecord(for: bundle)
         let identity = PommeRuntimeIdentity(socketPath: record.socketPath, pid: record.pid, startedAt: record.startedAt)
@@ -1634,6 +1647,7 @@ struct PommeCore {
         bundle: BundleLayout,
         setupTimeout: TimeInterval = Constants.agentRoundTripTimeout
     ) throws -> [String: Any] {
+        PommeProgressContext.sink?.suspend()
         let request = try makeControlRequest(from: payload)
         guard request.command == "terminal.session",
               payload["operation"] as? String == "terminal.attach"
@@ -1709,6 +1723,7 @@ struct PommeCore {
                         guard data.count <= maximumOutputBytes - outputBytes, frames.count < 16_384 else {
                             throw RunnerError.invalidGuestCommand("Foreground output exceeded the buffered byte or frame limit.")
                         }
+                        PommeProgressContext.sink?.suspend()
                         outputBytes += data.count
                         frames.append(["stream": frame.stream.rawValue, "dataBase64": data.base64EncodedString()])
                     }
@@ -2088,6 +2103,7 @@ struct PommeCore {
         deadline: TimeInterval,
         timeout: TimeInterval
     ) throws -> [String: Any] {
+        PommeProgressContext.sink?.step(vm: reference.name, "Waiting for Pomme agent")
         var payload = initial
         while true {
             let agent = payload["guestAgent"] as? [String: Any]
@@ -2279,6 +2295,8 @@ struct PommeCore {
             )
         }
 
+        PommeProgressContext.sink?.step(vm: name, "Preparing creation")
+
         // The floor runs before any download so a too-small request costs
         // nothing; the image's exact minimum is checked again once loaded.
         try validateProvisionalMemoryFloor(arguments.sizeOptions.memorySizeBytes)
@@ -2355,6 +2373,7 @@ struct PommeCore {
         if let metadata = try? metadataPayload(bundle: reference.bundle) {
             payload["metadata"] = metadata
         }
+        PommeProgressContext.sink?.complete(vm: name)
         return payload
     }
 
@@ -2379,7 +2398,9 @@ struct PommeCore {
         arguments: CLIOptions,
         vmName: String
     ) async throws -> ProvisioningSource {
-        let restoreImageURL = try await resolveCreateRestoreImageURL(arguments)
+        PommeProgressContext.sink?.step(vm: vmName, "Resolving restore image")
+        let restoreImageURL = try await resolveCreateRestoreImageURL(arguments, vmName: vmName)
+        PommeProgressContext.sink?.step(vm: vmName, "Verifying restore image")
         let restoreQualification = try await qualifyRestoreImage(at: restoreImageURL)
         let canonicalRestoreImage = URL(fileURLWithPath: restoreQualification.identity.canonicalPath)
         let requirements = restoreQualification.requirements
@@ -2448,7 +2469,7 @@ struct PommeCore {
         let build = source.build
         let profileDescriptor = source.profileDescriptor
         if profileDescriptor.qualification == .experimental {
-            log(
+            warning(
                 "Warning: Recovery support for macOS \(version) (\(build)) is experimental. Creation will attempt the observed-screen navigation and stop if it does not match.",
                 vmName: vmName
             )
@@ -2618,6 +2639,7 @@ struct PommeCore {
     }
 
     private static func provisionVirtualizationGuest(_ plan: PommeProvisioningPlan) async throws -> String {
+        PommeProgressContext.sink?.step(vm: plan.vm.name, "Provisioning macOS")
         let reference = provisioningReference(for: plan)
         let journal = try loadProvisioningV2(reference: reference)
         guard journal.plan == plan, let event = journal.events.last,
@@ -2691,7 +2713,7 @@ struct PommeCore {
             expectedGeneratedUID: owner.generatedUID)
         try await normal.verifyOwnerConsole(username: owner.account, uniqueID: proof.owner.uniqueID)
         checkpoint(.buddyPreferences)
-        try await PommeBuddyPreferencesGate.failOpen("receipt", log: { log($0, vmName: plan.vm.name) }) {
+        try await PommeBuddyPreferencesGate.failOpen("receipt", log: { warning($0, vmName: plan.vm.name) }) {
             _ = try await preparation.waitForBuddyPreferences(expected: proof.owner)
         }
         checkpoint(.desktopProof)
@@ -2713,9 +2735,9 @@ struct PommeCore {
             log("framework verification failed stage=\(stage.rawValue)")
             // These closed error types contain only fixed cases, enum labels,
             // and numeric exit statuses, never guest output or credentials.
-            if let known = error as? PommeSecurityOwnerPreparationError { log(known.localizedDescription) }
-            else if let known = error as? PommeSecurityNormalAgentError { log(known.localizedDescription) }
-            else if let known = error as? PommeSecurityWorkflowError { log(known.localizedDescription) }
+            if let known = error as? PommeSecurityOwnerPreparationError { warning(known.localizedDescription) }
+            else if let known = error as? PommeSecurityNormalAgentError { warning(known.localizedDescription) }
+            else if let known = error as? PommeSecurityWorkflowError { warning(known.localizedDescription) }
             throw error
         }
     }
@@ -2825,6 +2847,7 @@ struct PommeCore {
     }
 
     private static func bootstrapNormalAgent(_ plan: PommeProvisioningPlan) async throws -> String {
+        PommeProgressContext.sink?.step(vm: plan.vm.name, "Bootstrapping Pomme agent for normal boot")
         var diagnostics = PommeBootstrapDiagnostics()
         log(diagnostics.checkpoint(.started))
         do {
@@ -3022,7 +3045,7 @@ struct PommeCore {
             if let processError = error as? PommeSSHBootstrapError {
                 switch processError {
                 case .processLaunchFailed, .processTimedOut, .processExited:
-                    log(processError.localizedDescription)
+                    warning(processError.localizedDescription)
                 case .invalid: break
                 }
             }
@@ -3038,7 +3061,7 @@ struct PommeCore {
     ) async throws {
         // The owner is proved again by SSH UID verification before this and by
         // the full owner proof in verifyNormalAgent after it.
-        try await PommeBuddyPreferencesGate.failOpen("bootstrap prerequisites", log: { log($0) }) {
+        try await PommeBuddyPreferencesGate.failOpen("bootstrap prerequisites", log: { warning($0) }) {
             try await requireBootstrapBuddyPreferencesPrerequisites(coordinator: coordinator,
                 expectedUID: expectedUID, expectedGeneratedUID: expectedGeneratedUID)
         }
@@ -3170,7 +3193,7 @@ struct PommeCore {
         guard fsync(fd) == 0 else { throw PommeSSHBootstrapError.invalid }
     }
 
-    private static func resolveCreateRestoreImageURL(_ arguments: CLIOptions) async throws -> URL {
+    private static func resolveCreateRestoreImageURL(_ arguments: CLIOptions, vmName: String) async throws -> URL {
         if let path = arguments.restoreImagePath {
             let url = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
             guard isRegularFile(url) else {
@@ -3181,7 +3204,8 @@ struct PommeCore {
         let selection = arguments.restoreImageVersionSelection ?? "latest"
         return try await downloadIPSWFirmware(
             selection: selection,
-            deviceIdentifier: arguments.ipswDeviceIdentifier
+            deviceIdentifier: arguments.ipswDeviceIdentifier,
+            vmName: vmName
         ).url
     }
 
@@ -3699,6 +3723,7 @@ struct PommeCore {
     }
 
     private static func installProvisioningVM(_ plan: PommeProvisioningPlan) async throws -> String {
+        PommeProgressContext.sink?.step(vm: plan.vm.name, "Preparing macOS installation")
         let bundle = BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
         let input = try loadProvisioningInput(for: plan)
         if let templateBundlePath = input.templateBundlePath {
@@ -3765,11 +3790,20 @@ struct PommeCore {
             let vm = VZVirtualMachine(configuration: configuration, queue: queue)
             return VZMacOSInstaller(virtualMachine: vm, restoringFromImageAt: imageURL)
         }
+        let progressSink = PommeProgressContext.sink
+        let logSink = PommeLogContext.sink
         let observation = installer.progress.observe(\.fractionCompleted, options: [.initial, .new]) { progress, _ in
-            logInstallProgress(fractionCompleted: progress.fractionCompleted, vmName: plan.vm.name)
+            if let progressSink {
+                progressSink.measured(vm: plan.vm.name, "Installing macOS", fraction: progress.fractionCompleted)
+            } else if let logSink {
+                logSink("Install progress: \(Int(progress.fractionCompleted * 100))%")
+            } else {
+                logInstallProgress(fractionCompleted: progress.fractionCompleted, vmName: plan.vm.name)
+            }
         }
         defer { observation.invalidate() }
         try await install(installer, on: queue)
+        progressSink?.step(vm: plan.vm.name, "Verifying macOS installation")
         return try receiptDigest("install", plan: plan, bundle: bundle)
     }
 
@@ -3822,6 +3856,7 @@ struct PommeCore {
         bundle: BundleLayout,
         templateBundlePath: String
     ) throws -> String {
+        PommeProgressContext.sink?.step(vm: plan.vm.name, "Cloning template")
         let template = BundleLayout(rootURL: URL(fileURLWithPath: templateBundlePath))
         let manifest = try PommeTemplateStore.manifest(in: template)
         guard manifest.version == plan.restore.version,
@@ -3872,7 +3907,7 @@ struct PommeCore {
         let memory = arguments.sizeOptions.memorySizeBytes
         try validateMemorySize(memory, requirements: requirements)
         if source.profileDescriptor.qualification == .experimental {
-            log(
+            warning(
                 "Warning: Recovery support for macOS \(source.version) (\(source.build)) is experimental; VMs created from this template will attempt observed-screen navigation.",
                 vmName: validName
             )
@@ -3906,11 +3941,20 @@ struct PommeCore {
                 let vm = VZVirtualMachine(configuration: configuration, queue: queue)
                 return VZMacOSInstaller(virtualMachine: vm, restoringFromImageAt: source.restoreImage)
             }
+            let progressSink = PommeProgressContext.sink
+            let logSink = PommeLogContext.sink
             let observation = installer.progress.observe(\.fractionCompleted, options: [.initial, .new]) { progress, _ in
-                logInstallProgress(fractionCompleted: progress.fractionCompleted, vmName: validName)
+                if let progressSink {
+                    progressSink.measured(vm: validName, "Installing macOS", fraction: progress.fractionCompleted)
+                } else if let logSink {
+                    logSink("Install progress: \(Int(progress.fractionCompleted * 100))%")
+                } else {
+                    logInstallProgress(fractionCompleted: progress.fractionCompleted, vmName: validName)
+                }
             }
             defer { observation.invalidate() }
             try await install(installer, on: queue)
+            progressSink?.step(vm: validName, "Saving template")
             // The installer's identifier is never reused: every VM cloned
             // from the template generates its own.
             try? FileManager.default.removeItem(at: bundle.machineIdentifierURL)
@@ -3978,6 +4022,7 @@ struct PommeCore {
     /// adapter refuses the phase after the intent is durable, preserving the
     /// exact VM/journal for a configured Recovery integration.
     private static func installRecoveryAgent(_ plan: PommeProvisioningPlan) async throws -> String {
+        PommeProgressContext.sink?.step(vm: plan.vm.name, "Bootstrapping Pomme agent in Recovery")
         try await stopRetainedRuntime(for: plan.vm.bundlePath)
         guard let adapter = currentProvisioningRecoveryAdapter() else {
             throw PommeProvisioningError.unavailableIntegration("request-bound Recovery agent installation")
@@ -4000,6 +4045,7 @@ struct PommeCore {
     /// the boot a `normal` final state keeps: no second start is needed and
     /// the VM outlives this process.
     private static func verifyNormalAgent(_ plan: PommeProvisioningPlan) async throws -> String {
+        PommeProgressContext.sink?.step(vm: plan.vm.name, "Verifying Pomme agent")
         try await stopRetainedRuntime(for: plan.vm.bundlePath)
         let reference = provisioningReference(for: plan)
         let deadline = Date().addingTimeInterval(Constants.defaultRecoveryAgentTimeout)
@@ -4104,6 +4150,7 @@ struct PommeCore {
         _ plan: PommeProvisioningPlan,
         finalState: PommeProvisioningFinalState
     ) async throws -> String {
+        PommeProgressContext.sink?.step(vm: plan.vm.name, "Repairing Pomme agent")
         // A repair is deliberately Recovery-only.  The adapter constructs a
         // request-bound PommeRecoverySession; no normal agent is accepted as
         // a repair authority.
@@ -4346,7 +4393,7 @@ struct PommeCore {
                 timeout: Constants.defaultRecoveryAgentTimeout
             )
         } catch {
-            log(
+            warning(
                 "Final-state guest agent wait did not complete: \(error.localizedDescription)",
                 vmName: reference.displayName
             )
@@ -4709,6 +4756,7 @@ struct PommeCore {
         bootMode: BootMode,
         timeout: TimeInterval
     ) throws -> [String: Any] {
+        PommeProgressContext.sink?.step(vm: reference.name, bootMode == .recovery ? "Starting Recovery" : "Starting macOS")
         let bundle = reference.bundle
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
         if let existing = try? runtimeRecord(for: bundle) {
@@ -5787,6 +5835,7 @@ struct PommeCore {
         name: String,
         lease: VMBundleMutationLease
     ) async throws -> PommeOperationResult {
+        PommeProgressContext.sink?.step(vm: name, "Resuming creation")
         guard lease.validates(name: name) else {
             throw VMBundleMutationLease.Error.invalidScope(name: name)
         }
@@ -5806,6 +5855,7 @@ struct PommeCore {
                     "finalState": journal.plan.finalState.rawValue,
                     "journal": provisioningV2JournalURL(bundle: reference.bundle).path]]
             payload.merge(provisioningDisclosure(virtualization: true)) { _, new in new }
+            PommeProgressContext.sink?.complete(vm: name)
             return .init(title: "Resume Create", vmName: name, ok: true, hostExitCode: 0,
                 text: "OK resumed Pomme provisioning for \(name).", payload: payload)
         }
@@ -5834,6 +5884,7 @@ struct PommeCore {
             "hostExitCode": 0
         ]
         payload.merge(provisioningDisclosure(virtualization: false)) { _, new in new }
+        PommeProgressContext.sink?.complete(vm: name)
         return PommeOperationResult(
             title: "Resume Create",
             vmName: name,
@@ -5953,7 +6004,7 @@ struct PommeCore {
             // logs, so the command that exists to diagnose a retained journal
             // does not say strictly less than `create --resume` about the same
             // failure.
-            log(
+            warning(
                 "provisioning phase \(next.phase.rawValue) failed "
                     + "[code=\(PommeProvisioningFailureDiagnostic.code(for: error))].",
                 vmName: intent.plan.vm.name
@@ -6294,10 +6345,11 @@ struct PommeCore {
 
     static func downloadIPSWFirmware(
         selection: String,
-        deviceIdentifier: String?
+        deviceIdentifier: String?,
+        vmName: String? = nil
     ) async throws -> (firmware: IPSWMEFirmware, url: URL) {
         let firmware = try await resolveIPSWFirmware(selection: selection, deviceIdentifier: deviceIdentifier)
-        let url = try await downloadFirmware(firmware, resume: true)
+        let url = try await downloadFirmware(firmware, resume: true, vmName: vmName)
         return (firmware, url)
     }
 
@@ -6348,7 +6400,25 @@ struct PommeCore {
         throw RunnerError.hostCommandFailed("No signed restore image matched \(value).")
     }
 
-    private static func downloadFirmware(_ firmware: IPSWMEFirmware, resume: Bool) async throws -> URL {
+    private static func downloadFirmware(_ firmware: IPSWMEFirmware, resume: Bool, vmName: String?) async throws -> URL {
+        let directory = try applicationSupportRoot().appendingPathComponent(Constants.restoreImageDirectoryName, isDirectory: true)
+        let session = makeIPSWURLSession()
+        defer { session.invalidateAndCancel() }
+        return try await downloadFirmware(firmware, resume: resume, vmName: vmName, directory: directory) { request in
+            try await session.bytes(for: request)
+        }
+    }
+
+    /// The production byte loop also accepts synthetic responses for offline validation.
+    static func downloadFirmware<Bytes: AsyncSequence>(
+        _ firmware: IPSWMEFirmware,
+        resume: Bool,
+        vmName: String?,
+        directory: URL,
+        publish: (URL, URL) throws -> Void = publishDownloadedFirmware,
+        fetch: (URLRequest) async throws -> (Bytes, URLResponse)
+    ) async throws -> URL where Bytes.Element == UInt8 {
+
         guard firmware.signed == true else {
             throw RunnerError.hostCommandFailed("Refusing to download an unsigned restore image.")
         }
@@ -6358,7 +6428,6 @@ struct PommeCore {
         guard let remoteURL = URL(string: firmware.url), remoteURL.scheme?.hasPrefix("http") == true else {
             throw RunnerError.hostCommandFailed("The restore-image catalog returned an invalid URL.")
         }
-        let directory = try applicationSupportRoot().appendingPathComponent(Constants.restoreImageDirectoryName, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let fileName = remoteURL.lastPathComponent.isEmpty
             ? "macOS-\(firmware.version)-\(firmware.buildid).ipsw"
@@ -6366,7 +6435,10 @@ struct PommeCore {
         let destination = directory.appendingPathComponent(fileName)
         let partial = directory.appendingPathComponent(".\(fileName).part")
         let fileManager = FileManager.default
+        let progressSink = PommeProgressContext.sink
+        let logSink = PommeLogContext.sink
         if cachedRestoreImageURL(for: firmware, in: directory) != nil {
+            progressSink?.step(vm: vmName, "Using cached IPSW \(firmware.version)")
             // A completed destination wins; remove only the deterministic
             // temporary file owned by this download operation.
             try? fileManager.removeItem(at: partial)
@@ -6381,12 +6453,12 @@ struct PommeCore {
             try fileManager.moveItem(at: destination, to: partial)
         }
         if fileSize(partial) == expectedSize {
-            if fileManager.fileExists(atPath: destination.path) {
-                try fileManager.replaceItemAt(destination, withItemAt: partial)
-            } else {
-                try fileManager.moveItem(at: partial, to: destination)
-            }
+            progressSink?.step(vm: vmName, "Publishing IPSW \(firmware.version)")
+            try publish(partial, destination)
             try? fileManager.removeItem(at: partial)
+            if progressSink == nil { logSink?("Download progress: 100%") }
+            progressSink?.measured(vm: vmName, "Downloaded IPSW \(firmware.version)", fraction: 1,
+                completedBytes: expectedSize, totalBytes: expectedSize)
             return destination
         }
         if let partialSize = fileSize(partial), partialSize > expectedSize {
@@ -6400,10 +6472,9 @@ struct PommeCore {
             request.setValue("bytes=\(current)-", forHTTPHeaderField: "Range")
         }
 
-        let session = makeIPSWURLSession()
-        defer { session.invalidateAndCancel() }
 
-        let (bytes, response) = try await session.bytes(for: request)
+        progressSink?.step(vm: vmName, "Connecting to server for IPSW \(firmware.version)")
+        let (bytes, response) = try await fetch(request)
         guard let http = response as? HTTPURLResponse else {
             throw RunnerError.hostCommandFailed("The restore-image server returned a non-HTTP response.")
         }
@@ -6422,14 +6493,27 @@ struct PommeCore {
             throw RunnerError.hostCommandFailed(error.localizedDescription)
         }
 
-        guard fileManager.createFile(
+        guard fileManager.fileExists(atPath: partial.path) || fileManager.createFile(
             atPath: partial.path,
             contents: nil,
             attributes: [.posixPermissions: 0o600]
-        ) || fileManager.fileExists(atPath: partial.path) else {
+        ) else {
             throw RunnerError.hostCommandFailed("Could not create the restore-image temporary file.")
         }
         let handle = try FileHandle(forWritingTo: partial)
+        var completedBytes = ipswDownloadProgressOffset(decision: decision, requestedOffset: offset)
+        var lastLoggedPercent: Int?
+        func reportDownload() {
+            let percent = Int(min(Double(completedBytes) / Double(expectedSize), 0.999) * 100)
+            if progressSink == nil, percent != lastLoggedPercent {
+                logSink?("Download progress: \(percent)%")
+                lastLoggedPercent = percent
+            }
+            progressSink?.measured(vm: vmName, "Downloading IPSW \(firmware.version)",
+                fraction: min(Double(completedBytes) / Double(expectedSize), 0.999),
+                completedBytes: completedBytes, totalBytes: expectedSize)
+        }
+        reportDownload()
         do {
             if decision == .overwrite {
                 try handle.truncate(atOffset: 0)
@@ -6442,12 +6526,17 @@ struct PommeCore {
                 chunk.append(byte)
                 if chunk.count == 64 * 1024 {
                     try handle.write(contentsOf: chunk)
+                    completedBytes += Int64(chunk.count)
+                    reportDownload()
                     chunk.removeAll(keepingCapacity: true)
                 }
             }
             if !chunk.isEmpty {
                 try handle.write(contentsOf: chunk)
+                completedBytes += Int64(chunk.count)
+                reportDownload()
             }
+            progressSink?.step(vm: vmName, "Verifying IPSW \(firmware.version)")
             try handle.synchronize()
             try handle.close()
         } catch {
@@ -6459,15 +6548,27 @@ struct PommeCore {
         guard fileSize(partial) == expectedSize else {
             throw RunnerError.hostCommandFailed("The restore-image size did not match catalog metadata.")
         }
-        if fileManager.fileExists(atPath: destination.path) {
-            try fileManager.replaceItemAt(destination, withItemAt: partial)
-        } else {
-            try fileManager.moveItem(at: partial, to: destination)
-        }
+        try publish(partial, destination)
+        if progressSink == nil { logSink?("Download progress: 100%") }
+        progressSink?.measured(vm: vmName, "Downloaded IPSW \(firmware.version)", fraction: 1,
+            completedBytes: expectedSize, totalBytes: expectedSize)
         // `partial` is normally consumed by move/replace; this cleanup also
         // handles platform implementations that leave a temporary inode.
         try? fileManager.removeItem(at: partial)
         return destination
+    }
+
+    static func publishDownloadedFirmware(_ partial: URL, _ destination: URL) throws {
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.replaceItemAt(destination, withItemAt: partial)
+        } else {
+            try FileManager.default.moveItem(at: partial, to: destination)
+        }
+    }
+
+    /// A server that ignores Range restarts the file and its displayed count.
+    static func ipswDownloadProgressOffset(decision: IPSWDownloadResponseDecision, requestedOffset: Int64) -> Int64 {
+        decision == .overwrite ? 0 : max(0, requestedOffset)
     }
 
     private static func parseIPSWContentRange(_ value: String) -> (start: Int64, end: Int64, total: Int64)? {
@@ -6495,8 +6596,11 @@ struct PommeCore {
     }
 
     private static func fileSize(_ url: URL) -> Int64? {
-        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey]), let size = values.fileSize else { return nil }
-        return Int64(size)
+        // URL resource values cache a pre-download size across file writes.
+        // Read the current filesystem metadata for resume and publication checks.
+        var metadata = stat()
+        guard stat(url.path, &metadata) == 0 else { return nil }
+        return metadata.st_size
     }
 
     private static func hostModelIdentifier() throws -> String {

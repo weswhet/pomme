@@ -605,10 +605,12 @@ enum PommeLiveRecoveryIntegration {
             authenticationTimeout: TimeInterval,
             now: @escaping @Sendable () -> Date
         ) -> PommeRecoveryRuntimeEffects {
-            .init(
+            let progressSink = PommeProgressContext.sink
+            return .init(
                 verifyVMIdentity: base.verifyVMIdentity,
                 startRecovery: {
                     PommeCore.log("Recovery bootstrap milestone: runtimeStarting.", vmName: vmName)
+                    progressSink?.step(vm: vmName, "Starting Recovery")
                     try await base.startRecovery()
                     PommeCore.log("Recovery bootstrap milestone: runtimeStarted.", vmName: vmName)
                 },
@@ -630,6 +632,17 @@ enum PommeLiveRecoveryIntegration {
                             else { throw Error.credentialRejected }
                         },
                         onMilestone: { milestone in
+                            switch milestone {
+                            case .navigationStarted:
+                                progressSink?.step(vm: vmName, "Navigating Recovery UI")
+                            case .terminalLaunching:
+                                progressSink?.step(vm: vmName, "Launching Terminal")
+                            case .terminalVerified:
+                                progressSink?.step(vm: vmName, "Preparing Recovery agent")
+                            case .launcherSubmitted:
+                                progressSink?.step(vm: vmName, "Connecting to Recovery agent")
+                            default: break
+                            }
                             PommeCore.log(
                                 "Recovery bootstrap milestone: \(milestone.rawValue).",
                                 vmName: vmName
@@ -764,6 +777,18 @@ enum PommeLiveRecoveryIntegration {
                 throw PommeRecoverySessionError.cleanupFailed
             }
             do {
+                let label: String
+                switch operation {
+                case .installAgent: label = "Bootstrapping Pomme agent for normal boot"
+                case .terminalSession: label = "Preparing Recovery shell"
+                case .sip(.status): label = "Checking SIP"
+                case .sip(.disable): label = "Disabling SIP"
+                case .sip(.enable): label = "Enabling SIP"
+                case .amfi(.status): label = "Checking AMFI"
+                case .amfi(.disable): label = "Disabling AMFI"
+                case .amfi(.enable): label = "Enabling AMFI"
+                }
+                PommeProgressContext.sink?.step(vm: reference.displayName, label)
                 let result = try await guestSession.perform(
                     operation: requestedOperation,
                     payload: value,

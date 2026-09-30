@@ -47,10 +47,6 @@ enum PommeBootstrap {
         }
 
         let publicArguments = PommeCore.normalizedPublicArguments(arguments)
-        if publicArguments.contains("--debug") {
-            let command = publicArguments.first(where: { !$0.hasPrefix("-") }) ?? "help"
-            PommeCore.log("Debug logging enabled for public command \(command).")
-        }
         await run(publicArguments)
     }
 
@@ -66,17 +62,33 @@ enum PommeBootstrap {
             PommeCLI.exit(withError: error)
         }
 
+        let options = (command as? CLIProgressCommand)?.progressOptions
+        let session = PommeProgressSession(
+            mode: options?.progress ?? .off,
+            structuredOutput: options?.json == true || options?.format == .json || options?.format == .jsonl,
+            debug: options?.debug ?? false
+        )
         do {
-            if var asyncCommand = command as? AsyncParsableCommand {
-                try await asyncCommand.run()
-            } else {
-                try command.run()
+            try await PommeProgressContext.$sink.withValue(options == nil ? nil : session.sink) {
+                try await PommeProgressContext.$debugEnabled.withValue(options?.debug ?? false) {
+                    if options?.debug == true {
+                        session.sink.diagnostic("Debug logging enabled for public command \(type(of: command)._commandName).")
+                    }
+                    if var asyncCommand = command as? AsyncParsableCommand {
+                        try await asyncCommand.run()
+                    } else {
+                        try command.run()
+                    }
+                }
             }
+            session.finish()
         } catch let error as ValidationError {
+            session.finish()
             let text = validationFailureText(error, command: type(of: command))
             FileHandle.standardError.write(Data((text + "\n").utf8))
             Foundation.exit(ExitCode.validationFailure.rawValue)
         } catch {
+            session.finish()
             PommeCLI.exit(withError: error)
         }
     }

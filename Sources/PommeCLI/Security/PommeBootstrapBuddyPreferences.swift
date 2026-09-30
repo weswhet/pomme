@@ -13,7 +13,9 @@ enum PommeBuddyPreferencesGate {
         } catch let error as CancellationError {
             throw error
         } catch {
-            log("Buddy preferences \(step) did not complete (\(error.localizedDescription)); continuing, because they do not gate provisioning, security, or MDM.")
+            let message = "Buddy preferences \(step) did not complete (\(error.localizedDescription)); continuing, because they do not gate provisioning, security, or MDM."
+            PommeProgressContext.sink?.warning(message)
+            log(message)
         }
     }
 }

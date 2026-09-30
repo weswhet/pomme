@@ -628,6 +628,64 @@ else
   fail "cp missing host source is reported on the host"
 fi
 
+# Presentation options preserve result bytes for text and empty JSONL. JSON
+# object key order is unspecified, so compare decoded structured values.
+for progress_format in table json jsonl; do
+  "$runner" list --format "$progress_format" --progress off >"$work/progress-baseline" 2>"$work/progress-baseline-stderr"
+  for progress_mode in auto plain off; do
+    expect_success "list $progress_format accepts progress $progress_mode" \
+      "$runner" list --format "$progress_format" --progress "$progress_mode"
+    if [[ "$progress_format" == table || ( "$progress_format" == jsonl && ! -s "$work/progress-baseline" ) ]]; then
+      if cmp -s "$work/progress-baseline" "$work/stdout"; then
+        pass "progress $progress_mode preserves $progress_format result bytes"
+      else
+        fail "progress $progress_mode preserves $progress_format result bytes"
+      fi
+    elif python3 -c 'import json,sys; decode=lambda p: json.load(open(p)) if sys.argv[3] == "json" else [json.loads(line) for line in open(p)]; sys.exit(0 if decode(sys.argv[1]) == decode(sys.argv[2]) else 1)' "$work/progress-baseline" "$work/stdout" "$progress_format"; then
+      pass "progress $progress_mode preserves $progress_format result values"
+    else
+      fail "progress $progress_mode preserves $progress_format result values"
+    fi
+    if [[ "$progress_format" != table ]]; then
+      if python3 -c 'import json,sys; text=open(sys.argv[1]).read(); json.loads(text) if sys.argv[2] == "json" else [json.loads(line) for line in text.splitlines()]' "$work/stdout" "$progress_format"; then
+        pass "progress $progress_mode preserves valid $progress_format"
+      else
+        fail "progress $progress_mode preserves valid $progress_format"
+      fi
+    fi
+  done
+done
+for progress_mode in auto plain off; do
+  expect_success "nonempty JSONL accepts progress $progress_mode" \
+    "$runner" ui keys --format jsonl --progress "$progress_mode"
+  if python3 -c 'import json,sys; rows=[json.loads(line) for line in open(sys.argv[1])]; sys.exit(0 if len(rows)>1 else 1)' "$work/stdout"; then
+    pass "progress $progress_mode preserves nonempty JSONL records"
+  else
+    fail "progress $progress_mode preserves nonempty JSONL records"
+  fi
+  expect_failure "progress $progress_mode retains missing VM errors" \
+    "$runner" status pomme-contract-progress-missing --progress "$progress_mode"
+  if [[ -s "$work/stderr" ]] && grep -q 'Error:' "$work/stderr" && [[ ! -s "$work/stdout" ]]; then
+    pass "progress $progress_mode keeps errors on stderr"
+  else
+    fail "progress $progress_mode keeps errors on stderr"
+  fi
+done
+expect_success "debug diagnostics remain visible with progress off" "$runner" list --progress off --debug
+if grep -q 'Debug logging enabled' "$work/stderr"; then
+  pass "progress off preserves explicit debug diagnostics"
+else
+  fail "progress off preserves explicit debug diagnostics"
+fi
+expect_failure "invalid progress mode is rejected" "$runner" list --progress animated
+expect_failure "guest debug argument does not enable host diagnostics" \
+  "$runner" exec pomme-contract-progress-missing --progress off -- /bin/echo --debug --progress plain
+if ! grep -q 'Debug logging enabled' "$work/stderr"; then
+  pass "guest options stay outside host presentation settings"
+else
+  fail "guest options stay outside host presentation settings"
+fi
+
 if [[ $failures -ne 0 ]]; then
   printf '%d of %d contract checks failed\n' "$failures" "$checks" >&2
   exit 1

@@ -168,9 +168,8 @@ enum SnapshotCommandInput {
 private enum SnapshotConfirmation {
     static func confirmRestore(vm: String, snapshot: String, drift: [String], force: Bool) throws -> Bool {
         if !drift.isEmpty {
-            fputs(
-                "Warning: snapshot '\(snapshot)' for VM '\(vm)' has recorded drift: \(drift.joined(separator: ", ")). Restore stores machine state only; Disk.img and AuxiliaryStorage are not copied or replaced. Backing-file drift may expose stale or inconsistent guest-visible filesystem state. --force acknowledges this risk, but VM identity/configuration drift is still rejected.\n",
-                stderr
+            PommeCore.warning(
+                "Snapshot '\(snapshot)' for VM '\(vm)' has recorded drift: \(drift.joined(separator: ", ")). Restore stores machine state only; Disk.img and AuxiliaryStorage are not copied or replaced. Backing-file drift may expose stale or inconsistent guest-visible filesystem state. --force acknowledges this risk, but VM identity/configuration drift is still rejected."
             )
         }
         guard !force else {
@@ -180,6 +179,9 @@ private enum SnapshotConfirmation {
             throw ValidationError("Restore requires an interactive terminal. Pass --force to restore without prompting and accept recorded drift; old machine state may expose inconsistent guest filesystems.")
         }
 
+        let progress = PommeProgressContext.sink
+        progress?.pause()
+        defer { progress?.resume() }
         fputs(
             "Restore snapshot '\(snapshot)' for VM '\(vm)'? This restores machine state only; Disk.img and AuxiliaryStorage are not copied or replaced. The VM will be paused. [y/N] ",
             stderr
@@ -200,6 +202,9 @@ private enum SnapshotConfirmation {
             throw ValidationError("Deletion requires an interactive terminal. Pass --force to delete without prompting.")
         }
 
+        let progress = PommeProgressContext.sink
+        progress?.pause()
+        defer { progress?.resume() }
         fputs("Delete snapshot '\(snapshot)' for VM '\(vm)'? This cannot be undone. [y/N] ", stderr)
         guard let response = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
               response == "y" || response == "yes"
