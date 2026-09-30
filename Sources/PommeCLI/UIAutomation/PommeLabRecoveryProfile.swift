@@ -143,7 +143,11 @@ extension PommeRecoveryProfileSelector {
         let route: PommeRecoveryNavigationRoute
         if descriptor.version == "26.6.2", descriptor.build == "25G83" {
             route = .directTerminal
-        } else if descriptor.version == "27.0.0", descriptor.build == "26A428" {
+        } else if descriptor.version.hasPrefix("27.") {
+            // Every macOS 27 Recovery can present the chooser without key
+            // focus, where a bare Return is silently dropped. Live-observed on
+            // 27.0/26A428 and 27.0.1/26A434; later 27.x builds inherit the
+            // route, and its frame proofs still gate the click and Return.
             route = .experimentalLanguageActivation
         } else if descriptor.version == "15.6.1", descriptor.build == "24G90" {
             // This remains an experimental identity. Its alternate Options
@@ -169,7 +173,7 @@ enum PommeRecoveryVirtualKey: Equatable, Sendable {
 }
 
 /// Closed navigation effects. The activation click has one fixed guest-display
-/// point, qualified only for the experimental 27.0/26A428 LanguageChooser.
+/// point, qualified only for the experimental macOS 27 LanguageChooser.
 /// This is deliberately not a general pointer or host-focus interface.
 enum PommeRecoveryNavigationInput: Equatable, Sendable {
     case key(PommeRecoveryVirtualKey)
@@ -254,7 +258,7 @@ enum PommeRecoveryNavigationRoute: Equatable, Sendable {
                       postEventFrame: .languageEnglishInactive,
                       alternatePostconditions: [
                         .init(frame: .languageEnglishActive, nextEventIndex: 4),
-                        // 27.0/26A428 can enter Utilities directly after Options.
+                        // macOS 27 can enter Utilities directly after Options.
                         .init(frame: .recoveryUtilities, nextEventIndex: 5),
                       ]),
                 .init(preEventFrame: .languageEnglishInactive, input: .activateLanguageChooser,

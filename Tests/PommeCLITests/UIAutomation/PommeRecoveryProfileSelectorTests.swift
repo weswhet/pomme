@@ -2,12 +2,15 @@ import Testing
 
 @Suite("Pomme reviewed Recovery input")
 struct PommeRecoveryProfileSelectorTests {
-    @Test("27.0 LanguageChooser requires a separate activation event")
+    @Test("every macOS 27 LanguageChooser requires a separate activation event")
     func languageChooserActivationRoute() throws {
-        for version in ["27.0", "27.0.0"] {
-            let descriptor = try PommeRecoveryProfileSelector.descriptor(version: version, build: "26A428")
+        for (version, build) in [
+            ("27.0", "26A428"), ("27.0.0", "26A428"), ("27.0.1", "26A434"),
+            ("27.0", "26A429"), ("27.1", "26B100"), ("27.10.2", "26K50"),
+        ] {
+            let descriptor = try PommeRecoveryProfileSelector.descriptor(version: version, build: build)
             let input = try PommeRecoveryProfileSelector.inputForAttempt(for: .init(
-                build: .experimental(version: version, build: "26A428"), locale: .english,
+                build: .experimental(version: version, build: build), locale: .english,
                 geometry: .pixels1280x800, privateHostABI: .qualifiedRecoveryInputV1,
                 manifestHash: .experimentalProfile(descriptor.digest), ownership: .verified
             ))
@@ -16,9 +19,9 @@ struct PommeRecoveryProfileSelectorTests {
         }
     }
 
-    @Test("neighboring experimental identities do not inherit the activation click")
-    func languageActivationIdentityIsExact() throws {
-        for (version, build) in [("27.0", "26A429"), ("27.0.1", "26A428"), ("26.6.2", "25G83")] {
+    @Test("other major versions do not inherit the activation click")
+    func languageActivationIsLimitedToMacOS27() throws {
+        for (version, build) in [("26.6.2", "25G83"), ("26.6.2", "25G84"), ("28.0", "27A100"), ("127.0", "26A428")] {
             let descriptor = try PommeRecoveryProfileSelector.descriptor(version: version, build: build)
             let input = try PommeRecoveryProfileSelector.inputForAttempt(for: .init(
                 build: .experimental(version: version, build: build), locale: .english,

@@ -45,7 +45,7 @@ enum PommeRecoveryFrameClassifier {
     return .unknown
   }
 
-  /// The exact 27.0/26A428 chooser uses gray for an inactive selected row and
+  /// The macOS 27 chooser uses gray for an inactive selected row and
   /// blue for an active selected row. OCR alone proves neither selection nor
   /// focus. Require the English label inside the fixed first-row bounds and a
   /// substantial highlight across that row before permitting either action.

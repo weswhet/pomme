@@ -64,10 +64,10 @@ struct PommeRecoveryLanguageActivationTests {
     }
   }
 
-  @Test("neighboring 27 build does not inherit the direct Utilities branch")
-  func neighboringBuildRejectsDirectUtilities() async throws {
+  @Test("a non-27 experimental build does not inherit the direct Utilities branch")
+  func otherMajorVersionRejectsDirectUtilities() async throws {
     let port = LanguageActivationPort(frames: prefixFrames(post: .recoveryUtilities))
-    let neighbor = try evidence(build: "26A429")
+    let neighbor = try evidence(version: "26.6.2", build: "25G84")
     #expect(try PommeRecoveryProfileSelector.inputForAttempt(for: neighbor).route == .reviewedMenus)
     var interaction = try PommeTahoeRecoveryInteraction(evidence: neighbor)
     for _ in 0..<2 { try await interaction.advance(using: port) }
@@ -160,9 +160,11 @@ struct PommeRecoveryLanguageActivationTests {
                                    englishConfidence: 0.5) == .unknown)
   }
 
-  private func evidence(build: String = "26A428") throws -> PommeRecoveryProfileEvidence {
-    let descriptor = try PommeRecoveryProfileSelector.descriptor(version: "27.0", build: build)
-    return .init(build: .experimental(version: "27.0", build: build), locale: .english,
+  private func evidence(
+    version: String = "27.0", build: String = "26A428"
+  ) throws -> PommeRecoveryProfileEvidence {
+    let descriptor = try PommeRecoveryProfileSelector.descriptor(version: version, build: build)
+    return .init(build: .experimental(version: version, build: build), locale: .english,
                  geometry: .pixels1280x800, privateHostABI: .qualifiedRecoveryInputV1,
                  manifestHash: .experimentalProfile(descriptor.digest), ownership: .verified)
   }
