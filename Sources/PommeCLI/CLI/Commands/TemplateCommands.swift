@@ -165,6 +165,9 @@ struct TemplateDeleteCommand: ParsableCommand {
             guard isatty(STDIN_FILENO) == 1 else {
                 throw ValidationError("Deletion requires an interactive terminal. Pass --force to delete without prompting.")
             }
+            let progress = PommeProgressContext.sink
+            progress?.pause()
+            defer { progress?.resume() }
             print("Delete template \(name)? Type the template name to confirm: ", terminator: "")
             guard readLine() == name else {
                 throw ValidationError("Deletion cancelled.")

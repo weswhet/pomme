@@ -32,6 +32,9 @@ struct LogCommand: ParsableCommand {
     @Flag(name: .customLong("debug"), help: "Print verbose CLI diagnostics.")
     var debug = false
 
+    @Option(name: .customLong("progress"), help: "Progress display: auto, plain, or off.")
+    var progress: CLIProgressMode = .auto
+
     @OptionGroup var timeout: TimeoutOptions
 
     mutating func validate() throws {
@@ -131,4 +134,19 @@ enum GuestLogFormat: String, CaseIterable, ExpressibleByArgument {
     case text
     case json
     case jsonl
+}
+
+extension LogCommand: CLIProgressCommand {
+    var progressOptions: GlobalOptions {
+        var options = GlobalOptions()
+        options.progress = progress
+        options.debug = debug
+        options.json = json
+        switch format {
+        case .json: options.format = .json
+        case .jsonl: options.format = .jsonl
+        case .text, nil: options.format = .table
+        }
+        return options
+    }
 }

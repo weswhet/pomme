@@ -648,6 +648,14 @@ struct PommeProvisioningOrchestrator: Sendable {
         attempt: UInt64,
         in journal: PommeProvisioningJournal
     ) async throws -> PommeProvisioningJournal {
+        let label: String
+        switch phase {
+        case .install: label = "Preparing macOS installation"
+        case .installRecoveryAgent: label = "Bootstrapping Pomme agent for normal boot"
+        case .verifyNormalAgent: label = "Verifying Pomme agent in normal macOS"
+        case .restoreFinalState: label = "Restoring requested VM state"
+        }
+        PommeProgressContext.sink?.step(vm: journal.plan.vm.name, label)
         do {
             let receipt = try await effect(phase, plan: journal.plan)
             guard PommeProvisioningDigest.isSHA256(receipt) else {
@@ -687,6 +695,7 @@ struct PommeProvisioningOrchestrator: Sendable {
         let journal = try repository.load()
         try journal.plan.validate()
         _ = try await exactOwnership(journal.plan.vm)
+        PommeProgressContext.sink?.step(vm: journal.plan.vm.name, "Repairing Pomme agent in Recovery")
         let receipt = try await effects.recoveryRepair(journal.plan, finalState)
         guard PommeProvisioningDigest.isSHA256(receipt) else {
             throw PommeProvisioningError.phaseFailed(.installRecoveryAgent, vmName: journal.plan.vm.name)

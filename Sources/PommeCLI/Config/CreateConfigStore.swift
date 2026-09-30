@@ -503,6 +503,11 @@ struct VMCreationExecutor: Sendable {
             for plan in plans { results.append(await dryRunResult(plan)) }
             return results
         }
+        // Register every member before execution so the shared line retains
+        // the batch total even while only two installs are active.
+        for plan in plans {
+            PommeProgressContext.sink?.register(vm: plan.name)
+        }
         if parallelism == 1 {
             var results: [PommeOperationResult] = []
             for plan in plans { results.append(await install(plan)) }
@@ -528,6 +533,7 @@ struct VMCreationExecutor: Sendable {
     }
 
     private func install(_ plan: VMCreationPlan) async -> PommeOperationResult {
+        defer { PommeProgressContext.sink?.complete(vm: plan.name) }
         do {
             return try await dependencies.install(plan)
         } catch {

@@ -23,6 +23,9 @@ struct GlobalOptions: ParsableArguments {
     )
     var debug = false
 
+    @Option(name: .customLong("progress"), help: "Progress display: auto, plain, or off.")
+    var progress: CLIProgressMode = .auto
+
     /// Returns the selected output format after validating shorthand combinations.
     func resolvedFormat() throws -> CLIOutputFormat {
         if json, let format, format != .json {
@@ -59,6 +62,7 @@ enum PommeRecoveryDebugScreenshotOutput {
             lines.append(contentsOf: files.map { "  \($0)" })
         }
         lines.append(contentsOf: warnings.map { "Warning: Recovery debug screenshot \($0)." })
+        PommeProgressContext.sink?.suspend()
         FileHandle.standardError.write(Data((lines.joined(separator: "\n") + "\n").utf8))
     }
 }
@@ -129,6 +133,7 @@ enum CLIOutputWriter {
 
     /// Writes multiple operation results and reports a nonzero aggregate exit status.
     static func write(_ results: [PommeOperationResult], options: GlobalOptions) throws {
+        PommeProgressContext.sink?.suspend()
         let format = try options.resolvedFormat()
         switch format {
         case .json:
@@ -325,6 +330,7 @@ enum CLIOutputWriter {
         jsonlCollection: String? = nil,
         jsonlElements: [[String: Any]]? = nil
     ) throws {
+        PommeProgressContext.sink?.suspend()
         switch try options.resolvedFormat() {
         case .json:
             print(try jsonLine(payload), terminator: "")
@@ -384,6 +390,9 @@ enum CLIConfirmation {
             throw ValidationError("Deletion requires an interactive terminal. Pass --force to delete without prompting.")
         }
 
+        let progress = PommeProgressContext.sink
+        progress?.pause()
+        defer { progress?.resume() }
         let quotedNames = names.map { "'\($0)'" }.joined(separator: ", ")
         fputs("Delete \(quotedNames)? This removes the VM data and cannot be undone. [y/N] ", stderr)
         guard let response = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
@@ -393,3 +402,63 @@ enum CLIConfirmation {
         }
     }
 }
+
+/// Reads presentation settings from the parsed command, never from guest arguments.
+protocol CLIProgressCommand {
+    var progressOptions: GlobalOptions { get }
+}
+
+extension AgentStatusCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension AgentRepairCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension ConfigValidateCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension ConfigRenderCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension IPSWListCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension IPSWDownloadCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension ExecCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension ShellCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension JobsListCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension JobsInspectCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension JobsLogsCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension JobsWaitCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension JobsKillCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension CopyCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension CatCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension CreateCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension ListCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension StartCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension StopCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension RestartCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension PauseCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension ResumeCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension DeleteCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension StatusCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension InspectCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension MDMCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension RemoteLoginStatusCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension RemoteLoginEnableCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension RemoteLoginDisableCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension ScreenSharingStatusCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension ScreenSharingEnableCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension ScreenSharingDisableCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension SnapshotCreateCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension SnapshotListCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension SnapshotRestoreCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension SnapshotDeleteCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension TemplateCreateCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension TemplateListCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension TemplateDeleteCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension SessionsListCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension SessionsInspectCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension SessionsAttachCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension SessionsLogsCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension SessionsTerminateCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension SessionsDeleteCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension UITypeCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension UIKeyCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension UIKeySequenceCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension UIKeysCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension UIClickCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension UIScreenshotCommand: CLIProgressCommand { var progressOptions: GlobalOptions { format } }
+extension UIAISettingsCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension ToolsCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension AgentHelpCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }

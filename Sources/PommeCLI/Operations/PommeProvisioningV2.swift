@@ -381,6 +381,15 @@ struct PommeProvisioningV2Orchestrator: Sendable {
             let receipt: String
             var verifiedReference = journal.ownerReference
             var verifiedVolumeGroup = journal.startupVolumeGroupUUID
+            let label: String
+            switch next.phase {
+            case .install: label = "Preparing macOS installation"
+            case .provisionGuest: label = "Preparing macOS owner account"
+            case .bootstrapNormalAgent: label = "Bootstrapping Pomme agent for normal boot"
+            case .verifyNormalAgent: label = "Verifying Pomme agent in normal macOS"
+            case .restoreFinalState: label = "Restoring requested VM state"
+            }
+            PommeProgressContext.sink?.step(vm: journal.plan.vm.name, label)
             do {
                 if next.phase == .verifyNormalAgent {
                     let verification = try await effects.verifyNormalAgent(journal.plan)

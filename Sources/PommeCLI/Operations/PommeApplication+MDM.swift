@@ -100,6 +100,8 @@ extension PommeApplication {
     static func mdm(
         _ request: PommeMDMCommandRequest, dependencies: PommeMDMOrchestratorDependencies = .live
     ) async throws -> PommeOperationResult {
+        let progressSink = PommeProgressContext.sink
+        progressSink?.step(vm: request.name, "Preparing MDM enrollment")
         let profile: PommeMDMOrchestratorDependencies.Profile
         do {
             profile = try dependencies.readProfile(request.profilePath)
@@ -110,6 +112,7 @@ extension PommeApplication {
             guard !request.dryRun else { throw error }
             return try await dependencies.enroll(request, nil)
         }
+        if !request.skipServerPreflight { progressSink?.step(vm: request.name, "Checking MDM server") }
         let trust = request.skipServerPreflight ? nil : await dependencies.serverPreflight(profile.trust)
         if let trust {
             PommeCore.log("MDM server preflight: \(trust.decision.rawValue).", vmName: request.name)
@@ -128,7 +131,7 @@ extension PommeApplication {
             if !facts.vmExists, let creation = request.creation { facts.creationProblem = dependencies.checkCreation(creation) }
             let plan = PommeMDMReadiness.plan(facts, request: request.readiness)
             if iteration == 0 {
-                for warning in plan.warnings { PommeCore.log("Warning: \(warning.message)", vmName: request.name) }
+                for warning in plan.warnings { progressWarning("Warning: \(warning.message)", vmName: request.name) }
             }
             let context = MDMPlanContext(request: request, facts: facts, plan: plan, trust: trust)
             if request.dryRun || !plan.blockers.isEmpty {
@@ -136,6 +139,7 @@ extension PommeApplication {
             }
             guard let lease else { return mdmPlanResult(context, completed: steps) }
             guard let step = plan.nextPreparation else {
+                progressSink?.step(vm: request.name, "Enrolling in MDM")
                 PommeCore.log("MDM preparation complete; starting enrollment.", vmName: request.name)
                 do {
                     let result = try await dependencies.enroll(request, lease)
@@ -149,6 +153,7 @@ extension PommeApplication {
                 return mdmFailureResult(context, steps: steps + [mdmStep(step, status: "failed")],
                                         error: PommeMDMOrchestrationError.preparationRepeated(step.name))
             }
+            progressSink?.step(vm: request.name, step.detail)
             PommeCore.log("MDM preparation: \(step.detail)", vmName: request.name)
             do {
                 switch step {
@@ -284,7 +289,7 @@ extension PommeApplication {
         var details = context.details
         details["failureStatePreserved"] = true
         details["retryAllowed"] = true
-        PommeCore.log("MDM stopped; state is preserved. Repeat the same command to resume.", vmName: context.request.name)
+        progressWarning("MDM stopped; state is preserved. Repeat the same command to resume.", vmName: context.request.name)
         return mdmResult(title: "MDM enrollment", operation: "mdm", reference: context.reference, ok: false,
             agent: [:], steps: steps, result: details, error: error.localizedDescription)
     }

@@ -40,7 +40,9 @@ struct PommeFrameworkOwnerWorkflowTests {
     } catch {
       #expect(error as? PommeOwnerCredentialStoreError == failure)
     }
-    #expect(trace.events == ["read", "restore"])
+    // Owner preparation failures preserve the current VM state for inspection.
+    #expect(trace.events == ["read"])
+    #expect(progress.journal.phase == .credentialPending)
     #expect(progress.journal.credential == fixture.credentialReference)
   }
 

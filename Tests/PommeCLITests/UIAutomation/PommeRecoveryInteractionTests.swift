@@ -409,6 +409,7 @@ struct PommeRecoveryInteractionTests {
     #expect(await port.preparedRoutes == [.reviewedMenus])
     #expect(await milestones.values == [
       .navigationStarted,
+      .terminalLaunching,
       .terminalVerified,
       .capabilityProbeSubmitted,
       .capabilityProbeVerified,

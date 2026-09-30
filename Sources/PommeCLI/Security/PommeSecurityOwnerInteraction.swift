@@ -6,12 +6,20 @@ import Foundation
 struct PommeSecurityOwnerInteraction: Sendable {
   var isInteractive: @Sendable () -> Bool = { isatty(STDIN_FILENO) == 1 }
   var confirm: @Sendable (String) -> Bool = { message in
+    let progress = PommeProgressContext.sink
+    progress?.pause()
+    defer { progress?.resume() }
     fputs(message + " [y/N] ", stderr)
     fflush(stderr)
     return ["y", "yes"].contains(
       readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "")
   }
-  var readPrivate: @Sendable (String) -> String? = { readSecureLine(prompt: $0) }
+  var readPrivate: @Sendable (String) -> String? = { prompt in
+    let progress = PommeProgressContext.sink
+    progress?.pause()
+    defer { progress?.resume() }
+    return readSecureLine(prompt: prompt)
+  }
 
   func authorizeFreshOwner(vmName: String, force: Bool) throws {
     if force { return }

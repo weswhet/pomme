@@ -48,6 +48,7 @@ enum PommeProvisionedTemplate {
             )
         }
 
+        PommeProgressContext.sink?.step(vm: vmName, "Preparing provisioned template")
         log("Creating the disposable VM \(vmName) that template \(validName) is captured from.")
         _ = try await PommeApplication.create(
             name: vmName, restoreArgs: restoreArgs,
@@ -68,6 +69,7 @@ enum PommeProvisionedTemplate {
 
             let manifest = try capture(
                 from: vmReference, into: bundle, templateName: validName, log: log)
+            PommeProgressContext.sink?.step(vm: vmName, "Removing template provisioning VM")
             log("Removing the disposable VM \(vmName).")
             _ = try PommeApplication.destroy(name: vmName)
             return payload(for: manifest, bundle: bundle)
@@ -76,9 +78,9 @@ enum PommeProvisionedTemplate {
             // it holds the owner account and a retained security journal, so
             // deleting it would discard evidence the failure needs.
             try? FileManager.default.removeItem(at: bundle.rootURL)
-            log(
-                "Template \(validName) was not created. The disposable VM \(vmName) was retained for inspection; delete it with `pomme delete \(vmName) --force`."
-            )
+            let warning = "Template \(validName) was not created. The disposable VM \(vmName) was retained for inspection; delete it with `pomme delete \(vmName) --force`."
+            if let sink = PommeProgressContext.sink { sink.warning(warning) }
+            else { log(warning) }
             throw error
         }
     }
@@ -105,6 +107,7 @@ enum PommeProvisionedTemplate {
         let input = try PommeCore.loadProvisioningInput(for: plan)
         let diskSize = input.diskSizeBytes
 
+        PommeProgressContext.sink?.step(vm: reference.displayName, "Capturing template \(templateName)")
         log("Capturing template \(templateName) from the stopped VM.")
         try FileManager.default.createDirectory(
             at: bundle.rootURL,

@@ -156,6 +156,26 @@ The local build script retains signed agent artifacts by SHA-256. Recovery
 installation after a host rebuild uses the original pinned artifact, not a
 replacement digest; missing or altered artifacts fail closed.
 
+### Command progress
+
+Long-running commands show one status line on standard error, with a dotted
+apple animation, the current step, and elapsed time. IPSW downloads and macOS
+installation show measured percentages. Downloads also show the resolved macOS
+version, byte counts, transfer rate, and estimated time remaining once enough
+data has arrived to measure the rate. Compact terminals omit secondary counters
+to keep the status on one line.
+Parallel creation shares the line and rotates between VMs when space is limited.
+
+Use `--progress auto|plain|off` to control the display. `auto` is the default:
+it animates on a capable terminal and prints deduplicated step lines when
+standard error is redirected or `TERM=dumb`. JSON and JSONL suppress progress
+unless you explicitly select `plain`. `--debug` uses plain progress with verbose
+diagnostics. `NO_COLOR` disables color, and non-Unicode locales use ASCII symbols.
+Warnings and errors remain visible with `off`.
+
+Progress clears before results, prompts, guest output, and PTY attachment.
+The full-screen TUI retains its own display and log capture.
+
 ### Recovery debug screenshots
 
 `--debug` retains a full-resolution PNG immediately before each automatic
