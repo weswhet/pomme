@@ -1372,10 +1372,19 @@ struct PommeSecurityNormalAgent: Sendable {
     volumeGroupUUID: UUID,
     timeout: TimeInterval = Constants.defaultGuestCommandTimeout
   ) -> PommeSecurityWorkflowState? {
+    observeAMFIStatus(volumeGroupUUID: volumeGroupUUID, timeout: timeout)?.state
+  }
+
+  /// The same read as `observeAMFIState`, with the agent's verified report
+  /// kept beside the decoded state for a caller that presents it.
+  func observeAMFIStatus(
+    volumeGroupUUID: UUID,
+    timeout: TimeInterval = Constants.defaultGuestCommandTimeout
+  ) -> (report: JSONValue, state: PommeSecurityWorkflowState)? {
     // Declining is ordinary, not a failure, but it costs the caller a whole
     // Recovery session, so say which check declined it. The reasons are a
     // closed vocabulary and carry no guest text.
-    func decline(_ reason: String) -> PommeSecurityWorkflowState? {
+    func decline(_ reason: String) -> (report: JSONValue, state: PommeSecurityWorkflowState)? {
       PommeCore.log(
         "Normal-agent AMFI status unavailable (\(reason)); observing through Recovery.",
         vmName: reference.displayName)
@@ -1412,7 +1421,7 @@ struct PommeSecurityNormalAgent: Sendable {
     guard let state = try? PommeSecurityWorkflowState.decode(result, sip: false) else {
       return decline("report-not-verifiable")
     }
-    return state
+    return (result, state)
   }
 
   /// True when this VM's pinned agent advertises the normal-boot AMFI status
