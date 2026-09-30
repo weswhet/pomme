@@ -1362,6 +1362,9 @@ enum PommeApplication {
                     text: formatSecurityPayload(payload.publicValue as? [String: Any] ?? [:])
                 )
             }
+            if let payload = await normalSIPStatusPayload(reference: reference, finalState: finalState) {
+                return result(title: "SIP Status", reference: reference, payload: payload, text: formatSecurityPayload(payload))
+            }
             let integration = try await currentRecoveryIntegrationFactory().make(
                 reference: reference,
                 operation: .sip(action)
@@ -1473,19 +1476,54 @@ enum PommeApplication {
         PommeCore.log(
             "Read the AMFI configuration through the persistent normal agent.",
             vmName: reference.displayName)
-        return normalAMFIStatusPayload(name: reference.name, finalState: finalState, report: observed.report)
+        return normalAgentStatusPayload(
+            operation: "amfi.status", name: reference.name, finalState: finalState, report: observed.report)
+    }
+
+    /// The SIP counterpart. `csrutil status` in a normal boot reports the
+    /// configuration the running kernel booted with, the same read that proves
+    /// every SIP workflow after its final normal boot. The agent is given only
+    /// a short time to answer, so a VM without a working agent is not held up
+    /// before Recovery, and any output other than the two exact states (a
+    /// custom configuration, for example) is left to Recovery as well.
+    private static func normalSIPStatusPayload(
+        reference: VMReference,
+        finalState: VMFinalState
+    ) async -> [String: Any]? {
+        guard finalState == .previous || finalState == .normal,
+              (try? PommeCore.stableVMRunState(reference: reference)) == .running(.normal),
+              let plan = try? PommeCore.securityProvisioningPlan(reference: reference)
+        else { return nil }
+        let agent = PommeSecurityNormalAgent(
+            reference: reference, expectedExecutableDigest: plan.normalAgent.executableDigest)
+        guard (try? await agent.authenticate(timeout: 10)) != nil,
+              let disabled = try? agent.observeSIPDisabled(),
+              (try? PommeCore.provesStableVMRunState(.running(.normal), reference: reference)) == true
+        else { return nil }
+        PommeCore.log(
+            "Read the SIP configuration through the persistent normal agent.",
+            vmName: reference.displayName)
+        return normalAgentStatusPayload(
+            operation: "sip.status", name: reference.name, finalState: finalState,
+            report: .object([
+                "operation": .string("sip.normal.status"),
+                "sipEnabled": .bool(!disabled),
+                "sipDisabled": .bool(disabled),
+                "verified": .bool(true),
+            ]))
     }
 
     /// The public result of a normal-agent status read. It has no `recovery`
     /// or `cleanup` evidence because no Recovery session ran; `source` says so.
-    static func normalAMFIStatusPayload(
+    static func normalAgentStatusPayload(
+        operation: String,
         name: String?,
         finalState: VMFinalState,
         report: JSONValue
     ) -> [String: Any] {
         var payload: [String: Any] = [
             "ok": true,
-            "operation": "amfi.status",
+            "operation": operation,
             "name": name as Any,
             "source": "normalAgent",
             "finalState": finalState.rawValue,
