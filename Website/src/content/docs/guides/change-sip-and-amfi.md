@@ -39,9 +39,12 @@ pomme amfi status VM_NAME
 
 Replace `VM_NAME` with the name of your VM.
 
-Status commands observe the guest through Recovery, so the VM restarts during
-the check. When the check finishes, Pomme returns the VM to the state it was in
-before the command. Status commands never ask for or transmit an owner
+When the VM is already running normal macOS and the final state is
+`previous` (the default) or `normal`, `pomme amfi status` reads the configuration through the guest agent and
+the VM doesn't restart. In every other case, and always for `pomme sip status`,
+the status command observes the guest through Recovery, so the VM restarts
+during the check. When the check finishes, Pomme returns the VM to the state it
+was in before the command. Status commands never ask for or transmit an owner
 password.
 
 ## Choose the final VM state

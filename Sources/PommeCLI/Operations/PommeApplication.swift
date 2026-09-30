@@ -1426,6 +1426,9 @@ enum PommeApplication {
                     text: formatSecurityPayload(payload.publicValue as? [String: Any] ?? [:])
                 )
             }
+            if let payload = normalAMFIStatusPayload(reference: reference, finalState: finalState) {
+                return result(title: "AMFI Status", reference: reference, payload: payload, text: formatSecurityPayload(payload))
+            }
             let integration = try await currentRecoveryIntegrationFactory().make(
                 reference: reference,
                 operation: .amfi(action)
@@ -1446,6 +1449,54 @@ enum PommeApplication {
             let title = action == .status ? "AMFI Status" : (action == .disable ? "Disable AMFI" : "Enable AMFI")
             return result(title: title, reference: reference, payload: payload, text: formatSecurityPayload(payload))
         }
+    }
+
+    /// AMFI status is fully observable from a normal boot, so a VM that is
+    /// already running normal macOS, and is asked to stay there, is read through
+    /// its persistent agent instead of being restarted into Recovery. Returns
+    /// nil whenever that read is unavailable or the VM must change state, and
+    /// the caller then uses the authoritative Recovery observation.
+    private static func normalAMFIStatusPayload(
+        reference: VMReference,
+        finalState: VMFinalState
+    ) -> [String: Any]? {
+        guard finalState == .previous || finalState == .normal,
+              (try? PommeCore.stableVMRunState(reference: reference)) == .running(.normal),
+              let plan = try? PommeCore.securityProvisioningPlan(reference: reference),
+              let group = try? PommeCore.provisioningRuntimeMetadata(for: plan).startupVolumeGroupUUID
+        else { return nil }
+        let agent = PommeSecurityNormalAgent(
+            reference: reference, expectedExecutableDigest: plan.normalAgent.executableDigest)
+        guard let observed = agent.observeAMFIStatus(volumeGroupUUID: group),
+              (try? PommeCore.provesStableVMRunState(.running(.normal), reference: reference)) == true
+        else { return nil }
+        PommeCore.log(
+            "Read the AMFI configuration through the persistent normal agent.",
+            vmName: reference.displayName)
+        return normalAMFIStatusPayload(name: reference.name, finalState: finalState, report: observed.report)
+    }
+
+    /// The public result of a normal-agent status read. It has no `recovery`
+    /// or `cleanup` evidence because no Recovery session ran; `source` says so.
+    static func normalAMFIStatusPayload(
+        name: String?,
+        finalState: VMFinalState,
+        report: JSONValue
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "ok": true,
+            "operation": "amfi.status",
+            "name": name as Any,
+            "source": "normalAgent",
+            "finalState": finalState.rawValue,
+            "finalStateVerified": true,
+            "hostExitCode": 0
+        ]
+        if let data = try? JSONSerialization.data(
+            withJSONObject: report.publicValue, options: [.sortedKeys]) {
+            payload["output"] = safeRecoveryOutput(data)
+        }
+        return payload
     }
 
     /// Mutation credentials are accepted only from Pomme's dedicated
