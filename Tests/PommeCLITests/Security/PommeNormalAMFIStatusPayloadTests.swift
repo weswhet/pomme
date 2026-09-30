@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@Suite("Normal-agent AMFI status payload")
+@Suite("Normal-agent security status payload")
 struct PommeNormalAMFIStatusPayloadTests {
     private static let report = JSONValue.object([
         "operation": .string("amfi.normal.status"),
@@ -17,8 +17,8 @@ struct PommeNormalAMFIStatusPayloadTests {
 
     @Test("the payload names its source and carries no Recovery evidence")
     func payloadShape() throws {
-        let payload = PommeApplication.normalAMFIStatusPayload(
-            name: "devme", finalState: .previous, report: Self.report)
+        let payload = PommeApplication.normalAgentStatusPayload(
+            operation: "amfi.status", name: "devme", finalState: .previous, report: Self.report)
         #expect(payload["ok"] as? Bool == true)
         #expect(payload["operation"] as? String == "amfi.status")
         #expect(payload["name"] as? String == "devme")
@@ -32,8 +32,8 @@ struct PommeNormalAMFIStatusPayloadTests {
 
     @Test("the output is the agent's report with the keys a Recovery status prints")
     func outputCarriesTheReport() throws {
-        let payload = PommeApplication.normalAMFIStatusPayload(
-            name: "devme", finalState: .normal, report: Self.report)
+        let payload = PommeApplication.normalAgentStatusPayload(
+            operation: "amfi.status", name: "devme", finalState: .normal, report: Self.report)
         let output = try #require(payload["output"] as? String)
         let decoded = try #require(
             JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
@@ -44,5 +44,27 @@ struct PommeNormalAMFIStatusPayloadTests {
         #expect(decoded["verified"] as? Bool == true)
         #expect(decoded["baselinePhase"] as? String == "none")
         #expect(payload["finalState"] as? String == "normal")
+    }
+
+    @Test("a SIP read uses the same shape with the keys a Recovery status prints")
+    func sipPayload() throws {
+        let payload = PommeApplication.normalAgentStatusPayload(
+            operation: "sip.status", name: "devme", finalState: .previous,
+            report: .object([
+                "operation": .string("sip.normal.status"),
+                "sipEnabled": .bool(false),
+                "sipDisabled": .bool(true),
+                "verified": .bool(true),
+            ]))
+        #expect(payload["operation"] as? String == "sip.status")
+        #expect(payload["source"] as? String == "normalAgent")
+        #expect(payload["recovery"] == nil)
+        #expect(payload["cleanup"] == nil)
+        let output = try #require(payload["output"] as? String)
+        let decoded = try #require(
+            JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
+        #expect(decoded["sipDisabled"] as? Bool == true)
+        #expect(decoded["sipEnabled"] as? Bool == false)
+        #expect(decoded["verified"] as? Bool == true)
     }
 }
