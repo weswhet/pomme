@@ -29,6 +29,8 @@ Intermediates.noindex/
 *.a
 *.dylib
 *.framework
+# Release packages from Scripts/build-release-pkg.sh
+/dist/
 
 ## Local CLI binaries
 pomme
