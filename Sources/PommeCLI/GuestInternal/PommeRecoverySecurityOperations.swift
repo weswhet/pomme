@@ -1140,6 +1140,58 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
         }
     }
 
+    /// Clears the SIP configuration from a normal boot. `csrutil clear` is the
+    /// one SIP change macOS permits outside Recovery: it only restores the
+    /// default protection, authenticates a local volume owner, and takes
+    /// effect on the next boot. The host proves that boot; this receipt only
+    /// says the native tool accepted the owner and cleared the configuration.
+    func executeNormalSIPClear(role: PommeAgentRole, payload: JSONValue) throws -> JSONValue {
+        guard role == .persistent else {
+            throw PommeGuestRecoverySecurityError.invalidOperation
+        }
+        guard effectiveUserID() == 0 else {
+            throw PommeGuestRecoverySecurityError.rootRequired
+        }
+        let request = try normalSIPClearRequest(from: payload)
+        do {
+            // The same installed-volume proof as the normal AMFI stages; it
+            // also requires the running boot to report SIP disabled.
+            try normalEnvironmentVerifier(request.volumeGroupUUID)
+            let result = try secretProcess("/usr/bin/csrutil", ["clear"], request.credentials)
+            guard result.status == 0 else { throw PommeGuestRecoverySecurityError.commandFailed }
+            return .object([
+                "operation": .string(Self.normalSIPClearOperation),
+                "sipConfigurationCleared": .bool(true),
+                "verified": .bool(true)
+            ])
+        } catch let error as PommeGuestRecoverySecurityError {
+            throw error
+        } catch {
+            throw PommeGuestRecoverySecurityError.commandFailed
+        }
+    }
+
+    static let normalSIPClearOperation = "sip.normal.clear"
+
+    private func normalSIPClearRequest(from payload: JSONValue) throws -> (
+        credentials: PommeGuestSecurityCredentials,
+        volumeGroupUUID: UUID
+    ) {
+        guard let object = payload.objectValue,
+              Set(object.keys) == ["authorizedUser", "password", "volumeGroupUUID"],
+              let rawUUID = object["volumeGroupUUID"]?.stringValue,
+              let volumeGroupUUID = UUID(uuidString: rawUUID),
+              volumeGroupUUID.uuidString.lowercased() == rawUUID
+        else { throw PommeGuestRecoverySecurityError.invalidPayload }
+        return try (
+            credentials(from: .object([
+                "authorizedUser": object["authorizedUser"] ?? .null,
+                "password": object["password"] ?? .null
+            ])),
+            volumeGroupUUID
+        )
+    }
+
     private enum Operation: String {
         case sipStatus = "sip.status"
         case sipDisable = "sip.disable"
@@ -4554,11 +4606,18 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
         _ credentials: PommeGuestSecurityCredentials
     ) throws -> PommeGuestProcessCapture {
         if executable == "/usr/bin/csrutil" {
-            return try PommeGuestSecurityPTY.runSIP(
-                action: arguments == ["enable"] ? "enable" : "disable",
-                credentials: credentials,
-                timeout: 120
-            )
+            switch arguments {
+            case ["enable"], ["disable"]:
+                return try PommeGuestSecurityPTY.runSIP(
+                    action: arguments[0],
+                    credentials: credentials,
+                    timeout: 120
+                )
+            case ["clear"]:
+                return try PommeGuestSecurityPTY.runSIPClear(credentials: credentials, timeout: 120)
+            default:
+                throw PommeGuestRecoverySecurityError.invalidOperation
+            }
         }
         guard executable == "/usr/bin/bputil" else {
             throw PommeGuestRecoverySecurityError.invalidOperation
@@ -4586,6 +4645,26 @@ private enum PommeGuestSecurityPTY {
         let result = try run(
             executable: "/usr/bin/csrutil",
             arguments: [action],
+            timeout: timeout
+        ) { text, descriptor in
+            if let input = try responder.nextInput(for: text, credentials: credentials) {
+                try write(input + "\r", to: descriptor)
+            }
+        }
+        guard responder.completed else {
+            throw PommeGuestRecoverySecurityError.promptRejected
+        }
+        return result
+    }
+
+    static func runSIPClear(
+        credentials: PommeGuestSecurityCredentials,
+        timeout: TimeInterval
+    ) throws -> PommeGuestProcessCapture {
+        var responder = PommeGuestSIPClearPromptResponder(expectedUsername: credentials.username)
+        let result = try run(
+            executable: "/usr/bin/csrutil",
+            arguments: ["clear"],
             timeout: timeout
         ) { text, descriptor in
             if let input = try responder.nextInput(for: text, credentials: credentials) {
@@ -5165,3 +5244,117 @@ struct PommeGuestAMFIPromptResponder {
 
 @_silgen_name("fork")
 private func pommeGuestFork() -> pid_t
+
+/// Answers the normal-boot `csrutil clear` dialog: an `Authorized user:` line
+/// read from standard input, then a `getpass` password prompt. The native
+/// tool asks for no confirmation, so any `[y/n]` prompt, a repeated or
+/// unexpected credential prompt, or a password prompt naming another user is
+/// rejected. Completion also requires the native success line, so a clear
+/// that fails after authentication is never reported as done.
+struct PommeGuestSIPClearPromptResponder {
+    private enum State { case username, password, result, complete }
+
+    static let successLine = "Successfully cleared system integrity configuration."
+
+    let expectedUsername: String
+    private var state: State = .username
+    private var consumedCharacterCount = 0
+
+    init(expectedUsername: String) {
+        self.expectedUsername = expectedUsername
+    }
+
+    mutating func nextInput(
+        for transcript: String,
+        credentials: PommeGuestSecurityCredentials
+    ) throws -> String? {
+        guard credentials.username == expectedUsername,
+              transcript.count >= consumedCharacterCount else {
+            throw PommeGuestRecoverySecurityError.promptRejected
+        }
+        let delta = String(transcript.dropFirst(consumedCharacterCount))
+        guard !PommeGuestPromptParsing.hasRejectedOutput(delta), !hasConfirmationPrompt(in: delta) else {
+            throw PommeGuestRecoverySecurityError.promptRejected
+        }
+
+        switch state {
+        case .username:
+            if let range = PommeGuestPromptParsing.firstLine(in: delta, matching: PommeGuestPromptParsing.usernamePrompt) {
+                consume(transcript, delta: delta, through: range)
+                state = .password
+                return credentials.username
+            }
+            if hasCredentialPrompt(in: delta) {
+                throw PommeGuestRecoverySecurityError.promptRejected
+            }
+        case .password:
+            if PommeGuestPromptParsing.firstLine(in: delta, matching: PommeGuestPromptParsing.usernamePrompt) != nil {
+                throw PommeGuestRecoverySecurityError.promptRejected
+            }
+            if let range = PommeGuestPromptParsing.firstLine(in: delta, matching: { line in
+                PommeGuestPromptParsing.passwordPrompt(line) != nil
+            }) {
+                switch PommeGuestPromptParsing.passwordPrompt(String(delta[range])) {
+                case .named(let username)?:
+                    guard username == expectedUsername else {
+                        throw PommeGuestRecoverySecurityError.promptRejected
+                    }
+                case .unbound?:
+                    break
+                case nil:
+                    throw PommeGuestRecoverySecurityError.promptRejected
+                }
+                consume(transcript, delta: delta, through: range)
+                state = .result
+                return credentials.password
+            }
+            if hasCredentialPrompt(in: delta) {
+                throw PommeGuestRecoverySecurityError.promptRejected
+            }
+        case .result, .complete:
+            if PommeGuestPromptParsing.firstLine(in: delta, matching: PommeGuestPromptParsing.usernamePrompt) != nil
+                || hasCredentialPrompt(in: delta) {
+                throw PommeGuestRecoverySecurityError.promptRejected
+            }
+            if state == .result, let range = PommeGuestPromptParsing.firstLine(in: delta, matching: { line in
+                line.trimmingCharacters(in: .whitespacesAndNewlines) == Self.successLine
+            }) {
+                consume(transcript, delta: delta, through: range)
+                state = .complete
+            }
+        }
+        return nil
+    }
+
+    var completed: Bool {
+        if case .complete = state { return true }
+        return false
+    }
+
+    private func hasConfirmationPrompt(in text: String) -> Bool {
+        PommeGuestPromptParsing.firstLine(
+            in: text,
+            matching: { line in
+                PommeGuestPromptParsing.bareConfirmationPrompt(line)
+                    || PommeGuestPromptParsing.hasConfirmationPrompt(line)
+            }
+        ) != nil
+    }
+
+    private func hasCredentialPrompt(in text: String) -> Bool {
+        PommeGuestPromptParsing.firstLine(
+            in: text,
+            matching: PommeGuestPromptParsing.hasCredentialPrompt
+        ) != nil
+    }
+
+    private mutating func consume(
+        _ transcript: String,
+        delta: String,
+        through range: Range<String.Index>
+    ) {
+        let consumed = delta.distance(from: delta.startIndex, to: range.upperBound)
+        consumedCharacterCount += consumed
+        consumedCharacterCount = min(consumedCharacterCount, transcript.count)
+    }
+}

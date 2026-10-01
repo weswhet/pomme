@@ -5508,7 +5508,7 @@ struct PommeCore {
                 code = "normal-amfi-unverified"
             case .invalidRebootTimeout, .bootIdentityUnavailable, .rebootRequestFailed,
                  .rebootDidNotStop, .rebootStartFailed, .rebootBootIdentityUnchanged,
-                 .rebootAgentUnverified:
+                 .rebootAgentUnverified, .unverifiedSIPClear:
                 code = "normal-amfi-unverified"
             }
         } else if let error = error as? PommeAgentSessionError {

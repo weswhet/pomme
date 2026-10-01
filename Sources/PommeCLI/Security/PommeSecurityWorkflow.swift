@@ -162,7 +162,7 @@ enum PommeSecurityWorkflow {
             try progress.advance(.securityMutationIntent)
           }
           dependencies.log(operation.isSIP
-            ? "Applying the requested change in authenticated Recovery."
+            ? "Applying the requested SIP change."
             : "Applying the journaled AMFI policy and normal-boot NVRAM stages.")
           PommeProgressContext.sink?.step(vm: progress.journal.identity.vmName,
             (operation.requestsDisabled ? "Disabling " : "Enabling ") + (operation.isSIP ? "SIP" : "AMFI"))

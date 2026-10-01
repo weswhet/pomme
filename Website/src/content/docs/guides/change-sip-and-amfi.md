@@ -122,6 +122,12 @@ To restore AMFI and then SIP, follow these steps:
 
 Replace `VM_NAME` with the name of your VM.
 
+Turning SIP on doesn't boot Recovery. The guest agent runs `csrutil clear` in
+normal macOS with the owner's credentials, and Pomme then restarts the guest
+and checks `csrutil status` on the new boot. A VM created with an earlier Pomme
+release, whose guest agent can't run `csrutil clear`, turns SIP on in Recovery
+instead.
+
 `pomme amfi enable` restores the exact AMFI configuration that Pomme saved when
 it turned AMFI off. If AMFI is off but Pomme has no saved configuration, for
 example because AMFI was turned off outside Pomme, the command stops before it
