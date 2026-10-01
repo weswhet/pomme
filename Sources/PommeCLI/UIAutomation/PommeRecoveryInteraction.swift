@@ -93,6 +93,8 @@ enum PommeRecoveryTerminalLaunchDisposition: Equatable, Sendable {
 /// boundary.
 enum PommeRecoveryInteractionMilestone: String, Equatable, Sendable {
   case navigationStarted
+  case recoveryLoading
+  case utilitiesOpening
   case terminalLaunching
   case terminalVerified
   case capabilityProbeSubmitted
@@ -142,6 +144,7 @@ struct PommeTahoeRecoveryInteraction: Sendable {
     }
 
     let navigationInput: PommeRecoveryNavigationInput
+    let preEventFrame: PommeRecoveryFrame?
     do {
       try Task.checkCancellation()
       if !navigationPrepared {
@@ -152,6 +155,7 @@ struct PommeTahoeRecoveryInteraction: Sendable {
       let preEventFrames = try await port.nextRecoveryFramePair()
       try Task.checkCancellation()
       navigationInput = try input.authorizeInput(preEventFrames: preEventFrames)
+      preEventFrame = preEventFrames.first
     } catch {
       if Self.isObservationTimeout(error) {
         throw PommeRecoveryInteractionError.observationTimedOut(.noInputDelivered)
@@ -164,8 +168,8 @@ struct PommeTahoeRecoveryInteraction: Sendable {
     let receipt: PommeRecoveryDurableInputReceipt
     do {
       try Task.checkCancellation()
-      if navigationInput == .key(.shiftCommandT) {
-        await onMilestone(.terminalLaunching)
+      if let milestone = Self.milestone(before: navigationInput, preEventFrame: preEventFrame) {
+        await onMilestone(milestone)
       }
       receipt = try await port.deliverRecoveryInput(navigationInput)
     } catch {
@@ -275,6 +279,19 @@ struct PommeTahoeRecoveryInteraction: Sendable {
         return .observationTimedOut
       }
       return .recoveryCleanupRequired
+    }
+  }
+
+  /// The inputs that start a long guest transition. Recovery takes about a
+  /// minute to load after Options, so each is named before it is delivered.
+  static func milestone(
+    before input: PommeRecoveryNavigationInput, preEventFrame: PommeRecoveryFrame?
+  ) -> PommeRecoveryInteractionMilestone? {
+    switch (input, preEventFrame) {
+    case (.key(.return), .startupOptionsActivated?): .recoveryLoading
+    case (.key(.return), .languageEnglish?), (.key(.return), .languageEnglishActive?): .utilitiesOpening
+    case (.key(.shiftCommandT), _): .terminalLaunching
+    default: nil
     }
   }
 

@@ -182,9 +182,12 @@ extension PommeSecurityWorkflow {
       try await normal.authenticate()
       try normal.requireAMFIWorkflowSupport()
       _ = try normal.currentBootIdentity()
+      PommeProgressContext.sink?.step(vm: reference.displayName,
+        operation.requestsDisabled ? "Writing AMFI boot arguments" : "Removing AMFI boot arguments")
       let result = try normal.performAMFI(
         operation: operation.requestsDisabled ? "amfi.normal.disable" : "amfi.normal.enable",
         volumeGroupUUID: group)
+      PommeProgressContext.sink?.step(vm: reference.displayName, "Restarting macOS")
       // Native reboot commits the guest's firmware state before another host
       // lifecycle transition, including enable's subsequent Recovery stage.
       // The rebooted session is remembered so verification can run on it.
@@ -245,6 +248,7 @@ extension PommeSecurityWorkflow {
             PommeCore.log(
               "Rebooting normal macOS to verify the AMFI configuration on a fresh boot.",
               vmName: reference.displayName)
+            PommeProgressContext.sink?.step(vm: reference.displayName, "Restarting macOS")
             try await normal.rebootAndAuthenticate()
           } else {
             PommeCore.log(

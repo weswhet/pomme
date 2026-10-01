@@ -16,7 +16,7 @@ private final class HandoffOutput: @unchecked Sendable {
 
 @Suite("Foreground progress handoff")
 struct PommeProgressHandoffTests {
-    @Test("First guest bytes clear animation and preserve binary output and exit status")
+    @Test("Buffered guest bytes keep the status line and preserve binary output and exit status")
     func binaryHandoff() throws {
         let output = HandoffOutput()
         let session = PommeProgressSession(mode: .auto, structuredOutput: false, debug: false,
@@ -43,12 +43,14 @@ struct PommeProgressHandoffTests {
         var index = 0
         let result = try PommeProgressContext.$sink.withValue(session.sink) {
             try PommeCore.collectForegroundResponse {
-                if index == 1 { #expect(output.text.isEmpty) }
                 if index == 2 {
-                    #expect(output.text == "\r\u{001B}[2K")
-                    output.clear()
-                    session.tick()
+                    // Nothing reaches the terminal while output is buffered,
+                    // so the status line keeps animating.
                     #expect(output.text.isEmpty)
+                    output.time = 2
+                    session.tick()
+                    #expect(output.text.contains("Running whoami"))
+                    output.clear()
                 }
                 defer { index += 1 }
                 return events[index]
@@ -61,8 +63,15 @@ struct PommeProgressHandoffTests {
         #expect(frames[1].descriptor == STDERR_FILENO)
         #expect(frames[1].data == stderr)
         #expect(PommeCore.hostExitCode(from: result) == 7)
+        session.sink.step(vm: "sample", "Still visible after collection")
+        output.time = 3
+        session.tick()
+        #expect(output.text.contains("Still visible after collection"))
+        // The result writer ends progress before it prints guest output.
+        output.clear()
+        session.sink.suspend()
         session.sink.step(vm: "sample", "Hidden after handoff")
         session.tick()
-        #expect(output.text.isEmpty)
+        #expect(!output.text.contains("Hidden after handoff"))
     }
 }

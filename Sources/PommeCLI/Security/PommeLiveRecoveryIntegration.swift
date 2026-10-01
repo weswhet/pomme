@@ -634,7 +634,11 @@ enum PommeLiveRecoveryIntegration {
                         onMilestone: { milestone in
                             switch milestone {
                             case .navigationStarted:
-                                progressSink?.step(vm: vmName, "Navigating Recovery UI")
+                                progressSink?.step(vm: vmName, "Selecting Recovery options")
+                            case .recoveryLoading:
+                                progressSink?.step(vm: vmName, "Loading Recovery")
+                            case .utilitiesOpening:
+                                progressSink?.step(vm: vmName, "Opening Recovery utilities")
                             case .terminalLaunching:
                                 progressSink?.step(vm: vmName, "Launching Terminal")
                             case .terminalVerified:
@@ -794,6 +798,9 @@ enum PommeLiveRecoveryIntegration {
                     payload: value,
                     requestID: requestID
                 )
+                // Cleanup and the Recovery shutdown that follow take tens of
+                // seconds; name them rather than leaving the operation label.
+                PommeProgressContext.sink?.step(vm: reference.displayName, "Leaving Recovery")
                 let encoded = try PommeProvisioningCoding.encode(result)
                 guard encoded.count <= PommeAgentProtocol.maximumFrameBytes else {
                     throw PommeAgentProtocol.Error.frameTooLarge
