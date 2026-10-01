@@ -409,6 +409,8 @@ struct PommeRecoveryInteractionTests {
     #expect(await port.preparedRoutes == [.reviewedMenus])
     #expect(await milestones.values == [
       .navigationStarted,
+      .recoveryLoading,
+      .utilitiesOpening,
       .terminalLaunching,
       .terminalVerified,
       .capabilityProbeSubmitted,
@@ -868,5 +870,21 @@ private actor RecoveryMilestoneRecorder {
 
   func record(_ milestone: PommeRecoveryInteractionMilestone) {
     values.append(milestone)
+  }
+}
+
+@Suite("Recovery navigation progress milestones")
+struct PommeRecoveryNavigationMilestoneTests {
+  @Test("only the inputs that start a long guest transition are named")
+  func milestonesBeforeLongTransitions() {
+    typealias Interaction = PommeTahoeRecoveryInteraction
+    #expect(Interaction.milestone(before: .key(.return), preEventFrame: .startupOptionsActivated) == .recoveryLoading)
+    #expect(Interaction.milestone(before: .key(.return), preEventFrame: .languageEnglish) == .utilitiesOpening)
+    #expect(Interaction.milestone(before: .key(.return), preEventFrame: .languageEnglishActive) == .utilitiesOpening)
+    #expect(Interaction.milestone(before: .key(.shiftCommandT), preEventFrame: .terminalMenuItem) == .terminalLaunching)
+    #expect(Interaction.milestone(before: .key(.shiftCommandT), preEventFrame: .recoveryUtilities) == .terminalLaunching)
+    #expect(Interaction.milestone(before: .key(.right), preEventFrame: .startupOptions) == nil)
+    #expect(Interaction.milestone(before: .activateLanguageChooser, preEventFrame: .languageEnglishInactive) == nil)
+    #expect(Interaction.milestone(before: .key(.return), preEventFrame: .languageEnglishInactive) == nil)
   }
 }

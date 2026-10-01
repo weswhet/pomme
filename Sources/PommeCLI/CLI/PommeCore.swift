@@ -841,7 +841,11 @@ struct PommeCore {
         _ desired: VMRunStateSnapshot,
         reference: VMReference
     ) async throws {
-        PommeProgressContext.sink?.step(vm: reference.name, "Restoring VM run state")
+        // A restore that is already satisfied changes nothing, so it must not
+        // replace the label of the step that called it.
+        if (try? stableVMRunState(reference: reference)) != desired {
+            PommeProgressContext.sink?.step(vm: reference.name, "Restoring VM run state")
+        }
         let finalState: VMFinalState
         let captured: PommeRecoveryRunState
         switch desired {
@@ -1723,7 +1727,10 @@ struct PommeCore {
                         guard data.count <= maximumOutputBytes - outputBytes, frames.count < 16_384 else {
                             throw RunnerError.invalidGuestCommand("Foreground output exceeded the buffered byte or frame limit.")
                         }
-                        PommeProgressContext.sink?.suspend()
+                        // Output is buffered here and printed only by the
+                        // result writer, which ends progress first. Internal
+                        // guest reads (security, owner, and MDM checks) must
+                        // not stop the status line of the command they serve.
                         outputBytes += data.count
                         frames.append(["stream": frame.stream.rawValue, "dataBase64": data.base64EncodedString()])
                     }
@@ -4535,6 +4542,9 @@ struct PommeCore {
         allowAgentShutdown: Bool
     ) async throws {
         try await stopRetainedRuntime(for: reference.standardizedPath)
+        if (try? runtimeRecord(for: reference.bundle)) != nil {
+            PommeProgressContext.sink?.step(vm: reference.name, "Stopping VM")
+        }
         // A normal-booted guest with a connected agent can shut itself down in
         // a few seconds. VZ's requestStop behaves like a power button, which a
         // freshly booted macOS guest may take the full graceful window to
