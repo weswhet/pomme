@@ -512,7 +512,10 @@ struct PommeAgentPerformRequest: Sendable {
             "owner.credential.read",
             // Native OpenDirectory local-user reads and owner password
             // verification, named exactly like the credential read.
-            "directory.localUsers.read", "directory.password.verify"
+            "directory.localUsers.read", "directory.password.verify",
+            // Normal-boot `csrutil clear` as the volume owner. It carries the
+            // owner password to the root agent, so it is named exactly too.
+            "sip.normal.clear"
         ]
         let prefixes = ["process.", "file.", "job.", "maintenance.", "remoteLogin.", "mdm.", "ui."]
         return exact.contains(operation) || prefixes.contains(where: operation.hasPrefix)

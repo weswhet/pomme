@@ -75,6 +75,7 @@ enum PommeSecurityNormalAgentError: Error, Equatable, LocalizedError, Sendable {
   case rebootStartFailed
   case rebootBootIdentityUnchanged
   case rebootAgentUnverified
+  case unverifiedSIPClear
 
   var errorDescription: String? {
     switch self {
@@ -98,6 +99,8 @@ enum PommeSecurityNormalAgentError: Error, Equatable, LocalizedError, Sendable {
       "The native reboot did not produce a different verified boot identity; the security transaction was retained."
     case .rebootAgentUnverified:
       "The creation-pinned normal agent could not be reauthenticated after the native reboot; the security transaction was retained."
+    case .unverifiedSIPClear:
+      "Normal-boot csrutil clear could not be verified for the volume owner; SIP was not reported cleared and the security transaction was retained."
     }
   }
 }
@@ -1358,6 +1361,72 @@ struct PommeSecurityNormalAgent: Sendable {
       let disabled = Self.parseSIPDisabled(String(decoding: result.stdout, as: UTF8.self))
     else { throw PommeSecurityWorkflowError.statusUnverified }
     return disabled
+  }
+
+  /// True when this VM's pinned agent can clear SIP from a normal boot. A
+  /// pinned agent that predates `sip.normal.clear` is never replaced; the
+  /// caller enables SIP through Recovery instead.
+  func supportsNormalSIPClear() throws -> Bool {
+    try pinnedCapabilities().contains(PommeGuestRecoverySecurityOperations.normalSIPClearOperation)
+  }
+
+  /// Runs `csrutil clear` in the current normal boot as the volume owner. The
+  /// password travels only in the authenticated request and reaches only the
+  /// native tool's PTY. The receipt proves that the tool authenticated the
+  /// owner and cleared the configuration; SIP itself changes on the next boot,
+  /// which the caller must start and verify.
+  func clearSIPConfiguration(
+    credentials: PommeGuestSecurityCredentials, volumeGroupUUID: UUID
+  ) throws {
+    guard try PommeCore.stableVMRunState(reference: reference) == .running(.normal) else {
+      throw PommeSecurityWorkflowError.agentUnverified
+    }
+    let response: [String: Any]
+    do {
+      response = try PommeCore.sendControlObject([
+        "command": "agent.perform",
+        "operation": PommeGuestRecoverySecurityOperations.normalSIPClearOperation,
+        "payload": [
+          "authorizedUser": credentials.username, "password": credentials.password,
+          "volumeGroupUUID": volumeGroupUUID.uuidString.lowercased(),
+        ],
+      ], bundle: reference.bundle,
+        timeout: PommeAgentVSOCKCoordinator.normalSIPClearExchangeTimeout
+          + 3 * Constants.agentRoundTripTimeout)
+    } catch {
+      throw PommeSecurityNormalAgentError.unverifiedSIPClear
+    }
+    guard Self.isVerifiedSIPClearReceipt(response) else {
+      if let code = Self.guestFailureCode(response) {
+        PommeCore.log(
+          "Normal-boot csrutil clear was rejected by the guest (\(code.rawValue)).",
+          vmName: reference.displayName)
+      }
+      throw PommeSecurityNormalAgentError.unverifiedSIPClear
+    }
+  }
+
+  /// Accepts only the exact closed receipt for `sip.normal.clear`.
+  static func isVerifiedSIPClearReceipt(_ response: [String: Any]) -> Bool {
+    guard response["ok"] as? Bool == true,
+      let rawResult = response["result"],
+      let result = try? JSONValue(any: rawResult)
+    else { return false }
+    return result == .object([
+      "operation": .string(PommeGuestRecoverySecurityOperations.normalSIPClearOperation),
+      "sipConfigurationCleared": .bool(true),
+      "verified": .bool(true),
+    ])
+  }
+
+  /// The closed guest failure code inside a failed helper reply, if any.
+  /// Anything outside the closed vocabulary yields nil rather than text.
+  static func guestFailureCode(_ response: [String: Any]) -> PommeRecoveryGuestFailureCode? {
+    guard response["ok"] as? Bool == false,
+      let message = response["error"] as? String,
+      let match = message.firstMatch(of: /^Pomme agent request failed \(([a-z-]+)\)/)
+    else { return nil }
+    return PommeRecoveryGuestFailureCode(rawValue: String(match.1))
   }
 
   /// Observes AMFI configuration and any retained transaction through the

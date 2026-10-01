@@ -81,6 +81,13 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
     // before a retry.
     static let normalAMFIExchangeTimeout: TimeInterval = 300
 
+    // Normal-boot `csrutil clear` first proves the installed startup volume
+    // with native commands, then authenticates the volume owner in a bounded
+    // guest PTY. Like the AMFI stages, it gets one practical window rather
+    // than the ordinary short budget. If it expires, the next boot's
+    // `csrutil status` decides whether the clear must be repeated.
+    static let normalSIPClearExchangeTimeout: TimeInterval = 300
+
     // The agent spawns the guest process before it replies. Right after a
     // boot, macOS 27 guests took 3-6 seconds for a single spawn (September
     // 29 lab), which exceeded the ordinary budget while the agent was
@@ -116,6 +123,9 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
         }
         if role == .normal, isNormalAMFIOperation(operation) {
             return normalAMFIExchangeTimeout
+        }
+        if role == .normal, operation == PommeGuestRecoverySecurityOperations.normalSIPClearOperation {
+            return normalSIPClearExchangeTimeout
         }
         if role == .normal, isProcessLaunchOperation(operation) {
             return max(defaultTimeout, processLaunchExchangeTimeout)

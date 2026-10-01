@@ -19,8 +19,10 @@ provisioned template.
 macOS allows each setting to change only in a specific environment, so a
 workflow can involve more than one boot:
 
-- **SIP** changes in Recovery, through an authenticated, request-bound
-  Recovery session.
+- **SIP** turns off in Recovery, through an authenticated, request-bound
+  Recovery session. It turns back on in normal macOS: the guest agent runs
+  `csrutil clear` as the volume owner, and Pomme reboots the guest to apply
+  it. VMs whose guest agent predates this turn SIP on in Recovery instead.
 - **AMFI** has two parts. The LocalPolicy part changes in Recovery through an
   authenticated Recovery session. The boot-argument part is written through
   the authenticated normal agent in normal macOS, while SIP is off.

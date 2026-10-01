@@ -103,7 +103,7 @@ actor PommeAgent {
         "amfi.status", "amfi.disable", "amfi.enable"
     ]
     static let buddyPreferencesStatusOperation = "buddy.preferences.status"
-    static let persistentCapabilities = [buddyPreferencesStatusOperation, "agent.describe", "agent.health", "process.start", "process.status", "process.signal", "process.list", "process.output", "process.wait", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize", PommeGuestOwnerCredentialReader.operation, PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation] + PommeGuestDirectory.operations + terminalCapabilities + normalAMFIOperations
+    static let persistentCapabilities = [buddyPreferencesStatusOperation, "agent.describe", "agent.health", "process.start", "process.status", "process.signal", "process.list", "process.output", "process.wait", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize", PommeGuestOwnerCredentialReader.operation, PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation, PommeGuestRecoverySecurityOperations.normalSIPClearOperation] + PommeGuestDirectory.operations + terminalCapabilities + normalAMFIOperations
     /// Detached-job logs retain their trailing bytes so an already streamed
     /// status response never makes `process.output` destructive. The agent
     /// keeps this bounded per channel and tells callers when earlier bytes
@@ -305,6 +305,10 @@ actor PommeAgent {
                 operation: operation,
                 payload: request.payload
             )
+        // The payload carries the volume owner's password for `csrutil
+        // clear`. It goes only to the native tool's PTY and is never logged.
+        case PommeGuestRecoverySecurityOperations.normalSIPClearOperation:
+            return try recoverySecurity.executeNormalSIPClear(role: role, payload: request.payload)
         case "system.info": return .object(["name": .string("macOS"), "hostName": .string(ProcessInfo.processInfo.hostName)])
         case "network.interfaces": return .array([])
         case "remoteLogin.set": return try remoteLogin(request.payload)

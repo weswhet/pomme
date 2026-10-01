@@ -1,9 +1,10 @@
 # Security workflows
 
-This document describes the SIP and AMFI workflows for Pomme-owned VMs. A
-SIP mutation and AMFI LocalPolicy change use authenticated, request-bound
-Recovery transactions. AMFI boot arguments are written through the authenticated
-persistent agent in normal macOS. The workflow captures the VM run state first, records a durable journal before
+This document describes the SIP and AMFI workflows for Pomme-owned VMs. SIP
+disable and AMFI LocalPolicy changes use authenticated, request-bound Recovery
+transactions. SIP enable runs `csrutil clear` as the volume owner in normal
+macOS, and AMFI boot arguments are written through the authenticated persistent
+agent in normal macOS. The workflow captures the VM run state first, records a durable journal before
 owner or Recovery effects, and restores the requested final state only after
 verification.
 
@@ -53,7 +54,12 @@ AMFI changes require SIP disabled before LocalPolicy or NVRAM mutation. Use
 does not bypass this prerequisite. Clean already-requested states and status
 commands do not require a SIP change.
 
-Disable changes LocalPolicy in Recovery, boots normal macOS to write and read
+SIP disable changes LocalPolicy in Recovery. SIP enable needs no Recovery
+session: `csrutil clear` is the one SIP change macOS allows in a normal boot.
+It restores the default protection once a volume owner authenticates and takes
+effect on the next boot. See [SIP enable in normal macOS](#sip-enable-in-normal-macos).
+
+AMFI disable changes LocalPolicy in Recovery, boots normal macOS to write and read
 back the merged boot arguments, and performs another normal boot to verify the
 effective arguments. Enable restores the exact saved boot arguments in normal
 macOS first, restores LocalPolicy in Recovery, then verifies a fresh normal
@@ -372,6 +378,52 @@ independent live-kernel enforcement.
 SIP uses the normal agent's exact `csrutil status` read-back for its normal-boot
 check. Its `enforcementVerified` field can be true only after that check and a
 verified normal boot.
+
+## SIP enable in normal macOS
+
+When the VM's creation-pinned persistent agent advertises `sip.normal.clear`,
+SIP enable never boots Recovery. After owner preparation and the
+`securityMutationIntent` record, Pomme sends the owner's username and password
+to that agent in one authenticated request. The guest first repeats the
+installed-volume proof used by the normal AMFI stages: the running boot reports
+SIP disabled, and its root is the requested startup System volume. It then runs
+`/usr/bin/csrutil clear` as root on a private PTY. The child inherits no
+environment beyond a fixed system `PATH`. The guest answers only the native `Authorized user:` and
+`Password:` prompts (or a password prompt that names the same owner). Any
+`[y/n]` confirmation, repeated or foreign credential prompt, `Unknown user`, or
+`Failed to authenticate.` output stops the clear. The receipt also requires
+exit status zero and the native line `Successfully cleared system integrity
+configuration.` The password is never returned, logged, or journaled.
+
+`csrutil clear` changes LocalPolicy, and macOS rotates the policy's NVRAM
+anti-replay nonces with it. As with AMFI's NVRAM stage, Pomme then requests a
+native guest reboot and proves a changed boot identity through the same
+creation-pinned agent; a host stop/start is not a substitute. Verification
+reads `csrutil status` on that proven boot, so no second restart is needed. A
+retry in a new process cannot prove which boot is current, so it verifies on a
+fresh boot as before. An interrupted clear is safe to repeat: if the next
+normal boot still reports SIP disabled, the retained intent runs the clear and
+reboot again.
+
+A VM whose pinned agent predates `sip.normal.clear` keeps the Recovery
+`csrutil enable` transaction. Pomme does not replace that agent.
+
+The VM helper forwards `sip.normal.clear` only by its exact name, like the
+other credential-bearing agent operations. A VM whose helper is still running
+an older Pomme build rejects the request; stopping the VM lets the next command
+start a current helper.
+
+The September 30, 2026 lab qualified this path on a disposable clone of the
+protected Tahoe `26.6.2` build `25G83` base (4 GB). After a Recovery SIP disable
+(LocalPolicy Permissive, `sip0=7f`, `sip2=1`, `sip3=1`), `pomme sip enable`
+cleared SIP in about 15 seconds, rebooted natively, and verified the proven
+boot without a stop/start or any Recovery session. A clean disable/enable cycle
+took 204 seconds to disable through Recovery and 74 seconds to enable,
+including owner verification and a final stop. Afterward, `csrutil status`
+reported enabled, `bputil -d` showed Full Security with `sip0` through `sip3`
+absent, and NVRAM `boot-args` was empty. This is the same end state the
+Recovery `csrutil enable` path produced. A repeated enable returned
+`noMutationVerified` in under two seconds.
 
 ## MDM from any state
 

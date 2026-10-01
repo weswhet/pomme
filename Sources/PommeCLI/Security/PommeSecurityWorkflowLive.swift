@@ -10,7 +10,7 @@ actor PommeSecurityProvenBootRecord {
 }
 
 extension PommeSecurityWorkflow {
-  /// A fresh owner credential is returned to the Recovery mutation only after
+  /// A fresh owner credential is returned to the security mutation only after
   /// the current normal boot proves that the owner still has an Aqua desktop.
   /// The autologin receipt is durable, but the desktop can regress before a
   /// later retry reaches the security mutation intent.
@@ -194,6 +194,36 @@ extension PommeSecurityWorkflow {
       await provenBoot.record(try await normal.rebootAndAuthenticate())
       return result
     }
+    // `csrutil clear` is the one SIP change macOS allows outside Recovery: it
+    // restores the default protection once a volume owner authenticates, and
+    // it takes effect on the next boot. Enabling SIP therefore needs no
+    // Recovery session when the pinned agent can run it. A native reboot
+    // commits the new LocalPolicy, as it does for AMFI's NVRAM stage, and the
+    // proven boot is the one verification reads. Nil means the pinned agent
+    // predates the operation and the caller must use Recovery.
+    let clearSIPInNormalBoot: @Sendable (PommeGuestSecurityCredentials) async throws -> JSONValue? = {
+      credentials in
+      try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
+      try await normal.authenticate()
+      guard try normal.supportsNormalSIPClear() else {
+        PommeCore.log(
+          "The pinned agent predates normal-boot csrutil clear; enabling SIP in authenticated Recovery.",
+          vmName: reference.displayName)
+        return nil
+      }
+      PommeCore.log(
+        "Clearing the SIP configuration in normal macOS as the volume owner.",
+        vmName: reference.displayName)
+      try normal.clearSIPConfiguration(credentials: credentials, volumeGroupUUID: group)
+      PommeProgressContext.sink?.step(vm: reference.displayName, "Restarting macOS")
+      await provenBoot.record(try await normal.rebootAndAuthenticate())
+      // The native receipt is for the cleared configuration. The proven boot
+      // is the first that can report it, and verification reads it there.
+      return .object([
+        "operation": .string(operation.wireName), "sipDisabled": .bool(false),
+        "verified": .bool(true),
+      ])
+    }
     let dependencies = PommeSecurityWorkflowDependencies(
       observe: {
         // Framework owners must still prove their saved identity and desktop
@@ -217,6 +247,12 @@ extension PommeSecurityWorkflow {
       prepareOwner: { try await owner.prepare(progress: $0) },
       mutate: { credentials in
         if operation.isSIP {
+          if operation == .sipEnable, let cleared = try await clearSIPInNormalBoot(credentials) {
+            return cleared
+          }
+          PommeCore.log(
+            "Applying the requested SIP change in authenticated Recovery.",
+            vmName: reference.displayName)
           return try await recovery.mutate(operation, credentials: credentials)
         }
         try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
@@ -231,6 +267,19 @@ extension PommeSecurityWorkflow {
       },
       verifyNormalBoot: {
         if operation.isSIP {
+          // A normal-boot clear already rebooted natively and proved the new
+          // boot in this process, so verify on it. Any other boot, such as
+          // one after Recovery or a retry in a new process, is replaced by a
+          // fresh normal boot first.
+          if let proven = await provenBoot.provenIdentity,
+            try PommeCore.stableVMRunState(reference: reference) == .running(.normal)
+          {
+            try await normal.authenticate()
+            if try normal.currentBootIdentity() == proven {
+              try normal.verifyNormalSecurity(sip: true, disabled: operation.requestsDisabled)
+              return
+            }
+          }
           try await PommeCore.restoreStableVMRunState(.stopped, reference: reference)
           try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
           try await normal.authenticate()
@@ -661,7 +710,7 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
       // A durable autologin receipt records what a previous attempt proved;
       // it does not prove that the normal desktop still exists after a later
       // crash or manual change. Recheck it before returning credentials to
-      // Recovery, without repeating account or autologin effects.
+      // the security mutation, without repeating account or autologin effects.
       PommeCore.log(
         "Revalidating the normal desktop for owner \(account) before security mutation.",
         vmName: reference.displayName)
