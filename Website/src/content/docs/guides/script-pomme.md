@@ -154,7 +154,9 @@ same command again to continue from the first unfinished step:
 | MDM enrollment | Repeat the same `pomme mdm` command with the same profile, `--enrollment-mode`, and `--final-security`. |
 
 Commands whose request is already satisfied don't change the VM. For example,
-`pomme agent repair` exits with status `0` when the agent is already healthy.
+`pomme agent repair` exits with status `0` when the agent is already healthy,
+and `pomme agent update` exits with status `0` and reports `"updated": false`
+when the agent already matches the host build.
 This makes it safe to retry these commands in automation.
 
 ## Discover commands
@@ -174,7 +176,7 @@ pomme tools --format jsonl
 
 ```text
 {"name":"vm","commands":["create","list|ls","start","stop","restart","pause","resume","delete|rm","status","inspect","snapshot","template"]}
-{"name":"agent","commands":["agent status","agent repair"]}
+{"name":"agent","commands":["agent status","agent repair","agent update"]}
 {"name":"guest","commands":["exec","shell","log","jobs","sessions","cp","cat"]}
 ...
 ```

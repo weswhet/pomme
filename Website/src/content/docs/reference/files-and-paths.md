@@ -50,6 +50,7 @@ Each `VMs/NAME.bundle` directory contains the following files:
 | `SaveFile.vzvmsave` | The saved machine state, when present. |
 | `Snapshots/` | Named saved-state snapshots. |
 | `pomme-helper.log` | The log of the VM's background helper process. |
+| `.pomme/` | The VM's creation journal and its signing key. After `pomme agent update`, it also holds the signed record of the updated agent's digest. |
 
 Treat these files as internal. Their formats can change between Pomme
 versions.

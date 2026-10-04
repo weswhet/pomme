@@ -81,22 +81,44 @@ output. It contains the following fields:
 
 When Pomme creates a VM, it records the SHA-256 digest of the agent that it
 installs. Workflows that depend on the agent, such as security changes and MDM
-enrollment, check that the connected agent has this pinned digest, the
+enrollment, check that the connected agent has the VM's pinned digest, the
 expected protocol version, and the capabilities that the workflow needs. If the
 agent doesn't match, the workflow stops before it makes a change.
 
-Installing a new host `pomme` command doesn't upgrade the agent in existing VMs, and it
-doesn't add new capabilities or log events to them. A workflow that needs a
-capability that an older agent lacks reports that the agent must be updated.
+The creation record never changes. When `pomme agent update` installs a newer
+agent, Pomme writes a separate record of the new digest in the VM bundle. That
+record is signed with the VM's own creation-journal key and bound to its
+creation record, and it replaces the creation digest for later checks. A
+Recovery repair that reinstalls the original agent removes the record.
+
+Installing a new host `pomme` command doesn't upgrade the agent in existing
+VMs, and it doesn't add new capabilities or log events to them. A workflow that
+needs a capability that an older agent lacks reports that the agent must be
+updated. To install the host build's agent, run `pomme agent update VM_NAME`.
+
+## Update
+
+`pomme agent update` replaces the normal agent in a running VM with the agent
+in the host's `pomme` build. The old agent receives the new executable and
+installs it. Then Pomme restarts the agent's launchd job and waits for the new
+agent to reconnect with the expected digest. The guest doesn't reboot, and
+Recovery isn't involved, so the command works for every Pomme-created VM,
+including VMs that macOS 27 first-boot provisioning created.
+
+The agent is unavailable for a moment while it restarts. The restarted agent
+doesn't know about background jobs or terminal sessions that the old agent
+started, so an update refuses to run while any of them are running. For details, see
+[Update the agent](/guides/repair-the-agent/#update-the-agent).
 
 ## Repair
 
-If the normal agent is missing, damaged, or out of date, `pomme agent repair`
-reinstalls it through Recovery and then returns the VM to its previous state.
+If the normal agent is missing or damaged, `pomme agent repair` reinstalls it
+through Recovery and then returns the VM to its previous state. A repair
+installs the agent that the VM was created with, not the host's current build.
 If provisioning is complete and the connected agent already has the required
-protocol and capabilities, and its digest matches the host `pomme` command, repair reports
-that the agent is healthy and makes no changes. For details, see
-[Check and repair the guest agent](/guides/repair-the-agent/).
+protocol and capabilities, and its digest matches the host `pomme` command,
+repair reports that the agent is healthy and makes no changes. For details, see
+[Check, update, and repair the guest agent](/guides/repair-the-agent/).
 
 ## Guest process environment
 
@@ -130,8 +152,8 @@ guest, use `pomme log`. For details, see
 
 ## What's next
 
-- Check or reinstall the agent in
-  [Check and repair the guest agent](/guides/repair-the-agent/).
+- Check, update, or reinstall the agent in
+  [Check, update, and repair the guest agent](/guides/repair-the-agent/).
 - Learn how the agent is installed in
   [Durable creation and journals](/concepts/durable-creation/).
 - Run programs through the agent in

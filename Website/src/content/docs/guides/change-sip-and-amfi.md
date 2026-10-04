@@ -21,7 +21,7 @@ you no longer need them off.
 
 - [Create a VM](/guides/create-vms/) and make sure that its guest agent is
   healthy. To check, run `pomme agent status VM_NAME`. For details, see
-  [Check and repair the guest agent](/guides/repair-the-agent/).
+  [Check, update, and repair the guest agent](/guides/repair-the-agent/).
 - End any active terminal sessions in the VM. Recovery security
   workflows don't start while a terminal session is active. For details, see
   [Use durable terminal sessions](/guides/use-terminal-sessions/).

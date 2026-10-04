@@ -13,6 +13,9 @@ enum PommeBootstrap {
         if arguments.first == PommeNormalBootstrapInstaller.flag {
             Foundation.exit(PommeNormalBootstrapInstaller.run(arguments: arguments))
         }
+        if arguments.first == PommeAgentUpdateApply.flag {
+            Foundation.exit(PommeAgentUpdateApply.run(arguments: arguments))
+        }
         if arguments.first == "--pomme-agent" {
             let exitCode = PommeAgentDaemon.run(arguments: arguments)
             Foundation.exit(exitCode)

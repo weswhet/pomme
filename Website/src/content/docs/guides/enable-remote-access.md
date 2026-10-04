@@ -13,7 +13,7 @@ authenticated guest agent, so the VM must be running normal macOS.
   [Manage the VM lifecycle](/guides/manage-vm-lifecycle/).
 - Make sure that the guest agent is connected. To check, run
   `pomme agent status VM_NAME`. For details, see
-  [Check and repair the guest agent](/guides/repair-the-agent/).
+  [Check, update, and repair the guest agent](/guides/repair-the-agent/).
 
 ## Check Remote Login status
 

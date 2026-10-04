@@ -1,12 +1,12 @@
 import ArgumentParser
 
 /// Durable Pomme agent workflow controls. This is the only public agent repair
-/// surface.
+/// and update surface.
 struct AgentCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "agent",
-        abstract: "Inspect and repair Pomme-owned durable agent workflows.",
-        subcommands: [AgentStatusCommand.self, AgentRepairCommand.self]
+        abstract: "Inspect, repair, and update Pomme-owned durable agent workflows.",
+        subcommands: [AgentStatusCommand.self, AgentRepairCommand.self, AgentUpdateCommand.self]
     )
 }
 
@@ -64,6 +64,37 @@ struct AgentRepairCommand: AsyncParsableCommand {
             )
             try CLIOutputWriter.write(result, options: output)
         }
+    }
+}
+
+/// Replaces the persistent agent in a running VM with this host's signed
+/// Pomme executable. The application adapter verifies the reconnected agent
+/// before recording its digest for later security checks.
+struct AgentUpdateCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "update",
+        abstract: "Update the Pomme agent in a running VM to this host's Pomme build.",
+        discussion: """
+        The VM must be running normal macOS with a connected agent. The agent is \
+        replaced in place and restarted; no Recovery boot or guest reboot is needed. \
+        It refuses while background jobs or terminal sessions are running, because \
+        the restarted agent could no longer manage them. Running it again when the agent already matches makes no change. \
+        `pomme agent repair` reinstalls the agent the VM was created with.
+        """
+    )
+
+    @Argument(help: "Pomme-owned VM name.")
+    var name: String
+
+    @OptionGroup var output: GlobalOptions
+
+    mutating func validate() throws {
+        _ = try validateVMName(name)
+    }
+
+    mutating func run() async throws {
+        let result = try await PommeApplication.agentUpdate(name: name)
+        try CLIOutputWriter.write(result, options: output)
     }
 }
 

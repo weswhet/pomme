@@ -244,7 +244,11 @@ enum PommeAgentDaemon {
             defer {
                 if options.role == .recovery { try? oneShotCleanup() }
             }
-            guard try PommeAgentFileTransaction.sha256(URL(fileURLWithPath: executablePath)) == options.expectedSHA256 else { return Exit.integrity.rawValue }
+            let executableSHA256 = try PommeAgentFileTransaction.sha256(URL(fileURLWithPath: executablePath))
+            guard executableSHA256 == options.expectedSHA256
+                || (options.role == .persistent && PommeAgentUpdateApply.installedDefinitionPins(
+                    executableSHA256, executablePath: executablePath))
+            else { return Exit.integrity.rawValue }
             // Recovery credentials are descriptor-backed one-shot material.
             // Consume the exact file before opening the host connection; a
             // reconnect or process restart therefore cannot replay it.
@@ -268,7 +272,7 @@ enum PommeAgentDaemon {
             let buddyPreferences = options.role == .persistent ? PommeBuddyPreferencesMaintenance() : nil
             let agent = try PommeAgent(
                 role: options.role,
-                executableSHA256: options.expectedSHA256,
+                executableSHA256: executableSHA256,
                 buddyPreferences: buddyPreferences,
                 authority: options.terminalAuthority ? .recoveryTerminal : .standard
             )
