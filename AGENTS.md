@@ -149,3 +149,33 @@ and repeat the signature/requirement checks on the final packaged executable.
 Do not assume re-signing preserves Xcode's generated designated requirement.
 Signing verification does not establish notarization or successful guest MDM
 enrollment, and does not authorize publication or VM operations.
+
+## Keep the documentation site current
+
+Every change to the public CLI must update the documentation site in
+`Website/` in the same change. That includes adding, removing, or renaming a
+command or subcommand; changing an argument, flag, default, accepted value, or
+help text; and changing the output fields, messages, or exit behavior that
+users or scripts rely on. Don't leave the site to a follow-up change.
+
+1. Build and install the signed CLI with `rtk proxy bash Scripts/build-local.sh`,
+   and confirm that `/Users/wes/.local/bin/pomme --version` reports the current
+   source.
+2. Regenerate the command-line reference from that executable with
+   `cd Website && rtk proxy npm run reference`. Never edit
+   `Website/src/content/docs/reference/cli/` by hand. When a new flag applies
+   to most commands, add it to `commonFlagDescriptions` and to the common-flags
+   table in `Website/scripts/generate-cli-reference.mjs` so that it isn't
+   repeated on every page.
+3. Update the hand-written pages that describe the changed behavior. Search
+   `Website/src/content/docs` for the command name and check the related
+   guide and concept pages, `resources/troubleshooting.md`,
+   `guides/script-pomme.md`, and `resources/release-notes.md`.
+4. When you add a subcommand, add it to `CommandCatalog` in
+   `Sources/PommeCLI/CLI/Commands/UIUtilityCommands.swift` so that
+   `pomme tools` and `pomme agent-help` list it.
+5. Follow `Website/CONTRIBUTING.md`. Run `rtk proxy npm run build` and
+   `rtk proxy npm run lint:style` from `Website/`, and don't add new Vale
+   errors or warnings to the pages that you change.
+6. Describe only behavior that you verified against the source or the
+   installed CLI.
