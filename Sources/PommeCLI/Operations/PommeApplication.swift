@@ -1503,10 +1503,11 @@ enum PommeApplication {
         guard finalState == .previous || finalState == .normal,
               (try? PommeCore.stableVMRunState(reference: reference)) == .running(.normal),
               let plan = try? PommeCore.securityProvisioningPlan(reference: reference),
-              let group = try? PommeCore.provisioningRuntimeMetadata(for: plan).startupVolumeGroupUUID
+              let group = try? PommeCore.provisioningRuntimeMetadata(for: plan).startupVolumeGroupUUID,
+              let digest = try? PommeCore.currentNormalAgentDigest(plan: plan)
         else { return nil }
         let agent = PommeSecurityNormalAgent(
-            reference: reference, expectedExecutableDigest: plan.normalAgent.executableDigest)
+            reference: reference, expectedExecutableDigest: digest)
         guard let observed = agent.observeAMFIStatus(volumeGroupUUID: group),
               (try? PommeCore.provesStableVMRunState(.running(.normal), reference: reference)) == true
         else { return nil }
@@ -1529,10 +1530,11 @@ enum PommeApplication {
     ) async -> [String: Any]? {
         guard finalState == .previous || finalState == .normal,
               (try? PommeCore.stableVMRunState(reference: reference)) == .running(.normal),
-              let plan = try? PommeCore.securityProvisioningPlan(reference: reference)
+              let plan = try? PommeCore.securityProvisioningPlan(reference: reference),
+              let digest = try? PommeCore.currentNormalAgentDigest(plan: plan)
         else { return nil }
         let agent = PommeSecurityNormalAgent(
-            reference: reference, expectedExecutableDigest: plan.normalAgent.executableDigest)
+            reference: reference, expectedExecutableDigest: digest)
         guard (try? await agent.authenticate(timeout: 10)) != nil,
               let disabled = try? agent.observeSIPDisabled(),
               (try? PommeCore.provesStableVMRunState(.running(.normal), reference: reference)) == true
@@ -1774,7 +1776,7 @@ enum PommeApplication {
             let workspace = try PommeMDMTemporaryHelperWorkspace(requestID: requestID)
             let profileDestination = try MDMProfileStaging.destination(requestedPath: guestPath)
             let journal = try store.begin(
-                identity: identity, profile: profile, agentSHA256: plan.normalAgent.executableDigest,
+                identity: identity, profile: profile, agentSHA256: try PommeCore.currentNormalAgentDigest(plan: plan),
                 enrollmentMode: enrollmentMode, finalSecurity: finalSecurity,
                 originalRunState: PommeCore.stableVMRunState(reference: reference),
                 ownedArtifacts: [workspace.helperPath, workspace.requestPath, workspace.entitlementsPath,
@@ -1821,7 +1823,7 @@ enum PommeApplication {
             // boot can report the same AMFI state, so prefer the agent and
             // defer to Recovery for agents pinned before that.
             let normalAgent = PommeSecurityNormalAgent(
-                reference: reference, expectedExecutableDigest: plan.normalAgent.executableDigest)
+                reference: reference, expectedExecutableDigest: journal.agentSHA256)
             let observeAMFIBaseline: @Sendable () async throws -> PommeSecurityWorkflowState = {
                 if let state = normalAgent.observeAMFIState(volumeGroupUUID: group) {
                     PommeCore.log("MDM baseline: read the AMFI configuration through the persistent normal agent.")
@@ -2345,7 +2347,7 @@ enum PommeApplication {
         }
     }
 
-    private static func performAuthenticatedAgentOperation(
+    static func performAuthenticatedAgentOperation(
         reference: VMReference,
         operation: String,
         payload: JSONValue = .object([:])
@@ -2688,7 +2690,7 @@ enum PommeApplication {
     private static let mdmTemporaryHelperIdentifier = "com.github.weswhet.pomme.mdm-helper"
     private static let mdmTemporaryHelperOutputLimit = 64 * 1024
 
-    private struct MDMGuestProcessResult: Sendable {
+    struct MDMGuestProcessResult: Sendable {
         let jobID: UUID
         let exited: Bool
         let exitCode: Int32?
@@ -3049,7 +3051,7 @@ enum PommeApplication {
         String(data: data, encoding: .utf8) == "Executable=\(helperPath)\n"
     }
 
-    private static func runMDMGuestProcess(
+    static func runMDMGuestProcess(
         reference: VMReference,
         path: String,
         arguments: [String],
@@ -3474,7 +3476,7 @@ enum PommeApplication {
         return chunks.joined()
     }
 
-    private static func result(title: String, reference: VMReference, payload: [String: Any], text: String) -> PommeOperationResult {
+    static func result(title: String, reference: VMReference, payload: [String: Any], text: String) -> PommeOperationResult {
         PommeOperationResult(
             title: title,
             vmName: reference.name,

@@ -32,6 +32,12 @@ guest agent, Recovery, packaging, and state identity.
   - When only the profile's own certificate payloads validate the MDM server,
     Pomme installs them as a separate
     `com.github.weswhet.pomme.mdm-trust.*` configuration profile.
+- `pomme agent update VM` replaces the guest agent in a running VM with the
+  agent from the host's `pomme` build. It doesn't use Recovery or restart the
+  guest. SIP, AMFI, and MDM workflows accept the updated agent. For details, see
+  [Update the agent](/guides/repair-the-agent/#update-the-agent).
+- Most commands accept `--progress auto|plain|off` to control the progress
+  display on standard error.
 
 ### Compatibility
 

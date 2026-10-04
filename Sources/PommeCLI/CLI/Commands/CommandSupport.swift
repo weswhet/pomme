@@ -410,6 +410,7 @@ protocol CLIProgressCommand {
 
 extension AgentStatusCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
 extension AgentRepairCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
+extension AgentUpdateCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
 extension ConfigValidateCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
 extension ConfigRenderCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
 extension IPSWListCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }

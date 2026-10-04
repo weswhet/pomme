@@ -98,7 +98,7 @@ extension PommeSecurityWorkflow {
     }
     let progress = PommeSecurityWorkflowProgress(journal, store: store, lease: lease)
     let normal = PommeSecurityNormalAgent(
-      reference: reference, expectedExecutableDigest: plan.normalAgent.executableDigest)
+      reference: reference, expectedExecutableDigest: try PommeCore.currentNormalAgentDigest(plan: plan))
     // SIP is read from the effective state of the current normal boot. This is
     // the same `csrutil status` read that proves every SIP workflow after its
     // final normal boot and the state that governs AMFI's normal-boot NVRAM

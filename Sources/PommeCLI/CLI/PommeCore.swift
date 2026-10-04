@@ -622,7 +622,42 @@ struct PommeCore {
     }
 
     static func expectedProvisionedAgentDigest(reference: VMReference) throws -> String {
-        try loadOwnedProvisioningPlan(reference: reference).normalAgent.executableDigest
+        try currentNormalAgentDigest(plan: loadOwnedProvisioningPlan(reference: reference))
+    }
+
+    /// The persistent agent digest a provisioned VM is expected to run now:
+    /// the creation pin, superseded by a verified `pomme agent update` record.
+    /// Creation-time checks keep using the plan's pin directly.
+    static func currentNormalAgentDigest(plan: PommeProvisioningPlan) throws -> String {
+        let bundle = provisioningReference(for: plan).bundle
+        guard let record = try PommeAgentUpdateRecord.load(at: agentUpdateRecordURL(bundle: bundle)) else {
+            return plan.normalAgent.executableDigest
+        }
+        return try record.verifiedDigest(plan: plan, key: provisioningKey(bundle: bundle))
+    }
+
+    /// Records the agent a completed `pomme agent update` verified, bound to
+    /// the VM's creation record and authenticated with its journal key.
+    static func recordNormalAgentUpdate(plan: PommeProvisioningPlan, previousDigest: String, digest: String) throws {
+        let bundle = provisioningReference(for: plan).bundle
+        if digest == plan.normalAgent.executableDigest {
+            let url = agentUpdateRecordURL(bundle: bundle)
+            guard unlink(url.path) == 0 || errno == ENOENT else { throw PommeProvisioningError.integrityFailure }
+            return
+        }
+        try PommeAgentUpdateRecord.make(plan: plan, previousExecutableDigest: previousDigest,
+            executableDigest: digest, key: provisioningKey(bundle: bundle))
+            .write(to: agentUpdateRecordURL(bundle: bundle))
+    }
+
+    private static func agentUpdateRecordURL(bundle: BundleLayout) -> URL {
+        provisioningRoot(bundle: bundle).appendingPathComponent(PommeAgentUpdateRecord.fileName)
+    }
+
+    private static func provisioningKey(bundle: BundleLayout) throws -> Data {
+        let key = try Data(contentsOf: provisioningKeyURL(bundle: bundle), options: .mappedIfSafe)
+        guard key.count >= 32 else { throw PommeProvisioningError.integrityFailure }
+        return key
     }
 
     static func frameworkProvisionedOwner(reference: VMReference) throws -> PommeFrameworkProvisionedOwnerContext? {
@@ -664,8 +699,10 @@ struct PommeCore {
         } else {
             plan = try securityProvisioningPlan(reference: reference)
         }
+        let pinnedDigest = provisioningVerification
+            ? plan.normalAgent.executableDigest : try currentNormalAgentDigest(plan: plan)
         guard plan.normalAgent.protocolVersion == PommeAgentProtocol.version,
-              plan.normalAgent.executableDigest == expectedExecutableDigest,
+              pinnedDigest == expectedExecutableDigest,
               try stableVMRunState(reference: reference) == .running(.normal)
         else { throw PommeSecurityWorkflowError.agentUnverified }
 
@@ -4170,6 +4207,10 @@ struct PommeCore {
             // skipped by a requested stopped/Recovery final state.
             let installationReceipt = try await adapter(plan, .stopped)
             let verificationReceipt = try await verifyNormalAgent(plan)
+            // The reinstalled agent is the creation pin again; drop any
+            // superseding `pomme agent update` record.
+            try recordNormalAgentUpdate(plan: plan, previousDigest: plan.normalAgent.executableDigest,
+                digest: plan.normalAgent.executableDigest)
             primary = .success(PommeProvisioningDigest.sha256(
                 Data((installationReceipt + verificationReceipt).utf8)
             ))

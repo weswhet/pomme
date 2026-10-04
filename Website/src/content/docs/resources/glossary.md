@@ -44,7 +44,8 @@ running when you detach. You can reattach later and replay its output. See
 **Executable digest**
 
 The SHA-256 hash of a guest agent executable. Pomme pins each VM to the
-digest it installed and verifies it on every connection.
+digest it installed, or to the digest that `pomme agent update` last
+installed, and verifies it on every connection.
 
 **Experimental attempt**
 

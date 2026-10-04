@@ -252,3 +252,17 @@ struct UIKeysCommandTests {
         #expect(CommandCatalog.groups.contains { $0.commands.contains { $0.contains("keys") } })
     }
 }
+
+@Suite("Command inventory")
+struct CommandCatalogTests {
+    @Test("The command inventory lists every agent and config subcommand")
+    func inventoryListsSubcommands() {
+        let listed = Set(CommandCatalog.groups.flatMap(\.commands))
+        for parent in [AgentCommand.self, ConfigCommand.self] as [ParsableCommand.Type] {
+            for child in parent.configuration.subcommands {
+                let command = "\(parent._commandName) \(child._commandName)"
+                #expect(listed.contains(command), "\(command) is missing from pomme tools and agent-help")
+            }
+        }
+    }
+}

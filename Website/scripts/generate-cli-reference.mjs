@@ -40,6 +40,7 @@ const commonFlagDescriptions = new Map([
 		'--debug',
 		'Print verbose diagnostics and retain Recovery navigation screenshots in a private temporary directory.',
 	],
+	['--progress <progress>', 'Progress display: auto, plain, or off. (values: auto, plain, off; default: auto)'],
 	['-h, --help', 'Show help information.'],
 ]);
 
@@ -276,6 +277,7 @@ only when the command gives it a different meaning.
 | \`--format FORMAT\` | Output format: \`table\`, \`json\`, or \`jsonl\`. Table output is the default. For details, see [Structured output](/reference/structured-output/). |
 | \`--json\` | Print JSON output. Equivalent to \`--format json\`. |
 | \`--debug\` | Print verbose diagnostics, and keep screenshots of automatic Recovery navigation in a private temporary directory. |
+| \`--progress PROGRESS\` | How to show progress on standard error: \`auto\`, \`plain\`, or \`off\`. The default, \`auto\`, keeps one updating status line when standard error is a terminal, prints one line per step otherwise, and shows nothing when the output format is JSON or JSONL. \`plain\` always prints one line per step. \`off\` shows no progress. |
 | \`-h\`, \`--help\` | Show help for the command. |
 
 ## VM name resolution

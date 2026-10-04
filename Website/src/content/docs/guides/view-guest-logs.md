@@ -17,8 +17,9 @@ you diagnose a failed workflow. You don't need to open a shell in the guest:
 :::note
 The logs come from the guest agent that's installed in the VM. Installing a
 newer `pomme` command on the host doesn't upgrade an existing guest agent, so
-it doesn't add log events to an older agent. To update the agent, see
-[Check and repair the guest agent](/guides/repair-the-agent/).
+it doesn't add log events to an older agent. To update the agent, run
+`pomme agent update VM_NAME`. For details, see
+[Update the agent](/guides/repair-the-agent/#update-the-agent).
 :::
 
 ## Show recent log records

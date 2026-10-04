@@ -271,7 +271,60 @@ running in the guest.
 2. If the agent still doesn't connect, run `pomme agent status NAME`.
 3. If the agent is missing or broken, run `pomme agent repair NAME`.
 
-For details, see [Check and repair the guest agent](/guides/repair-the-agent/).
+For details, see [Check, update, and repair the guest agent](/guides/repair-the-agent/).
+
+### The agent update doesn't finish
+
+**Symptom:** `pomme agent update` fails with one of the following errors:
+
+```text
+The guest could not install the new Pomme agent; the previous agent is still installed. Update mode exited with status STATUS.
+The updated Pomme agent in NAME did not connect with digest DIGEST (observed OBSERVED). It is installed and takes effect on the next restart: `pomme restart NAME`, then rerun `pomme agent update NAME`.
+```
+
+**Cause:** In the first case, the guest rejected or couldn't install the new
+executable, and the previous agent keeps running unchanged. In the second
+case, the new agent is installed but didn't reconnect before the command
+stopped waiting.
+
+**Resolution:**
+
+- If the previous agent is still installed, run `pomme agent update NAME`
+  again. If it fails again, check the agent with `pomme agent status NAME`.
+- If the new agent is installed but didn't connect, run
+  `pomme restart NAME`, and then run `pomme agent update NAME` again. The
+  second run records the new agent without copying it again.
+
+### The agent update reports running jobs or sessions
+
+**Symptom:** `pomme agent update` fails with the following error, followed by
+one line for each running job or session:
+
+```text
+NAME has running background jobs or terminal sessions that the restarted agent could no longer manage. Let them finish or stop them, then rerun `pomme agent update NAME`.
+```
+
+**Cause:** The update restarts the guest agent, and the restarted agent can't
+manage the jobs and sessions that the old agent started.
+
+**Resolution:** Let the listed jobs and sessions finish, or run the command
+shown next to each one to stop it. Then run `pomme agent update NAME` again.
+
+### The agent update reports a retained operation
+
+**Symptom:** `pomme agent update` fails with one of the following errors:
+
+```text
+NAME has a retained security operation pinned to its current agent. Finish it before updating the agent.
+NAME has a retained MDM enrollment operation pinned to its current agent. Finish it before updating the agent.
+```
+
+**Cause:** An unfinished SIP, AMFI, or MDM operation is pinned to the agent
+that was running when it started. Pomme doesn't replace that agent until the
+operation finishes.
+
+**Resolution:** Finish the operation by repeating its original command, and
+then run `pomme agent update NAME`.
 
 ### The login Keychain is locked
 

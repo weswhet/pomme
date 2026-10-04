@@ -97,7 +97,7 @@ enum PommeAutologinComparison {
             }
             let receipt: [String: String] = [
                 "strategy": strategy.rawValue, "vm": name, "planDigest": plan.digest,
-                "agentDigest": plan.normalAgent.executableDigest,
+                "agentDigest": try PommeCore.currentNormalAgentDigest(plan: plan),
                 "completion": strategy.ownerPreparationOverride == nil ? "production-owner-workflow"
                     : strategy == .markerfirst ? "markers-with-agent-preferences" : "shared-native",
                 "failurePolicy": "preserve-no-retry"
@@ -112,7 +112,7 @@ enum PommeAutologinComparison {
                 requestedFinalState: .normal, lease: lease)
             let progress = PommeSecurityWorkflowProgress(journal, store: store, lease: lease)
             let normal = PommeSecurityNormalAgent(
-                reference: reference, expectedExecutableDigest: plan.normalAgent.executableDigest)
+                reference: reference, expectedExecutableDigest: try PommeCore.currentNormalAgentDigest(plan: plan))
             let owner = PommeSecurityLiveOwnerPreparation(
                 reference: reference, normal: normal, force: true, labStrategy: strategy.ownerPreparationOverride)
             let started = Date()
@@ -216,7 +216,7 @@ enum PommeAutologinComparison {
             // An attempted verification is never silently repeated after failure.
             try Data("desktop-verification-intent".utf8).write(
                 to: directory.appendingPathComponent("DesktopVerificationIntent"), options: .withoutOverwriting)
-            let normal = PommeSecurityNormalAgent(reference: reference, expectedExecutableDigest: plan.normalAgent.executableDigest)
+            let normal = PommeSecurityNormalAgent(reference: reference, expectedExecutableDigest: try PommeCore.currentNormalAgentDigest(plan: plan))
             do {
                 try await normal.authenticate()
                 for (domain, key, expected) in [

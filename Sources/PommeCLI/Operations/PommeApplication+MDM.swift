@@ -203,14 +203,15 @@ extension PommeApplication {
             }
         }
         guard facts.runState == .running(.normal), case .complete = facts.provisioning,
-              let plan = try? PommeCore.securityProvisioningPlan(reference: reference) else { return facts }
+              let plan = try? PommeCore.securityProvisioningPlan(reference: reference),
+              let currentDigest = try? PommeCore.currentNormalAgentDigest(plan: plan) else { return facts }
         let timeout = min(request.timeout, 15)
         // A describe that does not answer yet is not evidence; the engine
         // waits for the agent itself. Only a completed answer is classified.
         guard let description = try? await authenticatedMDMAgentDescription(reference: reference, timeout: timeout)
         else { return facts }
         facts.agent = MDMEnrollmentAgentGate.classify(description,
-                                                      expectedExecutableDigest: plan.normalAgent.executableDigest)
+                                                      expectedExecutableDigest: currentDigest)
         guard facts.agent == .ready else { return facts }
         if let profile, let observed = try? await observeMDMEnrollment(reference: reference, timeout: timeout) {
             do {
@@ -233,7 +234,7 @@ extension PommeApplication {
         } catch {}
         if let group = try? PommeCore.provisioningRuntimeMetadata(for: plan).startupVolumeGroupUUID,
            let amfi = PommeSecurityNormalAgent(reference: reference,
-                                               expectedExecutableDigest: plan.normalAgent.executableDigest)
+                                               expectedExecutableDigest: currentDigest)
             .observeAMFIState(volumeGroupUUID: group) {
             facts.amfiDisabled = amfi.disabled
         }
