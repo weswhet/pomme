@@ -164,6 +164,7 @@ for line in help_text.split('SUBCOMMANDS:', 1)[1].splitlines():
     match = re.match(r'^  ([a-z][a-z-]*(?:, [a-z][a-z-]*)?)\s{2,}', line)
     if match:
         registered.update(match[1].split(', '))
+assert json.loads(catalog)['schemaVersion'] == 1
 groups = {g['name']: g['commands'] for g in json.loads(catalog)['groups']}
 discovered = {alias for commands in groups.values() for command in commands
               for alias in command.split()[0].split('|')}

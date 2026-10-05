@@ -258,7 +258,7 @@ enum CommandCatalog {
     static var publicPayload: [String: Any] {
         [
             "ok": true,
-            "schemaVersion": 2,
+            "schemaVersion": 1,
             "groups": groups.map(\.publicPayload),
             "uiCapabilities": PommeUICapabilities.publicPayload,
             "hostExitCode": 0
