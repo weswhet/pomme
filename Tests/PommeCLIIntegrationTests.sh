@@ -500,7 +500,7 @@ else
   fail "status run-time validation names the status usage"
 fi
 expect_failure "non-interactive delete requires force" "$runner" delete missing </dev/null
-if grep -q '^Usage: pomme delete' "$work/stderr" && grep -q -- '--force' "$work/stderr"; then
+if grep -q '^Usage: pomme delete' "$work/stderr" && grep -q -- 'Pass -f/--force' "$work/stderr"; then
   pass "delete run-time validation names the delete usage"
 else
   fail "delete run-time validation names the delete usage"

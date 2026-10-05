@@ -30,7 +30,7 @@ struct ConfigInitCommand: ParsableCommand {
     @Option(name: .customLong("output"), help: "Output file path.")
     var outputPath: String?
 
-    @Flag(name: .customLong("force"), help: "Replace an existing output file.")
+    @Flag(name: [.customShort("f"), .customLong("force")], help: "Replace an existing output file.")
     var force = false
 
     mutating func run() throws {
@@ -63,7 +63,7 @@ struct ConfigInitCommand: ParsableCommand {
         let path = outputPath ?? "\(name).\(format.pathExtension)"
         let url = URL(fileURLWithPath: path).standardizedFileURL
         if FileManager.default.fileExists(atPath: url.path), !force {
-            throw ValidationError("Refusing to replace \(url.path). Pass --force to overwrite it.")
+            throw ValidationError("Refusing to replace \(url.path). Pass -f/--force to overwrite it.")
         }
         let data = try CreateConfigStore.encode(config, to: url)
         try FileManager.default.createDirectory(

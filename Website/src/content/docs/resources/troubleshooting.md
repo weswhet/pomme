@@ -243,7 +243,7 @@ the delete command again.
 errors:
 
 ```text
-Deletion requires an interactive terminal. Pass --force to delete without prompting.
+Deletion requires an interactive terminal. Pass -f/--force to delete without prompting.
 tui requires an interactive terminal.
 --pty requires an interactive terminal for standard input and output.
 ```

@@ -78,7 +78,7 @@ struct SnapshotRestoreCommand: AsyncParsableCommand {
     var snapshot: String
 
     @Flag(
-        name: .customLong("force"),
+        name: [.customShort("f"), .customLong("force")],
         help: "Restore without prompting and accept recorded drift; old machine state may expose inconsistent guest filesystems."
     )
     var force = false
@@ -123,7 +123,7 @@ struct SnapshotDeleteCommand: AsyncParsableCommand {
     @Option(name: .customLong("snapshot"), help: ArgumentHelp("Snapshot name.", valueName: "name"))
     var snapshot: String
 
-    @Flag(name: .customLong("force"), help: "Delete without prompting.")
+    @Flag(name: [.customShort("f"), .customLong("force")], help: "Delete without prompting.")
     var force = false
 
     @OptionGroup var output: GlobalOptions
@@ -167,7 +167,7 @@ private enum SnapshotConfirmation {
             return true
         }
         guard isatty(STDIN_FILENO) == 1 else {
-            throw ValidationError("Restore requires an interactive terminal. Pass --force to restore without prompting and accept recorded drift; old machine state may expose inconsistent guest filesystems.")
+            throw ValidationError("Restore requires an interactive terminal. Pass -f/--force to restore without prompting and accept recorded drift; old machine state may expose inconsistent guest filesystems.")
         }
 
         let progress = PommeProgressContext.sink
@@ -190,7 +190,7 @@ private enum SnapshotConfirmation {
             return
         }
         guard isatty(STDIN_FILENO) == 1 else {
-            throw ValidationError("Deletion requires an interactive terminal. Pass --force to delete without prompting.")
+            throw ValidationError("Deletion requires an interactive terminal. Pass -f/--force to delete without prompting.")
         }
 
         let progress = PommeProgressContext.sink
