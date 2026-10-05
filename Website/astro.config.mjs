@@ -2,10 +2,10 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
-// The site is built and previewed locally; it is not deployed anywhere.
-// Set POMME_DOCS_SITE to the URL it is served from, such as a tailnet name.
+// Cloudflare Pages publishes the site at https://pommevm.dev from main.
+// Set POMME_DOCS_SITE to build for another URL, such as a tailnet name.
 export default defineConfig({
-	site: process.env.POMME_DOCS_SITE || 'http://localhost:4321',
+	site: process.env.POMME_DOCS_SITE || 'https://pommevm.dev',
 	telemetry: false,
 	integrations: [
 		starlight({

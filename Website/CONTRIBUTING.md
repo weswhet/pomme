@@ -26,6 +26,25 @@ either `https://HOST.TAILNET.ts.net/` or `http://TAILSCALE_IP/`. The site is
 reachable only from your tailnet (it doesn't use Funnel). The preview server
 doesn't survive a restart, so run `npm run tailnet` again after you log in.
 
+## Publish the site
+
+A Cloudflare Pages project builds the site from the `main` branch and serves it
+at <https://pommevm.dev>. Every push to `main` deploys a new version, and other
+branches get preview deployments. The project uses these build settings:
+
+| Setting | Value |
+| --- | --- |
+| Root directory | `Website` |
+| Build command | `npm run build` |
+| Build output directory | `dist` |
+| Node.js version | From `Website/.node-version` |
+
+The build doesn't run the CLI, so commit the regenerated reference pages with
+the change that needs them. `astro.config.mjs` builds for `https://pommevm.dev`
+unless `POMME_DOCS_SITE` names another URL.
+
+## Command-line reference
+
 The command-line reference in `src/content/docs/reference/cli/` is generated
 from the installed CLI's help text. Don't edit those files by hand. Build and
 install the CLI first (`rtk proxy bash Scripts/build-local.sh` from the

@@ -1,8 +1,8 @@
 # Pomme documentation site
 
 This directory contains the Pomme documentation site, built with
-[Starlight](https://starlight.astro.build/). It is built and viewed locally and
-isn't deployed anywhere.
+[Starlight](https://starlight.astro.build/). Cloudflare Pages publishes it at
+<https://pommevm.dev> from the `main` branch.
 
 ```sh
 cd Website
