@@ -229,10 +229,10 @@ pomme shell dev --detach
 pomme exec dev --pty --user alice -- /bin/zsh
 pomme exec dev --pty --detach -- /usr/bin/top
 pomme sessions list dev
-pomme sessions attach dev SESSION_ID --takeover
-pomme sessions logs dev SESSION_ID --follow
-pomme sessions terminate dev SESSION_ID
-pomme sessions delete dev SESSION_ID
+pomme sessions attach dev --session SESSION_ID --takeover
+pomme sessions logs dev --session SESSION_ID --follow
+pomme sessions terminate dev --session SESSION_ID
+pomme sessions delete dev --session SESSION_ID
 pomme exec dev --detach -- /usr/bin/sleep 30
 pomme jobs list dev
 pomme cp ./input dev:/tmp/input

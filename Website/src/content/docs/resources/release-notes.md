@@ -39,6 +39,18 @@ guest agent, Recovery, packaging, and state identity.
 - Most commands accept `--progress auto|plain|off` to control the progress
   display on standard error.
 
+### Command-line syntax
+
+A command takes at most one kind of positional value: the VM, or the file or
+endpoint that it acts on. Every other value is a named flag:
+
+- The `pomme jobs` commands that act on one job take its ID with `--job`, and
+  the `pomme sessions` commands that act on one session take its ID with
+  `--session`. For example, `pomme jobs logs dev --job JOB_ID`.
+- `pomme snapshot create`, `restore`, and `delete` require the snapshot name
+  with `--snapshot`. For example,
+  `pomme snapshot create dev --snapshot clean`.
+
 ### Compatibility
 
 - The MDM enrollment journal is now schema 6. Pomme reads schema 3–5 journals

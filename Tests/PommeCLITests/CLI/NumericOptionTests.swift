@@ -14,7 +14,7 @@ private let negativeValueCases: [(command: String, arguments: [String], expected
     ("exec", ["dev", "--timeout", "-5", "--", "/bin/true"], "--timeout must be greater than zero."),
     ("cat", ["dev:/tmp/x", "--offset", "-1"], "--offset must not be negative."),
     ("cat", ["dev:/tmp/x", "--count", "-1"], "--count must not be negative."),
-    ("sessions logs", ["dev", "00000000-0000-0000-0000-000000000000", "--from-offset", "-1"], "--from-offset must not be negative."),
+    ("sessions logs", ["dev", "--session", "00000000-0000-0000-0000-000000000000", "--from-offset", "-1"], "--from-offset must not be negative."),
     ("ui ai settings", ["dev", "Goal", "--max-steps", "-1"], "requires a positive integer"),
     ("ui ai settings", ["dev", "Goal", "--confidence", "-1"], "between 0 and 1"),
     ("ui ai settings", ["dev", "Goal", "--model-timeout", "-1"], "positive number of seconds"),
@@ -43,7 +43,7 @@ struct NumericOptionTests {
         try start.validate()
         #expect(start.timeout == 30)
 
-        var logs = try SessionsLogsCommand.parse(["dev", "00000000-0000-0000-0000-000000000000", "--from-offset", "12"])
+        var logs = try SessionsLogsCommand.parse(["dev", "--session", "00000000-0000-0000-0000-000000000000", "--from-offset", "12"])
         try logs.validate()
         #expect(logs.fromOffset == 12)
     }

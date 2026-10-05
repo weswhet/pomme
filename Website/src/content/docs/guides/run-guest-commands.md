@@ -138,10 +138,10 @@ Pomme prints the job ID. To manage the job, use the following commands:
 | Command | Effect |
 | --- | --- |
 | `pomme jobs list VM_NAME` | List the VM's background jobs. |
-| `pomme jobs inspect VM_NAME JOB_ID` | Show the job's state. |
-| `pomme jobs logs VM_NAME JOB_ID` | Print the job's output. |
-| `pomme jobs wait VM_NAME JOB_ID` | Wait for the job to finish. Accepts `--timeout SECONDS`. |
-| `pomme jobs kill VM_NAME JOB_ID` | Send a signal to the job. |
+| `pomme jobs inspect VM_NAME --job JOB_ID` | Show the job's state. |
+| `pomme jobs logs VM_NAME --job JOB_ID` | Print the job's output. |
+| `pomme jobs wait VM_NAME --job JOB_ID` | Wait for the job to finish. Accepts `--timeout SECONDS`. |
+| `pomme jobs kill VM_NAME --job JOB_ID` | Send a signal to the job. |
 
 Replace `JOB_ID` with the ID that Pomme printed when it started the job.
 
@@ -149,7 +149,7 @@ Replace `JOB_ID` with the ID that Pomme printed when it started the job.
 `--signal` with `KILL`, `INT`, or `HUP`:
 
 ```sh
-pomme jobs kill VM_NAME JOB_ID --signal KILL
+pomme jobs kill VM_NAME --job JOB_ID --signal KILL
 ```
 
 The guest agent keeps the job records. You can manage a job only while the

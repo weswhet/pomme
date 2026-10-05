@@ -403,7 +403,7 @@ Recovery security workflows are unavailable while a terminal session is active. 
 ```
 
 **Resolution:** List the sessions with `pomme sessions list NAME`, end each
-active one with `pomme sessions terminate NAME SESSION_ID`, and run the
+active one with `pomme sessions terminate NAME --session SESSION_ID`, and run the
 command again. For details, see
 [Use durable terminal sessions](/guides/use-terminal-sessions/).
 

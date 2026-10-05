@@ -265,6 +265,13 @@ struct ShellCommand: ParsableCommand {
     }
 }
 
+private extension ArgumentHelp {
+    /// The `--job` option of the commands that act on one job.
+    static var jobID: ArgumentHelp {
+        ArgumentHelp("Background job ID, as printed by `pomme exec --detach` or `pomme jobs list`.", valueName: "id")
+    }
+}
+
 /// Manages background guest jobs.
 struct JobsCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -297,7 +304,7 @@ struct JobsListCommand: ParsableCommand {
 struct JobsInspectCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "inspect", abstract: "Inspect a background job.")
     @Argument var name: String?
-    @Argument var jobID: String
+    @Option(name: .customLong("job"), help: .jobID) var jobID: String
     @OptionGroup var output: GlobalOptions
 
     mutating func run() throws {
@@ -312,7 +319,7 @@ struct JobsInspectCommand: ParsableCommand {
 struct JobsLogsCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "logs", abstract: "Print background job output.")
     @Argument var name: String?
-    @Argument var jobID: String
+    @Option(name: .customLong("job"), help: .jobID) var jobID: String
     @OptionGroup var output: GlobalOptions
 
     mutating func run() throws {
@@ -327,7 +334,7 @@ struct JobsLogsCommand: ParsableCommand {
 struct JobsWaitCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "wait", abstract: "Wait for a background job.")
     @Argument var name: String?
-    @Argument var jobID: String
+    @Option(name: .customLong("job"), help: .jobID) var jobID: String
     @OptionGroup var timeout: TimeoutOptions
     @OptionGroup var output: GlobalOptions
 
@@ -345,7 +352,7 @@ struct JobsWaitCommand: ParsableCommand {
 struct JobsKillCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "kill", abstract: "Signal a background job.")
     @Argument var name: String?
-    @Argument var jobID: String
+    @Option(name: .customLong("job"), help: .jobID) var jobID: String
     @Option(name: .customLong("signal"), help: "Signal: TERM, KILL, INT, or HUP.")
     var signal = "TERM"
     @OptionGroup var output: GlobalOptions

@@ -44,7 +44,7 @@ state. Use snapshots for short-lived experiments, not as backups.
 To create a snapshot, run the following command:
 
 ```sh
-pomme snapshot create VM_NAME SNAPSHOT_NAME
+pomme snapshot create VM_NAME --snapshot SNAPSHOT_NAME
 ```
 
 Replace the following:
@@ -56,7 +56,7 @@ Replace the following:
 
 If the VM is running, Pomme pauses it, saves the machine state, and then
 resumes it. If the VM is already paused, it stays paused. If you set
-`POMME_VM_NAME`, you can omit `VM_NAME` and pass only the snapshot name.
+`POMME_VM_NAME`, you can omit `VM_NAME`; `--snapshot` is always required.
 
 ## List snapshots
 
@@ -80,7 +80,7 @@ To restore a snapshot, do the following:
 1. Run the following command:
 
    ```sh
-   pomme snapshot restore VM_NAME SNAPSHOT_NAME
+   pomme snapshot restore VM_NAME --snapshot SNAPSHOT_NAME
    ```
 
    Replace the following:
@@ -109,7 +109,7 @@ The confirmation prompt requires an interactive terminal. To restore from a
 script, pass `--force`:
 
 ```sh
-pomme snapshot restore VM_NAME SNAPSHOT_NAME --force
+pomme snapshot restore VM_NAME --snapshot SNAPSHOT_NAME --force
 ```
 
 `--force` skips the prompt and accepts disk and auxiliary storage drift. It
@@ -122,7 +122,7 @@ To delete a snapshot, do the following:
 1. Run the following command:
 
    ```sh
-   pomme snapshot delete VM_NAME SNAPSHOT_NAME
+   pomme snapshot delete VM_NAME --snapshot SNAPSHOT_NAME
    ```
 
    Replace the following:

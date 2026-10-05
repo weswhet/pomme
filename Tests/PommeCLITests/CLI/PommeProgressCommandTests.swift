@@ -9,7 +9,7 @@ struct PommeProgressCommandTests {
         ["start", "dev"], ["stop", "dev"], ["restart", "dev"],
         ["agent", "repair", "dev"], ["sip", "disable", "dev"],
         ["amfi", "enable", "dev"], ["remote-login", "enable", "dev"],
-        ["screen-sharing", "disable", "dev"], ["jobs", "wait", "dev", "job-id"],
+        ["screen-sharing", "disable", "dev"], ["jobs", "wait", "dev", "--job", "job-id"],
         ["log", "dev"], ["ipsw", "download", "latest"],
         ["template", "list"], ["status", "dev"]
     ])

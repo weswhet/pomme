@@ -23,8 +23,8 @@ enum PommeAgentUpdateError: Error, LocalizedError, Equatable {
         case .activeWork(let name, let jobs, let sessions):
             "\(name) has running background jobs or terminal sessions that the restarted agent could no longer manage. "
                 + "Let them finish or stop them, then rerun `pomme agent update \(name)`."
-                + jobs.map { "\n  job \($0): pomme jobs kill \(name) \($0)" }.joined()
-                + sessions.map { "\n  session \($0): pomme sessions terminate \(name) \($0)" }.joined()
+                + jobs.map { "\n  job \($0): pomme jobs kill \(name) --job \($0)" }.joined()
+                + sessions.map { "\n  session \($0): pomme sessions terminate \(name) --session \($0)" }.joined()
         case .agentUnavailable(let name):
             "The Pomme agent in \(name) did not answer. Check it with `pomme agent status \(name)`."
         case .unsupportedAgent(let name):
