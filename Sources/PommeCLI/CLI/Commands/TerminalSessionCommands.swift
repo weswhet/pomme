@@ -132,7 +132,7 @@ struct SessionsTerminateCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "terminate", abstract: "Terminate a terminal session.")
     @Argument var name: String?
     @Option(name: .customLong("session"), help: .sessionID) var sessionID: String
-    @Flag(name: .customLong("force"), help: "Send SIGKILL instead of SIGHUP.")
+    @Flag(name: [.customShort("f"), .customLong("force")], help: "Send SIGKILL instead of SIGHUP.")
     var force = false
     @OptionGroup var output: GlobalOptions
 

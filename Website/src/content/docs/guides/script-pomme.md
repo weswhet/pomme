@@ -112,8 +112,8 @@ prints an empty `results` array. For details, see
 ## Avoid interactive prompts
 
 Some commands ask for confirmation in a terminal. When standard input isn't a
-terminal, these commands fail instead of waiting. Add `--force` to confirm in
-advance:
+terminal, these commands fail instead of waiting. Add `--force` (`-f`) to
+confirm in advance:
 
 | Command | Effect of `--force` |
 | --- | --- |
@@ -127,7 +127,7 @@ Without `--force` and without a terminal, a deletion fails with the following
 error:
 
 ```text
-Deletion requires an interactive terminal. Pass --force to delete without prompting.
+Deletion requires an interactive terminal. Pass -f/--force to delete without prompting.
 ```
 
 :::caution

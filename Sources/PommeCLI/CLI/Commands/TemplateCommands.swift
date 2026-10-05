@@ -155,7 +155,7 @@ struct TemplateDeleteCommand: ParsableCommand {
     @Argument(help: "Template name.")
     var name: String
 
-    @Flag(name: .customLong("force"), help: "Delete without prompting.")
+    @Flag(name: [.customShort("f"), .customLong("force")], help: "Delete without prompting.")
     var force = false
 
     @OptionGroup var output: GlobalOptions
@@ -163,7 +163,7 @@ struct TemplateDeleteCommand: ParsableCommand {
     mutating func run() throws {
         if !force {
             guard isatty(STDIN_FILENO) == 1 else {
-                throw ValidationError("Deletion requires an interactive terminal. Pass --force to delete without prompting.")
+                throw ValidationError("Deletion requires an interactive terminal. Pass -f/--force to delete without prompting.")
             }
             let progress = PommeProgressContext.sink
             progress?.pause()

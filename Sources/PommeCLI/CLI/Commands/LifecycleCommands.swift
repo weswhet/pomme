@@ -371,7 +371,7 @@ struct StopCommand: ParsableCommand {
     @Flag(name: [.customShort("a"), .customLong("all")], help: "Stop every running or paused VM.")
     var all = false
 
-    @Flag(name: .customLong("force"), help: "Skip graceful guest shutdown.")
+    @Flag(name: [.customShort("f"), .customLong("force")], help: "Skip graceful guest shutdown.")
     var force = false
 
     @OptionGroup var output: GlobalOptions
@@ -485,7 +485,7 @@ struct DeleteCommand: ParsableCommand {
     var all = false
 
     @Flag(
-        name: .customLong("force"),
+        name: [.customShort("f"), .customLong("force")],
         help: "Stop running VMs and delete without prompting. May power off if shutdown times out."
     )
     var force = false

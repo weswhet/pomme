@@ -36,7 +36,7 @@ struct SIPStatusCommand: AsyncParsableCommand {
 struct SIPEnableCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "enable", abstract: "Enable SIP and restore the VM state.")
     @Argument var name: String?
-    @Flag(help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
+    @Flag(name: [.customShort("f"), .customLong("force")], help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
     var force = false
     @OptionGroup private var workflow: SecurityWorkflowOptions
 
@@ -54,7 +54,7 @@ struct SIPEnableCommand: AsyncParsableCommand {
 struct SIPDisableCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "disable", abstract: "Disable SIP and restore the VM state.")
     @Argument var name: String?
-    @Flag(help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
+    @Flag(name: [.customShort("f"), .customLong("force")], help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
     var force = false
     @OptionGroup private var workflow: SecurityWorkflowOptions
 
@@ -97,7 +97,7 @@ struct AMFIStatusCommand: AsyncParsableCommand {
 struct AMFIEnableCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "enable", abstract: "Restore the saved AMFI configuration and the VM state.")
     @Argument var name: String?
-    @Flag(help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
+    @Flag(name: [.customShort("f"), .customLong("force")], help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
     var force = false
     @OptionGroup private var workflow: SecurityWorkflowOptions
 
@@ -115,7 +115,7 @@ struct AMFIEnableCommand: AsyncParsableCommand {
 struct AMFIDisableCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "disable", abstract: "Configure AMFI as disabled and restore the VM state.")
     @Argument var name: String?
-    @Flag(help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
+    @Flag(name: [.customShort("f"), .customLong("force")], help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
     var force = false
     @OptionGroup private var workflow: SecurityWorkflowOptions
 
@@ -147,7 +147,7 @@ struct MDMCommand: AsyncParsableCommand {
     var enrollmentMode: MDMEnrollmentMode = .supervised
     @Option(name: .customLong("final-security"), help: "SIP/AMFI after enrollment: restore (default) re-enables what enrollment disabled; disabled leaves it off.")
     var finalSecurity: MDMFinalSecurity = .restore
-    @Flag(help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
+    @Flag(name: [.customShort("f"), .customLong("force")], help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
     var force = false
     @Flag(name: .customLong("dry-run"), help: "Report the detected state and planned steps without changing the VM.")
     var dryRun = false

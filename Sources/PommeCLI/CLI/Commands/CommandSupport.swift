@@ -408,7 +408,7 @@ enum CLIConfirmation {
             return
         }
         guard isatty(STDIN_FILENO) == 1 else {
-            throw ValidationError("Deletion requires an interactive terminal. Pass --force to delete without prompting.")
+            throw ValidationError("Deletion requires an interactive terminal. Pass -f/--force to delete without prompting.")
         }
 
         let progress = PommeProgressContext.sink

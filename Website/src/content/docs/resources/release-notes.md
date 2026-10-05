@@ -68,6 +68,7 @@ endpoint that it acts on. Every other value is a named flag:
   to: `stop` on running and paused VMs, `pause` on running VMs, `resume` on
   paused VMs, and `delete` on every VM. For details, see
   [Act on every VM](/guides/manage-vm-lifecycle/#act-on-every-vm).
+- Every `--force` flag also accepts `-f`.
 
 ### Compatibility
 
