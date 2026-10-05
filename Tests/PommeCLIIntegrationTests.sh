@@ -473,6 +473,20 @@ if grep -q "Unknown option '--timeout'" "$work/stderr"; then
 else
   fail "shell names --timeout as unknown"
 fi
+for shell_flag in --stdin --pty --guest-stdout; do
+  expect_failure "shell has no $shell_flag" "$runner" shell missing --detach "$shell_flag"
+  if grep -q "Unknown option '$shell_flag'" "$work/stderr"; then
+    pass "shell names $shell_flag as unknown"
+  else
+    fail "shell names $shell_flag as unknown"
+  fi
+done
+expect_failure "attached shell requires a terminal" "$runner" shell missing </dev/null
+if grep -q 'An attached shell requires an interactive terminal' "$work/stderr"; then
+  pass "attached shell names the terminal requirement"
+else
+  fail "attached shell names the terminal requirement"
+fi
 expect_success "ui keys lists the key vocabulary" "$runner" ui keys
 if grep -q '^return' "$work/stdout" && grep -q '^command-' "$work/stdout"; then
   pass "ui keys names keys and modifier prefixes"

@@ -2,17 +2,11 @@ import ArgumentParser
 import Foundation
 import Darwin
 
-/// Execution controls shared by `exec` and `shell`.
+/// Who and where a guest program runs: the options `exec` and `shell` share.
 ///
 /// These options stay at the CLI boundary; PommeAgentProtocol owns their wire
 /// representation and the authenticated guest agent owns execution.
-struct GuestExecutionOptions: ParsableArguments {
-    @Flag(name: [.customShort("i"), .customLong("stdin")], help: "Read binary standard input from the host.")
-    var attachStdin = false
-
-    @Flag(name: .customLong("pty"), help: "Attach the command to a pseudo-terminal.")
-    var pty = false
-
+struct GuestProcessOptions: ParsableArguments {
     @Option(name: .customLong("cwd"), help: "Absolute guest working directory.")
     var cwd: String?
 
@@ -31,54 +25,14 @@ struct GuestExecutionOptions: ParsableArguments {
     @Option(name: .customLong("gid"), parsing: .unconditional, help: "Guest numeric group ID.")
     var gid: UInt32?
 
-    @Option(name: .customLong("guest-stdin"), help: "Absolute guest file used as standard input.")
-    var guestStdinPath: String?
-
-    @Option(name: .customLong("guest-stdout"), help: "Absolute guest file used as standard output.")
-    var guestStdoutPath: String?
-
-    @Option(name: .customLong("guest-stderr"), help: "Absolute guest file used as standard error.")
-    var guestStderrPath: String?
-
-    func validate(detached: Bool, output: GlobalOptions, implicitPTY: Bool = false) throws {
-        let usesPTY = pty || implicitPTY
-        let guestRedirections = [guestStdinPath, guestStdoutPath, guestStderrPath]
-
+    mutating func validate() throws {
         try validateAbsoluteGuestPath(cwd, option: "--cwd")
-        try validateAbsoluteGuestPath(guestStdinPath, option: "--guest-stdin")
-        try validateAbsoluteGuestPath(guestStdoutPath, option: "--guest-stdout")
-        try validateAbsoluteGuestPath(guestStderrPath, option: "--guest-stderr")
-
         guard user == nil || uid == nil else {
             throw ValidationError("--user conflicts with --uid.")
         }
         guard group == nil || gid == nil else {
             throw ValidationError("--group conflicts with --gid.")
         }
-        guard !attachStdin || guestStdinPath == nil else {
-            throw ValidationError("--stdin conflicts with --guest-stdin.")
-        }
-        guard !attachStdin || !detached else {
-            throw ValidationError("--stdin conflicts with --detach.")
-        }
-        guard !usesPTY || !attachStdin else {
-            throw ValidationError("--stdin is implicit for an attached PTY; omit --stdin.")
-        }
-        guard !usesPTY || guestRedirections.allSatisfy({ $0 == nil }) else {
-            throw ValidationError("--pty conflicts with --guest-stdin, --guest-stdout, and --guest-stderr.")
-        }
-        if usesPTY && !detached {
-            switch try output.resolvedFormat() {
-            case .json, .jsonl:
-                throw ValidationError("--pty conflicts with JSON and JSONL output.")
-            case .table:
-                break
-            }
-            guard isatty(STDIN_FILENO) == 1, isatty(STDOUT_FILENO) == 1 else {
-                throw ValidationError("--pty requires an interactive terminal for standard input and output.")
-            }
-        }
-
         for value in environment {
             let pieces = value.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
             guard pieces.count == 2, !pieces[0].isEmpty,
@@ -91,27 +45,90 @@ struct GuestExecutionOptions: ParsableArguments {
         }
     }
 
-    func apply(to request: GuestCommandRequest, implicitPTY: Bool = false) throws -> GuestCommandRequest {
+    /// The `--env` entries as a dictionary; a repeated key keeps its last value.
+    var environmentEntries: [String: String] {
+        var entries: [String: String] = [:]
+        for value in environment {
+            let separator = value.firstIndex(of: "=")!
+            entries[String(value[..<separator])] = String(value[value.index(after: separator)...])
+        }
+        return entries
+    }
+}
+
+/// `exec`'s execution controls: the shared process options plus how the
+/// program's standard streams are connected.
+struct GuestExecutionOptions: ParsableArguments {
+    @Flag(name: [.customShort("i"), .customLong("stdin")], help: "Read binary standard input from the host.")
+    var attachStdin = false
+
+    @Flag(name: .customLong("pty"), help: "Attach the command to a pseudo-terminal.")
+    var pty = false
+
+    @OptionGroup var process: GuestProcessOptions
+
+    @Option(name: .customLong("guest-stdin"), help: "Absolute guest file used as standard input.")
+    var guestStdinPath: String?
+
+    @Option(name: .customLong("guest-stdout"), help: "Absolute guest file used as standard output.")
+    var guestStdoutPath: String?
+
+    @Option(name: .customLong("guest-stderr"), help: "Absolute guest file used as standard error.")
+    var guestStderrPath: String?
+
+    func validate(detached: Bool, output: GlobalOptions) throws {
+        let guestRedirections = [guestStdinPath, guestStdoutPath, guestStderrPath]
+
+        try validateAbsoluteGuestPath(guestStdinPath, option: "--guest-stdin")
+        try validateAbsoluteGuestPath(guestStdoutPath, option: "--guest-stdout")
+        try validateAbsoluteGuestPath(guestStderrPath, option: "--guest-stderr")
+
+        guard !attachStdin || guestStdinPath == nil else {
+            throw ValidationError("--stdin conflicts with --guest-stdin.")
+        }
+        guard !attachStdin || !detached else {
+            throw ValidationError("--stdin conflicts with --detach.")
+        }
+        guard !pty || !attachStdin else {
+            throw ValidationError("--stdin is implicit for an attached PTY; omit --stdin.")
+        }
+        guard !pty || guestRedirections.allSatisfy({ $0 == nil }) else {
+            throw ValidationError("--pty conflicts with --guest-stdin, --guest-stdout, and --guest-stderr.")
+        }
+        if pty && !detached {
+            try Self.validateAttachedTerminal(output: output, subject: "--pty")
+        }
+    }
+
+    /// An attached terminal session needs table output and a terminal on
+    /// both standard input and standard output.
+    static func validateAttachedTerminal(output: GlobalOptions, subject: String) throws {
+        switch try output.resolvedFormat() {
+        case .json, .jsonl:
+            throw ValidationError("\(subject) conflicts with JSON and JSONL output.")
+        case .table:
+            break
+        }
+        guard isatty(STDIN_FILENO) == 1, isatty(STDOUT_FILENO) == 1 else {
+            throw ValidationError("\(subject) requires an interactive terminal for standard input and output.")
+        }
+    }
+
+    func apply(to request: GuestCommandRequest) throws -> GuestCommandRequest {
         let inputData: Data?
         if attachStdin {
             inputData = FileHandle.standardInput.readDataToEndOfFile()
         } else {
             inputData = nil
         }
-        var parsedEnvironment: [String: String] = [:]
-        for value in environment {
-            let separator = value.firstIndex(of: "=")!
-            parsedEnvironment[String(value[..<separator])] = String(value[value.index(after: separator)...])
-        }
         let requestPath: String = request.path
         let requestArguments: [String] = request.arguments
         let requestTimeout: TimeInterval = request.timeout
-        let requestsPTY: Bool = pty || implicitPTY
-        let requestCWD: String? = cwd
-        let requestUser: String? = user
-        let requestUID: UInt32? = uid
-        let requestGroup: String? = group
-        let requestGID: UInt32? = gid
+        let requestCWD: String? = process.cwd
+        let requestUser: String? = process.user
+        let requestUID: UInt32? = process.uid
+        let requestGroup: String? = process.group
+        let requestGID: UInt32? = process.gid
         let requestGuestStdinPath: String? = guestStdinPath
         let requestGuestStdoutPath: String? = guestStdoutPath
         let requestGuestStderrPath: String? = guestStderrPath
@@ -121,9 +138,9 @@ struct GuestExecutionOptions: ParsableArguments {
             timeout: requestTimeout,
             inputData: inputData,
             attachStdin: attachStdin,
-            pty: requestsPTY,
+            pty: pty,
             cwd: requestCWD,
-            environment: parsedEnvironment,
+            environment: process.environmentEntries,
             user: requestUser,
             uid: requestUID,
             group: requestGroup,
@@ -133,12 +150,12 @@ struct GuestExecutionOptions: ParsableArguments {
             guestStderrPath: requestGuestStderrPath
         )
     }
+}
 
-    private func validateAbsoluteGuestPath(_ path: String?, option: String) throws {
-        guard let path else { return }
-        guard path.hasPrefix("/"), !path.contains("\0") else {
-            throw ValidationError("\(option) must be an absolute guest path.")
-        }
+private func validateAbsoluteGuestPath(_ path: String?, option: String) throws {
+    guard let path else { return }
+    guard path.hasPrefix("/"), !path.contains("\0") else {
+        throw ValidationError("\(option) must be an absolute guest path.")
     }
 }
 
@@ -206,19 +223,29 @@ struct ShellCommand: ParsableCommand {
     @Flag(name: [.customShort("d"), .customLong("detach")], help: "Create the shell session without attaching and print its session ID.")
     var detach = false
 
-    @OptionGroup var execution: GuestExecutionOptions
+    @OptionGroup var process: GuestProcessOptions
     @OptionGroup var output: GlobalOptions
 
     mutating func validate() throws {
-        try execution.validate(detached: detach, output: output, implicitPTY: true)
+        if !detach {
+            try GuestExecutionOptions.validateAttachedTerminal(output: output, subject: "An attached shell")
+        }
     }
 
     mutating func run() throws {
         try PommeRecoveryDebugContext.$screenshotsEnabled.withValue(output.debug) {
             let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
-            let request = try execution.apply(
-                to: GuestCommandRequest(path: "/bin/sh", arguments: [], timeout: Constants.defaultGuestCommandTimeout),
-                implicitPTY: true
+            let request = GuestCommandRequest(
+                path: "/bin/sh",
+                arguments: [],
+                timeout: Constants.defaultGuestCommandTimeout,
+                pty: true,
+                cwd: process.cwd,
+                environment: process.environmentEntries,
+                user: process.user,
+                uid: process.uid,
+                group: process.group,
+                gid: process.gid
             )
             try CLIOutputWriter.write(
                 PommeApplication.terminalSessionCreate(
