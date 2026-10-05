@@ -24,8 +24,6 @@ const unlistedCommands = [
 const argumentFallbacks = {
 	name: 'VM name. Uses `POMME_VM_NAME` when omitted.',
 	vm: 'VM name. Uses `POMME_VM_NAME` when omitted.',
-	'job-id': 'Background job ID, as printed by `pomme exec --detach` or `pomme jobs list`.',
-	'session-id': 'Terminal session ID, as printed by `pomme sessions list`.',
 	path: 'Path to a config file with a `.json`, `.yaml`, `.yml`, `.toml`, or `.pkl` extension.',
 };
 const commandArgumentFallbacks = {

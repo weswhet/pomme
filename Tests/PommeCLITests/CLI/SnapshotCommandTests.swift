@@ -1,3 +1,4 @@
+import ArgumentParser
 import Foundation
 import Testing
 
@@ -18,9 +19,9 @@ struct SnapshotCommandTests {
 
     @Test("Create, restore, and delete parse the documented explicit targets")
     func explicitTargetSyntax() throws {
-        var create = try SnapshotCreateCommand.parse(["dev", "before-upgrade", "--json"])
-        var restore = try SnapshotRestoreCommand.parse(["dev", "before-upgrade", "--force"])
-        var delete = try SnapshotDeleteCommand.parse(["dev", "before-upgrade", "--format", "jsonl"])
+        var create = try SnapshotCreateCommand.parse(["dev", "--snapshot", "before-upgrade", "--json"])
+        var restore = try SnapshotRestoreCommand.parse(["dev", "--snapshot", "before-upgrade", "--force"])
+        var delete = try SnapshotDeleteCommand.parse(["--snapshot", "before-upgrade", "dev", "--format", "jsonl"])
 
         try create.validate()
         try restore.validate()
@@ -34,32 +35,43 @@ struct SnapshotCommandTests {
         #expect(delete.output.format == .jsonl)
     }
 
-    @Test("Mutation commands reject a missing snapshot name")
-    func mutationCommandsRequireSnapshotName() throws {
-        for command in ["create", "restore", "delete"] {
-            #expect(throws: Error.self) {
-                switch command {
-                case "create":
-                    var parsed = try SnapshotCreateCommand.parse([])
-                    try parsed.validate()
-                case "restore":
-                    var parsed = try SnapshotRestoreCommand.parse([])
-                    try parsed.validate()
-                default:
-                    var parsed = try SnapshotDeleteCommand.parse([])
-                    try parsed.validate()
-                }
+    @Test("Mutation commands require --snapshot, including in the old positional form", arguments: [
+        SnapshotCreateCommand.self as ParsableCommand.Type,
+        SnapshotRestoreCommand.self,
+        SnapshotDeleteCommand.self
+    ])
+    func mutationCommandsRequireSnapshotName(_ command: ParsableCommand.Type) {
+        for arguments in [["dev"], ["dev", "before-upgrade"]] {
+            do {
+                _ = try command.parse(arguments)
+                Issue.record("\(command._commandName) accepted \(arguments) without --snapshot.")
+            } catch {
+                #expect(command.fullMessage(for: error).contains("Missing expected argument '--snapshot <name>'"))
             }
+        }
+    }
+
+    @Test("The snapshot name is not a second positional value", arguments: [
+        SnapshotCreateCommand.self as ParsableCommand.Type,
+        SnapshotRestoreCommand.self,
+        SnapshotDeleteCommand.self
+    ])
+    func positionalSnapshotIsRejected(_ command: ParsableCommand.Type) {
+        do {
+            _ = try command.parse(["dev", "before-upgrade", "--snapshot", "before-upgrade"])
+            Issue.record("\(command._commandName) accepted a positional snapshot name.")
+        } catch {
+            #expect(command.fullMessage(for: error).contains("Unexpected argument 'before-upgrade'"))
         }
     }
 
     @Test("Snapshot names use the managed-name validator")
     func snapshotNameValidation() {
         #expect(throws: Error.self) {
-            try SnapshotCommandInput.resolve(vm: "dev", snapshot: "", action: "create")
+            try SnapshotCommandInput.resolve(vm: "dev", snapshot: "")
         }
         do {
-            _ = try SnapshotCommandInput.resolve(vm: "dev", snapshot: "before/upgrade", action: "create")
+            _ = try SnapshotCommandInput.resolve(vm: "dev", snapshot: "before/upgrade")
             Issue.record("An invalid snapshot name was accepted.")
         } catch {
             #expect(error.localizedDescription.hasPrefix("Invalid snapshot name before/upgrade."))

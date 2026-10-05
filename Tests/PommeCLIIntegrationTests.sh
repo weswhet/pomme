@@ -436,11 +436,29 @@ if grep -q -- '--x must be' "$work/stderr"; then
 else
   fail "click names the coordinate range"
 fi
-expect_failure "snapshot names are validated as snapshot names" "$runner" snapshot create missing "bad/snap"
+expect_failure "snapshot names are validated as snapshot names" "$runner" snapshot create missing --snapshot "bad/snap"
 if grep -q 'Invalid snapshot name bad/snap' "$work/stderr"; then
   pass "snapshot rejection names the snapshot"
 else
   fail "snapshot rejection names the snapshot"
+fi
+expect_failure "snapshot name is not a second positional value" "$runner" snapshot create missing clean
+if grep -q "Missing expected argument '--snapshot <name>'" "$work/stderr"; then
+  pass "positional snapshot name points at --snapshot"
+else
+  fail "positional snapshot name points at --snapshot"
+fi
+expect_failure "job ID is not a second positional value" "$runner" jobs logs missing 3f2a --job 3f2a
+if grep -q "Unexpected argument '3f2a'" "$work/stderr"; then
+  pass "positional job ID is an unexpected argument"
+else
+  fail "positional job ID is an unexpected argument"
+fi
+expect_failure "session ID requires --session" "$runner" sessions logs missing 00000000-0000-0000-0000-000000000000
+if grep -q "Missing expected argument '--session <id>'" "$work/stderr"; then
+  pass "positional session ID points at --session"
+else
+  fail "positional session ID points at --session"
 fi
 expect_failure "exec takes the VM name from the environment" env POMME_VM_NAME=invalid/name \
   "$runner" exec -- /bin/echo hi

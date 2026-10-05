@@ -26,17 +26,17 @@ struct SnapshotCreateCommand: AsyncParsableCommand {
     @Argument(help: "VM name. Uses POMME_VM_NAME when omitted.")
     var vm: String?
 
-    @Argument(help: "Snapshot name.")
-    var snapshot: String?
+    @Option(name: .customLong("snapshot"), help: ArgumentHelp("Snapshot name.", valueName: "name"))
+    var snapshot: String
 
     @OptionGroup var output: GlobalOptions
 
     mutating func validate() throws {
-        _ = try SnapshotCommandInput.resolve(vm: vm, snapshot: snapshot, action: "create")
+        _ = try SnapshotCommandInput.resolve(vm: vm, snapshot: snapshot)
     }
 
     mutating func run() async throws {
-        let input = try SnapshotCommandInput.resolve(vm: vm, snapshot: snapshot, action: "create")
+        let input = try SnapshotCommandInput.resolve(vm: vm, snapshot: snapshot)
         try CLIOutputWriter.write(
             try PommeApplication.snapshotCreate(name: input.vm, snapshot: input.snapshot),
             options: output
@@ -74,8 +74,8 @@ struct SnapshotRestoreCommand: AsyncParsableCommand {
     @Argument(help: "VM name. Uses POMME_VM_NAME when omitted.")
     var vm: String?
 
-    @Argument(help: "Snapshot name.")
-    var snapshot: String?
+    @Option(name: .customLong("snapshot"), help: ArgumentHelp("Snapshot name.", valueName: "name"))
+    var snapshot: String
 
     @Flag(
         name: .customLong("force"),
@@ -86,11 +86,11 @@ struct SnapshotRestoreCommand: AsyncParsableCommand {
     @OptionGroup var output: GlobalOptions
 
     mutating func validate() throws {
-        _ = try SnapshotCommandInput.resolve(vm: vm, snapshot: snapshot, action: "restore")
+        _ = try SnapshotCommandInput.resolve(vm: vm, snapshot: snapshot)
     }
 
     mutating func run() async throws {
-        let input = try SnapshotCommandInput.resolve(vm: vm, snapshot: snapshot, action: "restore")
+        let input = try SnapshotCommandInput.resolve(vm: vm, snapshot: snapshot)
         let record = try PommeApplication.snapshotsList(name: input.vm)
             .first { $0.name == input.snapshot }
         let allowDrift = try SnapshotConfirmation.confirmRestore(
@@ -120,8 +120,8 @@ struct SnapshotDeleteCommand: AsyncParsableCommand {
     @Argument(help: "VM name. Uses POMME_VM_NAME when omitted.")
     var vm: String?
 
-    @Argument(help: "Snapshot name.")
-    var snapshot: String?
+    @Option(name: .customLong("snapshot"), help: ArgumentHelp("Snapshot name.", valueName: "name"))
+    var snapshot: String
 
     @Flag(name: .customLong("force"), help: "Delete without prompting.")
     var force = false
@@ -129,11 +129,11 @@ struct SnapshotDeleteCommand: AsyncParsableCommand {
     @OptionGroup var output: GlobalOptions
 
     mutating func validate() throws {
-        _ = try SnapshotCommandInput.resolve(vm: vm, snapshot: snapshot, action: "delete")
+        _ = try SnapshotCommandInput.resolve(vm: vm, snapshot: snapshot)
     }
 
     mutating func run() async throws {
-        let input = try SnapshotCommandInput.resolve(vm: vm, snapshot: snapshot, action: "delete")
+        let input = try SnapshotCommandInput.resolve(vm: vm, snapshot: snapshot)
         try SnapshotConfirmation.confirmDeletion(vm: input.vm, snapshot: input.snapshot, force: force)
         try CLIOutputWriter.write(
             try PommeApplication.snapshotDelete(name: input.vm, snapshot: input.snapshot),
@@ -148,20 +148,11 @@ enum SnapshotCommandInput {
         let snapshot: String
     }
 
-    static func resolve(vm: String?, snapshot: String?, action: String) throws -> Resolved {
-        let target: String
-        let snapshotName: String
-        if let snapshot {
-            target = try VMTargetResolver.names(from: vm.map { [$0] } ?? [], allowMultiple: false)[0]
-            snapshotName = snapshot
-        } else if let vm {
-            target = try VMTargetResolver.names(from: [], allowMultiple: false)[0]
-            snapshotName = vm
-        } else {
-            throw ValidationError("Snapshot \(action) requires a snapshot name.")
-        }
-
-        return Resolved(vm: target, snapshot: try validateIdentifier(snapshotName, kind: .snapshot))
+    static func resolve(vm: String?, snapshot: String) throws -> Resolved {
+        Resolved(
+            vm: try VMTargetResolver.names(from: vm.map { [$0] } ?? [], allowMultiple: false)[0],
+            snapshot: try validateIdentifier(snapshot, kind: .snapshot)
+        )
     }
 }
 

@@ -31,7 +31,7 @@ struct SessionsListCommand: ParsableCommand {
 struct SessionsInspectCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "inspect", abstract: "Inspect a terminal session.")
     @Argument var name: String?
-    @Argument var sessionID: String
+    @Option(name: .customLong("session"), help: .sessionID) var sessionID: String
     @OptionGroup var output: GlobalOptions
 
     mutating func run() throws {
@@ -46,7 +46,7 @@ struct SessionsInspectCommand: ParsableCommand {
 struct SessionsAttachCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "attach", abstract: "Attach to a terminal session.")
     @Argument var name: String?
-    @Argument var sessionID: String
+    @Option(name: .customLong("session"), help: .sessionID) var sessionID: String
     @Flag(name: .customLong("takeover"), help: "Replace the current attachment.")
     var takeover = false
     @Flag(name: .customLong("from-start"), help: "Replay the transcript from byte offset zero.")
@@ -91,7 +91,7 @@ struct SessionsAttachCommand: ParsableCommand {
 struct SessionsLogsCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "logs", abstract: "Read terminal session transcript bytes.")
     @Argument var name: String?
-    @Argument var sessionID: String
+    @Option(name: .customLong("session"), help: .sessionID) var sessionID: String
     @Option(name: .customLong("from-offset"), parsing: .unconditional, help: "Starting transcript byte offset.")
     var fromOffset: Int64 = 0
     @Flag(name: .customLong("follow"), help: "Continue until the session exits or is lost.")
@@ -131,7 +131,7 @@ struct SessionsLogsCommand: ParsableCommand {
 struct SessionsTerminateCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "terminate", abstract: "Terminate a terminal session.")
     @Argument var name: String?
-    @Argument var sessionID: String
+    @Option(name: .customLong("session"), help: .sessionID) var sessionID: String
     @Flag(name: .customLong("force"), help: "Send SIGKILL instead of SIGHUP.")
     var force = false
     @OptionGroup var output: GlobalOptions
@@ -148,7 +148,7 @@ struct SessionsTerminateCommand: ParsableCommand {
 struct SessionsDeleteCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "delete", abstract: "Delete an exited or lost terminal session.")
     @Argument var name: String?
-    @Argument var sessionID: String
+    @Option(name: .customLong("session"), help: .sessionID) var sessionID: String
     @OptionGroup var output: GlobalOptions
 
     mutating func run() throws {
@@ -179,6 +179,13 @@ private extension SessionsTerminateCommand {
 
 private extension SessionsDeleteCommand {
     static func sessionID(_ value: String) throws -> String { try TerminalSessionCommandSupport.sessionID(value) }
+}
+
+private extension ArgumentHelp {
+    /// The `--session` option of the commands that act on one session.
+    static var sessionID: ArgumentHelp {
+        ArgumentHelp("Terminal session ID, as printed by `pomme sessions list`.", valueName: "id")
+    }
 }
 
 enum TerminalSessionCommandSupport {

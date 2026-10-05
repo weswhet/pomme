@@ -68,7 +68,7 @@ pomme sessions list VM_NAME
 To show the details of one session, run the following command:
 
 ```sh
-pomme sessions inspect VM_NAME SESSION_ID
+pomme sessions inspect VM_NAME --session SESSION_ID
 ```
 
 Replace the following:
@@ -81,7 +81,7 @@ Replace the following:
 To reattach your terminal to a running session, run the following command:
 
 ```sh
-pomme sessions attach VM_NAME SESSION_ID
+pomme sessions attach VM_NAME --session SESSION_ID
 ```
 
 Replace the following:
@@ -102,7 +102,7 @@ To replay earlier output when you attach, use one of the following flags:
 To print a session's transcript without attaching, run the following command:
 
 ```sh
-pomme sessions logs VM_NAME SESSION_ID
+pomme sessions logs VM_NAME --session SESSION_ID
 ```
 
 Replace the following:
@@ -119,7 +119,7 @@ session exits or is lost, pass `--follow`.
 To end a running session, run the following command:
 
 ```sh
-pomme sessions terminate VM_NAME SESSION_ID
+pomme sessions terminate VM_NAME --session SESSION_ID
 ```
 
 Pomme sends `SIGHUP` to the session. If the program doesn't exit, pass
@@ -136,7 +136,7 @@ After a session exits or is lost, its record and transcript stay on the host
 until you delete them. To delete a session, run the following command:
 
 ```sh
-pomme sessions delete VM_NAME SESSION_ID
+pomme sessions delete VM_NAME --session SESSION_ID
 ```
 
 Replace the following:
