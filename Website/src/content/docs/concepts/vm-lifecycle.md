@@ -100,6 +100,10 @@ restart output shows that result before the boot result.
 `pomme pause` suspends a running VM in memory, and `pomme resume` continues it
 in the same boot mode. `pomme start` also resumes a paused VM.
 
+With `--all`, `pomme stop` acts on every running or paused VM, `pomme pause`
+on every running VM, and `pomme resume` on every paused VM. VMs in other states
+are left alone.
+
 ## Deleting a VM
 
 `pomme delete` removes a VM's bundle, including its disk image. Without
@@ -109,6 +113,9 @@ in the same boot mode. `pomme start` also resumes a paused VM.
 stops it with the normal stop sequence, waits for the helper to exit, and
 verifies the exit before it removes the bundle. If Pomme can't confirm the
 stop or the helper's exit, it keeps the bundle.
+
+`pomme delete --all` deletes every VM and lists them all in its confirmation
+prompt.
 
 ## Effect on terminal sessions
 

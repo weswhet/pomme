@@ -102,6 +102,13 @@ pomme exec -- /usr/bin/sw_vers
 
 For details, see [Environment variables](/reference/environment-variables/).
 
+To act on every VM instead, pass `--all` (`-a`) to `pomme stop`, `pomme pause`,
+`pomme resume`, or `pomme delete`. Each command selects only the VMs that it
+applies to; for example, `pomme stop --all` stops the running and paused VMs.
+When no VM matches, the command exits with status `0` and, with `--json`,
+prints an empty `results` array. For details, see
+[Act on every VM](/guides/manage-vm-lifecycle/#act-on-every-vm).
+
 ## Avoid interactive prompts
 
 Some commands ask for confirmation in a terminal. When standard input isn't a
@@ -110,7 +117,7 @@ advance:
 
 | Command | Effect of `--force` |
 | --- | --- |
-| `pomme delete`, `pomme rm` | Deletes without prompting, and stops a running VM first. |
+| `pomme delete`, `pomme rm` | Deletes without prompting, and stops a running VM first. With `--all`, deletes every VM. |
 | `pomme template delete` | Deletes the template without prompting. |
 | `pomme snapshot delete` | Deletes the snapshot without prompting. |
 | `pomme snapshot restore` | Restores without prompting and accepts recorded drift. |
