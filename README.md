@@ -387,8 +387,9 @@ retry rules.
 
 ## Documentation site
 
-A local documentation site lives in [Website](Website/README.md). Run
-`npm install` and `npm run dev` in that directory, then open
+The documentation is published at <https://pommevm.dev> from the `main`
+branch. Its source lives in [Website](Website/README.md); to preview changes,
+run `npm install` and `npm run dev` in that directory, then open
 `http://localhost:4321`.
 
 ## Design
