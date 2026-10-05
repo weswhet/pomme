@@ -4,168 +4,124 @@ import Testing
 
 @Suite("Public UI utility command grammar")
 struct UIUtilityCommandTests {
-    @Test("Key and settings goals use POMME_VM_NAME for a single action")
-    func fixedArityEnvironmentFallback() throws {
-        let key = try UIPositionalTargetResolver.singleAction(
-            arguments: ["return"], environmentTarget: "default-vm", action: "key"
-        )
-        let goal = try UIPositionalTargetResolver.singleAction(
-            arguments: ["Open Keyboard settings"], environmentTarget: "default-vm", action: "ai settings"
-        )
+    @Test("Every VM-bound UI command names the VM with --vm")
+    func vmOption() throws {
+        let key = try UIKeyCommand.parse(["--vm", "dev", "--key", "return", "--format", "json"])
+        let sequence = try UIKeySequenceCommand.parse(["--vm", "dev", "--", "left", "right"])
+        let type = try UITypeCommand.parse(["--vm", "dev", "--text", "hi"])
+        let click = try UIClickCommand.parse(["--vm", "dev", "--x", "1", "--y", "2"])
 
-        #expect(key.target == "default-vm")
-        #expect(key.action == "return")
-        #expect(goal.target == "default-vm")
-        #expect(goal.action == "Open Keyboard settings")
+        #expect(key.target.name == "dev" && key.key == "return" && key.output.format == .json)
+        #expect(sequence.target.name == "dev" && sequence.keys == ["left", "right"])
+        #expect(type.target.name == "dev" && type.text == "hi")
+        #expect(click.target.name == "dev")
     }
 
-    @Test("Fixed-arity UI actions preserve an explicit target")
-    func fixedArityExplicitTargetOverridesEnvironment() throws {
-        let key = try UIPositionalTargetResolver.singleAction(
-            arguments: ["other-vm", "return"], environmentTarget: "default-vm", action: "key"
-        )
+    @Test("Without --vm the target is left to POMME_VM_NAME")
+    func vmOptionIsOptional() throws {
+        let key = try UIKeyCommand.parse(["--key", "cmd-shift-t"])
+        let sequence = try UIKeySequenceCommand.parse(["--", "dev", "return"])
 
-        #expect(key.target == "other-vm")
-        #expect(key.action == "return")
+        #expect(key.target.name == nil && key.key == "cmd-shift-t")
+        // After --, a value that looks like a VM name is still a key.
+        #expect(sequence.target.name == nil && sequence.keys == ["dev", "return"])
     }
 
-    @Test("Fixed-arity UI actions reject missing, extra, and malformed fallback targets")
-    func fixedArityFailures() {
-        #expect(throws: Error.self) {
-            _ = try UIPositionalTargetResolver.singleAction(arguments: [], environmentTarget: nil, action: "key")
-        }
-        #expect(throws: Error.self) {
-            _ = try UIPositionalTargetResolver.singleAction(arguments: ["one", "two", "three"], environmentTarget: "default-vm", action: "key")
-        }
-        #expect(throws: Error.self) {
-            _ = try UIPositionalTargetResolver.singleAction(arguments: ["return"], environmentTarget: " ", action: "key")
-        }
+    @Test("Keys after -- may look like options")
+    func keysFollowTerminator() throws {
+        let sequence = try UIKeySequenceCommand.parse(["--vm", "dev", "--", "-", "--json"])
+        #expect(sequence.keys == ["-", "--json"])
+        #expect(!sequence.output.json)
     }
 
-    @Test("Key sequence preserves unambiguous explicit targets and a single environment key")
-    func keySequenceUnambiguousResolution() throws {
-        let explicit = try UIPositionalTargetResolver.keySequence(
-            arguments: ["other-vm", "left", "right"], explicitTarget: nil, environmentTarget: "default-vm"
-        )
-        let omitted = try UIPositionalTargetResolver.keySequence(
-            arguments: ["return"], explicitTarget: nil, environmentTarget: "default-vm"
-        )
-        let option = try UIPositionalTargetResolver.keySequence(
-            arguments: ["left", "right"], explicitTarget: "override-vm", environmentTarget: "default-vm"
-        )
-        let modifierSequence = try UIPositionalTargetResolver.keySequence(
-            arguments: ["cmd+shift+t", "return"], explicitTarget: nil, environmentTarget: "default-vm"
-        )
-
-        #expect(explicit.target == "other-vm")
-        #expect(explicit.keys == ["left", "right"])
-        #expect(omitted.target == "default-vm")
-        #expect(omitted.keys == ["return"])
-        #expect(option.target == "override-vm")
-        #expect(option.keys == ["left", "right"])
-        #expect(modifierSequence.target == "default-vm")
-        #expect(modifierSequence.keys == ["cmd+shift+t", "return"])
-    }
-
-    @Test("Key sequence rejects an environment ambiguity before input")
-    func keySequenceAmbiguity() {
-        #expect(throws: Error.self) {
-            _ = try UIPositionalTargetResolver.keySequence(
-                arguments: ["return", "right"], explicitTarget: nil, environmentTarget: "default-vm"
-            )
+    @Test("UI commands take no positional values", arguments: [
+        (UIKeyCommand.self as ParsableCommand.Type, ["dev", "--key", "return"]),
+        (UITypeCommand.self, ["dev", "--text", "hi"]),
+        (UIClickCommand.self, ["dev", "--x", "1", "--y", "2"]),
+        (UIScreenshotCommand.self, ["dev", "--output", "/tmp/s.png"])
+    ])
+    func positionalVMIsRejected(command: ParsableCommand.Type, arguments: [String]) {
+        do {
+            _ = try command.parse(arguments)
+            Issue.record("\(command._commandName) accepted a positional VM name.")
+        } catch {
+            #expect(command.fullMessage(for: error).contains("Unexpected argument 'dev'"))
         }
     }
 
-    @Test("Key sequence rejects missing keys and malformed environment targets")
-    func keySequenceFailures() {
-        #expect(throws: Error.self) {
-            _ = try UIPositionalTargetResolver.keySequence(arguments: [], explicitTarget: "override-vm", environmentTarget: "default-vm")
-        }
-        #expect(throws: Error.self) {
-            _ = try UIPositionalTargetResolver.keySequence(arguments: ["return"], explicitTarget: nil, environmentTarget: " ")
-        }
-        #expect(throws: Error.self) {
-            _ = try UIPositionalTargetResolver.keySequence(arguments: ["return"], explicitTarget: nil, environmentTarget: nil)
+    @Test("ui key requires --key")
+    func keyRequiresOption() {
+        do {
+            _ = try UIKeyCommand.parse(["--vm", "dev"])
+            Issue.record("ui key accepted no key.")
+        } catch {
+            #expect(UIKeyCommand.fullMessage(for: error).contains("Missing expected argument '--key <key>'"))
         }
     }
 
-    @Test("UI positional actions and existing AI option bounds parse and validate")
-    func commandGrammarAndAIValidation() throws {
-        var key = try UIKeyCommand.parse(["dev", "return", "--format", "json"])
-        var sequence = try UIKeySequenceCommand.parse(["--vm", "dev", "left", "right"])
-        var settings = try UIAISettingsCommand.parse([
-            "dev", "Open Keyboard settings", "--mode", "suggest", "--max-steps", "1", "--confidence", "0.5", "--model-timeout", "1"
-        ])
+    @Test("ui key-sequence requires keys after --", arguments: [
+        ["--vm", "dev"],
+        ["--vm", "dev", "--"],
+        ["--vm", "dev", "return"]
+    ])
+    func keySequenceRequiresTerminatedKeys(arguments: [String]) {
+        do {
+            _ = try UIKeySequenceCommand.parse(arguments)
+            Issue.record("ui key-sequence accepted \(arguments).")
+        } catch {
+            let message = UIKeySequenceCommand.fullMessage(for: error)
+            #expect(message.contains("Put the keys after --") || message.contains("Unexpected argument 'return'"))
+        }
+    }
 
-        try key.validate()
-        try sequence.validate()
-        try settings.validate()
-        #expect(key.arguments == ["dev", "return"])
-        #expect(sequence.explicitTarget == "dev")
-        #expect(sequence.arguments == ["left", "right"])
-        #expect(settings.arguments == ["dev", "Open Keyboard settings"])
-
-        #expect(throws: Error.self) {
-            var invalid = try UIAISettingsCommand.parse(["dev", "Goal", "--max-steps", "0"])
-            try invalid.validate()
+    @Test("ui ai is no longer a command")
+    func aiIsRemoved() {
+        #expect(!UICommand.configuration.subcommands.contains { $0._commandName == "ai" })
+        do {
+            _ = try PommeCLI.parseAsRoot(["ui", "ai", "settings"])
+            Issue.record("ui ai settings still parses.")
+        } catch {
+            #expect(PommeCLI.fullMessage(for: error).contains("unexpected arguments: 'ai', 'settings'"))
         }
-        #expect(throws: Error.self) {
-            var invalid = try UIAISettingsCommand.parse(["dev", "Goal", "--confidence", "2"])
-            try invalid.validate()
-        }
-        #expect(throws: Error.self) {
-            var invalid = try UIAISettingsCommand.parse(["dev", "Goal", "--model-timeout", "0"])
-            try invalid.validate()
-        }
-        #expect(throws: Error.self) {
-            var invalid = try UIAISettingsCommand.parse(["dev", "Goal", "--mode", "unsupported"])
-            try invalid.validate()
-        }
+        #expect(!CommandCatalog.agentHelp.contains("ai settings"))
+        #expect(!CommandCatalog.agentHelp.contains("ui-unavailable"))
     }
 }
 
 @Suite("UI type grammar")
 struct UITypeCommandTests {
-    @Test("Positional text follows an optional VM name")
-    func positionalText() throws {
-        let explicit = try UITypeCommand.parse(["t1", "hi"]).target(environmentTarget: nil)
-        let environment = try UITypeCommand.parse(["hi"]).target(environmentTarget: "t2")
+    @Test("--text and --text-env each supply the text")
+    func textForms() throws {
+        let text = try UITypeCommand.parse(["--vm", "t1", "--text", "hi"])
+        let environmentText = try UITypeCommand.parse(["--text-env", "GREETING", "--replace"])
 
-        #expect(explicit.name == "t1")
-        #expect(explicit.positionalText == "hi")
-        #expect(environment.name == "t2")
-        #expect(environment.positionalText == "hi")
+        #expect(text.target.name == "t1")
+        #expect(text.text == "hi" && text.textEnvironment == nil)
+        #expect(environmentText.target.name == nil)
+        #expect(environmentText.textEnvironment == "GREETING" && environmentText.replace)
     }
 
-    @Test("--text and --text-env take at most a VM name positionally")
-    func explicitTextForms() throws {
-        let text = try UITypeCommand.parse(["t1", "--text", "hi"]).target(environmentTarget: nil)
-        let environmentText = try UITypeCommand.parse(["--text-env", "GREETING"]).target(environmentTarget: nil)
-
-        #expect(text.name == "t1")
-        #expect(text.positionalText == nil)
-        #expect(environmentText.name == nil)
-        #expect(environmentText.positionalText == nil)
-    }
-
-    @Test("Conflicting or missing text forms are rejected", arguments: [
-        ["t1", "hi", "--text", "hi"],
-        ["t1", "--text", "hi", "--text-env", "GREETING"],
-        ["t1", "hi", "--text-env", "GREETING"],
+    @Test("Exactly one of --text or --text-env is required", arguments: [
+        ["--vm", "t1", "--text", "hi", "--text-env", "GREETING"],
+        ["--vm", "t1"],
         [String]()
     ])
-    func conflictingForms(arguments: [String]) {
-        #expect(throws: (any Error).self) {
+    func conflictingOrMissingForms(arguments: [String]) {
+        do {
             _ = try UITypeCommand.parse(arguments)
+            Issue.record("ui type accepted \(arguments).")
+        } catch {
+            #expect(UITypeCommand.fullMessage(for: error).contains("Choose exactly one of --text or --text-env."))
         }
     }
 
-    @Test("Positional text without any target names the grammar")
-    func missingTarget() throws {
-        let command = try UITypeCommand.parse(["hi"])
-
-        #expect(throws: ValidationError.self) {
-            _ = try command.target(environmentTarget: nil)
+    @Test("Positional text is rejected")
+    func positionalTextIsRejected() {
+        do {
+            _ = try UITypeCommand.parse(["--vm", "t1", "--text", "hi", "hello"])
+            Issue.record("ui type accepted positional text.")
+        } catch {
+            #expect(UITypeCommand.fullMessage(for: error).contains("Unexpected argument 'hello'"))
         }
     }
 }
@@ -213,15 +169,16 @@ struct UIScreenshotOutputPathTests {
 
 @Suite("UI command help")
 struct UICommandHelpTests {
-    @Test("ui ai settings lists its modes and describes every option")
-    func aiSettingsHelpDescribesEveryOption() throws {
-        #expect(UIAISettingsCommand.helpMessage(columns: 400).contains("suggest, step, loop"))
-        #expect(try undescribedOptions(UIAISettingsCommand.self).isEmpty)
-    }
-
-    @Test("ui type describes --replace")
-    func typeHelpDescribesReplace() throws {
-        #expect(try undescribedOptions(UITypeCommand.self).isEmpty)
+    @Test("Every UI command describes each of its options", arguments: [
+        UITypeCommand.self as ParsableCommand.Type,
+        UIKeyCommand.self,
+        UIKeySequenceCommand.self,
+        UIClickCommand.self,
+        UIScreenshotCommand.self
+    ])
+    func helpDescribesEveryOption(_ command: ParsableCommand.Type) throws {
+        #expect(try undescribedOptions(command).isEmpty)
+        #expect(command.helpMessage(columns: 400).contains("--vm <vm>"))
     }
 
     @Test("config render names its output as the creation plan")

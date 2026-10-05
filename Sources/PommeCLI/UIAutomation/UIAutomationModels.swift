@@ -13,7 +13,6 @@ enum GuestUIOperation: String, Sendable {
     case keySequence = "key-sequence"
     case click
     case screenshot
-    case settingsAI = "settings-ai"
 }
 
 struct GuestUIRequest: @unchecked Sendable {
@@ -41,8 +40,7 @@ struct GuestUIRequest: @unchecked Sendable {
 
     static func parse(from object: [String: Any]) throws -> GuestUIRequest {
         guard let operationName = object["operation"] as? String,
-              let operation = GuestUIOperation(rawValue: operationName),
-              [.click, .key, .keySequence, .type, .screenshot, .settingsAI].contains(operation)
+              let operation = GuestUIOperation(rawValue: operationName)
         else {
             throw RunnerError.invalidControlResponse("guest-ui requires a valid operation.")
         }

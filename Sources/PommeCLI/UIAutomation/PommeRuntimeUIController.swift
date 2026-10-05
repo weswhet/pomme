@@ -63,13 +63,6 @@ actor PommeRuntimeUIController {
             }
             let outputURL = try validatedScreenshotURL(path)
             return try await backend.screenshot(to: outputURL, timeout: request.timeout)
-
-        case .settingsAI:
-            // Settings AI has an OCR/model/accessibility contract rather than
-            // a direct HID contract. Keep it explicit until that contract is
-            // rebuilt on top of this controller; never route it through an
-            // agent or host-window fallback.
-            throw RunnerError.invalidUICommand(PommeUICapabilities.settingsAIUnavailableReason)
         }
     }
 

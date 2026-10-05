@@ -460,6 +460,5 @@ extension UIKeySequenceCommand: CLIProgressCommand { var progressOptions: Global
 extension UIKeysCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
 extension UIClickCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
 extension UIScreenshotCommand: CLIProgressCommand { var progressOptions: GlobalOptions { format } }
-extension UIAISettingsCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
 extension ToolsCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }
 extension AgentHelpCommand: CLIProgressCommand { var progressOptions: GlobalOptions { output } }

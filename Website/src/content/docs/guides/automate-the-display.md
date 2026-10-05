@@ -12,6 +12,9 @@ a guest agent.
 These commands don't open a host window, move the host pointer, or change the
 frontmost app on the host.
 
+Each command that acts on a VM names it with `--vm VM_NAME`. If you set
+`POMME_VM_NAME`, you can omit `--vm`.
+
 ## Before you begin
 
 - Start the VM. For example, to start it in Recovery, run
@@ -30,7 +33,7 @@ To see what's on the guest display, save a screenshot to a PNG file on the
 host:
 
 ```sh
-pomme ui screenshot VM_NAME --output OUTPUT_PATH
+pomme ui screenshot --vm VM_NAME --output OUTPUT_PATH
 ```
 
 Replace the following:
@@ -48,12 +51,13 @@ repository, and delete them when you're done.
 
 ## Press a key
 
-To press one key or key combination, run `pomme ui key`:
+To press one key or key combination, run `pomme ui key` and name the key with
+`--key`:
 
 ```sh
-pomme ui key VM_NAME return
-pomme ui key VM_NAME cmd-shift-t
-pomme ui key VM_NAME ctrl-f2
+pomme ui key --vm VM_NAME --key return
+pomme ui key --vm VM_NAME --key cmd-shift-t
+pomme ui key --vm VM_NAME --key ctrl-f2
 ```
 
 Replace `VM_NAME` with the name of your VM.
@@ -67,43 +71,33 @@ Pomme doesn't accept numeric HID scan codes.
 
 ## Press a sequence of keys
 
-To press several keys in order, run `pomme ui key-sequence`:
+To press several keys in order, run `pomme ui key-sequence` and put the keys
+after `--`:
 
 ```sh
-pomme ui key-sequence VM_NAME down down return
+pomme ui key-sequence --vm VM_NAME -- down down return
 ```
 
 Replace `VM_NAME` with the name of your VM.
 
-If you set `POMME_VM_NAME` and omit the VM name, Pomme can't always tell
-whether the first value is a VM name or a key. In that case, name the VM with
-`--vm`:
-
-```sh
-pomme ui key-sequence --vm VM_NAME left right
-```
+Pomme reads every value after `--` as a key, so a key can't be mistaken for a
+VM name or a flag.
 
 ## Type text
 
 To type text into the focused field, run `pomme ui type`. Supply the text in
 exactly one of the following ways:
 
-- As a positional argument:
-
-  ```sh
-  pomme ui type VM_NAME 'hello world'
-  ```
-
 - With `--text`:
 
   ```sh
-  pomme ui type VM_NAME --text '/usr/bin/id -u'
+  pomme ui type --vm VM_NAME --text '/usr/bin/id -u'
   ```
 
 - With `--text-env`, which reads the text from a host environment variable:
 
   ```sh
-  pomme ui type VM_NAME --text-env VARIABLE_NAME
+  pomme ui type --vm VM_NAME --text-env VARIABLE_NAME
   ```
 
 Replace the following:
@@ -127,7 +121,7 @@ To click a point on the guest display, give its coordinates in points, measured
 from the top-left corner:
 
 ```sh
-pomme ui click VM_NAME --x 640 --y 400
+pomme ui click --vm VM_NAME --x 640 --y 400
 ```
 
 Replace `VM_NAME` with the name of your VM. Coordinates must be zero or
@@ -142,15 +136,8 @@ Each `pomme ui` command that talks to a VM accepts `--timeout` in seconds. For
 example:
 
 ```sh
-pomme ui screenshot VM_NAME --output OUTPUT_PATH --timeout 30
+pomme ui screenshot --vm VM_NAME --output OUTPUT_PATH --timeout 30
 ```
-
-## About guided automation
-
-`pomme ui ai settings` is reserved for guided System Settings automation. It's
-unavailable in this build because it needs a guest accessibility bridge. To
-automate System Settings, use explicit `ui key`, `ui type`, `ui click`, and
-`ui screenshot` commands.
 
 ## What's next
 
