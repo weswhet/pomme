@@ -50,6 +50,9 @@ endpoint that it acts on. Every other value is a named flag:
 - `pomme snapshot create`, `restore`, and `delete` require the snapshot name
   with `--snapshot`. For example,
   `pomme snapshot create dev --snapshot clean`.
+- `pomme shell` only opens a durable shell session, attached or with
+  `--detach`, and no longer accepts `--timeout`. To run a one-shot shell
+  expression, use `pomme exec VM -- /bin/sh -c 'EXPRESSION'`.
 
 ### Compatibility
 

@@ -73,10 +73,9 @@ Test the exit status of every command. Pomme uses the following conventions:
   standard error. In this case, standard output doesn't contain a JSON result,
   even with `--format json`.
 - `64` means the arguments were invalid, for example a missing VM name.
-- For `pomme exec` and `pomme shell`, a guest program's exit code passes
-  through. A program ended by a signal returns `128` plus the signal number, a
-  foreground timeout returns `124`, and an interrupted foreground command
-  returns `130`.
+- For `pomme exec`, a guest program's exit code passes through. A program
+  ended by a signal returns `128` plus the signal number, a foreground timeout
+  returns `124`, and an interrupted foreground command returns `130`.
 
 For the full list, see [Exit codes](/reference/exit-codes/).
 
@@ -132,7 +131,7 @@ them before you pass them to a deleting command.
 
 The following commands always need a terminal and don't have a
 non-interactive form: `pomme tui`, `pomme config init`, `pomme shell` without
-an expression, `pomme exec --pty`, and `pomme sessions attach`. To run a
+`--detach`, `pomme exec --pty`, and `pomme sessions attach`. To run a
 terminal program from a script, create a detached session with
 `pomme exec --pty --detach` and read its output with `pomme sessions logs`. For
 details, see [Use durable terminal sessions](/guides/use-terminal-sessions/).

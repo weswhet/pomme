@@ -3,8 +3,8 @@ title: Run commands in a VM
 description: Run programs and shell commands in a running VM, in the foreground or as background jobs.
 ---
 
-This guide shows you how to run programs inside a VM from the host with
-`pomme exec` and `pomme shell`, and how to manage long-running commands as
+This guide shows you how to run programs and shell commands inside a VM from
+the host with `pomme exec`, and how to manage long-running commands as
 background jobs. Pomme runs each command through the authenticated guest
 agent, so you don't need SSH or a network connection to the guest.
 
@@ -66,27 +66,25 @@ For the full list of exit codes, see [Exit codes](/reference/exit-codes/).
 
 ## Run a shell command
 
-To run a shell expression, use `pomme shell` with the expression in quotes.
-Pomme runs it with `/bin/sh -c`, so you can use pipes, redirection, and
-variables:
+To run a shell expression, run `/bin/sh -c` with `pomme exec` and put the
+expression in quotes. The shell handles pipes, redirection, and variables:
 
 ```sh
-pomme shell VM_NAME 'ls -l /Users | wc -l'
+pomme exec VM_NAME -- /bin/sh -c 'ls -l /Users | wc -l'
 ```
 
 Replace `VM_NAME` with the name of the VM.
 
-A shell expression is a one-shot command. It follows the same output, exit
-code, and time limit rules as `pomme exec`.
+A shell expression follows the same output, exit code, and time limit rules as
+any other `pomme exec` command.
 
-If you run `pomme shell VM_NAME` without an expression, Pomme opens an
-interactive shell instead. For details, see
-[Use durable terminal sessions](/guides/use-terminal-sessions/).
+To open an interactive shell instead, run `pomme shell VM_NAME`. For details,
+see [Use durable terminal sessions](/guides/use-terminal-sessions/).
 
 ## Control how the command runs
 
-By default, the command runs as `root` in the guest. The following flags work
-with both `pomme exec` and `pomme shell`:
+By default, the command runs as `root` in the guest. The following flags
+change how `pomme exec` runs the command:
 
 | Flag | Effect |
 | --- | --- |
@@ -123,12 +121,11 @@ A background job keeps running in the guest after the Pomme command returns.
 Use a job for a command that takes longer than you want to wait, or that must
 keep running while you do other work.
 
-To start a background job, pass `--detach` (`-d`) to `pomme exec`, or to
-`pomme shell` with an expression:
+To start a background job, pass `--detach` (`-d`) to `pomme exec`:
 
 ```sh
 pomme exec VM_NAME --detach -- /usr/bin/sleep 30
-pomme shell VM_NAME --detach 'softwareupdate --list > /tmp/updates.txt 2>&1'
+pomme exec VM_NAME --detach -- /bin/sh -c 'softwareupdate --list > /tmp/updates.txt 2>&1'
 ```
 
 Replace `VM_NAME` with the name of the VM.

@@ -467,6 +467,18 @@ if grep -q 'Invalid VM name invalid/name' "$work/stderr"; then
 else
   fail "exec name comes from the environment, not the command"
 fi
+expect_failure "shell takes no expression" "$runner" shell missing --detach 'ls -l /Users'
+if grep -q "Unexpected argument 'ls -l /Users'" "$work/stderr"; then
+  pass "shell expression is an unexpected argument"
+else
+  fail "shell expression is an unexpected argument"
+fi
+expect_failure "shell takes no timeout" "$runner" shell missing --detach --timeout 5
+if grep -q "Unknown option '--timeout'" "$work/stderr"; then
+  pass "shell names --timeout as unknown"
+else
+  fail "shell names --timeout as unknown"
+fi
 expect_success "ui keys lists the key vocabulary" "$runner" ui keys
 if grep -q '^return' "$work/stdout" && grep -q '^command-' "$work/stdout"; then
   pass "ui keys names keys and modifier prefixes"

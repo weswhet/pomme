@@ -359,10 +359,6 @@ struct GuestCommandRequest: Sendable {
         return PommeAgentCLIModelSupport.controlPayload(operation: "process.start", payload: agentPayload(detached: detached))
     }
 
-    static func shell(_ command: String, timeout: TimeInterval) -> Self {
-        Self(path: "/bin/sh", arguments: ["-c", command], timeout: timeout)
-    }
-
     static func direct(_ arguments: [String], timeout: TimeInterval, flagName: String = "--exec") throws -> Self {
         guard let path = arguments.first, !path.isEmpty else {
             throw RunnerError.invalidGuestCommand("\(flagName) requires an executable path after --.")

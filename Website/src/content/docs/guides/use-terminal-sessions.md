@@ -17,8 +17,7 @@ transcript of its output that you can replay.
 
 ## Open a shell session
 
-To open an interactive shell in the guest, run `pomme shell` without an
-expression:
+To open an interactive shell in the guest, run `pomme shell`:
 
 ```sh
 pomme shell VM_NAME
