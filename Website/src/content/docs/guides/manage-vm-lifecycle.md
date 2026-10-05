@@ -38,6 +38,22 @@ pomme status
 
 For details, see [Environment variables](/reference/environment-variables/).
 
+### Act on every VM
+
+`pomme stop`, `pomme pause`, `pomme resume`, and `pomme delete` accept
+`--all` (`-a`) in place of VM names. Each command then acts on every VM that it
+applies to, and ignores `POMME_VM_NAME`:
+
+| Command | VMs that `--all` selects |
+| --- | --- |
+| `pomme stop --all` | Running and paused VMs. |
+| `pomme pause --all` | Running VMs. |
+| `pomme resume --all` | Paused VMs. |
+| `pomme delete --all` | Every VM. |
+
+If no VM matches, the command succeeds without changing anything. You can't
+combine `--all` with VM names.
+
 ## Check the state of your VMs
 
 To see every VM that Pomme manages, run `pomme list` (or its alias, `pomme ls`):
@@ -197,6 +213,9 @@ To delete a VM without a prompt, whether or not it's running, pass `--force`:
 pomme delete VM_NAME --force
 ```
 
+To delete every VM, pass `--all`. The confirmation prompt lists each VM that
+the command deletes.
+
 With `--force`, Pomme stops a running VM with the same shutdown sequence as
 `pomme stop`, so it can power off the VM if the guest doesn't shut down in
 time. Pomme then waits for the VM's helper process to exit before it removes
@@ -204,8 +223,9 @@ the bundle. If Pomme can't confirm that the VM stopped or that the helper
 exited, it keeps the VM bundle and reports an error.
 
 :::danger
-`pomme delete --force` deletes the VM without asking for confirmation. Check
-the VM name before you run it in a script.
+`pomme delete --force` deletes the VM without asking for confirmation, and
+`pomme delete --all --force` deletes every VM. Check the VM names before you
+run either command in a script.
 :::
 
 ## What's next

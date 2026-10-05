@@ -368,13 +368,22 @@ struct StopCommand: ParsableCommand {
     @Argument(help: "VM names. Uses POMME_VM_NAME when omitted.")
     var names: [String] = []
 
+    @Flag(name: [.customShort("a"), .customLong("all")], help: "Stop every running or paused VM.")
+    var all = false
+
     @Flag(name: .customLong("force"), help: "Skip graceful guest shutdown.")
     var force = false
 
     @OptionGroup var output: GlobalOptions
 
+    mutating func validate() throws {
+        try VMTargetResolver.validateAll(all, names: names)
+    }
+
     mutating func run() throws {
-        let targets = try VMTargetResolver.names(from: names)
+        let targets = all
+            ? try VMTargetResolver.allNames(states: ["running", "paused"])
+            : try VMTargetResolver.names(from: names)
         let results = try targets.map { try PommeEnvironment.live().lifecycle.stop($0, force) }
         try CLIOutputWriter.write(results, options: output)
     }
@@ -418,10 +427,19 @@ struct PauseCommand: ParsableCommand {
     @Argument(help: "VM names. Uses POMME_VM_NAME when omitted.")
     var names: [String] = []
 
+    @Flag(name: [.customShort("a"), .customLong("all")], help: "Pause every running VM.")
+    var all = false
+
     @OptionGroup var output: GlobalOptions
 
+    mutating func validate() throws {
+        try VMTargetResolver.validateAll(all, names: names)
+    }
+
     mutating func run() throws {
-        let targets = try VMTargetResolver.names(from: names)
+        let targets = all
+            ? try VMTargetResolver.allNames(states: ["running"])
+            : try VMTargetResolver.names(from: names)
         let results = try targets.map(PommeEnvironment.live().lifecycle.pause)
         try CLIOutputWriter.write(results, options: output)
     }
@@ -434,10 +452,19 @@ struct ResumeCommand: ParsableCommand {
     @Argument(help: "VM names. Uses POMME_VM_NAME when omitted.")
     var names: [String] = []
 
+    @Flag(name: [.customShort("a"), .customLong("all")], help: "Resume every paused VM.")
+    var all = false
+
     @OptionGroup var output: GlobalOptions
 
+    mutating func validate() throws {
+        try VMTargetResolver.validateAll(all, names: names)
+    }
+
     mutating func run() throws {
-        let targets = try VMTargetResolver.names(from: names)
+        let targets = all
+            ? try VMTargetResolver.allNames(states: ["paused"])
+            : try VMTargetResolver.names(from: names)
         let results = try targets.map(PommeEnvironment.live().lifecycle.resume)
         try CLIOutputWriter.write(results, options: output)
     }
@@ -454,6 +481,9 @@ struct DeleteCommand: ParsableCommand {
     @Argument(help: "VM names. Uses POMME_VM_NAME when omitted.")
     var names: [String] = []
 
+    @Flag(name: [.customShort("a"), .customLong("all")], help: "Delete every managed VM. The prompt lists them all.")
+    var all = false
+
     @Flag(
         name: .customLong("force"),
         help: "Stop running VMs and delete without prompting. May power off if shutdown times out."
@@ -462,9 +492,16 @@ struct DeleteCommand: ParsableCommand {
 
     @OptionGroup var output: GlobalOptions
 
+    mutating func validate() throws {
+        try VMTargetResolver.validateAll(all, names: names)
+    }
+
     mutating func run() throws {
-        let targets = try VMTargetResolver.names(from: names)
-        try CLIConfirmation.confirmDeletion(of: targets, force: force)
+        let targets = all ? try VMTargetResolver.allNames() : try VMTargetResolver.names(from: names)
+        // With --all and no VMs there is nothing to confirm.
+        if !targets.isEmpty {
+            try CLIConfirmation.confirmDeletion(of: targets, force: force)
+        }
         let results = try targets.map { try PommeEnvironment.live().lifecycle.destroy($0, force) }
         try CLIOutputWriter.write(results, options: output)
     }

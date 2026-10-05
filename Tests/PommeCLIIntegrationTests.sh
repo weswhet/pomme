@@ -506,6 +506,17 @@ else
   fail "delete run-time validation names the delete usage"
 fi
 
+# Only the parse-time conflict is exercised here: --all must never act on
+# this host's inventory from a contract test.
+for all_command in stop pause resume delete; do
+  expect_failure "$all_command --all rejects VM names" "$runner" "$all_command" -a pomme-contract-all-missing
+  if grep -q -- '--all conflicts with VM names.' "$work/stderr"; then
+    pass "$all_command names the --all conflict"
+  else
+    fail "$all_command names the --all conflict"
+  fi
+done
+
 for delete_command in delete rm; do
   expect_success "$delete_command help" "$runner" "$delete_command" --help
   tr -s '[:space:]' ' ' <"$work/stdout" >"$work/delete-help-normalized"

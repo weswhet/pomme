@@ -61,6 +61,14 @@ endpoint that it acts on. Every other value is a named flag:
 - The unavailable `pomme ui ai settings` command is removed, and
   `pomme tools` no longer reports `uiCapabilities.settingsAI`.
 
+### New flags
+
+- `pomme stop`, `pomme pause`, `pomme resume`, and `pomme delete` accept
+  `--all` (`-a`) in place of VM names. Each acts on the VMs that it applies
+  to: `stop` on running and paused VMs, `pause` on running VMs, `resume` on
+  paused VMs, and `delete` on every VM. For details, see
+  [Act on every VM](/guides/manage-vm-lifecycle/#act-on-every-vm).
+
 ### Compatibility
 
 - The MDM enrollment journal is now schema 6. Pomme reads schema 3–5 journals

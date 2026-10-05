@@ -110,6 +110,27 @@ enum VMTargetResolver {
         return try candidates.map(validateVMName)
     }
 
+    /// Rejects `--all` together with VM names.
+    static func validateAll(_ all: Bool, names: [String]) throws {
+        guard !all || names.isEmpty else {
+            throw ValidationError("--all conflicts with VM names.")
+        }
+    }
+
+    /// The VMs that `--all` selects from `pomme list` entries: those whose
+    /// `vmState` is in `states`, or every VM when `states` is nil, in list
+    /// order. `POMME_VM_NAME` plays no part.
+    static func allNames(from entries: [[String: Any]], states: Set<String>? = nil) -> [String] {
+        entries
+            .filter { entry in states.map { $0.contains(PommeCore.stringValue(entry["vmState"])) } ?? true }
+            .map { PommeCore.stringValue($0["name"]) }
+    }
+
+    /// `allNames(from:states:)` over the current VM inventory.
+    static func allNames(states: Set<String>? = nil) throws -> [String] {
+        allNames(from: try PommeApplication.listVMsPayload()["vms"] as? [[String: Any]] ?? [], states: states)
+    }
+
     /// Returns the single VM name encoded in a `name:/absolute/path` endpoint.
     static func endpointName(_ endpoint: String) throws -> String? {
         guard let separator = endpoint.firstIndex(of: ":") else {
