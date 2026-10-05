@@ -12,12 +12,17 @@ permissions:
 jobs:
   verify:
     name: Build and test Pomme
-    runs-on: macos-15
+    # Pomme uses macOS 27 Virtualization APIs, so it needs the Xcode 27 SDK.
+    # GitHub's xcode-27 image (macOS 27, Xcode 27) is a public preview.
+    runs-on: xcode-27
     timeout-minutes: 45
 
     steps:
       - name: Check out
         uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: sw_vers && xcodebuild -version
 
       - name: Resolve packages
         run: >-
