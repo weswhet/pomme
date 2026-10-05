@@ -397,3 +397,7 @@ A local documentation site lives in [Website](Website/README.md). Run
 - [Security workflows](Docs/SecurityWorkflows.md)
 - [Protocol contracts](Docs/Protocols.md)
 - [Qualification and publication gates](Docs/Qualification.md)
+
+## License
+
+Pomme is licensed under the [Apache License 2.0](LICENSE).
