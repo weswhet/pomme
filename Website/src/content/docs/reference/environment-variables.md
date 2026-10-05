@@ -15,8 +15,9 @@ The `pomme` command reads the following environment variables.
 ## POMME_VM_NAME
 
 Sets the default VM for commands that accept an optional VM name, such as
-`pomme status`, `pomme exec`, `pomme sessions list`, and `pomme ui key`. A
-name that you pass on the command line always takes precedence.
+`pomme status`, `pomme exec`, and `pomme sessions list`, and for the `pomme ui`
+commands that take `--vm`. A name that you pass on the command line always
+takes precedence.
 
 ```sh
 export POMME_VM_NAME=dev
@@ -31,11 +32,6 @@ following message and exit code `64`:
 ```text
 Error: Specify a VM name or set POMME_VM_NAME.
 ```
-
-Commands that take a single VM name followed by other positional values can be
-ambiguous when `POMME_VM_NAME` is set. For example, in
-`pomme ui key-sequence dev return`, `dev` might be a VM name or a key. For
-`pomme ui key-sequence`, use `--vm` to name the VM explicitly.
 
 ## POMME_AUTHORIZED_USER and POMME_AUTHORIZED_PASSWORD
 

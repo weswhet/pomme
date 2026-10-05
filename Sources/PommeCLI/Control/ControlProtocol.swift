@@ -435,10 +435,6 @@ struct PommeUIControlRequest: Sendable {
             guard hostOutputPath != nil else {
                 throw RunnerError.invalidUICommand("guest-ui screenshot requires hostOutputPath.")
             }
-        case .settingsAI:
-            // The existing planner depends on a guest/host accessibility
-            // bridge that is intentionally outside this direct HID boundary.
-            throw RunnerError.invalidUICommand(PommeUICapabilities.settingsAIUnavailableReason)
         }
 
         return .init(

@@ -57,9 +57,9 @@ The following commands press Control+F2, press Command+Shift+T, and then press
 the Left arrow and Right arrow keys in order:
 
 ```sh
-pomme ui key VM_NAME ctrl-f2
-pomme ui key VM_NAME cmd+shift+t
-pomme ui key-sequence VM_NAME left right
+pomme ui key --vm VM_NAME --key ctrl-f2
+pomme ui key --vm VM_NAME --key cmd+shift+t
+pomme ui key-sequence --vm VM_NAME -- left right
 ```
 
 Replace `VM_NAME` with the name of the VM.

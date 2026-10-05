@@ -6,8 +6,8 @@ import Testing
 /// element; inferring it across the whole literal exceeds the type checker's
 /// budget and fails the build.
 private let negativeValueCases: [(command: String, arguments: [String], expected: String)] = [
-    ("ui click", ["dev", "--x", "-1", "--y", "5"], "--x must be a finite display coordinate of zero or more."),
-    ("ui click", ["dev", "--x", "5", "--y", "-1"], "--y must be a finite display coordinate of zero or more."),
+    ("ui click", ["--vm", "dev", "--x", "-1", "--y", "5"], "--x must be a finite display coordinate of zero or more."),
+    ("ui click", ["--vm", "dev", "--x", "5", "--y", "-1"], "--y must be a finite display coordinate of zero or more."),
     ("ipsw list", ["--limit", "-1"], "--limit must be greater than zero."),
     ("start", ["dev", "--timeout", "-5"], "--timeout must be greater than zero."),
     ("restart", ["dev", "--timeout", "-5"], "--timeout must be greater than zero."),
@@ -15,9 +15,6 @@ private let negativeValueCases: [(command: String, arguments: [String], expected
     ("cat", ["dev:/tmp/x", "--offset", "-1"], "--offset must not be negative."),
     ("cat", ["dev:/tmp/x", "--count", "-1"], "--count must not be negative."),
     ("sessions logs", ["dev", "--session", "00000000-0000-0000-0000-000000000000", "--from-offset", "-1"], "--from-offset must not be negative."),
-    ("ui ai settings", ["dev", "Goal", "--max-steps", "-1"], "requires a positive integer"),
-    ("ui ai settings", ["dev", "Goal", "--confidence", "-1"], "between 0 and 1"),
-    ("ui ai settings", ["dev", "Goal", "--model-timeout", "-1"], "positive number of seconds"),
     ("exec", ["dev", "--uid", "-1", "--", "/bin/true"], "The value '-1' is invalid for '--uid <uid>'"),
 ]
 
@@ -35,7 +32,7 @@ struct NumericOptionTests {
 
     @Test("Positive values still parse for the same options")
     func positiveValuesParse() throws {
-        var click = try UIClickCommand.parse(["dev", "--x", "10", "--y", "20"])
+        var click = try UIClickCommand.parse(["--vm", "dev", "--x", "10", "--y", "20"])
         try click.validate()
         #expect(click.x == 10 && click.y == 20)
 
@@ -66,7 +63,6 @@ struct NumericOptionTests {
         case "exec": return message(ExecCommand.self)
         case "cat": return message(CatCommand.self)
         case "sessions logs": return message(SessionsLogsCommand.self)
-        case "ui ai settings": return message(UIAISettingsCommand.self)
         default: throw ValidationError("Unknown command \(command).")
         }
     }

@@ -53,6 +53,13 @@ endpoint that it acts on. Every other value is a named flag:
 - `pomme shell` only opens a durable shell session, attached or with
   `--detach`, and no longer accepts `--timeout`. To run a one-shot shell
   expression, use `pomme exec VM -- /bin/sh -c 'EXPRESSION'`.
+- The `pomme ui` commands that act on a VM name it with `--vm`, which falls
+  back to `POMME_VM_NAME`. `pomme ui key` takes the key with `--key`,
+  `pomme ui type` takes exactly one of `--text` or `--text-env`, and
+  `pomme ui key-sequence` takes its keys after `--`. For example,
+  `pomme ui key-sequence --vm dev -- down return`.
+- The unavailable `pomme ui ai settings` command is removed, and
+  `pomme tools` no longer reports `uiCapabilities.settingsAI`.
 
 ### Compatibility
 

@@ -258,23 +258,23 @@ The following illustrate input syntax, not a complete Recovery navigation sequen
 
 ```sh
 pomme start dev --mode recovery
-pomme ui key dev ctrl-f2
-pomme ui key dev cmd+shift+t
-pomme ui key-sequence dev left right
-pomme ui type dev --text '/usr/bin/id -u'
-pomme ui key dev return
+pomme ui key --vm dev --key ctrl-f2
+pomme ui key --vm dev --key cmd+shift+t
+pomme ui key-sequence --vm dev -- left right
+pomme ui type --vm dev --text '/usr/bin/id -u'
+pomme ui key --vm dev --key return
 pomme ui keys
 ```
 
 `pomme ui keys` lists the named keys, modifier prefixes, and aliases that `ui key`
 and `ui key-sequence` accept.
 
-Observe the guest with `pomme ui screenshot dev --output /absolute/private/path.png`.
+Observe the guest with `pomme ui screenshot --vm dev --output /absolute/private/path.png`.
 Keep Recovery screenshots in a private temporary lab directory, outside the
 repository. Named navigation/function keys and modifier combinations are
 supported; numeric HID scan codes are not exposed. Requests do not move the host
-pointer or change its frontmost app. `ui ai` remains unavailable. Automatic
-provisioning owns an exclusive VM lease; do not mix manual input into it.
+pointer or change its frontmost app. Automatic provisioning owns an exclusive
+VM lease; do not mix manual input into it.
 
 ## Security and access
 

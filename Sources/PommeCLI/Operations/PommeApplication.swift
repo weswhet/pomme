@@ -1259,7 +1259,6 @@ enum PommeApplication {
     }
 
     static func ui(name: String, request: GuestUIRequest) throws -> PommeOperationResult {
-        try PommeUICapabilities.require(operation: request.operation)
         if request.operation == .screenshot {
             return try uiUnchecked(name: name, request: request)
         }

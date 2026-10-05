@@ -1,7 +1,7 @@
 import ArgumentParser
 import Foundation
 
-/// Host-display UI input, screenshots, and guided Settings automation.
+/// Host-display UI input and screenshots.
 struct UICommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "ui",
@@ -12,8 +12,7 @@ struct UICommand: ParsableCommand {
             UIKeySequenceCommand.self,
             UIKeysCommand.self,
             UIClickCommand.self,
-            UIScreenshotCommand.self,
-            UIAICommand.self
+            UIScreenshotCommand.self
         ]
     )
 }
@@ -23,126 +22,31 @@ private func runUIRequest(name: String?, request: GuestUIRequest, output: Global
     try CLIOutputWriter.write(PommeEnvironment.live().guest.ui(target, request), options: output)
 }
 
-/// Resolves UI actions whose first positional value can otherwise be mistaken
-/// for an optional VM name. Fixed-arity actions preserve the established
-/// `[<vm>] <action>` grammar. A key sequence with an environment target only
-/// accepts a positional VM when the first value cannot be a display key; the
-/// remaining overlap is rejected rather than guessing which guest receives it.
-enum UIPositionalTargetResolver {
-    static func singleAction(
-        arguments: [String],
-        environmentTarget: String? = ProcessInfo.processInfo.environment["POMME_VM_NAME"],
-        action: String
-    ) throws -> (target: String, action: String) {
-        switch arguments.count {
-        case 1:
-            return (try self.environmentTarget(environmentTarget), arguments[0])
-        case 2:
-            return (try validateVMName(arguments[0]), arguments[1])
-        default:
-            let value = switch action {
-            case "ai settings": "goal"
-            case "type": "text"
-            default: "key"
-            }
-            throw ValidationError("Usage: pomme ui \(action) [<vm>] <\(value)> (or set POMME_VM_NAME).")
-        }
-    }
-
-    static func keySequence(
-        arguments: [String],
-        explicitTarget: String?,
-        environmentTarget: String? = ProcessInfo.processInfo.environment["POMME_VM_NAME"]
-    ) throws -> (target: String, keys: [String]) {
-        if let explicitTarget {
-            guard !arguments.isEmpty else {
-                throw ValidationError("key-sequence requires at least one key.")
-            }
-            return (try validateVMName(explicitTarget), arguments)
-        }
-
-        if let environmentTarget, !environmentTarget.isEmpty {
-            guard !arguments.isEmpty else {
-                throw ValidationError("key-sequence requires at least one key.")
-            }
-            if arguments.count == 1 {
-                return (try self.environmentTarget(environmentTarget), arguments)
-            }
-
-            let first = arguments[0]
-            if HostDisplayKey.lookup(first) == nil {
-                return (try validateVMName(first), Array(arguments.dropFirst()))
-            }
-            if (try? validateVMName(first)) != nil {
-                throw ValidationError(
-                    "POMME_VM_NAME makes \(first) ambiguous as either a VM name or a key; use --vm <vm> to select the target."
-                )
-            }
-            return (try self.environmentTarget(environmentTarget), arguments)
-        }
-
-        guard arguments.count >= 2 else {
-            throw ValidationError("Usage: pomme ui key-sequence <vm> <key>... (or set POMME_VM_NAME for one key, or use --vm <vm>).")
-        }
-        return (try validateVMName(arguments[0]), Array(arguments.dropFirst()))
-    }
-
-    private static func environmentTarget(_ value: String?) throws -> String {
-        guard let value, !value.isEmpty else {
-            throw ValidationError("Specify a VM name or set POMME_VM_NAME.")
-        }
-        return try validateVMName(value)
-    }
+/// The VM a `ui` command acts on. It's an option rather than a positional,
+/// so it never competes with the text, key, or keys that the command sends.
+struct UITargetOptions: ParsableArguments {
+    @Option(name: .customLong("vm"), help: "VM name. Uses POMME_VM_NAME when omitted.")
+    var name: String?
 }
 
 struct UITypeCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "type", abstract: "Type text into the guest display.")
-    @Argument(help: "[VM name] text. Uses POMME_VM_NAME when the VM name is omitted.") var arguments: [String] = []
+    @OptionGroup var target: UITargetOptions
     @Option(name: .customLong("text"), help: "Text to type.") var text: String?
     @Option(name: .customLong("text-env"), help: "Environment variable containing text to type.") var textEnvironment: String?
     @Flag(name: .customLong("replace"), help: "Press Command-A before typing so the text replaces the focused field's contents. Off by default.") var replace = false
     @OptionGroup var timeout: TimeoutOptions
     @OptionGroup var output: GlobalOptions
 
-    /// Checks the text forms and positional count only; the VM target,
-    /// which may come from POMME_VM_NAME, is resolved when the command runs.
     mutating func validate() throws {
-        let conflict = ValidationError("Choose exactly one of positional text, --text, or --text-env.")
-        switch (text != nil, textEnvironment != nil) {
-        case (true, true):
-            throw conflict
-        case (true, false), (false, true):
-            guard arguments.count <= 1 else { throw conflict }
-        case (false, false):
-            guard !arguments.isEmpty else { throw conflict }
-            guard arguments.count <= 2 else {
-                throw ValidationError("Usage: pomme ui type [<vm>] <text> (or set POMME_VM_NAME).")
-            }
+        guard (text == nil) != (textEnvironment == nil) else {
+            throw ValidationError("Choose exactly one of --text or --text-env.")
         }
-    }
-
-    /// The VM and, for the positional form, the text. With --text or
-    /// --text-env the positional list may hold only the VM name.
-    func target(
-        environmentTarget: String? = ProcessInfo.processInfo.environment["POMME_VM_NAME"]
-    ) throws -> (name: String?, positionalText: String?) {
-        guard text == nil, textEnvironment == nil else {
-            return (arguments.first, nil)
-        }
-        let resolved = try UIPositionalTargetResolver.singleAction(
-            arguments: arguments,
-            environmentTarget: environmentTarget,
-            action: "type"
-        )
-        return (resolved.target, resolved.action)
     }
 
     mutating func run() throws {
-        let target = try target()
         let resolved: String
-        if let positionalText = target.positionalText {
-            resolved = positionalText
-        } else if let text {
+        if let text {
             resolved = text
         } else if let name = textEnvironment, let value = ProcessInfo.processInfo.environment[name] {
             resolved = value
@@ -162,40 +66,42 @@ struct UITypeCommand: ParsableCommand {
 }
 
 struct UIKeyCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "key", abstract: "Press a guest key. Uses POMME_VM_NAME when the VM is omitted.")
-    @Argument(help: "[VM name] key. Uses POMME_VM_NAME when the VM name is omitted.") var arguments: [String] = []
+    static let configuration = CommandConfiguration(commandName: "key", abstract: "Press a guest key.")
+    @OptionGroup var target: UITargetOptions
+    @Option(name: .customLong("key"), help: "Key name, such as return or cmd-shift-t. Run `pomme ui keys` for the names.") var key: String
     @OptionGroup var timeout: TimeoutOptions
     @OptionGroup var output: GlobalOptions
-    mutating func validate() throws {
-        _ = try UIPositionalTargetResolver.singleAction(arguments: arguments, action: "key")
-    }
+
     mutating func run() throws {
-        let resolved = try UIPositionalTargetResolver.singleAction(arguments: arguments, action: "key")
         try runUIRequest(
-            name: resolved.target,
-            request: GuestUIRequest(operation: .key, agentPayload: ["operation": "key", "key": resolved.action], timeout: timeout.value()),
+            name: target.name,
+            request: GuestUIRequest(operation: .key, agentPayload: ["operation": "key", "key": key], timeout: timeout.value()),
             output: output
         )
     }
 }
 
 struct UIKeySequenceCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "key-sequence",
-        abstract: "Press a sequence of guest keys. Use --vm when POMME_VM_NAME makes the first value ambiguous."
-    )
-    @Option(name: .customLong("vm"), help: "VM name for an unambiguous key sequence.") var explicitTarget: String?
-    @Argument(help: "[VM name] key...; with POMME_VM_NAME, use --vm for a multiple-key sequence that could begin with a VM name.") var arguments: [String] = []
+    static let configuration = CommandConfiguration(commandName: "key-sequence", abstract: "Press a sequence of guest keys.")
+    @OptionGroup var target: UITargetOptions
     @OptionGroup var timeout: TimeoutOptions
     @OptionGroup var output: GlobalOptions
+
+    // Like `exec`, only tokens after `--` are keys, so no key can be taken
+    // for an option or a VM name.
+    @Argument(parsing: .postTerminator, help: "Key names after --, pressed in order.")
+    var keys: [String] = []
+
     mutating func validate() throws {
-        _ = try UIPositionalTargetResolver.keySequence(arguments: arguments, explicitTarget: explicitTarget)
+        guard !keys.isEmpty else {
+            throw ValidationError("Put the keys after --, for example: pomme ui key-sequence --vm dev -- down return.")
+        }
     }
+
     mutating func run() throws {
-        let resolved = try UIPositionalTargetResolver.keySequence(arguments: arguments, explicitTarget: explicitTarget)
         try runUIRequest(
-            name: resolved.target,
-            request: GuestUIRequest(operation: .keySequence, agentPayload: ["operation": "key-sequence", "keys": resolved.keys], timeout: timeout.value()),
+            name: target.name,
+            request: GuestUIRequest(operation: .keySequence, agentPayload: ["operation": "key-sequence", "keys": keys], timeout: timeout.value()),
             output: output
         )
     }
@@ -235,7 +141,7 @@ struct UIKeysCommand: ParsableCommand {
 
 struct UIClickCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "click", abstract: "Click guest display coordinates.")
-    @Argument var name: String?
+    @OptionGroup var target: UITargetOptions
     @Option(name: .customLong("x"), parsing: .unconditional, help: "Display x coordinate in points, from the left edge.") var x: Double
     @Option(name: .customLong("y"), parsing: .unconditional, help: "Display y coordinate in points, from the top edge.") var y: Double
     @OptionGroup var timeout: TimeoutOptions
@@ -248,7 +154,7 @@ struct UIClickCommand: ParsableCommand {
 
     mutating func run() throws {
         try runUIRequest(
-            name: name,
+            name: target.name,
             request: GuestUIRequest(operation: .click, agentPayload: ["operation": "click", "x": x, "y": y], timeout: timeout.value()),
             output: output
         )
@@ -257,7 +163,7 @@ struct UIClickCommand: ParsableCommand {
 
 struct UIScreenshotCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "screenshot", abstract: "Capture the guest display.")
-    @Argument var name: String?
+    @OptionGroup var target: UITargetOptions
     @Option(name: .customLong("output"), help: "Host output file path.") var outputPath: String
     @OptionGroup var timeout: TimeoutOptions
     @OptionGroup var format: GlobalOptions
@@ -282,7 +188,7 @@ struct UIScreenshotCommand: ParsableCommand {
 
     mutating func run() throws {
         try runUIRequest(
-            name: name,
+            name: target.name,
             request: GuestUIRequest(
                 operation: .screenshot,
                 agentPayload: ["operation": "screenshot"],
@@ -290,74 +196,6 @@ struct UIScreenshotCommand: ParsableCommand {
                 hostOutputPath: PommeCore.absoluteHostPath(outputPath)
             ),
             output: format
-        )
-    }
-}
-
-struct UIAICommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "ai",
-        abstract: "Run guided UI automation. Currently unavailable without a guest accessibility bridge.",
-        subcommands: [UIAISettingsCommand.self]
-    )
-}
-
-extension SettingsAIMode: ExpressibleByArgument {}
-
-struct UIAISettingsCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "settings",
-        abstract: "Navigate System Settings toward a goal. Currently unavailable without a guest accessibility bridge."
-    )
-    @Argument(help: "[VM name] goal. Uses POMME_VM_NAME when the VM name is omitted.") var arguments: [String] = []
-    @Option(name: .customLong("mode"), help: "suggest proposes one action, step performs one, loop repeats up to --max-steps.")
-    var mode: SettingsAIMode = .suggest
-    @Option(name: .customLong("max-steps"), parsing: .unconditional, help: "Most actions a loop run performs.")
-    var maxSteps = SettingsAIRequest.defaultMaxSteps
-    @Option(name: .customLong("confidence"), parsing: .unconditional, help: "Minimum model confidence, from 0 to 1, required to act.")
-    var confidence = SettingsAIRequest.defaultConfidence
-    @Option(name: .customLong("model-timeout"), parsing: .unconditional, help: "Seconds to wait for each model answer.")
-    var modelTimeout = SettingsAIRequest.defaultModelTimeout
-    @Flag(name: .customLong("deterministic-fallback"), help: "Fall back to text-matching navigation when the model is unavailable. Off by default.")
-    var deterministicFallback = false
-    @Flag(name: .customLong("no-open"), help: "Use the window already on screen instead of opening System Settings first.")
-    var noOpen = false
-    @Option(name: .customLong("settings-url"), help: "x-apple.systempreferences URL to open first. Defaults to System Settings' main window.")
-    var settingsURL: String?
-    @Option(name: .customLong("until-text"), help: "Stop once this text is visible on screen. Unset by default.")
-    var untilText: String?
-    @Option(name: .customLong("screenshot-output"), help: "Host directory for per-step screenshots. Defaults to a new temporary directory.")
-    var screenshotOutput: String?
-    @OptionGroup var timeout: TimeoutOptions
-    @OptionGroup var output: GlobalOptions
-    mutating func validate() throws {
-        _ = try request()
-    }
-
-    mutating func run() throws {
-        let resolved = try request()
-        try runUIRequest(name: resolved.target, request: resolved.request, output: output)
-    }
-
-    private func request() throws -> (target: String, request: GuestUIRequest) {
-        let resolved = try UIPositionalTargetResolver.singleAction(arguments: arguments, action: "ai settings")
-        let settings = SettingsAIRequest(
-            goal: resolved.action,
-            mode: mode,
-            provider: .appleLocal,
-            maxSteps: maxSteps,
-            confidenceThreshold: confidence,
-            modelTimeout: modelTimeout,
-            deterministicFallback: deterministicFallback,
-            openSettings: !noOpen,
-            settingsURL: settingsURL,
-            untilText: untilText,
-            screenshotOutputDirectory: screenshotOutput.map(PommeCore.absoluteHostPath)
-        )
-        _ = try SettingsAIRequest.parse(from: settings.jsonPayload)
-        return (
-            resolved.target,
-            GuestUIRequest(operation: .settingsAI, agentPayload: settings.jsonPayload, timeout: try timeout.value())
         )
     }
 }
@@ -412,7 +250,7 @@ enum CommandCatalog {
         Group(name: "agent", commands: ["agent status", "agent repair", "agent update"]),
         Group(name: "guest", commands: ["exec", "shell", "log", "jobs", "sessions", "cp", "cat"]),
         Group(name: "security", commands: ["sip", "amfi", "mdm"]),
-        Group(name: "access", commands: ["remote-login", "screen-sharing", "ui click|key|key-sequence|keys|type|screenshot|ai settings"]),
+        Group(name: "access", commands: ["remote-login", "screen-sharing", "ui click|key|key-sequence|keys|type|screenshot"]),
         Group(name: "config", commands: ["config init", "config validate", "config render", "ipsw"]),
         Group(name: "utility", commands: ["tui", "tools", "agent-help"])
     ]
@@ -453,7 +291,6 @@ enum CommandCatalog {
     guest=\(compactGroup("guest")); security=\(compactGroup("security")); access=\(compactGroup("access", excluding: ["ui"]))
     sessions=list|ls|inspect|attach|logs|terminate|delete
     ui=\(compactUI)
-    ui-unavailable=ai settings
     config=config \(compactGroup("config", excluding: ["ipsw"], removingPrefix: "config ")); ipsw=list|download; utility=\(compactGroup("utility"))
     """ }
 }

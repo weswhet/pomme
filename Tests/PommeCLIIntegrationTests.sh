@@ -373,43 +373,37 @@ fi
 expect_failure "unknown root command is rejected" "$runner" definitely-not-a-command
 
 expect_success "tools expose UI capability discovery" "$runner" tools --format json
-if python3 -c 'import json,sys; p=json.load(sys.stdin)["uiCapabilities"]; assert p["settingsAI"]["available"] is False; assert "unavailable" in p["settingsAI"]["reason"]; assert "settings-ai" not in p["implementedOperations"]' <"$work/stdout"; then
-  pass "AI unavailability is machine readable"
+if python3 -c 'import json,sys; p=json.load(sys.stdin)["uiCapabilities"]; assert "settingsAI" not in p; assert p["implementedOperations"]==["click","key","key-sequence","type","screenshot"]' <"$work/stdout"; then
+  pass "UI capability discovery lists only the direct operations"
 else
-  fail "AI unavailability is machine readable"
+  fail "UI capability discovery lists only the direct operations"
 fi
-expect_success "AI settings help" "$runner" ui ai settings --help
-if grep -qi 'unavailable' "$work/stdout"; then
-  pass "AI help exposes unavailable bridge"
+expect_failure "ui ai is not a command" "$runner" ui ai settings
+if grep -q "unexpected arguments: 'ai', 'settings'" "$work/stderr"; then
+  pass "ui ai is rejected as an unexpected argument"
 else
-  fail "AI help exposes unavailable bridge"
+  fail "ui ai is rejected as an unexpected argument"
 fi
-if tr -s ' \n' ' ' <"$work/stdout" | grep -q 'values: suggest, step, loop'; then
-  pass "AI help lists the modes"
+expect_failure "ui key takes the VM from the environment" env POMME_VM_NAME=invalid/name \
+  "$runner" ui key --key return --format json
+if grep -q 'Invalid VM name invalid/name' "$work/stderr"; then
+  pass "ui key reaches target validation"
 else
-  fail "AI help lists the modes"
+  fail "ui key reaches target validation"
 fi
-for mode in suggest step loop; do
-  expect_failure "AI $mode rejects before VM access" env POMME_VM_NAME=pomme-test-nonexistent \
-    "$runner" ui ai settings 'Open Keyboard settings' --mode "$mode" --max-steps 1 \
-    --confidence 0.5 --model-timeout 1 --deterministic-fallback --no-open \
-    --settings-url x-apple.systempreferences:com.apple.Keyboard-Settings.extension \
-    --until-text Keyboard --screenshot-output "$work/no-ai-output" --timeout 5 --format json --debug
-  if grep -q 'UI AI Settings automation is unavailable in this build' "$work/stderr" && [[ ! -e "$work/no-ai-output" ]]; then
-    pass "AI $mode reports capability without output side effects"
-  else
-    fail "AI $mode reports capability without output side effects"
-  fi
-done
-for action in key key-sequence; do
-  expect_failure "$action accepts a single environment-target action" env POMME_VM_NAME=invalid/name \
-    "$runner" ui "$action" return --format json
-  if grep -q 'Invalid VM name invalid/name' "$work/stderr"; then
-    pass "$action reaches target validation"
-  else
-    fail "$action reaches target validation"
-  fi
-done
+expect_failure "ui key-sequence takes the VM from the environment" env POMME_VM_NAME=invalid/name \
+  "$runner" ui key-sequence -- return right
+if grep -q 'Invalid VM name invalid/name' "$work/stderr"; then
+  pass "ui key-sequence reaches target validation"
+else
+  fail "ui key-sequence reaches target validation"
+fi
+expect_failure "ui key takes no positional VM" "$runner" ui key missing --key return
+if grep -q "Unexpected argument 'missing'" "$work/stderr"; then
+  pass "ui key names the positional VM as unexpected"
+else
+  fail "ui key names the positional VM as unexpected"
+fi
 expect_failure "dry-run rejects memory below the provisional floor" "$runner" create example \
   --restore-image "$work/missing.ipsw" --memory 512MB --dry-run
 if grep -q 'provisional guest minimum' "$work/stderr"; then
@@ -430,7 +424,7 @@ else
   fail "parallel explains that it takes no value"
 fi
 rm -f "$work/parallel.yaml"
-expect_failure "click rejects a negative coordinate" "$runner" ui click missing --x -1 --y 1
+expect_failure "click rejects a negative coordinate" "$runner" ui click --vm missing --x -1 --y 1
 if grep -q -- '--x must be' "$work/stderr"; then
   pass "click names the coordinate range"
 else
@@ -491,12 +485,12 @@ if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d[
 else
   fail "ui keys JSON carries the vocabulary"
 fi
-expect_failure "key sequence rejects ambiguous environment target" env POMME_VM_NAME=pomme-test-nonexistent \
+expect_failure "key sequence takes keys only after --" env POMME_VM_NAME=pomme-test-nonexistent \
   "$runner" ui key-sequence return right
-if grep -q 'ambiguous' "$work/stderr" && grep -q -- '--vm' "$work/stderr"; then
-  pass "key sequence explains target disambiguation"
+if grep -q 'Put the keys after --' "$work/stderr"; then
+  pass "key sequence explains the -- terminator"
 else
-  fail "key sequence explains target disambiguation"
+  fail "key sequence explains the -- terminator"
 fi
 
 expect_failure "status without a target shows status usage" env -u POMME_VM_NAME "$runner" status
@@ -603,15 +597,22 @@ else
   fail "raw rejection names the supported formats"
 fi
 
-expect_failure "ui type takes positional text" env POMME_VM_NAME=invalid/name "$runner" ui type hi
-if grep -q 'Invalid VM name invalid/name' "$work/stderr"; then
-  pass "ui type positional value is text, not a VM name"
+expect_failure "ui type requires --text or --text-env" env POMME_VM_NAME=invalid/name "$runner" ui type hi
+if grep -q 'Choose exactly one of --text or --text-env.' "$work/stderr"; then
+  pass "ui type names its two text forms"
 else
-  fail "ui type positional value is text, not a VM name"
+  fail "ui type names its two text forms"
+fi
+expect_failure "ui type --text takes the VM from the environment" env POMME_VM_NAME=invalid/name \
+  "$runner" ui type --text hi
+if grep -q 'Invalid VM name invalid/name' "$work/stderr"; then
+  pass "ui type reaches target validation"
+else
+  fail "ui type reaches target validation"
 fi
 
 expect_failure "screenshot rejects a missing output directory" \
-  "$runner" ui screenshot missing --output /nonexistentdir/s.png
+  "$runner" ui screenshot --vm missing --output /nonexistentdir/s.png
 if grep -q 'No such directory: /nonexistentdir' "$work/stderr"; then
   pass "screenshot names the missing output directory"
 else

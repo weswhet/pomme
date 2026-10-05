@@ -83,7 +83,7 @@ the VM's private Virtualization keyboard, pointer, and framebuffer interfaces.
 These routes do not need a guest agent, OCR, a host window, or host event
 injection. One helper UI operation may run at a time; the full input request is
 validated before delivery. Numeric HID codes and separate key-down/up commands
-are not public interfaces. Guided `ui ai` remains unavailable.
+are not public interfaces.
 
 Automatic Recovery provisioning owns a separate exclusive runtime. Manual input
 must not be mixed into its request-bound navigation. Recovery observation waits
