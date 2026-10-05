@@ -86,7 +86,7 @@ enum PommeSecurityWorkflowError: Error, LocalizedError, Equatable, Sendable {
     case .ownerUnavailable:
       "Owner credentials are required. Set both POMME_AUTHORIZED_USER and POMME_AUTHORIZED_PASSWORD, restore the exact VM-scoped Keychain item, or run from an interactive terminal."
     case .confirmationRequired:
-      "Creating the owner account on this verified fresh VM requires confirmation. Run from an interactive terminal or pass --force."
+      "Creating the owner account on this verified fresh VM requires confirmation. Run from an interactive terminal or pass -f/--force."
     case .confirmationDeclined: "Owner account creation was declined; security is unchanged."
     case .agentUnverified:
       "The existing persistent Pomme agent could not be authenticated with its creation-pinned identity."

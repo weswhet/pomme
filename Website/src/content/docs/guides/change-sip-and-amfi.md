@@ -159,7 +159,7 @@ If you run the command without a terminal and without `--force`, it stops with
 the following error:
 
 ```text
-Creating the owner account on this verified fresh VM requires confirmation. Run from an interactive terminal or pass --force.
+Creating the owner account on this verified fresh VM requires confirmation. Run from an interactive terminal or pass -f/--force.
 ```
 
 :::caution
