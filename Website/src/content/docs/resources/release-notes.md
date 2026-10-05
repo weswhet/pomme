@@ -62,6 +62,8 @@ endpoint that it acts on. Every other value is a named flag:
   `pomme ui key-sequence --vm dev -- down return`.
 - The unavailable `pomme ui ai settings` command is removed, and
   `pomme tools` no longer reports `uiCapabilities.settingsAI`.
+- The `pomme tools` and `pomme agent-help` JSON output starts at
+  `schemaVersion` 1.
 
 ### New flags
 

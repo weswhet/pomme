@@ -212,6 +212,13 @@ struct UIKeysCommandTests {
 
 @Suite("Command inventory")
 struct CommandCatalogTests {
+    @Test("Discovery output is schema version 1")
+    func discoverySchemaVersion() {
+        let payload = CommandCatalog.publicPayload
+        #expect(payload["schemaVersion"] as? Int == 1)
+        #expect(Set(payload.keys) == ["ok", "schemaVersion", "groups", "uiCapabilities", "hostExitCode"])
+    }
+
     @Test("The command inventory lists every agent and config subcommand")
     func inventoryListsSubcommands() {
         let listed = Set(CommandCatalog.groups.flatMap(\.commands))
