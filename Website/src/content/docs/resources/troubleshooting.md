@@ -246,10 +246,12 @@ errors:
 Deletion requires an interactive terminal. Pass -f/--force to delete without prompting.
 tui requires an interactive terminal.
 --pty requires an interactive terminal for standard input and output.
+An attached shell requires an interactive terminal for standard input and output.
 ```
 
 **Resolution:** For deletion, add `--force`. For terminal programs, create a
-detached session with `pomme exec --pty --detach` instead. For details, see
+detached session with `pomme exec --pty --detach` or `pomme shell --detach`
+instead. For details, see
 [Use Pomme in scripts and coding agents](/guides/script-pomme/).
 
 ## Guest agent

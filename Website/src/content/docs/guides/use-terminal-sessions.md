@@ -27,8 +27,12 @@ Replace `VM_NAME` with the name of the VM.
 
 Pomme creates a session that runs `/bin/sh` as `root` and attaches your
 terminal to it. To run the shell as another user, pass `--user USER_NAME`.
-Other flags from [Run commands in a VM](/guides/run-guest-commands/), such as
-`--cwd` and `--env`, also apply.
+`pomme shell` also accepts `--uid`, `--group`, `--gid`, `--cwd`, and `--env`,
+which work as they do for
+[`pomme exec`](/guides/run-guest-commands/#control-how-the-command-runs).
+The shell's standard streams are always its terminal, so `pomme shell` doesn't
+accept `--stdin`, `--pty`, `--guest-stdin`, `--guest-stdout`, or
+`--guest-stderr`.
 
 To run a different interactive program as a session, use `pomme exec --pty`:
 

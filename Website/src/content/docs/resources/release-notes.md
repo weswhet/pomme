@@ -51,8 +51,10 @@ endpoint that it acts on. Every other value is a named flag:
   with `--snapshot`. For example,
   `pomme snapshot create dev --snapshot clean`.
 - `pomme shell` only opens a durable shell session, attached or with
-  `--detach`, and no longer accepts `--timeout`. To run a one-shot shell
-  expression, use `pomme exec VM -- /bin/sh -c 'EXPRESSION'`.
+  `--detach`. It keeps the user, group, working directory, and environment
+  flags, and no longer accepts `--timeout`, `--stdin`, `--pty`,
+  `--guest-stdin`, `--guest-stdout`, or `--guest-stderr`. To run a one-shot
+  shell expression, use `pomme exec VM -- /bin/sh -c 'EXPRESSION'`.
 - The `pomme ui` commands that act on a VM name it with `--vm`, which falls
   back to `POMME_VM_NAME`. `pomme ui key` takes the key with `--key`,
   `pomme ui type` takes exactly one of `--text` or `--text-env`, and
