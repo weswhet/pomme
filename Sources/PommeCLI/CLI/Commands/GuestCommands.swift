@@ -195,72 +195,40 @@ struct ExecCommand: ParsableCommand {
     }
 }
 
-/// Executes a shell expression in a running VM.
+/// Opens a durable `/bin/sh` session in a running VM. A one-shot shell
+/// expression is `exec VM -- /bin/sh -c '...'`.
 struct ShellCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "shell", abstract: "Run a guest shell command or session.")
+    static let configuration = CommandConfiguration(commandName: "shell", abstract: "Open a durable guest shell session.")
 
-    @Argument(help: "[VM name] [quoted shell expression]. Uses POMME_VM_NAME when the VM name is omitted.")
-    var arguments: [String] = []
+    @Argument(help: "VM name. Uses POMME_VM_NAME when omitted.")
+    var name: String?
 
-    @Flag(name: [.customShort("d"), .customLong("detach")], help: "Detach a bare shell as a durable session; expressions remain background jobs.")
+    @Flag(name: [.customShort("d"), .customLong("detach")], help: "Create the shell session without attaching and print its session ID.")
     var detach = false
 
     @OptionGroup var execution: GuestExecutionOptions
-    @OptionGroup var timeout: TimeoutOptions
     @OptionGroup var output: GlobalOptions
 
     mutating func validate() throws {
-        let resolution = try resolveTargetAndExpression()
-        if resolution.expression != nil && execution.pty {
-            throw ValidationError("--pty is available for a bare durable shell; shell expressions remain one-shot /bin/sh -c commands.")
-        }
-        try execution.validate(detached: detach, output: output, implicitPTY: resolution.expression == nil)
-        if resolution.expression == nil, timeout.isExplicitlySet {
-            throw ValidationError("--timeout is unavailable for interactive PTY sessions.")
-        }
+        try execution.validate(detached: detach, output: output, implicitPTY: true)
     }
 
     mutating func run() throws {
         try PommeRecoveryDebugContext.$screenshotsEnabled.withValue(output.debug) {
-            let resolution = try resolveTargetAndExpression()
-            let bareShell = resolution.expression == nil
-            let directRequest: GuestCommandRequest
-            if let expression = resolution.expression {
-                directRequest = GuestCommandRequest.shell(expression, timeout: try timeout.value())
-            } else {
-                directRequest = GuestCommandRequest(path: "/bin/sh", arguments: [], timeout: try timeout.value())
-            }
-            let request = try execution.apply(to: directRequest, implicitPTY: bareShell)
-            let result: PommeOperationResult
-            if bareShell {
-                result = try PommeApplication.terminalSessionCreate(
-                    name: resolution.target,
+            let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
+            let request = try execution.apply(
+                to: GuestCommandRequest(path: "/bin/sh", arguments: [], timeout: Constants.defaultGuestCommandTimeout),
+                implicitPTY: true
+            )
+            try CLIOutputWriter.write(
+                PommeApplication.terminalSessionCreate(
+                    name: target,
                     payload: request.terminalPayload(shell: true),
                     title: "Shell",
                     attach: !detach
-                )
-            } else {
-                result = detach
-                    ? try PommeEnvironment.live().guest.request(resolution.target, .startBackground(request), "Shell")
-                    : try PommeEnvironment.live().guest.execute(resolution.target, request)
-            }
-            try CLIOutputWriter.write(result, options: output)
-        }
-    }
-
-    private func resolveTargetAndExpression() throws -> (target: String, expression: String?) {
-        let configuredTarget = ProcessInfo.processInfo.environment["POMME_VM_NAME"].flatMap { $0.isEmpty ? nil : $0 }
-        switch (configuredTarget, arguments.count) {
-        case (_, 2):
-            return (try validateVMName(arguments[0]), arguments[1])
-        case let (.some(target), 1):
-            return (try validateVMName(target), arguments[0])
-        case let (.some(target), 0):
-            return (try validateVMName(target), nil)
-        case (.none, 1):
-            return (try validateVMName(arguments[0]), nil)
-        default:
-            throw ValidationError("Usage: pomme shell [<vm>] ['<expression>'] (or set POMME_VM_NAME).")
+                ),
+                options: output
+            )
         }
     }
 }

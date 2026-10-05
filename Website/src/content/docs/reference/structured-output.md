@@ -94,9 +94,8 @@ screenshot details to table, JSON, or JSONL output.
 
 ## Guest program output
 
-For `pomme exec` and `pomme shell` in table format, Pomme writes the guest
-program's standard output and standard error to the matching host streams,
-byte for byte. Pomme doesn't merge the two streams or add text to them.
+For `pomme exec` in table format, Pomme writes the guest program's standard
+output and standard error to the matching host streams, byte for byte. Pomme doesn't merge the two streams or add text to them.
 
 ## What's next
 
