@@ -280,8 +280,10 @@ expect_failure "create resume rejects restore options" \
 expect_failure "create resume rejects boot options" \
   "$runner" create example --resume --boot normal
 
+# The memory check against this host's Virtualization limit runs before the
+# file check, and the 8GB default exceeds the 7 GiB of GitHub's runners.
 expect_failure "local restore image dry-run rejects a missing file" \
-  "$runner" create example --restore-image "$work/missing.ipsw" --dry-run
+  "$runner" create example --restore-image "$work/missing.ipsw" --memory 4GB --dry-run
 if grep -qi 'does not exist' "$work/stderr"; then
   pass "local restore image reaches file validation"
 else
