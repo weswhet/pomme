@@ -71,8 +71,8 @@ unless you create VMs from a local restore image or an installed template.
 
 To build and install Pomme from source, you also need:
 
-- A full installation of Xcode. The Command Line Tools package alone isn't
-  enough.
+- A full installation of Xcode 27 or later. Pomme builds against the macOS 27
+  SDK, and the Command Line Tools package alone isn't enough.
 - The Developer ID Application certificate that the project is configured to
   sign with, including its private key, in your Keychain.
 
