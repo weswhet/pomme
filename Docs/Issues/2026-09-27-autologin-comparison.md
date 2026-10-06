@@ -3,7 +3,7 @@
 ## Scope
 
 The user requested deletion of existing VM instances and a controlled comparison
-of native `sysadminctl` automatic login with Tiddly-style loginwindow preference
+of native `sysadminctl` automatic login with the predecessor CLI's loginwindow preference
 and `/etc/kcpassword` writes. The comparison uses two fresh internal-drive clones
 of `pomme-agent-ownerloop-base26-20260922a` (macOS 26.6.2, build 25G83), each with
 the template's 40 GB disk and 4 GB memory.
