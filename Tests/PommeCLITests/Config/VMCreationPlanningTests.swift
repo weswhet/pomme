@@ -199,10 +199,13 @@ struct VMCreationPlanningTests {
 
     @Test("Live config dry-run discloses provisioning without credentials", arguments: ["27.0", "26.6.0"])
     func liveDryRunProvisioningDisclosure(version: String) async throws {
+        // The live preflight checks memory against this host's Virtualization
+        // limit, which is its physical memory: 7 GiB on GitHub's runners. Use
+        // the 4 GB floor so the result doesn't depend on the host.
         let plan = VMCreationPlan(
             name: "lab-\(version)", selector: version,
             firmware: firmware(version: version, build: "dry-run-\(UUID().uuidString)"),
-            config: sampleConfig(),
+            config: sampleConfig(memory: "4GB"),
             recoveryProfile: PommeRecoveryProfileSelector.tahoe2660Build25G72
         )
         let executor = VMCreationExecutor(dependencies: .init(
@@ -227,13 +230,13 @@ struct VMCreationPlanningTests {
         }
     }
 
-    private func sampleConfig() -> VMCreationConfigV1 {
+    private func sampleConfig(memory: String = "12GB") -> VMCreationConfigV1 {
         VMCreationConfigV1(
             schemaVersion: 1,
             name: "lab",
             versions: ["latest", "26.6.0"],
             ipswDevice: "VirtualMac2,1",
-            hardware: .init(diskSize: "64GB", memory: "12GB"),
+            hardware: .init(diskSize: "64GB", memory: memory),
             credentials: nil,
             workflow: nil,
             mdm: nil,

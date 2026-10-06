@@ -2,10 +2,12 @@ import CoreGraphics
 import CoreText
 import Foundation
 import Testing
+import Vision
 
 @Suite("Pomme Recovery Terminal OCR")
 struct PommeRecoveryTerminalRecognitionTests {
     @Test("generated probe output remains recognizable for repeated and alternating nonce nibbles",
+          .enabled(if: AccurateTextRecognition.isAvailable, AccurateTextRecognition.unavailableReason),
           arguments: ["44444444-4444-4444-8444-444444444444", "34343434-3434-4434-8434-343434343434"])
     func generatedProbeHasStrictOCRProof(_ requestID: String) throws {
         let plan = try markerPlan(requestID)
@@ -39,7 +41,8 @@ struct PommeRecoveryTerminalRecognitionTests {
         #expect(markerObservation(output: marker, promptBelow: true).terminalMarkerProofDiagnostic(marker).isVerified)
     }
 
-    @Test("real OCR does not accept a correct command echo as successful marker output")
+    @Test("real OCR does not accept a correct command echo as successful marker output",
+          .enabled(if: AccurateTextRecognition.isAvailable, AccurateTextRecognition.unavailableReason))
     func generatedProbeEchoCannotAuthorize() throws {
         let plan = try markerPlan("01234567-89ab-cdef-8123-456789abcdef")
         let probe = try #require(plan.capabilityProbes.first)
@@ -344,4 +347,36 @@ private final class OCRRequestRecorder: @unchecked Sendable {
     func record(_ request: SettingsAIOCRRecognitionRequest) {
         lock.withLock { values.append(request) }
     }
+}
+
+/// Whether Vision's accurate text recognizer, which Recovery OCR uses, can run
+/// on this host. It can't in GitHub's macOS runner VMs, which lack the graphics
+/// hardware its model needs, while the fast recognizer still works there. Only
+/// a recognition error counts as unavailable, so a recognizer that runs but
+/// misreads still fails the tests above.
+private enum AccurateTextRecognition {
+    static let unavailableReason: Comment = "Vision's accurate text recognizer can't run on this host."
+
+    static let isAvailable: Bool = {
+        guard let context = CGContext(data: nil, width: 600, height: 120, bitsPerComponent: 8, bytesPerRow: 2_400,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return true }
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 600, height: 120))
+        let attributes: [NSAttributedString.Key: Any] = [
+            NSAttributedString.Key(kCTFontAttributeName as String): CTFontCreateWithName("Menlo" as CFString, 36, nil),
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(gray: 0, alpha: 1),
+        ]
+        context.textPosition = CGPoint(x: 20, y: 45)
+        CTLineDraw(CTLineCreateWithAttributedString(NSAttributedString(string: "POMME OCR PROBE", attributes: attributes)), context)
+        guard let image = context.makeImage() else { return true }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        do {
+            try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+            return true
+        } catch {
+            return false
+        }
+    }()
 }
