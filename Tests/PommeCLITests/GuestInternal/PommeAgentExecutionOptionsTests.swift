@@ -198,7 +198,25 @@ struct PommeAgentExecutionOptionsTests: Sendable {
 
     @Test("An explicit current identity does not require a privileged transition")
     func currentIdentityLaunchesWithoutRoot() throws {
-        let identity = try #require(try PommePrivilege.resolve(["uid": .integer(Int64(geteuid()))]))
+        let resolved = try #require(try PommePrivilege.resolve(["uid": .integer(Int64(geteuid()))]))
+        #expect(resolved.uid == geteuid())
+        #expect(resolved.gid == getegid())
+
+        // A process carries at most 16 supplementary groups, so an account in
+        // more groups (as on GitHub's runners) never resolves to exactly the
+        // running identity and needs the root-only helper. Use the process's
+        // own credentials to exercise the unprivileged path.
+        let count = getgroups(0, nil)
+        try #require(count >= 0)
+        var rawGroups = [Int32](repeating: 0, count: Int(count))
+        let populated = getgroups(count, &rawGroups)
+        try #require(populated >= 0)
+        let identity = PommePrivilege(
+            account: resolved.account,
+            uid: geteuid(),
+            gid: getegid(),
+            supplementary: rawGroups.prefix(Int(populated)).map { gid_t(bitPattern: $0) }
+        )
         let spawned = try PommeProcess.spawn(
             path: "/bin/sh",
             arguments: ["-c", "printf current-identity"],
