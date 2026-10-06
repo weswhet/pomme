@@ -106,7 +106,7 @@ The default build directory is
 `~/Library/Developer/Xcode/DerivedData/pomme-local-signed`.
 `--derived-data-path DIR` and `--install-dir DIR` accept absolute paths for isolated
 verification; they do not change the signing identity. The script does not modify
-shell startup files or publish/notarize artifacts.
+shell startup files or publish artifacts.
 
 Keep `~/.local/bin` on the shell PATH. On this host it is already configured in
 both `~/.zprofile` and `~/.zshrc`; do not append duplicate entries. Verify command
@@ -147,8 +147,9 @@ input. When packaging is requested, set `DEVELOPER_ID_APPLICATION` to the exact
 certificate above, supply the verified Release products with `--products-dir`,
 and repeat the signature/requirement checks on the final packaged executable.
 Do not assume re-signing preserves Xcode's generated designated requirement.
-Signing verification does not establish notarization or successful guest MDM
-enrollment, and does not authorize publication or VM operations.
+Pomme doesn't notarize its packages. Signing verification does not establish
+successful guest MDM enrollment, and does not authorize publication or VM
+operations.
 
 ## Keep the documentation site current
 

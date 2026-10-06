@@ -2,20 +2,18 @@
 set -euo pipefail
 
 usage() {
-  echo 'Usage: Scripts/build-release-pkg.sh [--version <version>] [--dist-dir <dir>] [--products-dir <dir>] [--notarize]'
+  echo 'Usage: Scripts/build-release-pkg.sh [--version <version>] [--dist-dir <dir>] [--products-dir <dir>]'
 }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 version="${VERSION:-}"
 dist_dir="${DIST_DIR:-$repo_root/dist}"
 products_dir=""
-notarize=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) version="$2"; shift 2 ;;
     --dist-dir) dist_dir="$2"; shift 2 ;;
     --products-dir) products_dir="$2"; shift 2 ;;
-    --notarize) notarize=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) usage >&2; exit 64 ;;
   esac
@@ -74,27 +72,6 @@ bash "$repo_root/Scripts/validate-package.sh" \
   --pkg "$pkg" \
   --tarball "$tarball"
 
-notarized=0
-if [[ "$notarize" -eq 1 ]]; then
-  if [[ -n "${APPLE_API_PRIVATE_KEY_PATH:-}" && -f "${APPLE_API_PRIVATE_KEY_PATH:-}" \
-        && -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER_ID:-}" ]]; then
-    if xcrun notarytool submit "$pkg" --key "$APPLE_API_PRIVATE_KEY_PATH" \
-        --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait \
-        && xcrun stapler staple "$pkg"; then
-      notarized=1
-    else
-      echo "WARNING: notarization failed; publishing signed-but-unnotarized artifacts." >&2
-    fi
-  else
-    echo "WARNING: notarization credentials are unavailable; publishing signed-but-unnotarized artifacts." >&2
-  fi
-fi
-if [[ "$notarized" -eq 0 ]]; then
-  mv "$pkg" "$dist_dir/pomme-$version-arm64-signed-unnotarized.pkg"
-  mv "$tarball" "$dist_dir/pomme-$version-arm64-signed-unnotarized.tar.gz"
-  pkg="$dist_dir/pomme-$version-arm64-signed-unnotarized.pkg"
-  tarball="$dist_dir/pomme-$version-arm64-signed-unnotarized.tar.gz"
-fi
 (cd "$dist_dir" && shasum -a 256 "$(basename "$pkg")" "$(basename "$tarball")" > SHA256SUMS)
 echo "Built $pkg"
 echo "Built $tarball"

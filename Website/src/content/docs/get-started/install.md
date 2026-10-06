@@ -8,8 +8,7 @@ that your shell runs the installed executable.
 
 :::note
 Pomme is pre-release software at version 0.1.0. It isn't published: there is
-no Homebrew formula, and the installer package isn't notarized. Build Pomme
-from source to use it.
+no Homebrew formula or installer package. Build Pomme from source to use it.
 :::
 
 ## Before you begin

@@ -16,9 +16,6 @@ Environment:
   DEVELOPER_ID_KEYCHAIN_PASSWORD     Optional CI temp keychain password
   DEVELOPER_ID_APPLICATION           Defaults to Wesley Whetstone Developer ID Application
   DEVELOPER_ID_INSTALLER             Defaults to Wesley Whetstone Developer ID Installer
-  APPLE_TEAM_ID                      Defaults to 2D8XQ77EBQ
-  APPLE_ID                           Optional; uploaded when set
-  APPLE_APP_SPECIFIC_PASSWORD        Optional; uploaded when set
   HOMEBREW_TAP_TOKEN                 Optional; uploaded when set
 USAGE
 }
@@ -76,7 +73,6 @@ require_tool security
 
 developer_id_application="${DEVELOPER_ID_APPLICATION:-Developer ID Application: Wesley Whetstone (2D8XQ77EBQ)}"
 developer_id_installer="${DEVELOPER_ID_INSTALLER:-Developer ID Installer: Wesley Whetstone (2D8XQ77EBQ)}"
-apple_team_id="${APPLE_TEAM_ID:-2D8XQ77EBQ}"
 
 tmpdir=""
 cleanup() {
@@ -105,19 +101,6 @@ fi
 
 set_secret DEVELOPER_ID_APPLICATION "$developer_id_application"
 set_secret DEVELOPER_ID_INSTALLER "$developer_id_installer"
-set_secret APPLE_TEAM_ID "$apple_team_id"
-
-if [[ -n "${APPLE_ID:-}" ]]; then
-  set_secret APPLE_ID "$APPLE_ID"
-else
-  echo "Skipped APPLE_ID; set APPLE_ID to configure notarization auth."
-fi
-
-if [[ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]]; then
-  set_secret APPLE_APP_SPECIFIC_PASSWORD "$APPLE_APP_SPECIFIC_PASSWORD"
-else
-  echo "Skipped APPLE_APP_SPECIFIC_PASSWORD; set APPLE_APP_SPECIFIC_PASSWORD to configure notarization auth."
-fi
 
 if [[ -n "${HOMEBREW_TAP_TOKEN:-}" ]]; then
   set_secret HOMEBREW_TAP_TOKEN "$HOMEBREW_TAP_TOKEN"

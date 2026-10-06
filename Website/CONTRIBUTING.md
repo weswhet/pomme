@@ -134,8 +134,9 @@ a concept instead of explaining it at length.
 
 - Describe the behavior of the current source and the installed CLI. When the
   engineering records in `Docs/` disagree with the source, the source wins.
-- Pomme is pre-release (version 0.1.0). Don't describe publication, notarized
-  packages, or Homebrew installation as available.
+- Pomme is pre-release (version 0.1.0). Don't describe publication, installer
+  packages, or Homebrew installation as available. Pomme doesn't notarize its
+  packages.
 - Don't document hidden or internal commands, internal environment variables,
   or private protocol details that a user can't act on.
 - Never include real credentials, host names, serial numbers, or UUIDs from a
