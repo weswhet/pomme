@@ -86,6 +86,37 @@ that you can inspect and resume them.
 
 For details, see [Durable creation and journals](/concepts/durable-creation/).
 
+### Recovery navigation stops
+
+**Symptom:** A command fails while Pomme navigates the macOS Recovery screens.
+Commands that navigate Recovery include `pomme create`, `pomme agent repair`,
+the SIP, AMFI, and MDM changes that need Recovery, and `pomme shell` on a VM
+that runs Recovery.
+
+**Cause:** Pomme stops navigating when a Recovery screen is unexpected or
+doesn't settle. It keeps the VM and its journal so that you can inspect the
+failure and resume.
+
+**Resolution:**
+
+1. Run the same command again with `--debug`. Before each navigation action,
+   Pomme saves a full-resolution PNG screenshot, and it prints the directory
+   and file names to standard error.
+1. Review the screenshots to find the screen that Pomme didn't expect.
+1. When you no longer need the screenshots, delete the directory that Pomme
+   printed.
+
+Each attempt saves its screenshots in its own private `pomme-recovery-debug-…`
+directory in the host's temporary directory. Pomme doesn't delete them, even
+after a successful run. Capture stops before Pomme types a Terminal command, so
+the screenshots don't show command text or output. A failed capture prints a
+warning and doesn't stop navigation.
+
+:::caution
+Full-resolution screenshots can show identifiers from the guest. Keep them out
+of your source repository, and delete them when you're done.
+:::
+
 ### The requested memory is too small
 
 **Symptom:** `pomme create` or `pomme create --dry-run` fails with a message

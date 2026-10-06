@@ -11,6 +11,7 @@ The `pomme` command reads the following environment variables.
 | `POMME_AUTHORIZED_USER` | The existing guest owner account that authorizes a SIP or AMFI change. |
 | `POMME_AUTHORIZED_PASSWORD` | The password for `POMME_AUTHORIZED_USER`. |
 | `POMME_APP_SUPPORT_DIR` | An alternative directory for Pomme's host data. |
+| `NO_COLOR` | When set, turns off color in the progress display. For details, see [Control the progress display](/guides/script-pomme/#control-the-progress-display). |
 
 ## POMME_VM_NAME
 

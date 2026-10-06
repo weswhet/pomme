@@ -64,6 +64,28 @@ on several VMs, JSON output wraps the per-VM results:
 For the fields that each command returns, see
 [Structured output](/reference/structured-output/).
 
+## Control the progress display
+
+Long-running commands, such as `pomme create` and `pomme ipsw download`, show
+their progress on standard error, so it never mixes with the results on
+standard output. On an interactive terminal, one status line shows a spinning
+rectangle, the current step, and the elapsed time. Restore-image downloads and
+macOS installation also show a percentage.
+
+To choose how progress appears, pass `--progress` with one of the following
+values:
+
+| Value | Display |
+| --- | --- |
+| `auto` | The default. Animates the status line on an interactive terminal. When standard error isn't a terminal, or `TERM` is `dumb`, prints one line per step instead. |
+| `plain` | Prints one line per step, without animation. |
+| `off` | Hides progress. Warnings and errors still appear. |
+
+With `--format json` or `--format jsonl`, Pomme hides progress unless you pass
+`--progress plain`. With `--debug`, Pomme prints one line per step along with
+its diagnostics. To turn off color, set the `NO_COLOR` environment variable. In
+a locale that doesn't use UTF-8, Pomme draws progress with ASCII characters.
+
 ## Check exit codes
 
 Test the exit status of every command. Pomme uses the following conventions:
