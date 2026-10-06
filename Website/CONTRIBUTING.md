@@ -40,7 +40,10 @@ branches get preview deployments. The project uses these build settings:
 | Node.js version | From `Website/.node-version` |
 
 The build doesn't run the CLI, so commit the regenerated reference pages with
-the change that needs them. `astro.config.mjs` builds for `https://pommevm.dev`
+the change that needs them. Vale is an optional dependency because its
+installer downloads the Vale binary from GitHub, which can refuse requests from
+Cloudflare's builders. If that download fails, the build continues without
+Vale. `astro.config.mjs` builds for `https://pommevm.dev`
 unless `POMME_DOCS_SITE` names another URL.
 
 ## Command-line reference

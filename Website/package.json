@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "version": "0.1.0",
-  "description": "Local documentation site for Pomme.",
+  "description": "Documentation site for Pomme, published at https://pommevm.dev.",
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",
@@ -19,7 +19,7 @@
     "astro": "^7.3.5",
     "sharp": "^0.34.0"
   },
-  "devDependencies": {
+  "optionalDependencies": {
     "@vvago/vale": "^3.23.0"
   },
   "allowScripts": {
