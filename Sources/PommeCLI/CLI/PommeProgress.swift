@@ -218,7 +218,7 @@ final class PommeProgressSession: @unchecked Sendable {
             let active = statuses.filter { !$0.complete && !$0.pending }
             guard !active.isEmpty else { clearLine(); return }
             let width = max(1, terminalWidth() - 1)
-            let frame = unicode ? Self.appleFrames[Int(elapsed * 10) % Self.appleFrames.count] : [".   ", " .  ", "  . ", "   ."][Int(elapsed * 10) % 4]
+            let frame = unicode ? Self.rectangleFrames[Int(elapsed * 10) % Self.rectangleFrames.count] : [".   ", " .  ", "  . ", "   ."][Int(elapsed * 10) % 4]
             let count = statuses.count > 1 ? " \(statuses.filter(\.complete).count)/\(statuses.count)" : ""
             let suffix = " \(separator) \(Int(elapsed))s\(count)"
             var selected = active
@@ -478,15 +478,22 @@ final class PommeProgressSession: @unchecked Sendable {
         return String(format: "%.1f %@", count, units[index])
     }
 
-    /// An 8×4 dot silhouette, packed into four cells. The leaf and body stay lit;
-    /// a moving accent follows the outline without replacing the apple shape.
-    static let appleFrames: [String] = {
-        let outline: [(Int, Int)] = [(4, 0), (5, 0), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (0, 2), (6, 2), (1, 3), (2, 3), (4, 3), (5, 3)]
-        let accents: [(Int, Int)] = [(3, 0), (6, 0), (7, 1), (7, 2), (6, 3), (3, 3), (0, 3), (0, 1)]
+    /// The perimeter of an 8-by-4-dot rectangle drawn in four Braille cells,
+    /// clockwise from the top-left corner.
+    static let rectanglePerimeter: [(x: Int, y: Int)] =
+        (0..<8).map { ($0, 0) } + [(7, 1), (7, 2)] + (0..<8).reversed().map { ($0, 3) } + [(0, 2), (0, 1)]
+
+    /// The rectangle outline with a three-dot gap that steps clockwise one
+    /// dot per frame, so the outline appears to spin.
+    static let rectangleFrames: [String] = {
         let bits = [[0, 1, 2, 6], [3, 4, 5, 7]]
-        return accents.map { accent in
+        let perimeter = rectanglePerimeter
+        return perimeter.indices.map { start in
+            let gap = Set((0..<3).map { (start + $0) % perimeter.count })
             var cells = [UInt32](repeating: 0, count: 4)
-            for (x, y) in outline + [accent] { cells[x / 2] |= 1 << bits[x % 2][y] }
+            for (index, point) in perimeter.enumerated() where !gap.contains(index) {
+                cells[point.x / 2] |= 1 << bits[point.x % 2][point.y]
+            }
             return String(String.UnicodeScalarView(cells.map { UnicodeScalar(0x2800 + $0)! }))
         }
     }()
