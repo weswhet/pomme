@@ -204,7 +204,7 @@ excluded. In the next live attempt at 00:59:28 UTC on September 27, credential
 recovery succeeded, but the private MDM Keychain rejected the owner's password
 with `errSecAuthFailed` (-25293). No import occurred.
 
-Compared the Tiddly implementation: it ignores the private unlock result and can
+Compared the predecessor CLI's implementation: it ignores the private unlock result and can
 fall back to the default Keychain during import. Pomme now makes the choice
 explicit before any import: if the private store reports readable but rejects
 unlock authentication, open `/Library/Keychains/System.keychain`, require a

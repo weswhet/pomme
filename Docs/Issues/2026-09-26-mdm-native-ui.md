@@ -154,7 +154,7 @@ Only the PKCS12 `PayloadContent` differs semantically from the original profile.
 Its key, certificates, password, identifiers, MDM settings, and root payload are
 unchanged. Native UI installation began at `2026-09-26T17:17:12Z` and succeeded
 at approximately `17:18Z`. Device Management showed the VM supervised and managed
-by Local Tiddly Lab, with three installed settings and an Unenroll control. This
+by the lab MDM server's organization, with three installed settings and an Unenroll control. This
 controlled change confirms PKCS12 packaging compatibility as the cause of the
 observed native UI failure. No new SIP, AMFI, or private-helper workflow was used.
 Both protected templates remain unchanged.
@@ -189,7 +189,7 @@ The new `scripts/check-profile-pkcs12.sh` checks embedded identities through
 remain in process memory, and output contains only fixed stages and numeric
 statuses. The actual script rejected the original profile with `-25264` and
 accepted the candidate with status 0. Shell syntax and explicit whitespace checks
-passed. `TIDDLY-SETUP.md` documents the compatibility scope and preflight.
+passed. The lab MDM server's setup notes document the compatibility scope and preflight.
 
 The generator and setup guide were already locally excluded from Git; the new
 checker is untracked. No exclusions were changed, commits created, or server

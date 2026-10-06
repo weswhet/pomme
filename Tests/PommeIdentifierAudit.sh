@@ -14,6 +14,14 @@ retired_port="$((505000 + 50))"
 retired_port_grouped="505[_ ]?0${retired_port: -2}"
 content_pattern="${old_product}|${old_wire}|${old_agent}|${old_guest_ids}|${old_provisioning}|${old_vm_ingest}|${retired_port}|${retired_port_grouped}"
 
+# Prints tracked content that matches a retired pattern. The generated
+# lockfile and lines made only of base64, such as certificate data, are
+# skipped, because random base64 can spell a retired token by chance.
+retired_matches() {
+  git grep -I -n -i -E "$content_pattern" "$@" -- . ':(exclude)Website/package-lock.json' \
+    | grep -v -E '^([^:]+:){2,3}[[:space:]]*[A-Za-z0-9+/=]{40,}\\?$' || true
+}
+
 status=0
 
 if git ls-files | grep -E -i "$content_pattern"; then
@@ -21,7 +29,9 @@ if git ls-files | grep -E -i "$content_pattern"; then
   status=1
 fi
 
-if git grep -I -n -i -E "$content_pattern" -- .; then
+matches="$(retired_matches)"
+if [[ -n "$matches" ]]; then
+  printf '%s\n' "$matches"
   echo "retired identifier found in tracked content" >&2
   status=1
 fi
@@ -39,7 +49,9 @@ if [[ "${1:-}" == "--history" ]]; then
   fi
 
   while IFS= read -r commit; do
-    if git grep -I -n -i -E "$content_pattern" "$commit" -- .; then
+    matches="$(retired_matches "$commit")"
+    if [[ -n "$matches" ]]; then
+      printf '%s\n' "$matches"
       echo "retired identifier found in reachable commit $commit" >&2
       status=1
     fi
