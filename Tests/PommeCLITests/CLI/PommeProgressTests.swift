@@ -337,14 +337,32 @@ struct PommeProgressTests {
         }
     }
 
-    @Test("Apple frames preserve four cells and animate a fixed silhouette")
-    func apple() {
-        let frames = PommeProgressSession.appleFrames
-        #expect(Set(frames).count == frames.count)
-        #expect(frames.allSatisfy { $0.count == 4 })
-        for cell in 0..<4 {
-            let masks = frames.map { Array($0.unicodeScalars)[cell].value - 0x2800 }
-            #expect(masks.reduce(UInt32(255), &) != 0)
+    @Test("Rectangle frames keep four cells and spin a gap around the outline")
+    func rectangle() {
+        let frames = PommeProgressSession.rectangleFrames
+        let perimeter = PommeProgressSession.rectanglePerimeter.map { "\($0.x),\($0.y)" }
+        #expect(perimeter.count == 20 && Set(perimeter).count == 20)
+        #expect(frames.count == perimeter.count && Set(frames).count == frames.count)
+
+        // Decodes a frame into the "x,y" dots it lights.
+        func dots(_ frame: String) -> Set<String> {
+            let bits = [[0, 1, 2, 6], [3, 4, 5, 7]]
+            let cells = frame.unicodeScalars.map { $0.value - 0x2800 }
+            var lit: Set<String> = []
+            for x in 0..<8 {
+                for y in 0..<4 where cells[x / 2] & (1 << bits[x % 2][y]) != 0 {
+                    lit.insert("\(x),\(y)")
+                }
+            }
+            return lit
+        }
+
+        for (index, frame) in frames.enumerated() {
+            #expect(frame.unicodeScalars.count == 4)
+            #expect(frame.unicodeScalars.allSatisfy { (0x2800...0x28FF).contains($0.value) })
+            #expect(PommeProgressSession.displayWidth(frame) == 4)
+            let hidden = (0..<3).map { perimeter[(index + $0) % perimeter.count] }
+            #expect(dots(frame) == Set(perimeter).subtracting(hidden), "frame \(index)")
         }
     }
 
