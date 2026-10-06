@@ -58,9 +58,6 @@ jobs:
         env:
           CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_BASE64 }}
           CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
-          APPLE_API_KEY_ID_SECRET: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER_ID_SECRET: ${{ secrets.APPLE_API_ISSUER_ID }}
-          APPLE_API_PRIVATE_KEY_SECRET: ${{ secrets.APPLE_API_PRIVATE_KEY }}
           DEVELOPER_ID_APPLICATION_SECRET: ${{ secrets.DEVELOPER_ID_APPLICATION }}
           DEVELOPER_ID_INSTALLER_SECRET: ${{ secrets.DEVELOPER_ID_INSTALLER }}
         shell: bash
@@ -69,9 +66,6 @@ jobs:
           missing=()
           [[ -n "$CERTIFICATE_BASE64" ]] || missing+=(DEVELOPER_ID_CERTIFICATE_BASE64)
           [[ -n "$CERTIFICATE_PASSWORD" ]] || missing+=(DEVELOPER_ID_CERTIFICATE_PASSWORD)
-          [[ -n "$APPLE_API_KEY_ID_SECRET" ]] || missing+=(APPLE_API_KEY_ID)
-          [[ -n "$APPLE_API_ISSUER_ID_SECRET" ]] || missing+=(APPLE_API_ISSUER_ID)
-          [[ -n "$APPLE_API_PRIVATE_KEY_SECRET" ]] || missing+=(APPLE_API_PRIVATE_KEY)
           [[ -n "$DEVELOPER_ID_APPLICATION_SECRET" ]] || missing+=(DEVELOPER_ID_APPLICATION)
           [[ -n "$DEVELOPER_ID_INSTALLER_SECRET" ]] || missing+=(DEVELOPER_ID_INSTALLER)
           if [[ "${#missing[@]}" -gt 0 ]]; then
@@ -118,20 +112,11 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
           security find-identity -v "$keychain"
 
-      - name: Build, sign, and notarize
-        env:
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
-          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+      - name: Build and sign
         shell: bash
         run: |
           set -euo pipefail
-          private_key="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
-          trap 'rm -f "$private_key"' EXIT
-          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$private_key"
-          chmod 600 "$private_key"
-          APPLE_API_PRIVATE_KEY_PATH="$private_key" \
-            Scripts/build-release-pkg.sh --version "${{ steps.version.outputs.version }}" --notarize
+          Scripts/build-release-pkg.sh --version "${{ steps.version.outputs.version }}"
 
       - name: Render Homebrew formula
         shell: bash
@@ -230,7 +215,7 @@ jobs:
               "dist/SHA256SUMS" \
               "dist/pomme.rb" \
               --title "$title" \
-              --notes "Signed and notarized macOS arm64 release artifacts."
+              --notes "Signed macOS arm64 release artifacts."
           fi
 
       - name: Update Homebrew tap
