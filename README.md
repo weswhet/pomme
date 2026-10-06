@@ -5,6 +5,9 @@ machines (VMs) on Mac computers with Apple silicon. It's built with Swift and
 Virtualization.framework, and it manages only the VMs that it creates in
 `~/Library/Application Support/pomme`.
 
+For guides and the complete command-line reference, see the documentation at
+<https://pommevm.dev>.
+
 > [!WARNING]
 > Pomme is beta software. Commands, flags, output formats, and behavior can
 > change or break from one release to the next. If you use Pomme in scripts,
