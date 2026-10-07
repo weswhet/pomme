@@ -1,9 +1,9 @@
 ---
 title: Pomme
-description: Pomme is a command-line tool for creating and controlling macOS virtual machines on Apple silicon.
+description: Pomme is a container-style command-line tool for headless macOS virtual machines on Apple silicon.
 template: splash
 hero:
-  tagline: Create, provision, and automate macOS virtual machines on your Apple silicon Mac from the command line.
+  tagline: Create, run, and automate headless macOS virtual machines on your Apple silicon Mac, the way you manage containers.
   actions:
     - text: Get started
       link: /get-started/quickstart/
@@ -15,16 +15,19 @@ hero:
 
 import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-Pomme is a command-line tool for macOS virtual machines (VMs) on Apple silicon.
-It uses Apple's Virtualization framework to install macOS from a restore
-image, and then installs an authenticated guest agent so that you can run
-programs, open shells, and transfer files without a network connection or a
-window.
+Pomme is a container-style command-line tool for macOS virtual machines (VMs)
+on Apple silicon. You create, start, run commands in, and delete VMs from the
+terminal, much as you manage containers, and every VM runs completely headless,
+with no window on the host. Pomme uses Apple's Virtualization framework to
+install macOS from a restore image, and then installs an authenticated guest
+agent so that you can run programs, open shells, and transfer files without a
+network connection.
 
-:::caution[Pre-release]
-Pomme 0.1.0 is a development build. It isn't published, and its release
-qualification isn't complete. For details, see
-[Supported macOS versions](/concepts/os-qualification/).
+:::caution[Beta]
+Pomme is beta software. Commands, flags, output formats, and behavior can
+change or break from one release to the next. Version 0.1.0 is a development
+build: it isn't published, and its release qualification isn't complete. For
+details, see [Supported macOS versions](/concepts/os-qualification/).
 :::
 
 ## What you can do with Pomme
@@ -82,3 +85,7 @@ qualification isn't complete. For details, see
 		href="/concepts/architecture/"
 	/>
 </CardGrid>
+
+## About the name
+
+Pomme is named after the Tiddly Pomme, one of the smallest apples.
