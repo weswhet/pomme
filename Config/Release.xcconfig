@@ -9,3 +9,11 @@
 // get-task-allow entitlement into the distributable command-line tool.
 ENABLE_HARDENED_RUNTIME = YES
 CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO
+
+// Strip the symbol table, which is more than half of the unstripped
+// executable. The guest agent hashes its whole executable at every launch,
+// and `pomme agent update` copies every byte into the guest. The dSYM keeps
+// crash reports symbolicated.
+DEPLOYMENT_POSTPROCESSING = YES
+STRIP_INSTALLED_PRODUCT = YES
+DEBUG_INFORMATION_FORMAT = dwarf-with-dsym

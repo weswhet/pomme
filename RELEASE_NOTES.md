@@ -25,6 +25,10 @@ delayed the agent by up to 22 seconds, and `pomme start` waits for the agent.
 `pomme start` also checks for the agent every 50 ms instead of every 500 ms,
 and for its VM helper every 20 ms instead of every 100 ms.
 
+Release builds now strip the executable's symbol table and keep a dSYM. The
+executable is half its previous size, so `pomme agent update` copies it into a
+VM in about half the time.
+
 ## MDM from any state
 
 `pomme mdm VM --profile FILE` now creates a missing VM, resumes incomplete
