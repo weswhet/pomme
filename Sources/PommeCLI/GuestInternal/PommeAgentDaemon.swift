@@ -227,7 +227,9 @@ enum PommeAgentDaemon {
                 owner: $2,
                 group: $3
             )
-        }
+        },
+        codeIdentity: () -> PommeAgentCodeIdentity? = PommeAgentCodeIdentity.current,
+        verifiedCodeURL: URL = URL(fileURLWithPath: PommeAgentVerifiedCodeRecord.path)
     ) -> Int32 {
         do {
             let options = try parse(arguments: arguments)
@@ -244,11 +246,13 @@ enum PommeAgentDaemon {
             defer {
                 if options.role == .recovery { try? oneShotCleanup() }
             }
-            let executableSHA256 = try PommeAgentFileTransaction.sha256(URL(fileURLWithPath: executablePath))
-            guard executableSHA256 == options.expectedSHA256
-                || (options.role == .persistent && PommeAgentUpdateApply.installedDefinitionPins(
-                    executableSHA256, executablePath: executablePath))
-            else { return Exit.integrity.rawValue }
+            guard let executableSHA256 = try verifiedExecutableDigest(
+                options: options,
+                executablePath: executablePath,
+                codeIdentity: options.role == .persistent ? codeIdentity() : nil,
+                verifiedCodeURL: verifiedCodeURL,
+                verifiedCodeOwner: recoveryOwner
+            ) else { return Exit.integrity.rawValue }
             // Recovery credentials are descriptor-backed one-shot material.
             // Consume the exact file before opening the host connection; a
             // reconnect or process restart therefore cannot replay it.
@@ -314,6 +318,43 @@ enum PommeAgentDaemon {
         } catch {
             return Exit.transport.rawValue
         }
+    }
+
+    /// Returns the running agent's digest, or nil when the executable is not
+    /// the one pinned for this launch.
+    ///
+    /// Hashing the whole executable costs tens of milliseconds at boot. A
+    /// persistent agent instead accepts its pinned digest when the kernel
+    /// reports an enforced signature whose CDHash matches a record that an
+    /// earlier launch wrote after hashing the same pinned digest. Recovery
+    /// agents always hash, and any other case falls back to the full hash.
+    static func verifiedExecutableDigest(
+        options: Options,
+        executablePath: String,
+        codeIdentity: PommeAgentCodeIdentity?,
+        verifiedCodeURL: URL,
+        verifiedCodeOwner: uid_t
+    ) throws -> String? {
+        let enforced = options.role == .persistent ? codeIdentity.flatMap { $0.isEnforced ? $0 : nil } : nil
+        if let enforced,
+           let record = PommeAgentVerifiedCodeRecord.read(at: verifiedCodeURL, expectedOwner: verifiedCodeOwner),
+           record.sha256 == options.expectedSHA256,
+           record.cdhash == enforced.cdhash {
+            return options.expectedSHA256
+        }
+        let digest = try PommeAgentFileTransaction.sha256(URL(fileURLWithPath: executablePath))
+        if digest == options.expectedSHA256 {
+            // Record only the digest that launchd pinned for this launch. A
+            // failed write only means that the next launch hashes again.
+            if let enforced, let record = PommeAgentVerifiedCodeRecord(sha256: digest, cdhash: enforced.cdhash) {
+                try? record.write(to: verifiedCodeURL)
+            }
+            return digest
+        }
+        guard options.role == .persistent,
+              PommeAgentUpdateApply.installedDefinitionPins(digest, executablePath: executablePath)
+        else { return nil }
+        return digest
     }
 
     /// Maintenance outlives transport reconnects and never runs in Recovery.

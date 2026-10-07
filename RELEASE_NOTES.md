@@ -29,6 +29,11 @@ Release builds now strip the executable's symbol table and keep a dSYM. The
 executable is half its previous size, so `pomme agent update` copies it into a
 VM in about half the time.
 
+After the agent hashes its executable and matches its pinned digest, it records
+its kernel-validated CDHash in `/private/var/db/pomme/agent-verified-code`.
+Later starts with an enforced signature and the same CDHash skip reading the
+executable.
+
 ## MDM from any state
 
 `pomme mdm VM --profile FILE` now creates a missing VM, resumes incomplete

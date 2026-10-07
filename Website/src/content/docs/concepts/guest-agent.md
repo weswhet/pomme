@@ -85,6 +85,16 @@ enrollment, check that the connected agent has the VM's pinned digest, the
 expected protocol version, and the capabilities that the workflow needs. If the
 agent doesn't match, the workflow stops before it makes a change.
 
+The normal agent also checks itself when it starts. Its launchd job passes the
+digest of the executable that Pomme installed, and the agent exits without
+connecting if its executable has a different digest. After a check succeeds,
+the agent records the code directory hash that the kernel validated for it in
+`/private/var/db/pomme/agent-verified-code`. On later starts, when the kernel
+reports an enforced signature with the same code directory hash, the agent
+accepts the pinned digest without reading its executable. In any other case,
+such as when the guest runs with relaxed code signing enforcement, it hashes
+the executable again.
+
 The creation record never changes. When `pomme agent update` installs a newer
 agent, Pomme writes a separate record of the new digest in the VM bundle. That
 record is signed with the VM's own creation-journal key and bound to its
