@@ -36,6 +36,11 @@ guest agent, Recovery, packaging, and state identity.
   agent from the host's `pomme` build. It doesn't use Recovery or restart the
   guest. SIP, AMFI, and MDM workflows accept the updated agent. For details, see
   [Update the agent](/guides/repair-the-agent/#update-the-agent).
+- VMs start faster. launchd no longer throttles the guest agent's CPU and disk
+  access, which during boot delayed the agent by up to 22 seconds. Because
+  `pomme start` waits for the agent, it now returns about 9 seconds after it
+  begins. Programs that `pomme exec` runs are no longer throttled either. An
+  existing VM gets this change after you update its agent and restart the VM.
 - Most commands accept `--progress auto|plain|off` to control the progress
   display on standard error.
 

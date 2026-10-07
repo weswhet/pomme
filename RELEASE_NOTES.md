@@ -13,6 +13,15 @@ require green CI, independent review of the Tahoe and Sequoia live qualification
 matrices, and the clean disposable-VM qualification described in
 `Docs/Qualification.md`.
 
+## Faster VM start
+
+The guest agent's LaunchDaemon now sets `ProcessType` to `Interactive`.
+Without it, launchd throttled the agent's CPU and I/O, which during boot
+delayed the agent by up to 22 seconds, and `pomme start` waits for the agent.
+`pomme start` now returns about 9 seconds after it begins, and programs that
+`pomme exec` runs are no longer throttled. An existing VM gets the change after
+`pomme agent update VM` and a guest restart.
+
 ## MDM from any state
 
 `pomme mdm VM --profile FILE` now creates a missing VM, resumes incomplete
