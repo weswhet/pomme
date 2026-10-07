@@ -41,6 +41,8 @@ guest agent, Recovery, packaging, and state identity.
   `pomme start` waits for the agent, it now returns about 9 seconds after it
   begins. Programs that `pomme exec` runs are no longer throttled either. An
   existing VM gets this change after you update its agent and restart the VM.
+- `pomme start` checks for the agent every 50 milliseconds instead of every
+  half second, so it returns sooner after the agent connects.
 - Most commands accept `--progress auto|plain|off` to control the progress
   display on standard error.
 
