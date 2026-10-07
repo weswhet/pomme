@@ -63,20 +63,23 @@ jobs:
         run: Tests/PackagingIdentity.sh
 
       # GitHub's macos-26 image has no Xcode 27, so it can't compile Pomme.
-      # The macOS 26 job runs these products instead. A tarball keeps the
-      # executable bits that artifact upload would drop.
-      - name: Package build products for macOS 26
-        run: tar -C "$RUNNER_TEMP/pomme-derived-data/Build" -czf "$RUNNER_TEMP/pomme-products.tar.gz" Products
+      # The macOS 26 job runs this binary instead. A tarball keeps the
+      # executable bit that artifact upload would drop.
+      - name: Package the pomme binary for macOS 26
+        run: tar -C "$RUNNER_TEMP/pomme-derived-data/Build/Products/Release" -czf "$RUNNER_TEMP/pomme-binary.tar.gz" pomme
 
-      - name: Upload build products
+      - name: Upload the pomme binary
         uses: actions/upload-artifact@v4
         with:
-          name: pomme-products
-          path: ${{ runner.temp }}/pomme-products.tar.gz
+          name: pomme-binary
+          path: ${{ runner.temp }}/pomme-binary.tar.gz
           retention-days: 3
 
+  # Unit tests run only on macOS 27: Xcode 26.6's test runner can't load a
+  # test bundle built by Xcode 27 (its Swift Testing runtime lacks newer
+  # symbols). This job checks the command-line contract on macOS 26 instead.
   verify-macos-26:
-    name: Test on macOS 26
+    name: Verify CLI contract on macOS 26
     needs: verify
     runs-on: macos-26
     timeout-minutes: 30
@@ -88,24 +91,17 @@ jobs:
       - name: Show toolchain
         run: sw_vers && xcodebuild -version
 
-      - name: Download build products
+      - name: Download the pomme binary
         uses: actions/download-artifact@v4
         with:
-          name: pomme-products
+          name: pomme-binary
           path: ${{ runner.temp }}
 
-      - name: Unpack build products
-        run: tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/pomme-products.tar.gz"
-
-      - name: Test
-        run: >-
-          xcodebuild test-without-building
-          -xctestrun "$(ls "$RUNNER_TEMP"/Products/*.xctestrun | head -n 1)"
-          -destination 'platform=macOS,arch=arm64'
-          -parallel-testing-enabled NO
+      - name: Unpack the pomme binary
+        run: tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/pomme-binary.tar.gz"
 
       - name: Verify public CLI contract
         run: >-
           Tests/PommeCLIIntegrationTests.sh
-          --runner "$RUNNER_TEMP/Products/Release/pomme"
+          --runner "$RUNNER_TEMP/pomme"
           --no-build
