@@ -1,9 +1,12 @@
 # Pomme
 
-Pomme is a command-line tool for creating and controlling macOS virtual
-machines (VMs) on Mac computers with Apple silicon. It's built with Swift and
-Virtualization.framework, and it manages only the VMs that it creates in
-`~/Library/Application Support/pomme`.
+Pomme is a container-style command-line tool for macOS virtual machines (VMs)
+on Mac computers with Apple silicon. You create, start, run commands in, and
+delete VMs from the terminal, much as you manage containers, and every VM runs
+completely headless, with no window on the host. Pomme is built with Swift and
+Virtualization.framework, and it manages only the VMs that it creates.
+
+Pomme is named after the Tiddly Pomme, one of the smallest apples.
 
 For guides and the complete command-line reference, see the documentation at
 <https://pommevm.dev>.
