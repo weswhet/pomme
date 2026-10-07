@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import Synchronization
@@ -400,6 +401,183 @@ struct PommeAgentDaemonTests {
 
         #expect(exit == PommeAgentDaemon.Exit.integrity.rawValue)
         #expect(cleanups.value == 1)
+    }
+
+    @Test("Recovery agent hashes its executable without consulting its CDHash")
+    func recoveryAgentIgnoresCodeIdentity() throws {
+        let fixture = try makeRecoveryRunWorkspace(requestData: Data("not-yet-validated".utf8))
+        defer { try? FileManager.default.removeItem(at: fixture.workspace) }
+        let identityQueries = DaemonCleanupRecorder()
+
+        let exit = PommeAgentDaemon.run(
+            arguments: recoveryArguments(
+                requestID: fixture.requestID,
+                workspace: fixture.workspace,
+                expectedDigest: String(repeating: "a", count: 64)
+            ),
+            executablePath: fixture.executable.path,
+            recoveryOwner: geteuid(),
+            recoveryGroup: fixture.group,
+            recoveryCleanupFactory: { _, _, _, _ in {} },
+            codeIdentity: { identityQueries.increment(); return Self.enforcedIdentity }
+        )
+
+        #expect(exit == PommeAgentDaemon.Exit.integrity.rawValue)
+        #expect(identityQueries.value == 0)
+    }
+
+    @Test("CDHash identity requires a valid, enforced, hardened, non-ad hoc signature")
+    func codeIdentityEnforcement() {
+        // The status that the kernel reported for the agent in a macOS 27 guest.
+        #expect(PommeAgentCodeIdentity(status: 0x2201_1311, cdhash: Self.cdhash).isEnforced)
+        let flag = PommeAgentCodeIdentity.self
+        for missing in [flag.valid, flag.hard, flag.kill, flag.enforcement, flag.runtime, flag.signed] {
+            #expect(!PommeAgentCodeIdentity(status: 0x2201_1311 & ~missing, cdhash: Self.cdhash).isEnforced)
+        }
+        for forbidden in [flag.adhoc, flag.getTaskAllow, flag.invalidAllowed, flag.linkerSigned, flag.debugged] {
+            #expect(!PommeAgentCodeIdentity(status: 0x2201_1311 | forbidden, cdhash: Self.cdhash).isEnforced)
+        }
+    }
+
+    @Test("verified code record round-trips and rejects unsafe or malformed files")
+    func verifiedCodeRecordFile() throws {
+        let directory = try Self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("agent-verified-code")
+        let record = try #require(PommeAgentVerifiedCodeRecord(sha256: Self.digest, cdhash: Self.cdhash))
+
+        #expect(PommeAgentVerifiedCodeRecord.read(at: url, expectedOwner: geteuid()) == nil)
+        try record.write(to: url)
+        #expect(PommeAgentVerifiedCodeRecord.read(at: url, expectedOwner: geteuid()) == record)
+        #expect(try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int == 0o600)
+        #expect(PommeAgentVerifiedCodeRecord.read(at: url, expectedOwner: geteuid() + 1) == nil)
+        chmod(url.path, 0o644)
+        #expect(PommeAgentVerifiedCodeRecord.read(at: url, expectedOwner: geteuid()) == nil)
+
+        let link = directory.appendingPathComponent("link")
+        chmod(url.path, 0o600)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: url)
+        #expect(PommeAgentVerifiedCodeRecord.read(at: link, expectedOwner: geteuid()) == nil)
+
+        #expect(PommeAgentVerifiedCodeRecord(sha256: Self.digest.uppercased(), cdhash: Self.cdhash) == nil)
+        #expect(PommeAgentVerifiedCodeRecord(sha256: Self.digest, cdhash: String(Self.cdhash.dropLast())) == nil)
+        // Same length as a valid record, so only the format rejects it.
+        try Data("\(Self.digest)  \(Self.cdhash.dropLast())\n".utf8).write(to: url)
+        chmod(url.path, 0o600)
+        #expect(PommeAgentVerifiedCodeRecord.read(at: url, expectedOwner: geteuid()) == nil)
+    }
+
+    @Test("persistent agent skips hashing when an enforced CDHash matches its verified record")
+    func persistentAgentAcceptsVerifiedCDHash() throws {
+        let directory = try Self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let recordURL = directory.appendingPathComponent("agent-verified-code")
+        try #require(PommeAgentVerifiedCodeRecord(sha256: Self.digest, cdhash: Self.cdhash)).write(to: recordURL)
+
+        // The executable doesn't exist, so reaching the token proves that the
+        // agent never read it. The missing token stops before any connection.
+        let exit = PommeAgentDaemon.run(
+            arguments: Self.persistentArguments(directory: directory, digest: Self.digest),
+            executablePath: directory.appendingPathComponent("missing-pomme").path,
+            recoveryOwner: geteuid(),
+            recoveryGroup: getegid(),
+            codeIdentity: { Self.enforcedIdentity },
+            verifiedCodeURL: recordURL
+        )
+
+        #expect(exit == PommeAgentDaemon.Exit.credential.rawValue)
+    }
+
+    @Test(
+        "persistent agent hashes its executable unless its CDHash is enforced and verified",
+        arguments: [
+            (status: Self.enforcedIdentity.status, recordedCDHash: String(repeating: "c", count: 40)),
+            (status: Self.enforcedIdentity.status & ~PommeAgentCodeIdentity.kill, recordedCDHash: Self.cdhash),
+            (status: Self.enforcedIdentity.status | PommeAgentCodeIdentity.adhoc, recordedCDHash: Self.cdhash),
+        ]
+    )
+    func persistentAgentFallsBackToHash(status: UInt32, recordedCDHash: String) throws {
+        let directory = try Self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let recordURL = directory.appendingPathComponent("agent-verified-code")
+        let previous = try #require(PommeAgentVerifiedCodeRecord(sha256: Self.digest, cdhash: recordedCDHash))
+        try previous.write(to: recordURL)
+        let missing = directory.appendingPathComponent("missing-pomme")
+
+        let exit = PommeAgentDaemon.run(
+            arguments: Self.persistentArguments(directory: directory, digest: Self.digest),
+            executablePath: missing.path,
+            recoveryOwner: geteuid(),
+            recoveryGroup: getegid(),
+            codeIdentity: { PommeAgentCodeIdentity(status: status, cdhash: Self.cdhash) },
+            verifiedCodeURL: recordURL
+        )
+
+        // Hashing the missing executable fails before the token is read.
+        #expect(exit == PommeAgentDaemon.Exit.transport.rawValue)
+        #expect(PommeAgentVerifiedCodeRecord.read(at: recordURL, expectedOwner: geteuid()) == previous)
+    }
+
+    @Test("persistent agent records its CDHash only after hashing its pinned digest")
+    func persistentAgentRecordsVerifiedCDHash() throws {
+        let directory = try Self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let recordURL = directory.appendingPathComponent("agent-verified-code")
+        let executable = directory.appendingPathComponent("pomme")
+        let bytes = Data("pomme-test-executable".utf8)
+        try bytes.write(to: executable)
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+
+        func launch(expecting expected: String, identity: PommeAgentCodeIdentity) -> Int32 {
+            PommeAgentDaemon.run(
+                arguments: Self.persistentArguments(directory: directory, digest: expected),
+                executablePath: executable.path,
+                recoveryOwner: geteuid(),
+                recoveryGroup: getegid(),
+                codeIdentity: { identity },
+                verifiedCodeURL: recordURL
+            )
+        }
+
+        // A digest that launchd didn't pin is never recorded.
+        #expect(launch(expecting: Self.digest, identity: Self.enforcedIdentity) == PommeAgentDaemon.Exit.integrity.rawValue)
+        #expect(!FileManager.default.fileExists(atPath: recordURL.path))
+
+        // Without enforcement, a matching hash still isn't recorded.
+        let unenforced = PommeAgentCodeIdentity(status: Self.enforcedIdentity.status | PommeAgentCodeIdentity.adhoc,
+                                                cdhash: Self.cdhash)
+        #expect(launch(expecting: digest, identity: unenforced) == PommeAgentDaemon.Exit.credential.rawValue)
+        #expect(!FileManager.default.fileExists(atPath: recordURL.path))
+
+        #expect(launch(expecting: digest, identity: Self.enforcedIdentity) == PommeAgentDaemon.Exit.credential.rawValue)
+        #expect(PommeAgentVerifiedCodeRecord.read(at: recordURL, expectedOwner: geteuid())
+            == PommeAgentVerifiedCodeRecord(sha256: digest, cdhash: Self.cdhash))
+
+        // With the record in place, the next launch never reads the executable.
+        try FileManager.default.removeItem(at: executable)
+        #expect(launch(expecting: digest, identity: Self.enforcedIdentity) == PommeAgentDaemon.Exit.credential.rawValue)
+    }
+
+    private static let digest = String(repeating: "a", count: 64)
+    private static let cdhash = String(repeating: "b", count: 40)
+    private static let enforcedIdentity = PommeAgentCodeIdentity(status: 0x2201_1311, cdhash: cdhash)
+
+    private static func makeTemporaryDirectory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pomme-agent-code-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        return directory
+    }
+
+    /// The token file never exists, so a launch stops before connecting.
+    private static func persistentArguments(directory: URL, digest: String) -> [String] {
+        [
+            "--pomme-agent", String(Constants.pommeAgentPort),
+            "--token-file", directory.appendingPathComponent("missing-token").path,
+            "--expected-sha256", digest,
+            "--role", "normal",
+        ]
     }
 
     @Test("default Recovery cleanup accepts an existing private workspace before digest validation")

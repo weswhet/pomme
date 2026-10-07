@@ -46,6 +46,10 @@ guest agent, Recovery, packaging, and state identity.
 - Release builds strip the symbol table from the `pomme` executable, which
   halves its size. `pomme agent update` copies the smaller executable into a
   VM in about half the time.
+- After the agent verifies the digest of its executable once, later starts
+  check the code directory hash that the kernel validated instead of reading
+  the whole executable again. For details, see
+  [Digest pinning](/concepts/guest-agent/#digest-pinning).
 - Most commands accept `--progress auto|plain|off` to control the progress
   display on standard error.
 
