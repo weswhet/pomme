@@ -710,18 +710,13 @@ struct PommeAgentProcessExchangeTests: Sendable {
             let jobID = try #require(UUID(uuidString: jobText))
 
             var frames = started.streams
-            var completed = frames.contains { $0.frame.stream == .exit }
-            for _ in 0..<32 where !completed {
-                let status = PommeAgentProtocol.Envelope.request(
-                    operation: "process.status",
-                    payload: .object(["jobID": .string(jobID.uuidString.lowercased())])
-                )
-                let result = try await exchange(status, using: context.wire)
-                #expect(result.streams.filter { $0.frame.stream == .stdout }.count <= 1)
-                #expect(result.streams.filter { $0.frame.stream == .stderr }.count <= 1)
-                frames += result.streams
-                completed = result.streams.contains { $0.frame.stream == .exit }
+            if !frames.contains(where: { $0.frame.stream == .exit }) {
+                frames += try await pollUntilExit(jobID: jobID, using: context.wire) { result in
+                    #expect(result.streams.filter { $0.frame.stream == .stdout }.count <= 1)
+                    #expect(result.streams.filter { $0.frame.stream == .stderr }.count <= 1)
+                }
             }
+            let completed = frames.contains { $0.frame.stream == .exit }
 
             #expect(completed)
             #expect(frames.contains { $0.frame.stream == .stdout && $0.frame.data == Data("stdout".utf8) })
@@ -748,23 +743,18 @@ struct PommeAgentProcessExchangeTests: Sendable {
             let jobID = try #require(UUID(uuidString: jobText))
 
             var frames = started.streams
-            var completed = frames.contains { $0.frame.stream == .exit }
-            for _ in 0..<32 where !completed {
-                let status = PommeAgentProtocol.Envelope.request(
-                    operation: "process.status",
-                    payload: .object(["jobID": .string(jobID.uuidString.lowercased())])
-                )
-                let result = try await exchange(status, using: context.wire)
-                let stdout = result.streams.filter { $0.frame.stream == .stdout }
-                let stderr = result.streams.filter { $0.frame.stream == .stderr }
-                #expect(stdout.count <= 1)
-                #expect(stderr.count <= 1)
-                #expect(stdout.allSatisfy { ($0.frame.data?.count ?? 0) <= PommeAgentProtocol.maximumStreamChunkBytes })
-                #expect(stderr.allSatisfy { ($0.frame.data?.count ?? 0) <= PommeAgentProtocol.maximumStreamChunkBytes })
-                #expect(result.streams.reduce(0) { $0 + ($1.frame.data?.count ?? 0) } <= 2 * PommeAgentProtocol.maximumStreamChunkBytes)
-                frames += result.streams
-                completed = result.streams.contains { $0.frame.stream == .exit }
+            if !frames.contains(where: { $0.frame.stream == .exit }) {
+                frames += try await pollUntilExit(jobID: jobID, using: context.wire) { result in
+                    let stdout = result.streams.filter { $0.frame.stream == .stdout }
+                    let stderr = result.streams.filter { $0.frame.stream == .stderr }
+                    #expect(stdout.count <= 1)
+                    #expect(stderr.count <= 1)
+                    #expect(stdout.allSatisfy { ($0.frame.data?.count ?? 0) <= PommeAgentProtocol.maximumStreamChunkBytes })
+                    #expect(stderr.allSatisfy { ($0.frame.data?.count ?? 0) <= PommeAgentProtocol.maximumStreamChunkBytes })
+                    #expect(result.streams.reduce(0) { $0 + ($1.frame.data?.count ?? 0) } <= 2 * PommeAgentProtocol.maximumStreamChunkBytes)
+                }
             }
+            let completed = frames.contains { $0.frame.stream == .exit }
 
             let stdoutBytes = frames
                 .filter { $0.frame.stream == .stdout }
@@ -814,16 +804,10 @@ struct PommeAgentProcessExchangeTests: Sendable {
             #expect(acknowledged.response.result?.objectValue?["jobID"]?.stringValue == jobID.uuidString.lowercased())
 
             var frames = started.streams + acknowledged.streams
-            var completed = frames.contains { $0.frame.stream == .exit }
-            for _ in 0..<32 where !completed {
-                let status = PommeAgentProtocol.Envelope.request(
-                    operation: "process.status",
-                    payload: .object(["jobID": .string(jobID.uuidString.lowercased())])
-                )
-                let result = try await exchange(status, using: context.wire)
-                frames += result.streams
-                completed = result.streams.contains { $0.frame.stream == .exit }
+            if !frames.contains(where: { $0.frame.stream == .exit }) {
+                frames += try await pollUntilExit(jobID: jobID, using: context.wire)
             }
+            let completed = frames.contains { $0.frame.stream == .exit }
 
             #expect(completed)
             #expect(frames.contains { $0.frame.stream == .stdout && $0.frame.data == Data("stream-out".utf8) })
@@ -1124,6 +1108,32 @@ struct PommeAgentProcessExchangeTests: Sendable {
         let result = try await exchange(request, using: wire)
         #expect(result.response.ok == true)
         #expect(result.streams.isEmpty)
+    }
+
+    /// Polls `process.status` until the job's exit frame arrives or `timeout`
+    /// passes, and returns every stream frame received. A fixed number of
+    /// back-to-back polls could finish on a loaded CI runner before the child
+    /// wrote anything, so the loop pauses briefly after each empty poll.
+    private func pollUntilExit(
+        jobID: UUID,
+        using wire: PommeAgentVSOCKWire,
+        timeout: Duration = .seconds(10),
+        inspect: (ExchangeResult) -> Void = { _ in }
+    ) async throws -> [PommeAgentJobStreamFrame] {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        var frames: [PommeAgentJobStreamFrame] = []
+        while ContinuousClock.now < deadline {
+            let status = PommeAgentProtocol.Envelope.request(
+                operation: "process.status",
+                payload: .object(["jobID": .string(jobID.uuidString.lowercased())])
+            )
+            let result = try await exchange(status, using: wire)
+            inspect(result)
+            frames += result.streams
+            if result.streams.contains(where: { $0.frame.stream == .exit }) { break }
+            if result.streams.isEmpty { try await Task.sleep(for: .milliseconds(20)) }
+        }
+        return frames
     }
 
     private func exchange(
