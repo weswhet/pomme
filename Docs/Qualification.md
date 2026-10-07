@@ -1,7 +1,8 @@
 # Release qualification
 
-Pomme `0.1.0` is not publishable until every item below has an independently
-reviewed record and digest. Raw screenshots and sensitive frame data stay in a
+A stable Pomme release, such as `0.1.0`, isn't publishable until every item
+below has an independently reviewed record and digest. Qualify the alpha that
+you plan to promote. Alpha builds themselves aren't qualified. Raw screenshots and sensitive frame data stay in a
 private temporary lab workspace and are never committed or included in product
 diagnostics.
 
@@ -55,6 +56,8 @@ output across multiple chunks, and checks repeated and offset replay. It deletes
 only its successfully verified sessions; failures retain their session IDs for
 inspection. This targeted smoke check does not replace the full matrix above.
 
-GitHub publication and Homebrew updates remain manual actions protected by the
-`pomme-release` environment. The workflow requires the reviewed qualification
-digest and an explicit publish choice; tag pushes do not publish.
+The Alpha workflow publishes each alpha as a GitHub pre-release without
+qualification. A stable release and its Homebrew update happen only through the
+manual Release workflow, which requires the `QUALIFIED` confirmation and an
+approved deployment to the protected `pomme-release` environment. Tag pushes
+don't publish. For the steps, see [Releasing Pomme](Releasing.md).

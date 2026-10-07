@@ -1,0 +1,159 @@
+name: Alpha
+
+# Publishes a signed alpha pre-release, such as v0.1.0-alpha.3, for each push
+# to main that passes CI and changes more than documentation or tests.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Publish even if only documentation or tests changed
+        type: boolean
+        default: false
+
+# One alpha at a time, so that each gets the next number. A newer run waits
+# for a running one instead of canceling it.
+concurrency:
+  group: alpha
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Plan the alpha
+    # Only CI runs for pushes to this repository's main branch qualify. A pull
+    # request from a fork can also come from a branch named main.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.plan.outputs.publish }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      commit: ${{ steps.plan.outputs.commit }}
+      previous_tag: ${{ steps.plan.outputs.previous_tag }}
+
+    steps:
+      - name: Choose the commit
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" != workflow_dispatch ]]; then
+            echo "sha=$RUN_SHA" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "::error::Run the Alpha workflow from main."
+            exit 64
+          fi
+          passed="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow CI --commit "$GITHUB_SHA" \
+            --status success --json databaseId --jq length)"
+          if [[ "$passed" -eq 0 ]]; then
+            echo "::error::CI hasn't passed for $GITHUB_SHA."
+            exit 64
+          fi
+          echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.commit.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Plan
+        id: plan
+        env:
+          COMMIT: ${{ steps.commit.outputs.sha }}
+          FORCE: ${{ inputs.force }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(alpha --commit "$COMMIT")
+          if [[ "$FORCE" == true ]]; then args+=(--force); fi
+          plan="$(Scripts/plan-release.sh "${args[@]}")"
+          printf '%s\n' "$plan"
+          printf '%s\n' "$plan" >> "$GITHUB_OUTPUT"
+          sed -n 's/^reason=//p' <<<"$plan" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/build-release.yml
+    with:
+      commit: ${{ needs.plan.outputs.commit }}
+      version: ${{ needs.plan.outputs.version }}
+
+  publish:
+    name: Publish the pre-release
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      PREVIOUS_TAG: ${{ needs.plan.outputs.previous_tag }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download the release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: pomme-${{ needs.plan.outputs.version }}
+          path: dist
+
+      - name: Verify the release artifacts
+        env:
+          EXPECTED_DIGEST: ${{ needs.build.outputs.artifact_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(shasum -a 256 dist/SHA256SUMS | awk '{print $1}')"
+          if [[ -z "$EXPECTED_DIGEST" || "$actual" != "$EXPECTED_DIGEST" ]]; then
+            echo "::error::The downloaded artifacts don't match the build."
+            exit 70
+          fi
+          (cd dist && shasum -a 256 -c SHA256SUMS)
+
+      - name: Publish the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          Scripts/release-notes.sh alpha --version "$VERSION" --commit "$COMMIT" \
+            --previous-tag "$PREVIOUS_TAG" > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$COMMIT" \
+            --title "Pomme $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --prerelease \
+            --latest=false
+          echo "Published [$TAG]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG)." >> "$GITHUB_STEP_SUMMARY"

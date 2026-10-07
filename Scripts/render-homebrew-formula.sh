@@ -63,20 +63,21 @@ fi
 render() {
   cat <<RUBY
 class Pomme < Formula
-  desc "Headless macOS VM CLI built with Virtualization.framework"
-  homepage "https://github.com/$repo"
+  desc "Container-style CLI for headless macOS virtual machines"
+  homepage "https://pommevm.dev"
   url "https://github.com/$repo/releases/download/v$version/pomme-$version-arm64.tar.gz"
   sha256 "$sha256"
-  license "NOASSERTION"
+  license "Apache-2.0"
 
   depends_on arch: :arm64
+  depends_on macos: :sequoia
 
   def install
     bin.install "pomme"
   end
 
   test do
-    assert_match "pomme CLI", shell_output("#{bin}/pomme --help")
+    assert_match "pomme #{version} (", shell_output("#{bin}/pomme --version")
   end
 end
 RUBY

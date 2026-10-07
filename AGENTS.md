@@ -142,14 +142,25 @@ Do not delete/recreate credentials, broaden ACLs, or reset the Keychain to hide 
 signing mismatch. Items previously authorized for an ad-hoc or different identity
 may still need explicit user authorization; this workflow does not migrate them.
 
-`Scripts/build-release-pkg.sh` is a separate packaging workflow that re-signs its
-input. When packaging is requested, set `DEVELOPER_ID_APPLICATION` to the exact
-certificate above, supply the verified Release products with `--products-dir`,
-and repeat the signature/requirement checks on the final packaged executable.
-Do not assume re-signing preserves Xcode's generated designated requirement.
-Pomme doesn't notarize its packages. Signing verification does not establish
-successful guest MDM enrollment, and does not authorize publication or VM
-operations.
+`Scripts/build-release-pkg.sh` is a separate packaging workflow that re-signs a
+copy of its input and checks the same identifier, team, certificate, Hardened
+Runtime, timestamp, entitlements, and designated requirement as
+`Scripts/build-local.sh`. The Alpha and Release workflows run it in CI; see
+[Docs/Releasing.md](Docs/Releasing.md). When local packaging is requested, set
+`DEVELOPER_ID_APPLICATION` to the exact certificate above and supply the
+verified Release products with `--products-dir`. Do not assume re-signing
+preserves Xcode's generated designated requirement. Pomme doesn't notarize its
+packages. Signing verification does not establish successful guest MDM
+enrollment, and does not authorize publication or VM operations.
+
+## Releases
+
+A push to `main` that passes CI publishes a signed alpha pre-release, and it
+also redeploys https://pommevm.dev. Treat a push to `main` as a public release.
+Don't push to `main`, run the Alpha or Release workflow, approve a
+`pomme-release` deployment, create or delete release tags, or run
+`Scripts/configure-release-secrets.sh` unless the user asks for that action.
+Never export signing identities yourself; the user exports them.
 
 ## Keep the documentation site current
 

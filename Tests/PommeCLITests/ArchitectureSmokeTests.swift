@@ -49,7 +49,11 @@ struct ArchitectureSmokeTests {
         )
         #expect(config.contains("PRODUCT_NAME = pomme"))
         #expect(config.contains("PRODUCT_BUNDLE_IDENTIFIER = com.github.weswhet.pomme"))
-        #expect(config.contains("MARKETING_VERSION = 0.1.0"))
+        // Scripts/plan-release.sh reads the next stable version from here.
+        #expect(config.range(
+            of: #"(?m)^MARKETING_VERSION = \d+\.\d+\.\d+$"#,
+            options: .regularExpression
+        ) != nil)
     }
 
     @Test("Source tree contains no retired guest protocol identifiers")

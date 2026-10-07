@@ -1,247 +1,222 @@
 name: Release
 
+# Promotes a qualified alpha to a stable release: it rebuilds the alpha's
+# commit with the stable version, waits for approval in the pomme-release
+# environment, publishes the GitHub release, and updates the Homebrew formula.
+# Docs/Releasing.md describes the steps.
 on:
-  # Tag pushes intentionally do not start a release workflow.
   workflow_dispatch:
     inputs:
-      version:
-        description: "Release version without the leading v"
+      alpha:
+        description: Alpha release to promote, such as v0.1.0-alpha.7
         required: true
         type: string
-      publish:
-        description: "Publish the qualified artifacts to GitHub"
-        required: true
-        default: false
-        type: boolean
-      update_homebrew:
-        description: "Update Homebrew only when publishing"
-        required: true
-        default: false
-        type: boolean
       qualification:
-        description: "Enter QUALIFIED only after release qualification is complete"
+        description: Type QUALIFIED to confirm that this alpha passed release qualification
         required: true
-        default: "UNQUALIFIED"
+        default: UNQUALIFIED
         type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  build-release:
-    name: Build signed package
-    # Building Pomme needs the Xcode 27 SDK, which only GitHub's xcode-27
-    # image (macOS 27) provides.
-    runs-on: xcode-27
+  plan:
+    name: Plan the release
+    runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      artifact_digest: ${{ steps.artifact_digest.outputs.artifact_digest }}
-    env:
-      DEVELOPER_ID_APPLICATION: ${{ secrets.DEVELOPER_ID_APPLICATION }}
-      DEVELOPER_ID_INSTALLER: ${{ secrets.DEVELOPER_ID_INSTALLER }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      commit: ${{ steps.plan.outputs.commit }}
+      previous_tag: ${{ steps.plan.outputs.previous_tag }}
 
     steps:
+      - name: Check the inputs
+        env:
+          QUALIFICATION: ${{ inputs.qualification }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "::error::Run the Release workflow from main."
+            exit 64
+          fi
+          if [[ "$QUALIFICATION" != QUALIFIED ]]; then
+            echo "::error::Type QUALIFIED only after the alpha passes release qualification. See Docs/Qualification.md."
+            exit 64
+          fi
+
       - name: Check out
-        uses: actions/checkout@v4
-
-      - name: Validate dispatch options
-        env:
-          PUBLISH: ${{ inputs.publish }}
-          UPDATE_HOMEBREW: ${{ inputs.update_homebrew }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "$UPDATE_HOMEBREW" == "true" && "$PUBLISH" != "true" ]]; then
-            echo "Homebrew update requires publish=true." >&2
-            exit 64
-          fi
-
-      - name: Check release secrets
-        env:
-          CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_BASE64 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
-          DEVELOPER_ID_APPLICATION_SECRET: ${{ secrets.DEVELOPER_ID_APPLICATION }}
-          DEVELOPER_ID_INSTALLER_SECRET: ${{ secrets.DEVELOPER_ID_INSTALLER }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          missing=()
-          [[ -n "$CERTIFICATE_BASE64" ]] || missing+=(DEVELOPER_ID_CERTIFICATE_BASE64)
-          [[ -n "$CERTIFICATE_PASSWORD" ]] || missing+=(DEVELOPER_ID_CERTIFICATE_PASSWORD)
-          [[ -n "$DEVELOPER_ID_APPLICATION_SECRET" ]] || missing+=(DEVELOPER_ID_APPLICATION)
-          [[ -n "$DEVELOPER_ID_INSTALLER_SECRET" ]] || missing+=(DEVELOPER_ID_INSTALLER)
-          if [[ "${#missing[@]}" -gt 0 ]]; then
-            printf 'Missing required release secrets:\n' >&2
-            printf '  %s\n' "${missing[@]}" >&2
-            exit 64
-          fi
-
-      - name: Resolve version
-        id: version
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="$RELEASE_VERSION"
-          if [[ -z "$version" || "$version" =~ [^A-Za-z0-9._-] ]]; then
-            echo "Invalid release version: $version" >&2
-            exit 64
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Import Developer ID identities
-        env:
-          CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_BASE64 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.DEVELOPER_ID_KEYCHAIN_PASSWORD }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${CERTIFICATE_BASE64:?DEVELOPER_ID_CERTIFICATE_BASE64 is required}"
-          : "${CERTIFICATE_PASSWORD:?DEVELOPER_ID_CERTIFICATE_PASSWORD is required}"
-
-          keychain_password="${KEYCHAIN_PASSWORD:-$(uuidgen)}"
-          keychain="$RUNNER_TEMP/pomme-signing.keychain-db"
-          certificate="$RUNNER_TEMP/developer-id.p12"
-
-          printf '%s' "$CERTIFICATE_BASE64" | base64 --decode > "$certificate"
-          security create-keychain -p "$keychain_password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$keychain_password" "$keychain"
-          security import "$certificate" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign -T /usr/bin/pkgbuild
-          security list-keychains -d user -s "$keychain" login.keychain-db
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
-          security find-identity -v "$keychain"
-
-      - name: Build and sign
-        shell: bash
-        run: |
-          set -euo pipefail
-          Scripts/build-release-pkg.sh --version "${{ steps.version.outputs.version }}"
-
-      - name: Render Homebrew formula
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
-          tarball="dist/pomme-$version-arm64.tar.gz"
-          sha256="$(shasum -a 256 "$tarball" | awk '{print $1}')"
-          Scripts/render-homebrew-formula.sh --version "$version" --sha256 "$sha256" --output dist/pomme.rb
-
-      - name: Verify release artifacts and record digest
-        id: artifact_digest
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
-          pkg="dist/pomme-$version-arm64.pkg"
-          tarball="dist/pomme-$version-arm64.tar.gz"
-          [[ -f "$pkg" ]] || { echo "Missing package artifact: $pkg" >&2; exit 70; }
-          [[ -f "$tarball" ]] || { echo "Missing tarball artifact: $tarball" >&2; exit 70; }
-          [[ -f dist/SHA256SUMS ]] || { echo "Missing SHA256SUMS" >&2; exit 70; }
-          (cd dist && shasum -a 256 -c SHA256SUMS)
-          digest="$(shasum -a 256 dist/SHA256SUMS | awk '{print $1}')"
-          echo "artifact_digest=$digest" >> "$GITHUB_OUTPUT"
-
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/checkout@v7
         with:
-          name: pomme-release-artifacts
-          path: |
-            dist/pomme-${{ steps.version.outputs.version }}-arm64.pkg
-            dist/pomme-${{ steps.version.outputs.version }}-arm64.tar.gz
-            dist/SHA256SUMS
-            dist/pomme.rb
+          fetch-depth: 0
+          persist-credentials: false
 
-  publish-release:
-    name: Publish qualified release
-    # Publication is opt-in and the protected environment supplies the human approval gate.
-    if: ${{ inputs.publish == true }}
-    needs: build-release
-    runs-on: xcode-27
+      - name: Plan
+        id: plan
+        env:
+          ALPHA: ${{ inputs.alpha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          plan="$(Scripts/plan-release.sh stable --alpha "$ALPHA" --branch HEAD)"
+          printf '%s\n' "$plan"
+          printf '%s\n' "$plan" >> "$GITHUB_OUTPUT"
+
+      - name: Check that the alpha is a published pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALPHA: ${{ inputs.alpha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          prerelease="$(gh release view "$ALPHA" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)"
+          if [[ "$prerelease" != true ]]; then
+            echo "::error::$ALPHA isn't a published alpha pre-release."
+            exit 64
+          fi
+
+      # The notes come from main, so that you can finish them after the alpha.
+      - name: Write the release notes
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          COMMIT: ${{ steps.plan.outputs.commit }}
+          PREVIOUS_TAG: ${{ steps.plan.outputs.previous_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/notes"
+          Scripts/release-notes.sh stable --version "$VERSION" --commit "$COMMIT" \
+            --previous-tag "$PREVIOUS_TAG" > "$RUNNER_TEMP/notes/notes.md"
+          cat "$RUNNER_TEMP/notes/notes.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the release notes
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes/notes.md
+          if-no-files-found: error
+
+  build:
+    name: Build
+    needs: plan
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/build-release.yml
+    with:
+      commit: ${{ needs.plan.outputs.commit }}
+      version: ${{ needs.plan.outputs.version }}
+
+  publish:
+    name: Publish the release
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    # Waits for a required reviewer to approve the deployment.
     environment: pomme-release
     permissions:
       contents: write
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      COMMIT: ${{ needs.plan.outputs.commit }}
 
     steps:
-      - name: Download qualified artifacts
-        uses: actions/download-artifact@v4
+      - name: Check the Homebrew deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        shell: bash
+        run: |
+          if [[ -z "$DEPLOY_KEY" ]]; then
+            echo "::error::The pomme-release environment has no HOMEBREW_TAP_DEPLOY_KEY. Run Scripts/configure-release-secrets.sh."
+            exit 64
+          fi
+
+      - name: Check out
+        uses: actions/checkout@v7
         with:
-          name: pomme-release-artifacts
+          ref: ${{ needs.plan.outputs.commit }}
+          persist-credentials: false
+
+      - name: Download the release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: pomme-${{ needs.plan.outputs.version }}
           path: dist
 
-      - name: Verify qualification and artifact digest
+      - name: Download the release notes
+        uses: actions/download-artifact@v8
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes
+
+      - name: Verify the release artifacts
         env:
-          RELEASE_QUALIFICATION: ${{ inputs.qualification }}
-          EXPECTED_ARTIFACT_DIGEST: ${{ needs.build-release.outputs.artifact_digest }}
-          RELEASE_VERSION: ${{ needs.build-release.outputs.version }}
+          EXPECTED_DIGEST: ${{ needs.build.outputs.artifact_digest }}
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$RELEASE_QUALIFICATION" == "QUALIFIED" ]] || {
-            echo "Publication requires the exact QUALIFIED approval input." >&2
-            exit 64
-          }
-          actual_digest="$(shasum -a 256 dist/SHA256SUMS | awk '{print $1}')"
-          [[ -n "$EXPECTED_ARTIFACT_DIGEST" && "$actual_digest" == "$EXPECTED_ARTIFACT_DIGEST" ]] || {
-            echo "Release artifact digest does not match the qualified build." >&2
+          actual="$(shasum -a 256 dist/SHA256SUMS | awk '{print $1}')"
+          if [[ -z "$EXPECTED_DIGEST" || "$actual" != "$EXPECTED_DIGEST" ]]; then
+            echo "::error::The downloaded artifacts don't match the build."
             exit 70
-          }
+          fi
           (cd dist && shasum -a 256 -c SHA256SUMS)
-          [[ -f "dist/pomme-$RELEASE_VERSION-arm64.pkg" ]] || exit 70
-          [[ -f "dist/pomme-$RELEASE_VERSION-arm64.tar.gz" ]] || exit 70
-          [[ -f dist/pomme.rb ]] || exit 70
 
-      - name: Publish GitHub release
+      - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ needs.build-release.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
-          version="$RELEASE_VERSION"
-          tag="v$version"
-          title="pomme $version"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" \
-              "dist/pomme-$version-arm64.pkg" \
-              "dist/pomme-$version-arm64.tar.gz" \
-              "dist/SHA256SUMS" \
-              "dist/pomme.rb" \
-              --clobber
-          else
-            gh release create "$tag" \
-              "dist/pomme-$version-arm64.pkg" \
-              "dist/pomme-$version-arm64.tar.gz" \
-              "dist/SHA256SUMS" \
-              "dist/pomme.rb" \
-              --title "$title" \
-              --notes "Signed macOS arm64 release artifacts."
+          # A rerun after a failed Homebrew update finds the release already
+          # published. Continue only if it has these exact artifacts.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS \
+              --output "$RUNNER_TEMP/published-SHA256SUMS"
+            if ! cmp -s dist/SHA256SUMS "$RUNNER_TEMP/published-SHA256SUMS"; then
+              echo "::error::$TAG is already published with different artifacts."
+              exit 70
+            fi
+            echo "$TAG is already published with these artifacts."
+            exit 0
           fi
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$COMMIT" \
+            --title "Pomme $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes/notes.md" \
+            --latest
+          echo "Published [$TAG]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG)." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Update Homebrew tap
-        if: ${{ inputs.update_homebrew == true }}
-        env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          RELEASE_VERSION: ${{ needs.build-release.outputs.version }}
+      - name: Check out the Homebrew tap
+        uses: actions/checkout@v7
+        with:
+          repository: weswhet/homebrew-tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          path: homebrew-tap
+
+      - name: Update the Homebrew formula
         shell: bash
         run: |
           set -euo pipefail
-          : "${GH_TOKEN:?HOMEBREW_TAP_TOKEN is required when update_homebrew=true}"
-          version="$RELEASE_VERSION"
-          tap_dir="$RUNNER_TEMP/homebrew-tap"
-
-          gh auth setup-git
-          git clone https://github.com/weswhet/homebrew-tap.git "$tap_dir"
-          mkdir -p "$tap_dir/Formula"
-          cp dist/pomme.rb "$tap_dir/Formula/pomme.rb"
-          git -C "$tap_dir" config user.name "github-actions[bot]"
-          git -C "$tap_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C "$tap_dir" add Formula/pomme.rb
-          if git -C "$tap_dir" diff --cached --quiet; then
-            echo "Homebrew tap already has pomme $version"
-          else
-            git -C "$tap_dir" commit -m "Update pomme formula to $version"
-            git -C "$tap_dir" push
+          sha256="$(shasum -a 256 "dist/pomme-$VERSION-arm64.tar.gz" | awk '{print $1}')"
+          mkdir -p homebrew-tap/Formula
+          Scripts/render-homebrew-formula.sh --version "$VERSION" --sha256 "$sha256" \
+            --output homebrew-tap/Formula/pomme.rb
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/pomme.rb
+          if git diff --cached --quiet; then
+            echo "The Homebrew formula is already at $VERSION."
+            exit 0
           fi
+          git commit -m "pomme $VERSION"
+          git push
+          echo "Updated the Homebrew formula to $VERSION." >> "$GITHUB_STEP_SUMMARY"

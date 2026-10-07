@@ -62,6 +62,9 @@ jobs:
       - name: Verify package identity
         run: Tests/PackagingIdentity.sh
 
+      - name: Check release scripts
+        run: Tests/ReleaseScripts.sh
+
       # GitHub's macos-26 image has no Xcode 27, so it can't compile Pomme.
       # The macOS 26 job runs this binary instead. A tarball keeps the
       # executable bit that artifact upload would drop.
