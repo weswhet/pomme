@@ -459,6 +459,18 @@ struct PommeAgentTests {
         #expect(PommeAgentInstall.token == "/private/var/db/pomme/agent.token")
     }
 
+    @Test("LaunchDaemon runs the agent unthrottled")
+    func launchDaemonDefinition() throws {
+        let definition = try PommeAgentInstall.definition(digest: String(repeating: "a", count: 64))
+        let plist = try #require(PropertyListSerialization.propertyList(
+            from: Data(definition.utf8), format: nil
+        ) as? [String: Any])
+        #expect(plist["Label"] as? String == PommeAgentInstall.label)
+        #expect(plist["ProcessType"] as? String == "Interactive")
+        #expect(plist["RunAtLoad"] as? Bool == true)
+        #expect(plist["KeepAlive"] as? Bool == true)
+    }
+
     @Test("Recovery agent installs only a request-bound staged executable")
     func recoveryInstall() async throws {
         let root = try recoveryFixture()

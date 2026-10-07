@@ -109,6 +109,14 @@ Updated the Pomme agent in dev to 0123456789ab.
 
 Copying the executable takes most of the time, usually about a minute.
 
+The restarted agent runs with the launchd settings that the guest loaded when
+it started. When an update also changes those settings, they take effect the
+next time that the guest starts. To apply them right away, restart the VM:
+
+```sh
+pomme restart VM_NAME
+```
+
 If the agent already matches the host build, the command makes no change and
 reports that the agent is current. JSON output reports `"updated": false`, and
 the command exits with status `0`, so you can run it again safely:

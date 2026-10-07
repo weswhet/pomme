@@ -20,6 +20,12 @@ struct PommeAgentInstall: Sendable {
         token: String = PommeAgentInstall.token
     ) throws -> String {
         let digest = try PommeAgentAuthentication.normalized(digest)
+        // Without a ProcessType, launchd throttles the job's CPU and I/O. At
+        // boot the throttled page-ins delayed the agent's main by up to 22
+        // seconds, and every `pomme start` waits for the agent. Adaptive only
+        // boosts during XPC activity, and the agent talks to the host over
+        // VSOCK, so it must be Interactive. Processes the agent starts inherit
+        // its priority.
         return """
         <?xml version="1.0" encoding="UTF-8"?>
         <plist version="1.0"><dict>
@@ -27,6 +33,7 @@ struct PommeAgentInstall: Sendable {
         <key>ProgramArguments</key><array><string>\(executable)</string><string>--pomme-agent</string><string>\(port)</string><string>--token-file</string><string>\(token)</string><string>--expected-sha256</string><string>\(digest)</string><string>--role</string><string>normal</string></array>
         <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
         <key>ThrottleInterval</key><integer>5</integer>
+        <key>ProcessType</key><string>Interactive</string>
         </dict></plist>
         """
     }
