@@ -1,0 +1,131 @@
+name: Build signed release
+
+# The Alpha and Release workflows call this to build, sign, check, and attest
+# one commit's release artifacts. It never publishes anything.
+on:
+  workflow_call:
+    inputs:
+      commit:
+        description: Full SHA of the commit to build
+        required: true
+        type: string
+      version:
+        description: Release version without the leading v
+        required: true
+        type: string
+    outputs:
+      artifact_digest:
+        description: SHA-256 of the build's SHA256SUMS file
+        value: ${{ jobs.build.outputs.artifact_digest }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build, sign, and package
+    # Building Pomme needs the Xcode 27 SDK, which only GitHub's xcode-27
+    # image (macOS 27) provides.
+    runs-on: xcode-27
+    timeout-minutes: 45
+    # Holds the signing identities. Only the main branch can deploy to it.
+    environment: pomme-signing
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      artifact_digest: ${{ steps.verify.outputs.artifact_digest }}
+    env:
+      DEVELOPER_ID_APPLICATION: "Developer ID Application: Wesley Whetstone (2D8XQ77EBQ)"
+      DEVELOPER_ID_INSTALLER: "Developer ID Installer: Wesley Whetstone (2D8XQ77EBQ)"
+      RELEASE_VERSION: ${{ inputs.version }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+
+      - name: Show toolchain
+        run: sw_vers && xcodebuild -version
+
+      - name: Import the signing identities
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$CERTIFICATE_BASE64" || -z "$CERTIFICATE_PASSWORD" ]]; then
+            echo "::error::The pomme-signing environment has no signing identities. Run Scripts/configure-release-secrets.sh."
+            exit 64
+          fi
+          keychain="$RUNNER_TEMP/pomme-signing.keychain-db"
+          certificate="$RUNNER_TEMP/developer-id.p12"
+          keychain_password="$(uuidgen)"
+          printf '%s' "$CERTIFICATE_BASE64" | base64 --decode > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/productsign
+          rm -f "$certificate"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
+            -k "$keychain_password" "$keychain" >/dev/null
+          identities="$(security find-identity -v "$keychain")"
+          for identity in "$DEVELOPER_ID_APPLICATION" "$DEVELOPER_ID_INSTALLER"; do
+            grep -Fq "\"$identity\"" <<<"$identities" || {
+              echo "::error::The signing keychain has no valid identity named $identity."
+              exit 65
+            }
+          done
+
+      - name: Build, sign, and package
+        shell: bash
+        run: Scripts/build-release-pkg.sh --version "$RELEASE_VERSION"
+
+      - name: Check the signed executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/release"
+          tar -xzf "dist/pomme-$RELEASE_VERSION-arm64.tar.gz" -C "$RUNNER_TEMP/release"
+          expected="pomme $RELEASE_VERSION ($(git rev-parse --short HEAD))"
+          actual="$("$RUNNER_TEMP/release/pomme" --version)"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::pomme --version printed '$actual' instead of '$expected'."
+            exit 70
+          fi
+          Tests/PommeCLIIntegrationTests.sh --runner "$RUNNER_TEMP/release/pomme" --no-build
+
+      - name: Verify the release artifacts
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist && shasum -a 256 -c SHA256SUMS)
+          echo "artifact_digest=$(shasum -a 256 dist/SHA256SUMS | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/pomme-${{ inputs.version }}-arm64.tar.gz
+            dist/pomme-${{ inputs.version }}-arm64.pkg
+            dist/pomme-${{ inputs.version }}-arm64.dSYM.zip
+
+      - name: Upload the release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: pomme-${{ inputs.version }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove the signing keychain
+        if: always()
+        shell: bash
+        run: security delete-keychain "$RUNNER_TEMP/pomme-signing.keychain-db" 2>/dev/null || true
