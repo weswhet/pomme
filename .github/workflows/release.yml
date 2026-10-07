@@ -30,7 +30,9 @@ permissions:
 jobs:
   build-release:
     name: Build signed package
-    runs-on: macos-15
+    # Building Pomme needs the Xcode 27 SDK, which only GitHub's xcode-27
+    # image (macOS 27) provides.
+    runs-on: xcode-27
     outputs:
       version: ${{ steps.version.outputs.version }}
       artifact_digest: ${{ steps.artifact_digest.outputs.artifact_digest }}
@@ -157,7 +159,7 @@ jobs:
     # Publication is opt-in and the protected environment supplies the human approval gate.
     if: ${{ inputs.publish == true }}
     needs: build-release
-    runs-on: macos-15
+    runs-on: xcode-27
     environment: pomme-release
     permissions:
       contents: write

@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   verify:
-    name: Build and test Pomme
+    name: Build and test on macOS 27
     # Pomme uses macOS 27 Virtualization APIs, so it needs the Xcode 27 SDK.
     # GitHub's xcode-27 image (macOS 27, Xcode 27) is a public preview.
     runs-on: xcode-27
@@ -30,16 +30,25 @@ jobs:
           -project pomme.xcodeproj
           -scheme pomme
 
-      - name: Build and test
+      - name: Build for testing
         run: >-
-          xcodebuild test
+          xcodebuild build-for-testing
+          -project pomme.xcodeproj
+          -scheme pomme
+          -configuration Release
+          -destination 'platform=macOS,arch=arm64'
+          -derivedDataPath "$RUNNER_TEMP/pomme-derived-data"
+          CODE_SIGNING_ALLOWED=NO
+
+      - name: Test
+        run: >-
+          xcodebuild test-without-building
           -project pomme.xcodeproj
           -scheme pomme
           -configuration Release
           -destination 'platform=macOS,arch=arm64'
           -parallel-testing-enabled NO
           -derivedDataPath "$RUNNER_TEMP/pomme-derived-data"
-          CODE_SIGNING_ALLOWED=NO
 
       - name: Verify public CLI contract
         run: >-
@@ -52,3 +61,51 @@ jobs:
 
       - name: Verify package identity
         run: Tests/PackagingIdentity.sh
+
+      # GitHub's macos-26 image has no Xcode 27, so it can't compile Pomme.
+      # The macOS 26 job runs these products instead. A tarball keeps the
+      # executable bits that artifact upload would drop.
+      - name: Package build products for macOS 26
+        run: tar -C "$RUNNER_TEMP/pomme-derived-data/Build" -czf "$RUNNER_TEMP/pomme-products.tar.gz" Products
+
+      - name: Upload build products
+        uses: actions/upload-artifact@v4
+        with:
+          name: pomme-products
+          path: ${{ runner.temp }}/pomme-products.tar.gz
+          retention-days: 3
+
+  verify-macos-26:
+    name: Test on macOS 26
+    needs: verify
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: sw_vers && xcodebuild -version
+
+      - name: Download build products
+        uses: actions/download-artifact@v4
+        with:
+          name: pomme-products
+          path: ${{ runner.temp }}
+
+      - name: Unpack build products
+        run: tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/pomme-products.tar.gz"
+
+      - name: Test
+        run: >-
+          xcodebuild test-without-building
+          -xctestrun "$(ls "$RUNNER_TEMP"/Products/*.xctestrun | head -n 1)"
+          -destination 'platform=macOS,arch=arm64'
+          -parallel-testing-enabled NO
+
+      - name: Verify public CLI contract
+        run: >-
+          Tests/PommeCLIIntegrationTests.sh
+          --runner "$RUNNER_TEMP/Products/Release/pomme"
+          --no-build
