@@ -22,6 +22,9 @@ delayed the agent by up to 22 seconds, and `pomme start` waits for the agent.
 `pomme exec` runs are no longer throttled. An existing VM gets the change after
 `pomme agent update VM` and a guest restart.
 
+`pomme start` also checks for the agent every 50 ms instead of every 500 ms,
+and for its VM helper every 20 ms instead of every 100 ms.
+
 ## MDM from any state
 
 `pomme mdm VM --profile FILE` now creates a missing VM, resumes incomplete

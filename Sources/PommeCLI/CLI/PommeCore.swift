@@ -2167,7 +2167,10 @@ struct PommeCore {
             )
             let remaining = deadline - ProcessInfo.processInfo.systemUptime
             guard remaining > 0 else { throw timedOut }
-            Thread.sleep(forTimeInterval: min(0.5, remaining))
+            // The agent connects within milliseconds of launchd starting it,
+            // so a long interval only delays `start` after it is ready. A poll
+            // costs one local socket round trip until the agent connects.
+            Thread.sleep(forTimeInterval: min(0.05, remaining))
             let status: [String: Any]
             do {
                 status = try sendControlObject(
@@ -4883,8 +4886,10 @@ struct PommeCore {
                )) != nil {
                 return
             }
+            // Until the helper listens, a probe fails at connect without a
+            // round trip, so a short interval is cheap and returns sooner.
             let sleepInterval = min(
-                0.1, max(0, deadline - ProcessInfo.processInfo.systemUptime))
+                0.02, max(0, deadline - ProcessInfo.processInfo.systemUptime))
             Thread.sleep(forTimeInterval: sleepInterval)
         }
         throw RunnerError.backgroundStartTimedOut(pid: process.processIdentifier, logURL: bundle.helperLogURL)
