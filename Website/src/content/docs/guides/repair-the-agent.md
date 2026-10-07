@@ -107,7 +107,7 @@ SHA-256 digest of the new executable. The output looks similar to the following:
 Updated the Pomme agent in dev to 0123456789ab.
 ```
 
-Copying the executable takes most of the time, usually about a minute.
+Copying the executable takes most of the time, usually less than a minute.
 
 The restarted agent runs with the launchd settings that the guest loaded when
 it started. When an update also changes those settings, they take effect the

@@ -43,6 +43,9 @@ guest agent, Recovery, packaging, and state identity.
   existing VM gets this change after you update its agent and restart the VM.
 - `pomme start` checks for the agent every 50 milliseconds instead of every
   half second, so it returns sooner after the agent connects.
+- Release builds strip the symbol table from the `pomme` executable, which
+  halves its size. `pomme agent update` copies the smaller executable into a
+  VM in about half the time.
 - Most commands accept `--progress auto|plain|off` to control the progress
   display on standard error.
 
