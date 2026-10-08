@@ -164,6 +164,12 @@ Don't push to `main`, run the Alpha or Release workflow, approve a
 `Scripts/configure-release-secrets.sh` unless the user asks for that action.
 Never export signing identities yourself; the user exports them.
 
+Pomme follows [Semantic Versioning](https://semver.org/). When you raise
+`MARKETING_VERSION` after a stable release, choose the patch, minor, or major
+bump from what the next release will contain, as step 7 of "Stable releases"
+in [Docs/Releasing.md](Docs/Releasing.md) describes. Never lower it after one
+of its alphas publishes.
+
 The site serves `Website/public/install.pl` at https://pommevm.dev/install.pl,
 and `pomme update` runs that script with `/usr/bin/perl` for every release
 install that Homebrew doesn't manage. It's a Perl program that uses only core
