@@ -35,8 +35,9 @@ Each generated page names the version and commit that it came from.
 
 ## Build the site locally
 
-The site uses [Starlight](https://starlight.astro.build/). You build and view
-it on your own Mac; it isn't published.
+The site uses [Starlight](https://starlight.astro.build/), and it's published
+at https://pommevm.dev from the `main` branch. To preview a change, build and
+view the site on your own Mac.
 
 To build and view the site, do the following:
 

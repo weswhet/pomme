@@ -55,12 +55,14 @@ brew install weswhet/tap/pomme
 ```
 
 Or use the install script, which runs with the Perl that macOS includes and
-installs `~/.local/bin/pomme`. Until Pomme 0.1.0 is released, set
-`POMME_CHANNEL=alpha` to install the newest alpha:
+installs `~/.local/bin/pomme`:
 
 ```sh
-curl -fsSL https://pommevm.dev/install.pl | POMME_CHANNEL=alpha perl
+curl -fsSL https://pommevm.dev/install.pl | perl
 ```
+
+To install the newest alpha instead, run
+`curl -fsSL https://pommevm.dev/install.pl | POMME_CHANNEL=alpha perl`.
 
 To update a release, run `pomme update`.
 
