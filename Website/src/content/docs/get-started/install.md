@@ -22,12 +22,6 @@ Choose an install method:
 | [Installer package](#install-the-installer-package) | Stable releases or alphas | `/usr/local/bin/pomme` | `pomme update` |
 | [Source](#build-from-source) | Your checkout | `~/.local/bin/pomme` | Rebuilding |
 
-:::note
-Pomme 0.1.0 isn't released yet, so Homebrew has no formula and the install
-script has no stable release to install. Until the 0.1.0 release, install an
-alpha with the install script, or build Pomme from source.
-:::
-
 ## Before you begin
 
 Check that your Mac meets the

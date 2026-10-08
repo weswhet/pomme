@@ -66,9 +66,10 @@ reviewed and experimental rules apply to them. For details, see
 
 ## Release qualification
 
-Pomme is pre-release, and publication stays blocked until release qualification
-is complete and independently reviewed. Qualification is separate from
-permission to try a new macOS version. It requires the following evidence:
+Release qualification is the independently reviewed evidence that a stable
+release works. Pomme 0.1.0 was released before its qualification was complete.
+Qualification is separate from permission to try a new macOS version. It
+requires the following evidence:
 
 - **Recovery profile matrix.** For each supported OS, 25 consecutive
   successful Recovery navigations in each of three host states: another app in
