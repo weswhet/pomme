@@ -19,6 +19,14 @@ struct PommeBuildInfoTests {
                 == "pomme unknown (unknown)")
     }
 
+    @Test("Only a release distribution is a release build")
+    func distributionMarksReleaseBuilds() {
+        #expect(PommeBuildInfo(dictionary: ["PommeDistribution": "release"]).isRelease)
+        #expect(!PommeBuildInfo(dictionary: ["PommeDistribution": "source"]).isRelease)
+        #expect(!PommeBuildInfo(dictionary: ["PommeDistribution": "$(POMME_DISTRIBUTION)"]).isRelease)
+        #expect(!PommeBuildInfo(dictionary: [:]).isRelease)
+    }
+
     @Test("An unexpanded build setting reports unknown")
     func unexpandedSettingReportsUnknown() {
         let info = PommeBuildInfo(dictionary: [

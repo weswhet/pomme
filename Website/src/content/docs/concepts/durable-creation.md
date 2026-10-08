@@ -111,9 +111,10 @@ see [Use templates](/guides/use-templates/).
 ## Pinned agent artifacts
 
 A VM's journal pins the exact guest agent executable by its SHA-256 digest.
-When you rebuild and install the host `pomme` command with the local build script, the
-script also stores each signed executable in the append-only
+Before Pomme creates a VM, it copies that executable into the append-only
 `AgentArtifacts/sha256` directory under `~/Library/Application Support/pomme`.
+The local build script also stores each signed build there. If Pomme can't
+keep the copy, it warns you and creates the VM anyway.
 
 This store lets a resumed Recovery installation use the exact agent that the
 journal pinned, even after the host `pomme` command has changed. Pomme doesn't rewrite the

@@ -2500,6 +2500,24 @@ struct PommeCore {
         )
     }
 
+    /// Keeps a copy of the executable that a new plan pins as the VM's agent.
+    /// Updating Pomme replaces that executable, and a later Recovery repair
+    /// or resumed creation installs exactly the pinned agent. A failure
+    /// doesn't stop creation, because only those later operations need the
+    /// copy.
+    private static func retainPinnedAgent(url: URL, sha256: String, vmName: String) {
+        do {
+            try PommeAgentArtifactArchiver(rootURL: applicationSupportRoot(create: true))
+                .retain(executableAt: url, sha256: sha256)
+        } catch {
+            warning(
+                "Warning: Pomme couldn't keep a copy of this pomme executable for later agent repairs: \(error.localizedDescription) "
+                    + "After you update Pomme, `pomme agent repair` and `pomme create --resume` can't reinstall this VM's agent.",
+                vmName: vmName
+            )
+        }
+    }
+
     private static func prepareProvisioning(
         config: VMCreationConfigV1?,
         arguments: CLIOptions,
@@ -2532,6 +2550,7 @@ struct PommeCore {
             bundlePath: reference.bundle.rootURL.standardizedFileURL.path
         )
         let executable = try runningExecutableIdentity()
+        retainPinnedAgent(url: executable.url, sha256: executable.sha256, vmName: vmName)
         let profile = try PommeRecoveryProfileContract(descriptor: profileDescriptor)
         let normalAgent = try PommeAgentIdentity(
             identifier: PommeAgentInstall.label,

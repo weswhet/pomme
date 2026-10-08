@@ -7,15 +7,25 @@ struct PommeBuildInfo: Equatable {
 
     let version: String
     let commit: String
+    /// `release` for the builds that Scripts/build-release-pkg.sh publishes.
+    /// Any other value, such as a local build's `source`, is a source build.
+    let distribution: String
 
     init(dictionary: [String: Any]) {
         version = Self.value(dictionary["CFBundleShortVersionString"])
         commit = Self.value(dictionary["PommeGitCommit"])
+        distribution = Self.value(dictionary["PommeDistribution"])
     }
 
     /// The line `pomme --version` prints, such as `pomme 0.1.0 (5ebd40f)`.
     var versionLine: String {
         "pomme \(version) (\(commit))"
+    }
+
+    /// Whether this is a published release build, which `pomme update` can
+    /// replace.
+    var isRelease: Bool {
+        distribution == "release"
     }
 
     /// A missing, empty, or unexpanded `$(SETTING)` value is reported as

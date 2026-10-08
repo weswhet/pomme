@@ -1,6 +1,6 @@
 ---
 title: Environment variables
-description: Environment variables that change how Pomme selects VMs, authorizes security workflows, and stores data.
+description: Environment variables that change how Pomme selects VMs, authorizes security workflows, stores data, and checks for updates.
 ---
 
 The `pomme` command reads the following environment variables.
@@ -11,6 +11,8 @@ The `pomme` command reads the following environment variables.
 | `POMME_AUTHORIZED_USER` | The existing guest owner account that authorizes a SIP or AMFI change. |
 | `POMME_AUTHORIZED_PASSWORD` | The password for `POMME_AUTHORIZED_USER`. |
 | `POMME_APP_SUPPORT_DIR` | An alternative directory for Pomme's host data. |
+| `POMME_NO_UPDATE_CHECK` | Any value other than `0` turns off the daily check for a newer Pomme release. For details, see [Update notices](/get-started/install/#update-notices). |
+| `CI` | Any value turns off the daily update check, as `POMME_NO_UPDATE_CHECK` does. |
 | `NO_COLOR` | When set, turns off color in the progress display. For details, see [Control the progress display](/guides/script-pomme/#control-the-progress-display). |
 
 ## POMME_VM_NAME

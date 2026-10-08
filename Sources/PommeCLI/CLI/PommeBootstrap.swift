@@ -34,6 +34,10 @@ enum PommeBootstrap {
             Foundation.exit(exitCode)
         }
 
+        if arguments.first == PommeUpdateNotifier.flag {
+            Foundation.exit(await PommeUpdateNotifier.runBackgroundCheck())
+        }
+
         if arguments.first == "--pomme-runtime" {
             let exitCode = await PommeCore.runInternalHelper(arguments: arguments)
             Foundation.exit(exitCode)
@@ -85,6 +89,7 @@ enum PommeBootstrap {
                 }
             }
             session.finish()
+            PommeUpdateNotifier.afterCommand(command)
         } catch let error as ValidationError {
             session.finish()
             let text = validationFailureText(error, command: type(of: command))

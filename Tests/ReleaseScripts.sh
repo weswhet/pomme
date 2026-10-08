@@ -160,6 +160,14 @@ rendered="$("$formula" --version 0.1.0 --sha256 "$sha")"
 check "formula URL" contains "$rendered" 'url "https://github.com/weswhet/pomme/releases/download/v0.1.0/pomme-0.1.0-arm64.tar.gz"'
 check "formula license" contains "$rendered" 'license "Apache-2.0"'
 check "formula checks the version" contains "$rendered" 'shell_output("#{bin}/pomme --version")'
+check "formula follows the latest stable release" contains "$rendered" 'strategy :github_latest'
+check "formula installs shell completions" contains "$rendered" 'generate_completions_from_executable(bin/"pomme", "--generate-completion-script")'
+# brew style installs its RuboCop gems on first use, so CI skips it.
+if command -v brew >/dev/null 2>&1 && [[ -z "${CI:-}" ]]; then
+  mkdir -p "$work/tap/Formula"
+  printf '%s\n' "$rendered" > "$work/tap/Formula/pomme.rb"
+  check "formula passes brew style" brew style "$work/tap/Formula/pomme.rb"
+fi
 check "formula rejects a bad digest" bash -c "! '$formula' --version 0.1.0 --sha256 xyz 2>/dev/null"
 
 # The signing p12 check. LibreSSL writes one key per p12, so these cases cover

@@ -35,6 +35,7 @@ struct PommeCLI: AsyncParsableCommand {
             ConfigCommand.self,
             IPSWCommand.self,
             UICommand.self,
+            UpdateCommand.self,
             TUICommand.self,
             ToolsCommand.self,
             AgentHelpCommand.self,

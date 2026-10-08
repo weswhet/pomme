@@ -15,6 +15,34 @@ pomme --version
 
 For more detail about any failing command, run it again with `--debug`.
 
+## Installing and updating Pomme
+
+### The install script won't replace the installed executable
+
+The install script stops with a message like the following:
+
+```text
+pomme install: /Users/USERNAME/.local/bin/pomme isn't signed like Pomme's releases. Pomme's Keychain items trust only Pomme's Developer ID signature, so the installer won't replace it. To replace it, delete it first.
+```
+
+The `pomme` executable in the install directory doesn't have Pomme's
+Developer ID signature. For example, it's a Debug build. Keychain items that
+such a build created stay tied to it. If you don't
+need that build, delete it, and then run the install script again. To keep it,
+install the release in another directory with `--install-dir`.
+
+### `pomme update` reports a build from source
+
+`pomme update` stops with the following message:
+
+```text
+Error: This pomme was built from source, so `pomme update` can't replace it. To update it, pull the newest source and run `bash Scripts/build-local.sh`.
+```
+
+Only published releases update themselves. To update a build from source, pull
+the newest source and run the build script again. To switch to releases
+instead, use the [install script](/get-started/install/#install-with-the-install-script).
+
 ## Selecting a VM
 
 ### A command asks for a VM name

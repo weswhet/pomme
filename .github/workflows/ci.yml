@@ -65,6 +65,11 @@ jobs:
       - name: Check release scripts
         run: Tests/ReleaseScripts.sh
 
+      # This unsigned build can't install, so only the cases that must fail
+      # run here. The release build runs every case.
+      - name: Check the install script
+        run: Tests/InstallScript.sh
+
       # GitHub's macos-26 image has no Xcode 27, so it can't compile Pomme.
       # The macOS 26 job runs this binary instead. A tarball keeps the
       # executable bit that artifact upload would drop.

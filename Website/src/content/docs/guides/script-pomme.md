@@ -86,6 +86,11 @@ With `--format json` or `--format jsonl`, Pomme hides progress unless you pass
 its diagnostics. To turn off color, set the `NO_COLOR` environment variable. In
 a locale that doesn't use UTF-8, Pomme draws progress with ASCII characters.
 
+Pomme prints a notice about a newer release only when standard error is a
+terminal and the output is a table, so scripts and JSON consumers never
+receive it. For details, see
+[Update notices](/get-started/install/#update-notices).
+
 ## Check exit codes
 
 Test the exit status of every command. Pomme uses the following conventions:
