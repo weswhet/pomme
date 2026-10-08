@@ -5,13 +5,14 @@ description: Changes in each version of Pomme.
 
 This page lists changes in each version of Pomme, newest first.
 
-## Pomme 0.1.0 (pre-release)
+## Pomme 0.1.0
 
-Pomme 0.1.0 isn't released yet. Each change to the `main` branch that passes
-CI publishes an alpha, such as `0.1.0-alpha.3`. Before the `v0.1.0` release,
-CI must pass, reviewers must check the live qualification matrices for Tahoe
-and Sequoia, and a clean disposable VM must pass qualification.
-For details, see [Supported macOS versions](/concepts/os-qualification/).
+Pomme 0.1.0 is the first release of Pomme. It's beta software, and it was
+released before the release qualification matrices for Tahoe and Sequoia were
+complete. For what qualification covers, see
+[Supported macOS versions](/concepts/os-qualification/#release-qualification).
+Each change to the `main` branch that passes CI also publishes an alpha, such
+as `0.1.0-alpha.3`.
 
 Pomme 0.1.0 begins with an independent history and its own host, control,
 guest agent, Recovery, packaging, and state identity.
