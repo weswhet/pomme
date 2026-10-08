@@ -109,6 +109,9 @@ jobs:
       id-token: write
       attestations: write
     uses: ./.github/workflows/build-release.yml
+    # A called workflow sees only the secrets that its caller passes, even
+    # the pomme-signing environment's own secrets.
+    secrets: inherit
     with:
       commit: ${{ needs.plan.outputs.commit }}
       version: ${{ needs.plan.outputs.version }}
