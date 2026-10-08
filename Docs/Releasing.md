@@ -213,9 +213,23 @@ executable, and runs every check again.
    `pomme-release` deployment on the workflow run's page.
 1. Confirm that the release is published with `v0.1.0` marked **Latest**, and
    that `weswhet/homebrew-tap` has the new `Formula/pomme.rb`.
-1. Raise `MARKETING_VERSION` in `Config/Shared.xcconfig`, such as to `0.2.0`,
-   and add a `## Pomme 0.2.0 (pre-release)` section to the release notes.
-   Commit and push both. Alphas of the new version start with this push.
+1. Raise `MARKETING_VERSION` in `Config/Shared.xcconfig` to the next version,
+   following [Semantic Versioning](https://semver.org/), and add a
+   `## Pomme VERSION (pre-release)` section to the release notes. Commit and
+   push both. Alphas of the new version start with this push.
+
+   Choose the version from what the next release will contain:
+
+   | Next release contains | Before 1.0 | From 1.0 |
+   | --- | --- | --- |
+   | Only bug fixes | Raise the patch, such as `0.2.0` to `0.2.1` | Raise the patch |
+   | New features that don't break existing use | Raise the minor, such as `0.2.0` to `0.3.0` | Raise the minor |
+   | Changes that break commands, flags, output, or state | Raise the minor | Raise the major |
+
+   If the next release turns out to need a larger bump than the one you
+   chose, raise `MARKETING_VERSION` again before it ships. Never lower it
+   after one of its alphas publishes: `pomme update` moves only to newer
+   versions, so alpha users would never see the lower version's alphas.
 
 If the Homebrew step fails after the GitHub release is published, rerun the
 failed job. It continues when the published release has the same artifacts.
