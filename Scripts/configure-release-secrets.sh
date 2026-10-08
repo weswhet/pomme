@@ -18,9 +18,11 @@ Configures GitHub for .github/workflows/alpha.yml and release.yml:
 4. Creates a deploy key with write access to weswhet/homebrew-tap, replacing
    an earlier one, and stores its private key as a pomme-release secret.
 
-To create FILE, open Keychain Access, select both Developer ID certificates
-under My Certificates in the login keychain, choose File > Export Items, and
-save a .p12 file with a password. Delete FILE when the script finishes.
+Scripts/export-signing-identities.swift exports both identities from the login
+keychain and runs this script for you. To create FILE by hand instead, open
+Keychain Access, select both Developer ID certificates under My Certificates
+in the login keychain, choose File > Export Items, and save a .p12 file with a
+password. Delete FILE when the script finishes.
 
 The script reads the password from DEVELOPER_ID_CERTIFICATE_PASSWORD, or asks
 for it. --check-only checks FILE and changes nothing on GitHub.
@@ -51,7 +53,7 @@ done
 
 readonly application_identity='Developer ID Application: Wesley Whetstone (2D8XQ77EBQ)'
 readonly installer_identity='Developer ID Installer: Wesley Whetstone (2D8XQ77EBQ)'
-# macOS's LibreSSL reads the legacy encryption that Keychain Access exports.
+# macOS's LibreSSL reads the legacy encryption that Keychain exports use.
 readonly openssl=/usr/bin/openssl
 
 if [[ -z "${DEVELOPER_ID_CERTIFICATE_PASSWORD:-}" ]]; then
