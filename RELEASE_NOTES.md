@@ -8,10 +8,36 @@ macOS uses the persistent authenticated Pomme agent; bounded Recovery workflows
 use an expiring, request-bound Pomme Recovery session. Both speak
 PommeAgentProtocol v1. The host helper speaks PommeControlProtocol v1.
 
-Release publication remains disabled. A `v0.1.0` tag and package publication
-require green CI, independent review of the Tahoe and Sequoia live qualification
-matrices, and the clean disposable-VM qualification described in
-`Docs/Qualification.md`.
+Each push to `main` that passes CI publishes a signed alpha. A `v0.1.0` tag and
+stable package publication require green CI, independent review of the Tahoe
+and Sequoia live qualification matrices, and the clean disposable-VM
+qualification described in `Docs/Qualification.md`.
+
+## Install and update
+
+`brew install weswhet/tap/pomme` installs stable releases, and
+`curl -fsSL https://pommevm.dev/install.pl | perl` installs a release, or with
+`POMME_CHANNEL=alpha` the newest alpha, in `~/.local/bin`. The install script,
+a Perl program that runs with macOS's `/usr/bin/perl`, checks the
+tarball against `SHA256SUMS` and Pomme's Developer ID requirement, and it won't
+replace a differently signed `pomme`. `POMME_PACKAGE=1` installs the signed
+installer package instead.
+
+`pomme update` updates a release the way it was installed, like Codex's
+updater: `brew upgrade weswhet/tap/pomme` for Homebrew, and the published
+install script otherwise. `--check` only reports. A build from source reports
+that it must be rebuilt. Release builds, marked by `PommeDistribution` in
+their Info.plist, check for a newer version about once a day in a detached
+process and print a one-line notice after an interactive table-output command;
+`CI` and `POMME_NO_UPDATE_CHECK` turn the check off.
+
+VM creation now copies the executable it pins into `AgentArtifacts/sha256`, so
+Recovery repair and resumed creation keep working after any update, including
+a plain `brew upgrade`.
+
+Release packaging states Xcode's designated requirement explicitly. A
+`codesign` re-sign otherwise produced different requirement text, which made
+`Scripts/build-local.sh` refuse to replace a release.
 
 ## Faster VM start
 

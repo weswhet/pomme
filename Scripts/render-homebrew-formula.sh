@@ -69,11 +69,20 @@ class Pomme < Formula
   sha256 "$sha256"
   license "Apache-2.0"
 
+  livecheck do
+    url :stable
+    strategy :github_latest
+  end
+
   depends_on arch: :arm64
   depends_on macos: :sequoia
 
+  # A formula, unlike a cask, doesn't quarantine its download, so macOS runs
+  # the Developer ID-signed executable without notarization. Homebrew
+  # installs the signed bytes unchanged.
   def install
     bin.install "pomme"
+    generate_completions_from_executable(bin/"pomme", "--generate-completion-script")
   end
 
   test do

@@ -4,7 +4,8 @@ description: Hardware, software, and resource requirements for running Pomme and
 ---
 
 This page lists what you need on your Mac to run Pomme and to build it from
-source.
+source. Installing a release with Homebrew or the install script doesn't need
+Xcode.
 
 ## Host hardware
 
@@ -76,7 +77,8 @@ To build and install Pomme from source, you also need:
 - The Developer ID Application certificate that the project is configured to
   sign with, including its private key, in your Keychain.
 
-For the build procedure, see [Install Pomme](/get-started/install/).
+For the build procedure, see
+[Build from source](/get-started/install/#build-from-source).
 
 ## What's next
 

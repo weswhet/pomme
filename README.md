@@ -48,8 +48,23 @@ For memory, disk, and Keychain requirements, see
 
 ## Install Pomme
 
-Pomme doesn't publish an installer package or a Homebrew formula yet. To use
-Pomme, build it from source:
+Install a signed release with Homebrew, which installs stable releases:
+
+```sh
+brew install weswhet/tap/pomme
+```
+
+Or use the install script, which runs with the Perl that macOS includes and
+installs `~/.local/bin/pomme`. Until Pomme 0.1.0 is released, set
+`POMME_CHANNEL=alpha` to install the newest alpha:
+
+```sh
+curl -fsSL https://pommevm.dev/install.pl | POMME_CHANNEL=alpha perl
+```
+
+To update a release, run `pomme update`.
+
+To build Pomme from source instead:
 
 1. Clone the repository:
 

@@ -7,9 +7,10 @@ This page lists changes in each version of Pomme, newest first.
 
 ## Pomme 0.1.0 (pre-release)
 
-Pomme 0.1.0 is a development build. It isn't published: a `v0.1.0` tag and
-package publication require green CI, independent review of the Tahoe and
-Sequoia live qualification matrices, and a clean disposable-VM qualification.
+Pomme 0.1.0 isn't released yet. Each change to the `main` branch that passes
+CI publishes an alpha, such as `0.1.0-alpha.3`. Before the `v0.1.0` release,
+CI must pass, reviewers must check the live qualification matrices for Tahoe
+and Sequoia, and a clean disposable VM must pass qualification.
 For details, see [Supported macOS versions](/concepts/os-qualification/).
 
 Pomme 0.1.0 begins with an independent history and its own host, control,
@@ -50,6 +51,23 @@ guest agent, Recovery, packaging, and state identity.
   check the code directory hash that the kernel validated instead of reading
   the whole executable again. For details, see
   [Digest pinning](/concepts/guest-agent/#digest-pinning).
+- Pomme publishes signed releases. To install the newest release, run
+  `brew install weswhet/tap/pomme` or
+  `curl -fsSL https://pommevm.dev/install.pl | perl`. To install the newest
+  alpha, run `curl -fsSL https://pommevm.dev/install.pl | POMME_CHANNEL=alpha perl`.
+  For details, see
+  [Install Pomme](/get-started/install/).
+- `pomme update` updates Pomme the way that you installed it: with
+  `brew upgrade` for Homebrew, and with the install script otherwise.
+  `pomme update --check` reports whether an update is available. For details,
+  see [Update Pomme](/get-started/install/#update-pomme).
+- About once a day, a release build checks for a newer version in the
+  background, and an interactive command prints a notice when one is
+  available. The check never runs for JSON output, without a terminal, or when
+  you set `CI` or `POMME_NO_UPDATE_CHECK`.
+- VM creation keeps a copy of the agent executable that it pins, so
+  `pomme agent repair` and `pomme create --resume` can still install that
+  agent after you update Pomme.
 - Most commands accept `--progress auto|plain|off` to control the progress
   display on standard error.
 

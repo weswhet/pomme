@@ -12,5 +12,7 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>PommeGitCommit</key>
 	<string>$(POMME_GIT_COMMIT)</string>
+	<key>PommeDistribution</key>
+	<string>$(POMME_DISTRIBUTION)</string>
 </dict>
 </plist>

@@ -10,7 +10,8 @@ in each guest.
 
 | Path | Description |
 | --- | --- |
-| `~/.local/bin/pomme` | The executable installed by a local source build. |
+| `~/.local/bin/pomme` | The executable installed by the install script or a local source build. |
+| `/opt/homebrew/bin/pomme` | The executable installed by Homebrew. |
 | `/usr/local/bin/pomme` | The executable installed by the Pomme package. |
 
 ## Host data directory
@@ -23,7 +24,7 @@ different directory, set [`POMME_APP_SUPPORT_DIR`](/reference/environment-variab
 | `VMs/NAME.bundle` | One bundle for each VM. |
 | `Templates/NAME.bundle` | One bundle for each template. |
 | `RestoreImages/` | Downloaded restore images (IPSW files). |
-| `AgentArtifacts/sha256/` | An append-only store of signed Pomme executables, keyed by SHA-256 digest. Recovery installation uses it to find the exact agent that a VM's journal pins. |
+| `AgentArtifacts/sha256/` | An append-only store of signed Pomme executables, keyed by SHA-256 digest. VM creation adds the executable that it pins, and the local build script adds each build. Recovery installation uses the store to find the exact agent that a VM's journal pins. |
 | `TerminalSessions/` | Transcripts and metadata for durable terminal sessions in normal macOS. |
 | `Runtime/` | Runtime state for running VM helpers. |
 | `RecoveryStaging/`, `RecoveryTerminalBootstrap/` | Temporary, request-bound files that Pomme shares with a VM in Recovery. |
@@ -62,6 +63,7 @@ versions.
 | Login Keychain | Each VM's guest agent credential and owner password, stored under a service name that starts with `com.github.weswhet.pomme.vm` and is scoped to the VM's UUID. The Keychain must be unlocked. |
 | `$TMPDIR/pomme-*.sock` | The Unix socket for each VM's background helper. |
 | `$TMPDIR/pomme-recovery-debug-*` | Screenshots that `--debug` keeps for each automatic Recovery navigation. Pomme doesn't delete them. |
+| `~/Library/Caches/com.github.weswhet.pomme/update-check.json` | The result of the most recent [update check](/get-started/install/#update-notices). Deleting it only causes another check. |
 
 ## Guest paths
 

@@ -32,6 +32,12 @@ done
 readonly team_id='2D8XQ77EBQ'
 readonly identifier='com.github.weswhet.pomme'
 readonly requirement='anchor apple generic and identifier "com.github.weswhet.pomme" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "2D8XQ77EBQ"'
+# The designated requirement that Xcode gives Scripts/build-local.sh builds.
+# Re-signing with codesign would generate a different one, and build-local.sh
+# refuses to replace an installed pomme whose requirement differs, so a
+# release states Xcode's requirement explicitly. codesign prints it with
+# /* exists */ comments.
+readonly designated='anchor apple generic and identifier "com.github.weswhet.pomme" and (certificate leaf[field.1.2.840.113635.100.6.1.9] exists or certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "2D8XQ77EBQ")'
 
 build_root="$repo_root/build/release-package"
 derived="$build_root/DerivedData"
@@ -46,7 +52,7 @@ if [[ -z "$products_dir" ]]; then
   commit="$(git -C "$repo_root" describe --always --dirty 2>/dev/null || echo unknown)"
   xcodebuild -project "$repo_root/pomme.xcodeproj" -scheme pomme -configuration Release \
     -arch arm64 -sdk macosx -derivedDataPath "$derived" build \
-    "MARKETING_VERSION=$version" "POMME_GIT_COMMIT=$commit"
+    "MARKETING_VERSION=$version" "POMME_GIT_COMMIT=$commit" "POMME_DISTRIBUTION=release"
   products_dir="$derived/Build/Products/Release"
   built_here=1
 else
@@ -60,7 +66,7 @@ runner="$build_root/pomme"
 install -m 0755 "$products_dir/pomme" "$runner"
 
 /usr/bin/codesign --force --sign "$DEVELOPER_ID_APPLICATION" --timestamp --options runtime \
-  --identifier "$identifier" \
+  --identifier "$identifier" --requirements "=designated => $designated" \
   --entitlements "$repo_root/Config/pomme.entitlements" "$runner"
 
 has_line() {
@@ -68,8 +74,8 @@ has_line() {
   [[ "$lines" == *$'\n'"$2"$'\n'* ]]
 }
 
-# The same checks as Scripts/build-local.sh: re-signing doesn't guarantee
-# Xcode's designated requirement, so test it explicitly.
+# The same checks as Scripts/build-local.sh, and the designated requirement
+# must be exactly Xcode's.
 verify_signature() {
   local binary="$1" details entitlements
   /usr/bin/codesign --verify --strict --verbose=2 --test-requirement="=$requirement" "$binary"
@@ -79,6 +85,8 @@ verify_signature() {
   has_line "$details" "Authority=$DEVELOPER_ID_APPLICATION" || fail 'unexpected signing certificate.'
   [[ "$details" == *'runtime)'* ]] || fail 'Hardened Runtime is missing.'
   [[ "$details" == *$'\nTimestamp='* ]] || fail 'a secure signing timestamp is missing.'
+  [[ "$(/usr/bin/codesign --display --requirements - "$binary" 2>&1 | sed -n 's/^designated => //p')" == \
+    "${designated// exists/ /* exists */}" ]] || fail "the designated requirement isn't Xcode's."
   entitlements="$(/usr/bin/codesign --display --entitlements - --xml "$binary" 2>/dev/null |
     /usr/bin/plutil -convert json -o - -- -)"
   [[ "$entitlements" == '{"com.apple.security.virtualization":true}' ]] ||

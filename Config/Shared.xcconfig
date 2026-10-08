@@ -14,6 +14,9 @@ MARKETING_VERSION = 0.1.0
 CURRENT_PROJECT_VERSION = 1
 // Scripts/build-local.sh passes the commit; other builds report unknown.
 POMME_GIT_COMMIT = unknown
+// Scripts/build-release-pkg.sh sets release. `pomme update` and its update
+// check act only on release builds.
+POMME_DISTRIBUTION = source
 
 // ==========================================
 // Platform Configuration

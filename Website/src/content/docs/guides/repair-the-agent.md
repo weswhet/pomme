@@ -196,12 +196,14 @@ To bring the agent in one of those VMs up to date while it's running, use
 ## Understand pinned agent artifacts
 
 Each VM's creation plan pins the exact signed agent executable, by SHA-256
-digest, that Pomme installed. The local build script keeps every signed build
-in an append-only store under
-`~/Library/Application Support/pomme/AgentArtifacts/sha256`. When a repair or a
-resumed creation reinstalls the agent through Recovery after you rebuild the
-host command-line tool, Pomme uses the original pinned artifact, not the new build. If the
-pinned artifact is missing or altered, the repair fails and changes nothing.
+digest, that Pomme installed. When Pomme creates a VM, it keeps a copy of that
+executable in an append-only store under
+`~/Library/Application Support/pomme/AgentArtifacts/sha256`, and the local
+build script adds every signed build to the same store. When a repair or a
+resumed creation reinstalls the agent through Recovery after you update or
+rebuild Pomme, Pomme uses the original pinned artifact, not the new version. If
+the pinned artifact is missing or altered, the repair fails and changes
+nothing.
 
 A repair that reinstalls the agent therefore undoes an earlier
 `pomme agent update`: the VM gets the agent that it was created with, and

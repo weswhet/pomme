@@ -28,8 +28,15 @@ Each release, alpha or stable, has these assets:
 The executable is signed exactly as `Scripts/build-local.sh` signs it: the
 Developer ID Application certificate, the `com.github.weswhet.pomme`
 identifier, Hardened Runtime, a secure timestamp, and only the Virtualization
-entitlement. Its designated requirement is the same, so Keychain items that a
-locally built `pomme` created keep working.
+entitlement. Re-signing with `codesign` would generate a different designated
+requirement than Xcode does, so `Scripts/build-release-pkg.sh` states Xcode's
+requirement explicitly and checks its exact text. The requirement is therefore
+identical: Keychain items that a locally built `pomme` created keep working,
+and `Scripts/build-local.sh` can replace a release with a local build.
+
+The executable's Info.plist section has `PommeDistribution` set to `release`.
+`pomme update` and its update check act only on such builds. Every other build
+reports `source`.
 
 Each asset except `SHA256SUMS` has a GitHub build provenance attestation.
 Anyone can check that an asset came from this repository's workflow:
@@ -44,6 +51,49 @@ gh attestation verify pomme-0.1.0-arm64.tar.gz --repo weswhet/pomme
 Pomme isn't notarized, so Gatekeeper blocks a copy that a web browser
 downloads. Homebrew, `curl`, and `gh release download` don't mark their
 downloads for Gatekeeper checks, so their copies run.
+
+## How users install and update
+
+| Method | What it installs | Source |
+| --- | --- | --- |
+| `brew install weswhet/tap/pomme` | The newest stable release | `Formula/pomme.rb` in `weswhet/homebrew-tap`, which the Release workflow renders with `Scripts/render-homebrew-formula.sh` |
+| `curl -fsSL https://pommevm.dev/install.pl \| perl` | The newest stable release, or with `POMME_CHANNEL=alpha` the newest alpha | `Website/public/install.pl`, which the site publishes |
+| `curl -fsSL https://pommevm.dev/install.pl \| POMME_PACKAGE=1 perl` | The installer package | The same script |
+
+The formula is a formula, not a cask, because Homebrew quarantines a cask's
+download, and Gatekeeper blocks the unnotarized executable. A formula installs
+the signed bytes unchanged, generates shell completions, and has a `livecheck`
+that follows the latest stable release.
+
+The install script is a Perl program, so it needs only the `/usr/bin/perl` that
+macOS includes. Piped to Perl, it takes options from environment variables, or
+after `perl -`, because Perl reads anything before the program as its own
+options. Piped to `sh` by mistake, it prints the Perl command and stops. It
+checks the tarball against `SHA256SUMS`, checks Pomme's
+Developer ID requirement and the reported version, and installs atomically in
+`~/.local/bin`. It won't replace a `pomme` that doesn't satisfy the requirement.
+`Tests/InstallScript.sh` tests it against a release served from a local
+directory. CI runs the cases that must fail, and the build workflow runs every
+case against the signed release executable.
+
+`pomme update` follows Codex's updater: it never replaces its own executable.
+It runs `brew upgrade weswhet/tap/pomme` for a Homebrew install and the install
+script, downloaded from `https://pommevm.dev/install.pl` and run with
+`/usr/bin/perl`, for any other release install. Because `pomme update` runs the
+published script, a change to `Website/public/install.pl` reaches every installation as soon as the site
+deploys from `main`. Test the script with `Tests/InstallScript.sh --runner` and
+a signed `pomme` before you push it.
+
+An installed alpha follows the newest alpha or stable release, and a stable
+release follows stable releases. Homebrew installs follow the tap's formula. A
+release build checks for a newer version about once a day in a detached
+background process, and an interactive command shows a one-line notice. The
+check never runs for JSON output, without a terminal, or when `CI` or
+`POMME_NO_UPDATE_CHECK` is set.
+
+VM creation copies the executable that it pins as the VM's agent into
+`AgentArtifacts/sha256`. Updates, including a plain `brew upgrade`, therefore
+never remove the agent that a repair or a resumed creation needs.
 
 ## How the workflows fit together
 
@@ -78,21 +128,23 @@ You need to do this once, and again when a certificate is renewed. It needs the
 Developer ID Application and Developer ID Installer certificates, with their
 private keys, in your login keychain.
 
-1. In Keychain Access, open the login keychain, and select **My Certificates**.
-1. Select both `Developer ID Application: Wesley Whetstone (2D8XQ77EBQ)` and
-   `Developer ID Installer: Wesley Whetstone (2D8XQ77EBQ)`. Select nothing
-   else.
-1. Choose **File** > **Export Items**, save the file in the Personal
-   Information Exchange (`.p12`) format, and set a password.
-1. From the repository root, run the setup script:
+1. From the repository root, run the export script in a terminal:
 
    ```sh
-   bash Scripts/configure-release-secrets.sh --p12 PATH_TO_P12
+   Scripts/export-signing-identities.swift
    ```
 
-   The script asks for the `.p12` password. It refuses a file that holds
-   anything other than the two Developer ID identities. Then it does the
-   following:
+   The script finds the two identities in your login keychain, and checks that
+   exactly one valid identity of each kind exists. It exports them, with their
+   private keys, as a `.p12` with a random password in a private temporary
+   directory. macOS asks for your login keychain password once for each
+   private key. Choose **Allow**, not **Always Allow**, so that the Swift
+   interpreter doesn't keep access to the keys.
+
+   The script then runs `Scripts/configure-release-secrets.sh` with the
+   `.p12`, and deletes the `.p12` when that script finishes. The setup script
+   refuses a file that holds anything other than the two Developer ID
+   identities. Then it does the following:
 
    - Creates or updates the `pomme-signing` and `pomme-release` environments.
      You become the required reviewer for `pomme-release`.
@@ -101,9 +153,13 @@ private keys, in your login keychain.
      replacing the one from an earlier run, and stores its private key in
      `pomme-release`.
 
-1. Delete the `.p12` file.
+The export script passes its other options to the setup script. To check the
+export without changing anything on GitHub, add `--check-only`. To see which
+identities the script would export, without exporting anything, add `--list`.
 
-To check a `.p12` without changing anything on GitHub, add `--check-only`.
+To export the `.p12` without running the setup script, add `--output FILE`.
+The script asks for the file's password. Then run
+`bash Scripts/configure-release-secrets.sh --p12 FILE`, and delete the file.
 
 ## Alpha releases
 

@@ -148,9 +148,11 @@ Runtime, timestamp, entitlements, and designated requirement as
 `Scripts/build-local.sh`. The Alpha and Release workflows run it in CI; see
 [Docs/Releasing.md](Docs/Releasing.md). When local packaging is requested, set
 `DEVELOPER_ID_APPLICATION` to the exact certificate above and supply the
-verified Release products with `--products-dir`. Do not assume re-signing
-preserves Xcode's generated designated requirement. Pomme doesn't notarize its
-packages. Signing verification does not establish successful guest MDM
+verified Release products with `--products-dir`. Re-signing doesn't preserve
+Xcode's generated designated requirement, so the script states Xcode's
+requirement explicitly and checks its exact text; `build-local.sh` refuses to
+replace an installed CLI whose requirement text differs. Pomme doesn't notarize
+its packages. Signing verification does not establish successful guest MDM
 enrollment, and does not authorize publication or VM operations.
 
 ## Releases
@@ -161,6 +163,13 @@ Don't push to `main`, run the Alpha or Release workflow, approve a
 `pomme-release` deployment, create or delete release tags, or run
 `Scripts/configure-release-secrets.sh` unless the user asks for that action.
 Never export signing identities yourself; the user exports them.
+
+The site serves `Website/public/install.pl` at https://pommevm.dev/install.pl,
+and `pomme update` runs that script with `/usr/bin/perl` for every release
+install that Homebrew doesn't manage. It's a Perl program that uses only core
+modules, so that it runs with the Perl that macOS includes. A push that changes the script therefore changes how every
+such installation updates. Before you change it, run
+`rtk proxy bash Tests/InstallScript.sh --runner /Users/wes/.local/bin/pomme`.
 
 ## Keep the documentation site current
 

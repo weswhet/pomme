@@ -252,7 +252,7 @@ enum CommandCatalog {
         Group(name: "security", commands: ["sip", "amfi", "mdm"]),
         Group(name: "access", commands: ["remote-login", "screen-sharing", "ui click|key|key-sequence|keys|type|screenshot"]),
         Group(name: "config", commands: ["config init", "config validate", "config render", "ipsw"]),
-        Group(name: "utility", commands: ["tui", "tools", "agent-help"])
+        Group(name: "utility", commands: ["update", "tui", "tools", "agent-help"])
     ]
 
     static var publicPayload: [String: Any] {
