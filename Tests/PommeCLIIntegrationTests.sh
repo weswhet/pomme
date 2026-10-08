@@ -591,7 +591,9 @@ else
   fail "stopped synthetic bundle was removed"
 fi
 
-marketing_version="$(sed -n 's/^MARKETING_VERSION = //p' "$repo_root/Config/Shared.xcconfig")"
+# A release build sets its own version, such as 0.1.0-alpha.1, and the
+# release workflow passes it in POMME_EXPECTED_VERSION.
+marketing_version="${POMME_EXPECTED_VERSION:-$(sed -n 's/^MARKETING_VERSION = //p' "$repo_root/Config/Shared.xcconfig")}"
 expect_success "version prints the build identity" "$runner" --version
 version_line="$(cat "$work/stdout")"
 if [[ -n "$marketing_version" && "$version_line" == "pomme $marketing_version ("?*")" ]]; then
