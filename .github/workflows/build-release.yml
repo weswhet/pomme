@@ -99,7 +99,8 @@ jobs:
             echo "::error::pomme --version printed '$actual' instead of '$expected'."
             exit 70
           fi
-          Tests/PommeCLIIntegrationTests.sh --runner "$RUNNER_TEMP/release/pomme" --no-build
+          POMME_EXPECTED_VERSION="$RELEASE_VERSION" \
+            Tests/PommeCLIIntegrationTests.sh --runner "$RUNNER_TEMP/release/pomme" --no-build
           Tests/InstallScript.sh --runner "$RUNNER_TEMP/release/pomme"
 
       - name: Verify the release artifacts
