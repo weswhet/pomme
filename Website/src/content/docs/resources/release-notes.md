@@ -19,6 +19,15 @@ run `curl -fsSL https://pommevm.dev/install.pl | POMME_CHANNEL=alpha perl`.
   `"resumed": true` when it resumed the VM. If the VM is paused in the other
   boot mode, `start` reports that it's paused instead of running.
 
+### Changes
+
+- The progress line on an interactive terminal shows a square spinner whose
+  dots fill in and empty as they swirl around it, in a new color each lap.
+  The elapsed time now appears right after the spinner, ahead of the VM name
+  and the current step. The spinner also advances at a steady rate; before,
+  macOS could delay its timer and skip frames. `--progress plain` output is
+  unchanged.
+
 ## Pomme 0.1.0
 
 Pomme 0.1.0 is the first release of Pomme. It's beta software, and it was

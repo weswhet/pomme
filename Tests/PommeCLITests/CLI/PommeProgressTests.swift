@@ -337,19 +337,19 @@ struct PommeProgressTests {
         }
     }
 
-    @Test("Rectangle frames keep four cells and spin a gap around the outline")
-    func rectangle() {
-        let frames = PommeProgressSession.rectangleFrames
-        let perimeter = PommeProgressSession.rectanglePerimeter.map { "\($0.x),\($0.y)" }
-        #expect(perimeter.count == 20 && Set(perimeter).count == 20)
-        #expect(frames.count == perimeter.count && Set(frames).count == frames.count)
+    @Test("Square frames fill clockwise, then empty from the first dot")
+    func square() {
+        let frames = PommeProgressSession.squareFrames
+        let perimeter = PommeProgressSession.squarePerimeter.map { "\($0.x),\($0.y)" }
+        #expect(perimeter.count == 12 && Set(perimeter).count == 12)
+        #expect(frames.count == 23 && Set(frames).count == frames.count)
 
         // Decodes a frame into the "x,y" dots it lights.
         func dots(_ frame: String) -> Set<String> {
             let bits = [[0, 1, 2, 6], [3, 4, 5, 7]]
             let cells = frame.unicodeScalars.map { $0.value - 0x2800 }
             var lit: Set<String> = []
-            for x in 0..<8 {
+            for x in 0..<4 {
                 for y in 0..<4 where cells[x / 2] & (1 << bits[x % 2][y]) != 0 {
                     lit.insert("\(x),\(y)")
                 }
@@ -358,12 +358,35 @@ struct PommeProgressTests {
         }
 
         for (index, frame) in frames.enumerated() {
-            #expect(frame.unicodeScalars.count == 4)
+            #expect(frame.unicodeScalars.count == 2)
             #expect(frame.unicodeScalars.allSatisfy { (0x2800...0x28FF).contains($0.value) })
-            #expect(PommeProgressSession.displayWidth(frame) == 4)
-            let hidden = (0..<3).map { perimeter[(index + $0) % perimeter.count] }
-            #expect(dots(frame) == Set(perimeter).subtracting(hidden), "frame \(index)")
+            #expect(PommeProgressSession.displayWidth(frame) == 2)
+            let lit = index < 12 ? perimeter[0...index] : perimeter[(index - 11)...]
+            #expect(dots(frame) == Set(lit), "frame \(index)")
         }
+    }
+
+    @Test("Each lap of the square takes the next color, and NO_COLOR leaves it plain")
+    func squareColor() {
+        let laps = PommeProgressSession.squareFrames.count
+        let first = PommeProgressSession.squareFrame(step: 0, color: true)
+        let second = PommeProgressSession.squareFrame(step: laps, color: true)
+        #expect(first.hasPrefix("\u{001B}[38;5;196m") && first.hasSuffix("\u{001B}[0m"))
+        #expect(second.hasPrefix("\u{001B}[38;5;208m"))
+        #expect(PommeProgressSession.displayWidth(first) == 2)
+        #expect(PommeProgressSession.squareFrame(step: 0, color: false) == PommeProgressSession.squareFrames[0])
+    }
+
+    @Test("The elapsed time follows the spinner, ahead of the VM and step")
+    func layout() {
+        let harness = ProgressHarness()
+        let session = harness.session(environment: ["LANG": "en_US.UTF-8", "NO_COLOR": ""])
+        session.sink.step(vm: "devme", "Starting macOS")
+        harness.time = 12.5
+        session.tick()
+        let line = harness.output.replacingOccurrences(of: "\r\u{001B}[2K", with: "")
+        let frame = PommeProgressSession.squareFrame(step: 12_500 / PommeProgressSession.frameMilliseconds, color: false)
+        #expect(line == frame + " 12s devme · Starting macOS")
     }
 
     @Test("Non-Unicode terminals use ASCII and invalid measurements stay finite")

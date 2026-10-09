@@ -68,9 +68,11 @@ For the fields that each command returns, see
 
 Long-running commands, such as `pomme create` and `pomme ipsw download`, show
 their progress on standard error, so it never mixes with the results on
-standard output. On an interactive terminal, one status line shows a spinning
-rectangle, the current step, and the elapsed time. Restore-image downloads and
-macOS installation also show a percentage.
+standard output. On an interactive terminal, one status line shows a small
+square whose dots fill in and empty as they swirl around it, changing color
+with each lap. The elapsed time follows the square, and then the VM name and
+the current step. Restore-image downloads and macOS installation also show a
+percentage.
 
 To choose how progress appears, pass `--progress` with one of the following
 values:
