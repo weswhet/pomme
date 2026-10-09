@@ -107,8 +107,10 @@ final class PommeProgressSession: @unchecked Sendable {
         unicode = locale.lowercased().contains("utf") || locale.isEmpty
         color = animated && environment["NO_COLOR"] == nil
         if animated && startTimer {
-            let source = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
-            source.schedule(deadline: .now() + .milliseconds(200), repeating: .milliseconds(100))
+            // Without .strict, macOS coalesces the timer to about twice its interval,
+            // which skips spinner frames.
+            let source = DispatchSource.makeTimerSource(flags: .strict, queue: .global(qos: .utility))
+            source.schedule(deadline: .now() + .milliseconds(200), repeating: .milliseconds(Self.frameMilliseconds))
             source.setEventHandler { [weak self] in self?.tick() }
             timer = source
             source.resume()
@@ -218,14 +220,16 @@ final class PommeProgressSession: @unchecked Sendable {
             let active = statuses.filter { !$0.complete && !$0.pending }
             guard !active.isEmpty else { clearLine(); return }
             let width = max(1, terminalWidth() - 1)
-            let frame = unicode ? Self.rectangleFrames[Int(elapsed * 10) % Self.rectangleFrames.count] : [".   ", " .  ", "  . ", "   ."][Int(elapsed * 10) % 4]
+            let step = Int(elapsed * 1_000) / Self.frameMilliseconds
+            let frame = unicode ? Self.squareFrame(step: step, color: color) : ["|", "/", "-", "\\"][step % 4]
             let count = statuses.count > 1 ? " \(statuses.filter(\.complete).count)/\(statuses.count)" : ""
-            let suffix = " \(separator) \(Int(elapsed))s\(count)"
+            // The elapsed time sits beside the spinner, ahead of the VM and step.
+            let prefix = frame + " \(Int(elapsed))s\(count) "
             var selected = active
             var barWidth = 10
             var counters = true
             var throughput = true
-            let available = width - Self.displayWidth(frame + " " + suffix)
+            let available = width - Self.displayWidth(prefix)
             func content() -> String { selected.map { description($0, barWidth: barWidth, counters: counters, throughput: throughput) }.joined(separator: " | ") }
             func reduceDetails() -> String {
                 var text = content()
@@ -263,9 +267,9 @@ final class PommeProgressSession: @unchecked Sendable {
             }
             let line: String
             if available > 0 {
-                line = frame + " " + Self.truncate(text, width: available, unicode: unicode) + suffix
+                line = prefix + Self.truncate(text, width: available, unicode: unicode)
             } else {
-                line = Self.truncate(frame + suffix, width: width, unicode: unicode)
+                line = Self.truncate(prefix, width: width, unicode: unicode)
             }
             installSignalCleanup()
             write("\r\u{001B}[2K" + line)
@@ -478,23 +482,44 @@ final class PommeProgressSession: @unchecked Sendable {
         return String(format: "%.1f %@", count, units[index])
     }
 
-    /// The perimeter of an 8-by-4-dot rectangle drawn in four Braille cells,
-    /// clockwise from the top-left corner.
-    static let rectanglePerimeter: [(x: Int, y: Int)] =
-        (0..<8).map { ($0, 0) } + [(7, 1), (7, 2)] + (0..<8).reversed().map { ($0, 3) } + [(0, 2), (0, 1)]
+    /// How long each spinner frame shows; the render timer runs at this rate.
+    static let frameMilliseconds = 120
 
-    /// The rectangle outline with a three-dot gap that steps clockwise one
-    /// dot per frame, so the outline appears to spin.
-    static let rectangleFrames: [String] = {
+    /// The outline of a 4-by-4-dot square drawn in two Braille cells,
+    /// clockwise from the top-left corner. Terminal cells are about twice as
+    /// tall as they are wide, so these dots look square.
+    static let squarePerimeter: [(x: Int, y: Int)] =
+        (0..<4).map { ($0, 0) } + [(3, 1), (3, 2)] + (0..<4).reversed().map { ($0, 3) } + [(0, 2), (0, 1)]
+
+    /// The square's dots fill in clockwise one at a time until the outline is
+    /// complete, then empty in the same direction from the first dot, so the
+    /// filled run swirls around the square. It's never blank.
+    static let squareFrames: [String] = {
         let bits = [[0, 1, 2, 6], [3, 4, 5, 7]]
-        let perimeter = rectanglePerimeter
-        return perimeter.indices.map { start in
-            let gap = Set((0..<3).map { (start + $0) % perimeter.count })
-            var cells = [UInt32](repeating: 0, count: 4)
-            for (index, point) in perimeter.enumerated() where !gap.contains(index) {
+        let perimeter = squarePerimeter
+        func frame(_ lit: Range<Int>) -> String {
+            var cells = [UInt32](repeating: 0, count: 2)
+            for index in lit {
+                let point = perimeter[index]
                 cells[point.x / 2] |= 1 << bits[point.x % 2][point.y]
             }
             return String(String.UnicodeScalarView(cells.map { UnicodeScalar(0x2800 + $0)! }))
         }
+        let count = perimeter.count
+        return (1...count).map { frame(0..<$0) } + (1..<count).map { frame($0..<count) }
     }()
+
+    /// Apple colors, one for each lap of the square, as 256-color indexes:
+    /// red, orange, gold, and green.
+    static let squareColors = [196, 208, 220, 112]
+
+    /// The spinner for one timer step. Each lap fills and empties the square
+    /// once and takes the next apple color.
+    static func squareFrame(step: Int, color: Bool) -> String {
+        let step = max(0, step)
+        let frame = squareFrames[step % squareFrames.count]
+        guard color else { return frame }
+        let lap = step / squareFrames.count
+        return "\u{001B}[38;5;\(squareColors[lap % squareColors.count])m" + frame + "\u{001B}[0m"
+    }
 }

@@ -16,12 +16,11 @@ final class RecoveryAgentEnsureResultBox: @unchecked Sendable {
 }
 
 final class RecoveryAgentProgressRenderer {
-    private static let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-
     private let vmName: String
     private let debug: Bool
     private let helperLogPath: String
     private let interactive: Bool
+    private let color = ProcessInfo.processInfo.environment["NO_COLOR"] == nil
     private let write: (String) -> Void
     private let startedAt = Date()
     private let lock = NSLock()
@@ -71,9 +70,9 @@ final class RecoveryAgentProgressRenderer {
                 write("\u{001B}[?25l")
                 cursorHidden = true
             }
-            let frame = Self.frames[frameIndex % Self.frames.count]
+            let frame = PommeProgressSession.squareFrame(step: frameIndex, color: color)
             frameIndex += 1
-            write("\r\u{001B}[2K\(frame) \(vmName) \(stage.rawValue) \(elapsed)s")
+            write("\r\u{001B}[2K\(frame) \(elapsed)s \(vmName) \(stage.rawValue)")
             fflush(stderr)
         } else if stage != lastStage {
             write("[recovery-agent] \(vmName) stage=\(stage.rawValue) elapsed=\(elapsed)s\n")
