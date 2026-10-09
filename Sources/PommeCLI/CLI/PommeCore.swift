@@ -4824,6 +4824,24 @@ struct PommeCore {
         return .init(bundlePath: bundlePath, name: name, bootMode: bootMode)
     }
 
+    /// Decides what `start` does with a VM whose helper is already running:
+    /// a paused VM in the requested boot mode is resumed, a running one is
+    /// reused, and one in the other boot mode is refused.
+    static func existingRuntimeNeedsResume(
+        status: [String: Any],
+        bootMode: BootMode,
+        displayName: String
+    ) throws -> Bool {
+        let currentMode = stringValue(status["bootMode"])
+        let paused = stringValue(status["vmState"]) == "paused"
+        guard currentMode == bootMode.rawValue else {
+            throw RunnerError.virtualMachineState(
+                "\(displayName) is already \(paused ? "paused" : "running") in \(currentMode) boot mode. Stop it before starting \(bootMode.rawValue) boot mode."
+            )
+        }
+        return paused
+    }
+
     private static func startRuntimeInBackground(
         reference: VMReference,
         bootMode: BootMode,
@@ -4838,11 +4856,20 @@ struct PommeCore {
                 bundle: bundle,
                 timeout: max(0.001, deadline - ProcessInfo.processInfo.systemUptime)
             )
-            let runningMode = stringValue(status["bootMode"])
-            guard runningMode == bootMode.rawValue else {
-                throw RunnerError.virtualMachineState(
-                    "\(reference.displayName) is already running in \(runningMode) boot mode. Stop it before starting \(bootMode.rawValue) boot mode."
+            if try existingRuntimeNeedsResume(status: status, bootMode: bootMode, displayName: reference.displayName) {
+                PommeProgressContext.sink?.step(vm: reference.name, "Resuming VM")
+                let resumed = try controlCommandPayload(.resume, reference: reference)
+                guard resumed["ok"] as? Bool == true else {
+                    throw RunnerError.virtualMachineState(
+                        "\(reference.displayName) is paused and could not be resumed: \(stringValue(resumed["error"]))"
+                    )
+                }
+                status = try sendControlObject(
+                    ["command": "status"],
+                    bundle: bundle,
+                    timeout: max(0.001, deadline - ProcessInfo.processInfo.systemUptime)
                 )
+                status["resumed"] = true
             }
             status["reused"] = true
             status["pid"] = Int(existing.pid)

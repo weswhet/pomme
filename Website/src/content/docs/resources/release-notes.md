@@ -11,6 +11,14 @@ Pomme 0.2.0 isn't released yet. Each change to the `main` branch that passes
 CI publishes an alpha, such as `0.2.0-alpha.1`. To install the newest alpha,
 run `curl -fsSL https://pommevm.dev/install.pl | POMME_CHANNEL=alpha perl`.
 
+### Fixes
+
+- `pomme start` now resumes a paused VM, as its help describes. Before, it
+  left the VM paused, waited for the guest agent until `--timeout` elapsed,
+  and then reported that the agent didn't connect. Its JSON output includes
+  `"resumed": true` when it resumed the VM. If the VM is paused in the other
+  boot mode, `start` reports that it's paused instead of running.
+
 ## Pomme 0.1.0
 
 Pomme 0.1.0 is the first release of Pomme. It's beta software, and it was
