@@ -109,18 +109,18 @@ enum ControlWireCodec {
     /// One monotonic deadline applies to every partial read/write, rather than
     /// restarting the timeout whenever another byte becomes available.
     static func waitForDescriptor(_ descriptor: Int32, events: Int16, deadline: TimeInterval) throws {
-        guard deadline.isFinite else { throw POSIXError(.EINVAL) }
+        guard deadline.isFinite else { throw RunnerError.posix(function: "poll", code: EINVAL) }
         while true {
             let remaining = deadline - ProcessInfo.processInfo.systemUptime
-            guard remaining > 0 else { throw POSIXError(.ETIMEDOUT) }
+            guard remaining > 0 else { throw RunnerError.controlSocketTimedOut }
             let milliseconds = Int32(min(Double(Int32.max), max(1, (remaining * 1_000).rounded(.up))))
             var item = pollfd(fd: descriptor, events: events, revents: 0)
             let ready = Darwin.poll(&item, 1, milliseconds)
             if ready > 0 {
-                if item.revents & Int16(POLLNVAL) != 0 { throw POSIXError(.EBADF) }
+                if item.revents & Int16(POLLNVAL) != 0 { throw RunnerError.posix(function: "poll", code: EBADF) }
                 if item.revents & (events | Int16(POLLHUP) | Int16(POLLERR)) != 0 { return }
             } else if ready == 0 {
-                throw POSIXError(.ETIMEDOUT)
+                throw RunnerError.controlSocketTimedOut
             } else if errno != EINTR {
                 try throwPOSIX("poll")
             }

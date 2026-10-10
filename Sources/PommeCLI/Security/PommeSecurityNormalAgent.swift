@@ -45,18 +45,36 @@ enum PommeSecurityDesktopTransportCause: String, CaseIterable, Sendable {
   case foregroundDeadline, foregroundState, controlResponse, posix, cancelled, other
 }
 
-struct PommeSecurityNormalAgentDiagnostic: Error, Equatable, LocalizedError, Sendable {
+struct PommeSecurityNormalAgentDiagnostic: PommeDescribedError, Equatable, Sendable {
   let stage: PommeSecurityNormalAgentProofStage
   let reason: PommeSecurityNormalAgentFailureReason
 
   /// A stable allowlisted value suitable for a bounded log or a caller's
   /// closed diagnostic field. It contains no guest-provided text.
-  var code: String {
+  var diagnosticCode: String {
     "normal-agent-\(stage.rawValue)-\(reason.rawValue)"
   }
 
+  var code: PommeErrorCode { reason == .timedOut ? .securityOwnerLoginUnverified : .securityDesktopUnverified }
+
   var errorDescription: String? {
-    "Normal agent verification failed (\(code))."
+    let check = switch stage {
+    case .console: "the owner's console session"
+    case .aqua: "the owner's desktop session"
+    case .processList: "the guest's running processes"
+    }
+    let reasonText = switch reason {
+    case .timedOut: "the check timed out"
+    case .outputTruncated: "the check's output was truncated"
+    case .incomplete: "the check didn't finish"
+    case .invalidEnvelope: "the guest agent's reply was malformed"
+    case .transport: "the connection to the guest agent failed"
+    }
+    return "Pomme couldn't verify \(check) because \(reasonText) (\(diagnosticCode))."
+  }
+
+  var recoverySuggestion: String? {
+    "Repeat the same command with the same `--final-state` value to resume."
   }
 }
 
@@ -64,43 +82,78 @@ struct PommeSecurityNormalAgentDiagnostic: Error, Equatable, LocalizedError, Sen
 /// unsupported case is intentionally distinct from an authentication failure:
 /// an older creation-pinned daemon must be reported as requiring an explicit
 /// new VM/agent, never silently replaced.
-enum PommeSecurityNormalAgentError: Error, Equatable, LocalizedError, Sendable {
+enum PommeSecurityNormalAgentError: PommeDescribedError, Equatable, Sendable {
   case invalidAMFIOperation
   case unsupportedAMFIWorkflow
   case unverifiedAMFIResponse
   case invalidRebootTimeout
-  case bootIdentityUnavailable
-  case rebootRequestFailed
+  case bootIdentityUnavailable(PommeRetainedCause = .init())
+  case rebootRequestFailed(PommeRetainedCause = .init())
   case rebootDidNotStop
-  case rebootStartFailed
+  case rebootStartFailed(PommeRetainedCause = .init())
   case rebootBootIdentityUnchanged
-  case rebootAgentUnverified
-  case unverifiedSIPClear
+  case rebootAgentUnverified(PommeRetainedCause = .init())
+  case unverifiedSIPClear(PommeRetainedCause = .init())
+
+  var code: PommeErrorCode {
+    switch self {
+    case .invalidAMFIOperation: .internalError
+    case .unsupportedAMFIWorkflow: .securityAgentUnsupported
+    case .unverifiedAMFIResponse, .unverifiedSIPClear: .securityChangeUnverified
+    case .invalidRebootTimeout: .invalidRequest
+    case .bootIdentityUnavailable, .rebootRequestFailed, .rebootDidNotStop, .rebootStartFailed,
+         .rebootBootIdentityUnchanged, .rebootAgentUnverified:
+      .securityRebootUnverified
+    }
+  }
 
   var errorDescription: String? {
     switch self {
     case .invalidAMFIOperation:
-      "The requested normal-agent AMFI operation is not supported."
+      "Pomme asked the guest agent for an AMFI operation that it doesn't support. This is a bug in Pomme."
     case .unsupportedAMFIWorkflow:
-      "The VM's creation-pinned Pomme agent does not support the normal-boot AMFI workflow. Create a VM with a Pomme build that includes this capability; the pinned agent was not replaced."
+      "The VM's guest agent doesn't support changing AMFI from a normal boot. Pomme didn't replace the agent."
     case .unverifiedAMFIResponse:
-      "The normal-agent AMFI operation could not be verified; the security transaction was retained."
+      "Pomme couldn't verify the guest agent's reply to the AMFI operation. Pomme kept the operation's progress."
     case .invalidRebootTimeout:
-      "The native reboot verification timeout is invalid or exceeds the bounded limit."
-    case .bootIdentityUnavailable:
-      "The normal-boot identity could not be verified; the security transaction was retained."
-    case .rebootRequestFailed:
-      "The native normal-boot reboot request could not be verified; the security transaction was retained."
+      "The guest restart time limit isn't a positive number of seconds within the allowed maximum."
+    case .bootIdentityUnavailable(let cause):
+      cause.describing("Pomme couldn't read the guest's boot session identifier. Pomme kept the operation's progress.")
+    case .rebootRequestFailed(let cause):
+      cause.describing("Pomme couldn't confirm that the guest accepted the restart request. Pomme kept the operation's progress.")
     case .rebootDidNotStop:
-      "The native reboot did not produce a verified stopped VM within the bounded window; the security transaction was retained."
-    case .rebootStartFailed:
-      "The VM could not be restarted in normal mode after a verified native reboot; the security transaction was retained."
+      "The guest didn't shut down within the time limit after the restart request. Pomme kept the operation's progress."
+    case .rebootStartFailed(let cause):
+      cause.describing("The VM didn't start again after the guest shut down for the restart. Pomme kept the operation's progress.")
     case .rebootBootIdentityUnchanged:
-      "The native reboot did not produce a different verified boot identity; the security transaction was retained."
+      "The guest reported the same boot session after the restart, so Pomme can't confirm that it restarted. Pomme kept the operation's progress."
+    case .rebootAgentUnverified(let cause):
+      cause.describing("The guest agent didn't authenticate after the restart. Pomme kept the operation's progress.")
+    case .unverifiedSIPClear(let cause):
+      cause.describing("Pomme couldn't verify that `csrutil clear` succeeded for the owner account, so it didn't report SIP as restored. Pomme kept the operation's progress.")
+    }
+  }
+
+  var recoverySuggestion: String? {
+    switch self {
+    case .invalidAMFIOperation, .invalidRebootTimeout:
+      nil
+    case .unsupportedAMFIWorkflow:
+      "Run `pomme agent update NAME` to install the current agent, then retry."
     case .rebootAgentUnverified:
-      "The creation-pinned normal agent could not be reauthenticated after the native reboot; the security transaction was retained."
-    case .unverifiedSIPClear:
-      "Normal-boot csrutil clear could not be verified for the volume owner; SIP was not reported cleared and the security transaction was retained."
+      "Run `pomme agent status NAME`, then repeat the same command with the same `--final-state` value."
+    default:
+      "Run `pomme status NAME`, then repeat the same command with the same `--final-state` value to resume."
+    }
+  }
+
+  var underlying: (any Error)? {
+    switch self {
+    case .bootIdentityUnavailable(let cause), .rebootRequestFailed(let cause),
+         .rebootStartFailed(let cause), .rebootAgentUnverified(let cause), .unverifiedSIPClear(let cause):
+      cause.underlying
+    default:
+      nil
     }
   }
 }
@@ -149,9 +202,13 @@ struct PommeSecurityDesktopProofHooks: Sendable {
   var sleep: @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }
 }
 
-private struct PommeDesktopProofTimeout: Error {
+private struct PommeDesktopProofTimeout: PommeDescribedError {
   let response: JSONValue
   let diagnostic: PommeSecurityNormalAgentDiagnostic
+
+  var code: PommeErrorCode { diagnostic.code }
+  var errorDescription: String? { diagnostic.errorDescription }
+  var recoverySuggestion: String? { diagnostic.recoverySuggestion }
 }
 
 /// Security preparation talks to the existing authenticated persistent agent.
@@ -361,7 +418,7 @@ struct PommeSecurityNormalAgent: Sendable {
       } catch let error as PommeSecurityNormalAgentError {
         throw error
       } catch {
-        throw PommeSecurityNormalAgentError.bootIdentityUnavailable
+        throw PommeSecurityNormalAgentError.bootIdentityUnavailable(PommeRetainedCause(error))
       }
     }
     do {
@@ -369,7 +426,7 @@ struct PommeSecurityNormalAgent: Sendable {
     } catch let error as PommeSecurityNormalAgentError {
       throw error
     } catch {
-      throw PommeSecurityNormalAgentError.bootIdentityUnavailable
+      throw PommeSecurityNormalAgentError.bootIdentityUnavailable(PommeRetainedCause(error))
     }
   }
 
@@ -402,7 +459,7 @@ struct PommeSecurityNormalAgent: Sendable {
     } catch is CancellationError {
       throw CancellationError()
     } catch {
-      throw PommeSecurityNormalAgentError.rebootAgentUnverified
+      throw PommeSecurityNormalAgentError.rebootAgentUnverified(PommeRetainedCause(error))
     }
 
     let originalBootIdentity: String
@@ -412,7 +469,7 @@ struct PommeSecurityNormalAgent: Sendable {
     } catch is CancellationError {
       throw CancellationError()
     } catch {
-      throw PommeSecurityNormalAgentError.bootIdentityUnavailable
+      throw PommeSecurityNormalAgentError.bootIdentityUnavailable(PommeRetainedCause(error))
     }
 
     do {
@@ -420,7 +477,7 @@ struct PommeSecurityNormalAgent: Sendable {
     } catch is CancellationError {
       throw CancellationError()
     } catch {
-      throw PommeSecurityNormalAgentError.rebootRequestFailed
+      throw PommeSecurityNormalAgentError.rebootRequestFailed(PommeRetainedCause(error))
     }
 
     var requiresNormalStart = false
@@ -495,14 +552,14 @@ struct PommeSecurityNormalAgent: Sendable {
       } catch let error as PommeSecurityNormalAgentError {
         throw error
       } catch {
-        throw PommeSecurityNormalAgentError.rebootStartFailed
+        throw PommeSecurityNormalAgentError.rebootStartFailed(PommeRetainedCause(error))
       }
     } else {
       if sawAuthenticatedBoot {
         throw PommeSecurityNormalAgentError.rebootBootIdentityUnchanged
       }
       if sawRunningNormal {
-        throw PommeSecurityNormalAgentError.rebootAgentUnverified
+        throw PommeSecurityNormalAgentError.rebootAgentUnverified()
       }
       throw PommeSecurityNormalAgentError.rebootDidNotStop
     }
@@ -530,7 +587,7 @@ struct PommeSecurityNormalAgent: Sendable {
     if sawAuthenticatedAfterStart || sawAuthenticatedBoot {
       throw PommeSecurityNormalAgentError.rebootBootIdentityUnchanged
     }
-    throw PommeSecurityNormalAgentError.rebootAgentUnverified
+    throw PommeSecurityNormalAgentError.rebootAgentUnverified()
   }
 
   /// The only process-start request that the reboot adapter can create.
@@ -575,7 +632,7 @@ struct PommeSecurityNormalAgent: Sendable {
       result.signal == nil, result.exitCode == 0,
       !result.stdoutTruncated, !result.stderrTruncated, result.stderr.isEmpty,
       let identity = Self.parseBootIdentity(result.stdout)
-    else { throw PommeSecurityNormalAgentError.bootIdentityUnavailable }
+    else { throw PommeSecurityNormalAgentError.bootIdentityUnavailable() }
     return identity
   }
 
@@ -594,7 +651,7 @@ struct PommeSecurityNormalAgent: Sendable {
 
   private static func validatedBootIdentity(_ value: String) throws -> String {
     guard let identity = parseBootIdentity(Data(value.utf8)) else {
-      throw PommeSecurityNormalAgentError.bootIdentityUnavailable
+      throw PommeSecurityNormalAgentError.bootIdentityUnavailable()
     }
     return identity
   }
@@ -641,7 +698,7 @@ struct PommeSecurityNormalAgent: Sendable {
     let response = try PommeCore.sendControlObject(
       payload, bundle: reference.bundle, timeout: timeout)
     guard isVerifiedDetachedRebootStart(response) else {
-      throw PommeSecurityNormalAgentError.rebootRequestFailed
+      throw PommeSecurityNormalAgentError.rebootRequestFailed()
     }
   }
 
@@ -868,7 +925,7 @@ struct PommeSecurityNormalAgent: Sendable {
     vmName: String
   ) {
     PommeCore.log(
-      "Normal desktop proof diagnostic: \(diagnostic.code).",
+      "Normal desktop proof diagnostic: \(diagnostic.diagnosticCode).",
       vmName: vmName)
   }
 
@@ -1394,7 +1451,7 @@ struct PommeSecurityNormalAgent: Sendable {
         timeout: PommeAgentVSOCKCoordinator.normalSIPClearExchangeTimeout
           + 3 * Constants.agentRoundTripTimeout)
     } catch {
-      throw PommeSecurityNormalAgentError.unverifiedSIPClear
+      throw PommeSecurityNormalAgentError.unverifiedSIPClear(PommeRetainedCause(codesOnly: error))
     }
     guard Self.isVerifiedSIPClearReceipt(response) else {
       if let code = Self.guestFailureCode(response) {
@@ -1402,7 +1459,7 @@ struct PommeSecurityNormalAgent: Sendable {
           "Normal-boot csrutil clear was rejected by the guest (\(code.rawValue)).",
           vmName: reference.displayName)
       }
-      throw PommeSecurityNormalAgentError.unverifiedSIPClear
+      throw PommeSecurityNormalAgentError.unverifiedSIPClear()
     }
   }
 
@@ -1567,7 +1624,7 @@ struct PommeSecurityNormalAgent: Sendable {
     ], bundle: reference.bundle, timeout: 30)
     guard response["ok"] as? Bool == true, let result = response["result"] as? [String: Any],
       Set(result.keys) == ["verified"], let verified = result["verified"] as? Bool
-    else { throw PommeSecurityOwnerPreparationError.privatePTYUnavailable }
+    else { throw PommeSecurityOwnerPreparationError.privatePTYUnavailable() }
     return verified
   }
 
@@ -1623,7 +1680,7 @@ struct PommeSecurityNormalAgent: Sendable {
     var payload: [String: Any] = [:]
     if let account {
       guard PommeGuestOwnerCredentialReader.isSafeAccount(account) else {
-        throw PommeSecurityWorkflowError.ownerUnavailable
+        throw PommeSecurityWorkflowError.ownerUnavailable()
       }
       payload["account"] = account
     }
@@ -1635,7 +1692,7 @@ struct PommeSecurityNormalAgent: Sendable {
         "payload": payload,
       ], bundle: reference.bundle, timeout: timeout)
     } catch {
-      throw PommeSecurityWorkflowError.ownerUnavailable
+      throw PommeSecurityWorkflowError.ownerUnavailable(PommeRetainedCause(codesOnly: error))
     }
     guard response["ok"] as? Bool == true,
       let rawResult = response["result"],
@@ -1647,11 +1704,11 @@ struct PommeSecurityNormalAgent: Sendable {
       let password = object["password"]?.stringValue,
       PommeGuestOwnerCredentialReader.isSafeAccount(recovered),
       account == nil || account == recovered
-    else { throw PommeSecurityWorkflowError.ownerUnavailable }
+    else { throw PommeSecurityWorkflowError.ownerUnavailable() }
     do {
       return try .init(username: recovered, password: password)
     } catch {
-      throw PommeSecurityWorkflowError.ownerUnavailable
+      throw PommeSecurityWorkflowError.ownerUnavailable()
     }
   }
 
@@ -1705,15 +1762,26 @@ struct PommeSecurityNormalAgent: Sendable {
   }
 }
 
-private enum PommeBuddyStatusReadError: Error, LocalizedError {
+private enum PommeBuddyStatusReadError: PommeDescribedError {
   case updatedAgentRequired, invalidReceipt
+
+  var code: PommeErrorCode {
+    switch self {
+    case .updatedAgentRequired: .securityAgentUnsupported
+    case .invalidReceipt: .securityOwnerPreparationFailed
+    }
+  }
 
   var errorDescription: String? {
     switch self {
     case .updatedAgentRequired:
-      "Buddy preference maintenance requires an updated guest agent with buddy.preferences.status support."
+      "The VM's guest agent is too old to report the state of the Setup Assistant preferences."
     case .invalidReceipt:
-      "The guest agent's Buddy preference receipt could not be verified."
+      "Pomme couldn't verify the guest agent's report on the Setup Assistant preferences."
     }
+  }
+
+  var recoverySuggestion: String? {
+    self == .updatedAgentRequired ? "Run `pomme agent update NAME` to install the current agent, then retry." : nil
   }
 }

@@ -46,32 +46,74 @@ enum PommeRecoveryGuestFailureCode: String, Codable, CaseIterable, Equatable, Se
         self == .rollbackFailed ? .rollbackFailed : nil
     }
 
-    var userDescription: String {
+    var pommeCode: PommeErrorCode {
         switch self {
-        case .rollbackFailed:
-            "Recovery security rollback was not verified; the retained transaction requires inspection before retry."
-        case .verificationFailed:
-            "Recovery security change was not verified; the retained transaction requires inspection before retry."
-        case .invalidSnapshot:
-            "The retained Recovery security baseline is invalid; inspect the transaction before retry."
-        case .snapshotPending:
-            "A previous Recovery security transaction remains pending; inspect it before retrying."
-        case .invalidPolicy:
-            "The Recovery boot policy was rejected; the retained transaction requires inspection before retry."
-        case .invalidNVRAM:
-            "The Recovery NVRAM state was rejected; the retained transaction requires inspection before retry."
-        case .nvramWriteDenied:
-            "Recovery denied the AMFI boot-argument write; the retained transaction requires inspection before retry."
-        case .commandFailed:
-            "The Recovery security command failed; the retained transaction requires inspection before retry."
-        case .promptRejected:
-            "The Recovery security command presented an unsupported prompt; the retained transaction requires inspection before retry."
-        case .timedOut:
-            "The Recovery security command timed out; the retained transaction requires inspection before retry."
+        case .rollbackFailed: .securityRollbackUnverified
+        case .verificationFailed: .securityChangeUnverified
+        case .invalidSnapshot, .invalidPolicy, .invalidNVRAM: .recoverySecurityStateRejected
+        case .snapshotPending: .securityOperationPending
+        case .nvramWriteDenied, .commandFailed, .promptRejected: .securityRecoveryCommandFailed
+        case .timedOut: .recoveryTimedOut
         case .recoveryRoleRequired, .rootRequired, .invalidOperation, .invalidPayload,
              .credentialRequired, .nvramMutationUnqualified, .recoveryEnvironmentUnverified,
              .startupVolumeMismatch, .outputTooLarge:
-            "The authenticated Recovery security operation was rejected."
+            .recoveryOperationFailed
+        }
+    }
+
+    var userDescription: String {
+        switch self {
+        case .rollbackFailed:
+            "Pomme couldn't verify that Recovery rolled back the security change. Pomme kept the operation's progress."
+        case .verificationFailed:
+            "Pomme couldn't verify the security change in Recovery. Pomme kept the operation's progress."
+        case .invalidSnapshot:
+            "The security baseline that Pomme recorded for this VM isn't valid. Pomme kept the operation's progress."
+        case .snapshotPending:
+            "An earlier security operation on this VM is still unfinished."
+        case .invalidPolicy:
+            "Recovery reported a boot policy that Pomme can't use. Pomme kept the operation's progress."
+        case .invalidNVRAM:
+            "Recovery reported NVRAM values that Pomme can't use. Pomme kept the operation's progress."
+        case .nvramWriteDenied:
+            "Recovery refused to write the AMFI boot arguments to NVRAM. Pomme kept the operation's progress."
+        case .commandFailed:
+            "A security command in Recovery failed. Pomme kept the operation's progress."
+        case .promptRejected:
+            "A security command in Recovery showed a prompt that Pomme doesn't answer. Pomme kept the operation's progress."
+        case .timedOut:
+            "A security command in Recovery didn't finish within its time limit. Pomme kept the operation's progress."
+        case .recoveryRoleRequired:
+            "The Recovery agent refused the operation because it isn't running in macOS Recovery."
+        case .rootRequired:
+            "The Recovery agent refused the operation because it isn't running as root."
+        case .invalidOperation, .invalidPayload:
+            "The Recovery agent refused the operation because the request wasn't valid."
+        case .credentialRequired:
+            "The Recovery agent refused the operation because the owner's credential was missing."
+        case .nvramMutationUnqualified:
+            "The Recovery agent refused to change NVRAM because this macOS build isn't qualified for it."
+        case .recoveryEnvironmentUnverified:
+            "The Recovery agent couldn't verify that it's running in the VM's own Recovery system."
+        case .startupVolumeMismatch:
+            "The Recovery agent refused the operation because the startup volume isn't the VM's macOS volume."
+        case .outputTooLarge:
+            "The Recovery agent refused the operation because a command's output exceeded its size limit."
+        }
+    }
+
+    var userRecoverySuggestion: String? {
+        switch self {
+        case .rollbackFailed, .verificationFailed, .invalidSnapshot, .invalidPolicy, .invalidNVRAM,
+             .nvramWriteDenied, .commandFailed, .promptRejected, .timedOut:
+            "Run `pomme sip status NAME` to check the VM, then repeat the same action with the same `--final-state` value to resume."
+        case .snapshotPending:
+            "Repeat the earlier operation's command with the same `--final-state` value to finish it."
+        case .credentialRequired:
+            "Provide the owner's credentials, then run the same command again."
+        case .recoveryRoleRequired, .rootRequired, .invalidOperation, .invalidPayload,
+             .nvramMutationUnqualified, .recoveryEnvironmentUnverified, .startupVolumeMismatch, .outputTooLarge:
+            nil
         }
     }
 }
@@ -110,16 +152,23 @@ enum PommeRecoveryDiagnosticPhase: String, Codable, CaseIterable, Equatable, Sen
 
 /// A typed guest failure that survived the authenticated session. It carries
 /// only the closed failure code and the one phase proven by that code.
-struct PommeRecoveryGuestOperationFailure: Error, LocalizedError, Equatable, Sendable {
-    let code: PommeRecoveryGuestFailureCode
+struct PommeRecoveryGuestOperationFailure: PommeDescribedError, Equatable, Sendable {
+    let failureCode: PommeRecoveryGuestFailureCode
     let phase: PommeRecoveryDiagnosticPhase?
 
     init(code: PommeRecoveryGuestFailureCode) {
-        self.code = code
+        failureCode = code
         phase = code.diagnosticPhase
     }
 
-    var errorDescription: String? { code.userDescription }
+    var code: PommeErrorCode { failureCode.pommeCode }
+    var errorDescription: String? { failureCode.userDescription }
+    var recoverySuggestion: String? { failureCode.userRecoverySuggestion }
+
+    /// The guest's wire code, kept so a report shows the exact failure.
+    var underlying: (any Error)? {
+        PommeExternalCause(domain: "PommeRecoveryGuest", code: failureCode.rawValue, description: "The Recovery agent reported \(failureCode.rawValue).")
+    }
 }
 
 enum PommeRecoveryDiagnosticStage: String, Codable, CaseIterable, Equatable, Sendable {
@@ -211,7 +260,7 @@ enum PommeRecoveryDiagnosticRedactor {
         case PommeRecoverySessionError.invalidRequest:
             code = .invalidRequest
         case let failure as PommeRecoveryGuestOperationFailure:
-            code = failure.code.diagnosticCode
+            code = failure.failureCode.diagnosticCode
             phase = failure.phase
         default:
             // Authentication failures are intentionally closed over a stable,

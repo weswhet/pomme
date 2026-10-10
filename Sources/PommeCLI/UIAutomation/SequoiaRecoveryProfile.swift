@@ -16,8 +16,18 @@ enum SequoiaRecoveryReference {
     static let productionInputEnabled = false
 }
 
-enum SequoiaRecoveryReferenceError: Error, Equatable, Sendable {
+enum SequoiaRecoveryReferenceError: PommeDescribedError, Equatable, Sendable {
     case pendingExternalReview(String)
+
+    var code: PommeErrorCode { .uiRecoveryReviewPending }
+
+    var errorDescription: String? {
+        "Recovery navigation for macOS Sequoia isn't available yet because the review of its Recovery screens isn't finished."
+    }
+
+    var recoverySuggestion: String? {
+        "Create the VM from a supported macOS version, or update Pomme with `pomme update` to get newly supported builds."
+    }
 }
 
 extension PommeRecoveryProfileSelector {

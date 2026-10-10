@@ -374,9 +374,24 @@ actor PommeRecoveryNavigationScreenshotRecorder {
   }
 }
 
-private enum PommeRecoveryNavigationScreenshotError: Error, Sendable {
+private enum PommeRecoveryNavigationScreenshotError: PommeDescribedError, Sendable {
   case encodingFailed
   case writeFailed
   case partialCleanupFailed
   case invalidPublishedFile
+
+  var code: PommeErrorCode { .uiDebugScreenshotFailed }
+
+  var errorDescription: String? {
+    switch self {
+    case .encodingFailed: "Pomme couldn't encode a Recovery debug screenshot as PNG."
+    case .writeFailed: "Pomme couldn't write a Recovery debug screenshot."
+    case .partialCleanupFailed: "Pomme couldn't remove a partly written Recovery debug screenshot."
+    case .invalidPublishedFile: "A saved Recovery debug screenshot failed its file checks."
+    }
+  }
+
+  var recoverySuggestion: String? {
+    "Check that the host's temporary directory has free space and is writable."
+  }
 }

@@ -127,7 +127,7 @@ struct PommeGuestJobWaitTests {
         try server.start()
         defer { server.stop() }
         let client = PommeControlSocketClient(identity: .init(socketPath: socket.path, pid: getpid(), startedAt: "test"))
-        #expect(throws: POSIXError(.ETIMEDOUT)) {
+        #expect(throws: RunnerError.self) {
             try client.send(.init(command: "status"), timeout: 0.03)
         }
     }

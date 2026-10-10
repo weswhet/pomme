@@ -1,7 +1,7 @@
 import Foundation
 import Darwin
 
-enum RunnerError: LocalizedError {
+enum RunnerError: PommeDescribedError {
     case usage
     case unsupportedHost
     case noSupportedConfiguration
@@ -31,6 +31,14 @@ enum RunnerError: LocalizedError {
     case noRunningVM(URL)
     case controlCommandFailed(String)
     case invalidControlCommand(String)
+    /// A value that the user or the CLI supplied breaks a rule. `field`
+    /// names the flag, argument, or payload key.
+    case invalidRequest(field: String, reason: String)
+    case controlSocketTimedOut
+    /// `start` asked for one boot mode while the VM runs or is paused in the
+    /// other.
+    case vmBootModeConflict(name: String, paused: Bool, current: String, requested: String)
+    case vmHelperRunning(name: String)
     case socketPathTooLong(String)
     case posix(function: String, code: Int32)
     case virtualMachineState(String)
@@ -122,11 +130,19 @@ enum RunnerError: LocalizedError {
         case .controlCommandFailed(let response):
             "The running VM helper rejected the command: \(response)"
         case .invalidControlCommand(let command):
-            "Unknown control command: \(command)"
+            "The VM helper doesn't support the command `\(command)`."
+        case .invalidRequest(let field, let reason):
+            "Invalid \(field): \(reason)"
+        case .controlSocketTimedOut:
+            "The VM helper didn't respond before the time limit."
+        case .vmBootModeConflict(let name, let paused, let current, let requested):
+            "\(name) is already \(paused ? "paused" : "running") in \(current) boot mode. Stop it before starting \(requested) boot mode."
+        case .vmHelperRunning(let name):
+            "Cannot delete VM '\(name)' while its helper is running. Run 'pomme stop \(name)' first, then retry deletion."
         case .socketPathTooLong(let path):
             "The control socket path is too long: \(path)"
         case .posix(let function, let code):
-            "\(function) failed: \(String(cString: strerror(code)))"
+            "\(function) failed: \(String(cString: strerror(code))) (errno \(code))."
         case .virtualMachineState(let message), .invalidGuestCommand(let message),
              .invalidDockerCommand(let message), .invalidUICommand(let message),
              .unsupportedCopy(let message), .hostCommandFailed(let message):
@@ -143,9 +159,9 @@ enum RunnerError: LocalizedError {
         case .guestAgentTimedOut(let operation):
             "Timed out waiting for agent operation \(operation)."
         case .guestAgentError(let message):
-            "Agent error: \(message)"
+            "The guest agent reported an error: \(message)"
         case .guestAgentProtocol(let message):
-            "PommeAgentProtocol error: \(message)"
+            "The guest agent sent an invalid message: \(message)"
         case .guestScreenSharingUnavailable:
             "Screen Sharing is unavailable through Pomme because this guest agent does not support it. Configure it in the guest’s Sharing settings instead."
         case .invalidControlResponse(let response):
@@ -184,6 +200,78 @@ enum RunnerError: LocalizedError {
             message
         case .keychainError(let message):
             "Host Keychain error: \(message)"
+        }
+    }
+
+    var code: PommeErrorCode {
+        switch self {
+        case .usage: .invalidArguments
+        case .unsupportedHost: .hostUnsupported
+        case .noSupportedConfiguration: .restoreImageUnsupported
+        case .restoreImageNeedsDownload: .restoreImageNotDownloaded
+        case .tuiRequiresInteractiveTerminal: .terminalRequired
+        case .downloadFailed: .restoreImageDownloadFailed
+        case .unknownDeviceIdentifier: .restoreImageUnknownDevice
+        case .catalogRequestFailed: .restoreImageCatalogFailed
+        case .invalidSize, .invalidIdentifier, .missingVMNameForCreate, .bundleCreateUnsupported,
+             .invalidGuestCommand, .invalidDockerCommand, .invalidUICommand, .invalidCopyEndpoint,
+             .unsupportedCopy, .invalidRequest:
+            .invalidRequest
+        case .memoryBelowGuestMinimum, .memoryBelowProvisionalFloor, .memoryOutsideHostLimits: .vmMemoryOutOfRange
+        case .backgroundStartFailed: .helperStartFailed
+        case .backgroundStartTimedOut: .helperStartTimedOut
+        case .namedVMNotFound: .vmNotFound
+        case .noDefaultRunningVM, .ambiguousVMSelection: .vmNotSpecified
+        case .missingBundleFile, .invalidHardwareModel, .invalidMachineIdentifier: .vmBundleDamaged
+        case .vmDestroyRequiresNamedVM, .vmDestroyConfirmationMismatch: .vmDeleteRefused
+        case .unsupportedHardwareModel: .vmHardwareUnsupported
+        case .noRunningVM: .vmNotRunning
+        case .controlCommandFailed: .helperCommandFailed
+        case .invalidControlCommand: .helperUnknownCommand
+        case .controlSocketTimedOut: .helperTimedOut
+        case .socketPathTooLong: .helperSocketPathTooLong
+        case .posix(_, let code): code == ENOSPC ? .hostDiskFull : (code == EACCES || code == EPERM ? .permissionDenied : .systemCallFailed)
+        case .virtualMachineState: .vmStateInvalid
+        case .vmBootModeConflict(_, let paused, _, _): paused ? .vmPausedOtherMode : .vmRunningOtherMode
+        case .vmHelperRunning, .runningVMBlocksRecovery: .vmRunning
+        case .guestAgentProbeTimedOut, .guestAgentTimedOut: .guestAgentTimedOut
+        case .guestAgentUnavailable: .guestAgentUnavailable
+        case .guestAgentConnecting: .guestAgentConnecting
+        case .guestAgentDisconnected: .guestAgentDisconnected
+        case .guestAgentError: .guestOperationFailed
+        case .guestAgentProtocol: .guestAgentProtocolError
+        case .guestScreenSharingUnavailable: .guestFeatureUnsupported
+        case .invalidControlResponse: .helperProtocolError
+        case .incompatibleHelperProtocol, .controlCapabilityUnavailable: .helperIncompatible
+        case .unsafeHelperTermination: .helperIdentityUnverified
+        case .guestFileTransferFailed: .guestFileTransferFailed
+        case .guestJobNotFound: .guestJobNotFound
+        case .snapshotNotFound: .snapshotNotFound
+        case .hostCommandFailed: .hostCommandFailed
+        case .configDecoding: .configInvalid
+        case .hostFileUnavailable: .hostFileUnavailable
+        case .missingSIPPassword, .sipCredentialUnavailable: .credentialUnavailable
+        case .invalidSIPBootstrapConfiguration: .securityConfigurationInvalid
+        case .keychainError: .keychainError
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .invalidControlCommand, .controlCapabilityUnavailable:
+            "Restart the VM with `pomme stop NAME` and `pomme start NAME` so that its helper matches this pomme."
+        case .controlSocketTimedOut, .guestAgentTimedOut, .guestAgentProbeTimedOut:
+            "Retry with a larger `--timeout` value, or run `pomme status NAME` to check the VM."
+        case .backgroundStartFailed:
+            "Run `pomme bug-report NAME` to collect the helper log for a bug report."
+        case .vmBootModeConflict(let name, _, _, _):
+            "Run `pomme stop \(name)` first."
+        case .guestAgentDisconnected:
+            "Run `pomme status NAME`, then retry when the agent is connected."
+        case .keychainError:
+            "Unlock your login Keychain, then retry."
+        default:
+            nil
         }
     }
 }

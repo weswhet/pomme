@@ -147,6 +147,36 @@ enum VMTargetResolver {
 
 /// Writes command results in a consistent human-readable or structured form.
 enum CLIOutputWriter {
+    /// Runs `body` for each VM. With one VM, its error propagates as before.
+    /// With several, a VM's error becomes a failed result so the batch
+    /// finishes and prints every VM's outcome; the exit status still reports
+    /// the first failure.
+    static func batch(
+        _ names: [String],
+        _ body: (String) throws -> PommeOperationResult
+    ) throws -> [PommeOperationResult] {
+        guard names.count > 1 else { return try names.map(body) }
+        return try names.map { name in
+            do {
+                return try body(name)
+            } catch let error where error is ExitCode || error is CleanExit {
+                throw error
+            } catch {
+                return failedResult(name: name, error: error)
+            }
+        }
+    }
+
+    /// A failed result for a VM whose operation threw `error`.
+    static func failedResult(name: String, error: any Error) -> PommeOperationResult {
+        let report = PommeErrorReport(error, redaction: .none)
+        let message = PommeErrorOutput.displayMessage(for: error, report: report)
+        var payload = PommeErrorOutput.failurePayload(message: message, report: report)
+        payload[PommeErrorReport.payloadKey] = report.payloadObject
+        payload["name"] = name
+        return PommeOperationResult(title: "Error", vmName: name, ok: false, hostExitCode: 1, text: message, payload: payload)
+    }
+
     /// Writes one operation result and throws its exit code when it failed.
     static func write(_ result: PommeOperationResult, options: GlobalOptions) throws {
         try write([result], options: options)
@@ -156,6 +186,9 @@ enum CLIOutputWriter {
     static func write(_ results: [PommeOperationResult], options: GlobalOptions) throws {
         PommeProgressContext.sink?.suspend()
         let format = try options.resolvedFormat()
+        for result in results where !result.ok {
+            recordFailure(result.payload, text: result.text)
+        }
         switch format {
         case .json:
             let payloads = results.map { resultPayload($0) }
@@ -264,13 +297,22 @@ enum CLIOutputWriter {
             return .text(descriptor: STDOUT_FILENO, text: result.text)
         }
         let message = result.text.isEmpty ? "The operation failed." : result.text
-        return .text(descriptor: STDERR_FILENO, text: "Error: " + (label.map { "\($0): " } ?? "") + message)
+        let report = PommeErrorOutput.failureReport(result.payload)
+        return .text(descriptor: STDERR_FILENO, text: PommeErrorOutput.failureText(message: message, report: report, label: label))
     }
 
     private static func writeFailure(_ payload: [String: Any]) throws {
-        if let error = payload["error"] as? String {
-            try writeBytes(Data(("Error: " + error + "\n").utf8), to: STDERR_FILENO)
-        }
+        guard let error = payload["error"] as? String else { return }
+        let text = payload["ok"] as? Bool == false
+            ? PommeErrorOutput.failureText(message: error, report: PommeErrorOutput.failureReport(payload))
+            : "Error: " + error
+        try writeBytes(Data((text + "\n").utf8), to: STDERR_FILENO)
+    }
+
+    /// Records a failed result as the last error for `pomme bug-report`.
+    private static func recordFailure(_ payload: [String: Any], text: String) {
+        let message = text.isEmpty ? (payload["error"] as? String ?? "The operation failed.") : text
+        PommeErrorOutput.recordLastError(report: PommeErrorOutput.failureReport(payload), message: message)
     }
 
     /// Cat emits exact bytes, including binary data and files without a newline.
@@ -352,6 +394,11 @@ enum CLIOutputWriter {
         jsonlElements: [[String: Any]]? = nil
     ) throws {
         PommeProgressContext.sink?.suspend()
+        var payload = payload
+        PommeErrorOutput.decorateFailure(&payload)
+        if payload["ok"] as? Bool == false {
+            recordFailure(payload, text: text)
+        }
         switch try options.resolvedFormat() {
         case .json:
             print(try jsonLine(payload), terminator: "")
@@ -364,7 +411,8 @@ enum CLIOutputWriter {
             }
         case .table:
             if payload["ok"] as? Bool == false {
-                try writeBytes(Data(("Error: " + text + "\n").utf8), to: STDERR_FILENO)
+                let report = PommeErrorOutput.failureReport(payload)
+                try writeBytes(Data((PommeErrorOutput.failureText(message: text, report: report) + "\n").utf8), to: STDERR_FILENO)
             } else {
                 print(text)
             }
@@ -392,6 +440,7 @@ enum CLIOutputWriter {
     private static func resultPayload(_ result: PommeOperationResult) -> [String: Any] {
         var payload = result.payload
         payload["ok"] = result.ok
+        PommeErrorOutput.decorateFailure(&payload)
         payload["hostExitCode"] = Int(result.hostExitCode)
         if let vmName = result.vmName {
             payload["name"] = vmName

@@ -16,6 +16,17 @@ enum PommeProvisioningV2RouteSelector {
 
 enum PommeProvisioningV2Phase: String, Codable, CaseIterable, Sendable {
     case install, provisionGuest, bootstrapNormalAgent, verifyNormalAgent, restoreFinalState
+
+    /// The phase as a sentence subject, such as "Installing macOS".
+    var displayName: String {
+        switch self {
+        case .install: "Installing macOS"
+        case .provisionGuest: "Creating the macOS owner account"
+        case .bootstrapNormalAgent: "Installing the Pomme agent"
+        case .verifyNormalAgent: "Verifying the Pomme agent"
+        case .restoreFinalState: "Restoring the VM's final state"
+        }
+    }
 }
 
 struct PommeProvisioningV2Event: Codable, Equatable, Sendable {
@@ -63,11 +74,91 @@ struct PommeProvisioningV2Journal: Codable, Equatable, Sendable {
     }
 }
 
-enum PommeProvisioningV2Error: Error, Equatable, Sendable {
+enum PommeProvisioningV2Error: Error, Equatable, Sendable, PommeDescribedError {
     case invalidJournal, integrityFailure, generationFailure, unexpectedEvent
     case ownerReferenceRequired, startupVolumeGroupRequired, ownershipMismatch, ambiguousProvisionGuest
-    case interruptedPhase(PommeProvisioningV2Phase), phaseFailed(PommeProvisioningV2Phase)
+    case interruptedPhase(PommeProvisioningV2Phase)
+    /// A phase failed after its intent was journaled. `cause` keeps only the
+    /// codes of the reason, because guest provisioning errors can contain
+    /// the owner account's credentials.
+    case phaseFailed(PommeProvisioningV2Phase, cause: PommeErrorReport? = nil)
     case unsafeRepository
+    /// Setting the first-boot guest provisioning options failed. `cause`
+    /// keeps only codes, because the options carry credentials.
+    case dispatchPreparationFailed(cause: PommeErrorReport)
+
+    var code: PommeErrorCode {
+        switch self {
+        case .invalidJournal, .unexpectedEvent, .ownerReferenceRequired, .startupVolumeGroupRequired:
+            .provisioningJournalInvalid
+        case .integrityFailure: .provisioningJournalIntegrityFailed
+        case .generationFailure: .provisioningJournalStale
+        case .ownershipMismatch: .provisioningOwnershipMismatch
+        case .ambiguousProvisionGuest, .interruptedPhase: .provisioningPhaseInterrupted
+        case .phaseFailed: .provisioningPhaseFailed
+        case .unsafeRepository: .provisioningJournalUnsafe
+        case .dispatchPreparationFailed: .provisioningDispatchFailed
+        }
+    }
+
+    var underlying: (any Error)? {
+        switch self {
+        case .phaseFailed(_, let cause?): cause
+        case .dispatchPreparationFailed(let cause): cause
+        default: nil
+        }
+    }
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidJournal:
+            "The VM's provisioning journal isn't valid."
+        case .integrityFailure:
+            "Pomme couldn't verify the integrity of the VM's provisioning journal."
+        case .generationFailure:
+            "The VM's provisioning journal is older than the last one that Pomme recorded, or another process changed it."
+        case .unexpectedEvent:
+            "The VM's provisioning journal records its steps in an order that isn't valid."
+        case .ownerReferenceRequired:
+            "The VM's provisioning journal doesn't record the owner account's credential."
+        case .startupVolumeGroupRequired:
+            "Pomme couldn't confirm the VM's startup volume group, so it can't record that the Pomme agent is verified."
+        case .ownershipMismatch:
+            "The VM isn't the exact Pomme-owned VM that its provisioning journal names. It might have been moved, copied, or replaced."
+        case .ambiguousProvisionGuest:
+            "The VM's first boot started creating the macOS owner account, but Pomme didn't record whether it finished. Pomme won't repeat it, because a second attempt could create a different account."
+        case .interruptedPhase(let phase):
+            "\(phase.displayName) was interrupted, and Pomme can't safely repeat it."
+        case .phaseFailed(let phase, let cause):
+            phase.displayName + " failed"
+                + (cause.map { ": \(PommeErrorDescriber.clause(for: $0))" } ?? "")
+                + ". The VM and journal were retained."
+        case .unsafeRepository:
+            "Pomme couldn't read or write the VM's provisioning journal safely. The file or its directory is missing, isn't private, or couldn't be written."
+        case .dispatchPreparationFailed(let cause):
+            "Pomme couldn't set up the macOS owner account for the VM's first boot: \(PommeErrorDescriber.clause(for: cause))."
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .phaseFailed(_, let cause):
+            if let hint = cause?.hint {
+                "\(hint) To continue creating the VM, run `pomme create NAME --resume`."
+            } else {
+                "Correct the cause, then run `pomme create NAME --resume` to continue."
+            }
+        case .ambiguousProvisionGuest, .interruptedPhase, .invalidJournal, .unexpectedEvent,
+             .ownerReferenceRequired, .integrityFailure, .ownershipMismatch:
+            "Delete the VM with `pomme delete NAME`, then create it again."
+        case .generationFailure:
+            "Make sure that no other Pomme command is using the VM, then retry."
+        case .unsafeRepository:
+            "Run Pomme as the user who created the VM, not with `sudo`, then retry."
+        case .startupVolumeGroupRequired, .dispatchPreparationFailed:
+            "Run `pomme create NAME --resume` to retry."
+        }
+    }
 }
 
 struct PommeProvisioningV2Signer: Sendable {
@@ -414,11 +505,18 @@ struct PommeProvisioningV2Orchestrator: Sendable {
                 _ = try commit(journal, reference: journal.ownerReference, event: .init(kind: .failure,
                     phase: next.phase, attempt: next.attempt,
                     digest: PommeProvisioningDigest.sha256(Data("phase-failed".utf8))))
-                throw PommeProvisioningV2Error.phaseFailed(next.phase)
+                throw PommeProvisioningV2Error.phaseFailed(next.phase, cause: Self.phaseCause(of: error))
             }
             journal = try commit(journal, reference: verifiedReference, startupVolumeGroupUUID: verifiedVolumeGroup, event: .init(kind: .receipt,
                 phase: next.phase, attempt: next.attempt, digest: receipt))
         }
+    }
+
+    /// The codes-only cause of a failed phase. A bare `phaseFailed` that a
+    /// phase threw itself adds nothing, so it keeps that one's cause instead.
+    static func phaseCause(of error: any Error) -> PommeErrorReport? {
+        if case .phaseFailed(_, let cause)? = error as? PommeProvisioningV2Error { return cause }
+        return PommeErrorReport(keepingSystemCause: error, codesOnly: true)
     }
 
     private func commit(_ journal: PommeProvisioningV2Journal, reference: PommeOwnerCredentialReference?,

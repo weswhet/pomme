@@ -226,7 +226,7 @@ actor PommeAgent {
 
     func perform(_ request: PommeAgentProtocol.Envelope, statusTrace: PommeAgentStatusTrace? = nil, startTrace: PommeAgentStartTrace? = nil) throws -> JSONValue {
         if authority == .recoveryTerminal {
-            guard role == .recovery else { throw PommeAgentOperationError.invalid }
+            guard role == .recovery else { throw PommeAgentOperationError.invalid("Recovery terminal authority requires the Recovery agent") }
             switch request.operation {
             case "agent.describe":
                 return .object([
@@ -238,7 +238,7 @@ actor PommeAgent {
             case "agent.health":
                 return .object(["ok": .bool(true), "activationPending": .bool(false)])
             default:
-                throw PommeAgentOperationError.unsupported
+                throw PommeAgentOperationError.unsupported("The Recovery terminal agent doesn't support \(request.operation)")
             }
         }
         if role == .recovery {
@@ -253,12 +253,12 @@ actor PommeAgent {
             case "agent.health":
                 return .object(["ok": .bool(true), "activationPending": .bool(false)])
             case "agent.install":
-                guard let recoveryInstaller else { throw PommeAgentOperationError.invalid }
+                guard let recoveryInstaller else { throw PommeAgentOperationError.invalid("agent.install has no Recovery installer in this agent") }
                 return try recoveryInstaller.install(payload: request.payload, requestID: request.requestID)
             case "terminal.create", "terminal.status", "terminal.read", "terminal.ack",
                  "terminal.input", "terminal.resize", "terminal.signal", "terminal.terminate",
                  "terminal.release", "terminal.list":
-                throw PommeAgentOperationError.unsupported
+                throw PommeAgentOperationError.unsupported("Terminal sessions require the Recovery terminal connection")
             case "sip.status", "sip.disable", "sip.enable",
                  "amfi.status", "amfi.disable", "amfi.enable":
                 return try recoverySecurity.execute(
@@ -267,7 +267,7 @@ actor PommeAgent {
                     payload: request.payload
                 )
             default:
-                throw PommeAgentOperationError.unsupported
+                throw PommeAgentOperationError.unsupported("The Recovery agent doesn't support \(request.operation)")
             }
         }
         if activationPending, !request.operation.hasPrefix("maintenance.update.") {
@@ -316,19 +316,19 @@ actor PommeAgent {
         // the root persistent agent on this authenticated session and is
         // never written to a log, journal, or process argument.
         case PommeGuestOwnerCredentialReader.operation:
-            guard role == .persistent else { throw PommeAgentOperationError.invalid }
+            guard role == .persistent else { throw PommeAgentOperationError.invalid("The owner credential is available only from the persistent agent") }
             return try ownerCredential.read(payload: request.payload)
         // Native OpenDirectory reads and password checks replace guest dscl
         // processes. A password is only verified, never stored or logged.
         case PommeGuestDirectory.readUsersOperation, PommeGuestDirectory.verifyPasswordOperation:
-            guard role == .persistent else { throw PommeAgentOperationError.invalid }
+            guard role == .persistent else { throw PommeAgentOperationError.invalid("Directory operations require the persistent agent") }
             return try directory.perform(operation: request.operation, payload: request.payload)
         case "process.start": return try start(request.payload, trace: startTrace)
         case "process.status": return try status(request.payload, trace: statusTrace)
         case "process.signal": return try signal(request.payload)
         case "process.list": return try list(request.payload)
         case "process.output": return try output(request.payload)
-        case "process.wait": throw PommeAgentOperationError.unsupported
+        case "process.wait": throw PommeAgentOperationError.unsupported("process.wait requires the asynchronous persistent agent")
         case "file.open": return try open(request.payload)
         case "file.read": return try read(request.payload)
         case "file.write": return try write(request.payload)
@@ -338,7 +338,7 @@ actor PommeAgent {
         case "file.commit": return try commitFile(request.payload)
         case "file.abort": return try abortFile(request.payload)
         case "mdm.staging.prepare":
-            guard try object(request.payload).isEmpty else { throw PommeAgentOperationError.invalid }
+            guard try object(request.payload).isEmpty else { throw PommeAgentOperationError.invalid("mdm.staging.prepare accepts no fields") }
             return try GuestMDMEnrollment.prepareStagingDirectory()
         case "mdm.enrollment": return try mdmEnrollment(request.payload)
         case "mdm.staging.cleanup": return try mdmCleanup(request.payload)
@@ -346,7 +346,7 @@ actor PommeAgent {
         case "maintenance.update.begin": return try beginUpdate(request.payload)
         case "maintenance.update.commit": return try commitUpdate(request.payload)
         case "maintenance.update.finalize": return try finalizeUpdate(request.payload)
-        default: throw PommeAgentOperationError.unsupported
+        default: throw PommeAgentOperationError.unsupported("The guest agent doesn't support \(request.operation)")
         }
     }
 
@@ -364,23 +364,23 @@ actor PommeAgent {
             guard request.operation == "agent.describe"
                     || request.operation == "agent.health"
                     || Self.terminalCapabilities.contains(request.operation)
-            else { throw PommeAgentOperationError.unsupported }
+            else { throw PommeAgentOperationError.unsupported("The Recovery terminal connection doesn't support \(request.operation)") }
             if request.operation == "agent.describe" || request.operation == "agent.health" {
                 return try perform(request)
             }
             return try await terminalService.perform(operation: request.operation, payload: request.payload)
         }
         if request.operation == Self.buddyPreferencesStatusOperation {
-            guard role == .persistent else { throw PommeAgentOperationError.unsupported }
+            guard role == .persistent else { throw PommeAgentOperationError.unsupported("\(request.operation) requires the persistent agent") }
             guard !activationPending else { throw PommeAgentOperationError.activationPending }
-            guard request.payload.objectValue?.isEmpty == true else { throw PommeAgentOperationError.invalid }
+            guard request.payload.objectValue?.isEmpty == true else { throw PommeAgentOperationError.invalid("\(request.operation) accepts no fields") }
             guard let buddyPreferences else {
                 return .object(["initializing": .bool(true)])
             }
             return try await buddyPreferences.statusPayload()
         }
         if Self.terminalCapabilities.contains(request.operation) {
-            guard role == .persistent || role == .recovery else { throw PommeAgentOperationError.unsupported }
+            guard role == .persistent || role == .recovery else { throw PommeAgentOperationError.unsupported("Terminal sessions require the persistent agent") }
             return try await terminalService.perform(operation: request.operation, payload: request.payload)
         }
         if role == .persistent, request.operation == "process.wait" {
@@ -403,9 +403,9 @@ actor PommeAgent {
         let path = try string(object, "path")
         let arguments = try strings(object["arguments"])
         let identity = try PommePrivilege.resolve(object)
-        let pty = try strictBoolean(object["pty"])
-        let detached = try strictBoolean(object["detached"])
-        guard !(pty && detached) else { throw PommeAgentOperationError.invalid }
+        let pty = try strictBoolean(object, "pty")
+        let detached = try strictBoolean(object, "detached")
+        guard !(pty && detached) else { throw PommeAgentOperationError.invalid("process.start can't combine pty and detached") }
         let options = try PommeProcess.Options(payload: object, pty: pty)
         trace?.emit(.spawnEntered)
         let launched = try PommeProcess.spawn(
@@ -457,7 +457,7 @@ actor PommeAgent {
     }
 
     private func list(_ payload: JSONValue) throws -> JSONValue {
-        guard try object(payload).isEmpty else { throw PommeAgentOperationError.invalid }
+        guard try object(payload).isEmpty else { throw PommeAgentOperationError.invalid("process.list accepts no fields") }
         var listed: [(id: UUID, job: Job)] = []
         for id in Array(jobs.keys) {
             let job = try refreshStatus(for: id)
@@ -479,7 +479,7 @@ actor PommeAgent {
         let id = try detachedJobID(payload, keys: ["jobID"])
         _ = try refreshStatus(for: id)
         _ = try captureAvailableOutput(jobID: id)
-        guard let job = jobs[id] else { throw PommeAgentOperationError.notFound }
+        guard let job = jobs[id] else { throw PommeAgentOperationError.notFound("No process job has ID \(id.uuidString.lowercased())") }
         var result = statusResult(for: job, id: id)
         result["outputComplete"] = .bool(outputIsDrained(job))
         result["stdoutBytes"] = .integer(job.stdoutBytes)
@@ -491,13 +491,13 @@ actor PommeAgent {
 
     private func wait(_ payload: JSONValue) async throws -> JSONValue {
         let values = try object(payload)
-        guard Set(values.keys) == ["jobID", "timeout"] else { throw PommeAgentOperationError.invalid }
+        guard Set(values.keys) == ["jobID", "timeout"] else { throw PommeAgentOperationError.invalid("process.wait requires exactly jobID and timeout") }
         let id = try detachedJobID(payload, keys: ["jobID", "timeout"])
         let deadline = ContinuousClock.now.advanced(by: .seconds(try timeout(values, "timeout")))
         while true {
             _ = try refreshStatus(for: id)
             _ = try captureAvailableOutput(jobID: id)
-            guard let current = jobs[id] else { throw PommeAgentOperationError.notFound }
+            guard let current = jobs[id] else { throw PommeAgentOperationError.notFound("No process job has ID \(id.uuidString.lowercased())") }
             if current.ownership == .reaped, outputIsDrained(current) {
                 var result = statusResult(for: current, id: id)
                 result["outputComplete"] = .bool(true)
@@ -582,7 +582,7 @@ actor PommeAgent {
     }
 
     private func refreshStatus(for id: UUID, trace: PommeAgentStatusTrace? = nil) throws -> Job {
-        guard var job = jobs[id] else { throw PommeAgentOperationError.notFound }
+        guard var job = jobs[id] else { throw PommeAgentOperationError.notFound("No process job has ID \(id.uuidString.lowercased())") }
         guard job.ownership == .owned else { return job }
         var info = siginfo_t()
         var observed: Int32
@@ -653,25 +653,25 @@ actor PommeAgent {
     private func signal(_ payload: JSONValue) throws -> JSONValue {
         let id = try jobID(payload)
         let job = try refreshStatus(for: id)
-        guard job.ownership == .owned else { throw PommeAgentOperationError.invalid }
+        guard job.ownership == .owned else { throw PommeAgentOperationError.invalid("Process job \(id.uuidString.lowercased()) has already been reaped") }
         let raw = try integer(try object(payload), "signal")
-        guard [SIGHUP, SIGINT, SIGTERM, SIGKILL].contains(Int32(raw)) else { throw PommeAgentOperationError.invalid }
+        guard [SIGHUP, SIGINT, SIGTERM, SIGKILL].contains(Int32(raw)) else { throw PommeAgentOperationError.invalid("process.signal accepts only SIGHUP, SIGINT, SIGTERM, or SIGKILL") }
         let groupSignalled = kill(-job.pid, Int32(raw)) == 0
         let processSignalled = !job.exited && kill(job.pid, Int32(raw)) == 0
-        guard groupSignalled || processSignalled else { throw PommeAgentOperationError.invalid }
+        guard groupSignalled || processSignalled else { throw PommeAgentOperationError.invalid("Process job \(id.uuidString.lowercased()) has no process left to signal") }
         return .object(["jobID": .string(id.uuidString.lowercased()), "signalled": .bool(true)])
     }
 
     private func open(_ payload: JSONValue) throws -> JSONValue {
         let object = try object(payload); let path = try string(object, "path"); let mode = try string(object, "mode")
-        guard path.hasPrefix("/"), !path.contains("\0") else { throw PommeAgentOperationError.invalid }
+        guard path.hasPrefix("/"), !path.contains("\0") else { throw PommeAgentOperationError.invalid("file.open path must be absolute and contain no NUL bytes") }
         let destination = URL(fileURLWithPath: path).standardizedFileURL
         if mode == "stageWrite" {
             return try describingOpenFailure(destination, forWrite: true) {
                 try mapFileTransactionError { try openStage(destination: destination) }
             }
         }
-        guard mode == "read" else { throw PommeAgentOperationError.invalid }
+        guard mode == "read" else { throw PommeAgentOperationError.invalid("file.open mode must be read or stageWrite") }
         let fd = try describingOpenFailure(destination, forWrite: false) {
             try mapFileTransactionError { try PommeAgentFileTransaction.openRegular(destination, flags: O_RDONLY) }
         }
@@ -686,51 +686,62 @@ actor PommeAgent {
     }
 
     private func read(_ payload: JSONValue) throws -> JSONValue {
-        let object = try object(payload); let file = try file(object); guard file.readable else { throw PommeAgentOperationError.invalid }
+        let object = try object(payload); let file = try file(object); guard file.readable else { throw PommeAgentOperationError.invalid("The file isn't open for reading") }
         let requested = min(try integer(object, "count"), PommeAgentProtocol.maximumFileChunkBytes)
-        guard requested >= 0 else { throw PommeAgentOperationError.invalid }
+        guard requested >= 0 else { throw PommeAgentOperationError.invalid("file.read count must not be negative") }
         var bytes = [UInt8](repeating: 0, count: requested); let count = Darwin.read(file.descriptor, &bytes, requested)
-        guard count >= 0 else { throw PommeAgentOperationError.io }
+        guard count >= 0 else { throw PommeAgentOperationError.io("Reading the open file") }
         return .object(["dataBase64": .string(Data(bytes.prefix(count)).base64EncodedString()), "eof": .bool(count < requested)])
     }
 
     private func write(_ payload: JSONValue) throws -> JSONValue {
-        let object = try object(payload); let id = try uuid(object, "fileID"); guard var file = files[id], file.writable, !file.tainted,
-              let encoded = object["dataBase64"]?.stringValue, let data = Data(base64Encoded: encoded), data.count <= PommeAgentProtocol.maximumFileChunkBytes
-        else { throw PommeAgentOperationError.invalid }
+        let object = try object(payload); let id = try uuid(object, "fileID")
+        guard var file = files[id], file.writable else { throw PommeAgentOperationError.invalid("No file open for writing has ID \(id.uuidString.lowercased())") }
+        guard !file.tainted else { throw PommeAgentOperationError.invalid("An earlier write to this file failed, so it accepts no more data") }
+        guard let encoded = object["dataBase64"]?.stringValue, let data = Data(base64Encoded: encoded) else {
+            throw PommeAgentOperationError.invalid("file.write dataBase64 must be valid base64")
+        }
+        guard data.count <= PommeAgentProtocol.maximumFileChunkBytes else {
+            throw PommeAgentOperationError.invalid("file.write chunks can't exceed \(PommeAgentProtocol.maximumFileChunkBytes) bytes")
+        }
         var completed = false
         defer { if !completed { file.tainted = true; files[id] = file } }
         var offset = 0
-        while offset < data.count { let count = writeChunk(file.descriptor, data, offset); guard count > 0 else { throw PommeAgentOperationError.io }; offset += count }
+        while offset < data.count { let count = writeChunk(file.descriptor, data, offset); guard count > 0 else { throw PommeAgentOperationError.io("Writing the open file") }; offset += count }
         completed = true
         return .object(["count": .integer(Int64(offset))])
     }
 
     private func seek(_ payload: JSONValue) throws -> JSONValue {
         let object = try object(payload); let file = try file(object); let offset = try integer(object, "offset")
-        guard let whence = ["set": SEEK_SET, "current": SEEK_CUR, "end": SEEK_END][object["whence"]?.stringValue ?? ""] else { throw PommeAgentOperationError.invalid }
-        let position = lseek(file.descriptor, off_t(offset), whence); guard position >= 0 else { throw PommeAgentOperationError.io }
+        guard let whence = ["set": SEEK_SET, "current": SEEK_CUR, "end": SEEK_END][object["whence"]?.stringValue ?? ""] else { throw PommeAgentOperationError.invalid("file.seek whence must be set, current, or end") }
+        let position = lseek(file.descriptor, off_t(offset), whence); guard position >= 0 else { throw PommeAgentOperationError.io("Seeking in the open file") }
         return .object(["position": .integer(Int64(position))])
     }
 
-    private func flush(_ payload: JSONValue) throws -> JSONValue { let file = try file(try object(payload)); guard fsync(file.descriptor) == 0 else { throw PommeAgentOperationError.io }; return .object([:]) }
-    private func close(_ payload: JSONValue) throws -> JSONValue { let object = try object(payload); let id = try uuid(object, "fileID"); guard let file = files.removeValue(forKey: id), Darwin.close(file.descriptor) == 0 else { throw PommeAgentOperationError.notFound }; return .object([:]) }
+    private func flush(_ payload: JSONValue) throws -> JSONValue { let file = try file(try object(payload)); guard fsync(file.descriptor) == 0 else { throw PommeAgentOperationError.io("fsync of the open file") }; return .object([:]) }
+    private func close(_ payload: JSONValue) throws -> JSONValue {
+        let object = try object(payload); let id = try uuid(object, "fileID")
+        guard let file = files.removeValue(forKey: id) else { throw PommeAgentOperationError.notFound("No open file has ID \(id.uuidString.lowercased())") }
+        guard Darwin.close(file.descriptor) == 0 else { throw PommeAgentOperationError.io("Closing the open file") }
+        return .object([:])
+    }
     private func commitFile(_ payload: JSONValue) throws -> JSONValue {
         let values = try object(payload)
         guard Set(values.keys) == ["fileID", "expectedBytes", "expectedSHA256"] else {
-            throw PommeAgentOperationError.invalid
+            throw PommeAgentOperationError.invalid("file.commit requires exactly fileID, expectedBytes, and expectedSHA256")
         }
         let id = try uuid(values, "fileID")
         let expectedBytes = try integer(values, "expectedBytes")
         let expectedSHA256 = try string(values, "expectedSHA256")
-        guard expectedBytes >= 0,
-              expectedSHA256.count == 64,
+        guard expectedBytes >= 0 else { throw PommeAgentOperationError.invalid("file.commit expectedBytes must not be negative") }
+        guard expectedSHA256.count == 64,
               expectedSHA256.allSatisfy({ $0.isHexDigit && !$0.isUppercase })
-        else { throw PommeAgentOperationError.invalid }
+        else { throw PommeAgentOperationError.invalid("file.commit expectedSHA256 must be 64 lowercase hexadecimal characters") }
         guard let file = files.removeValue(forKey: id),
               let stage = file.stage,
               let destination = file.destination
-        else { throw PommeAgentOperationError.notFound }
+        else { throw PommeAgentOperationError.notFound("No staged write has file ID \(id.uuidString.lowercased())") }
 
         var descriptorOpen = true
         var committed = false
@@ -750,22 +761,25 @@ actor PommeAgent {
                 }
             }
         }
-        guard !file.tainted else { throw PommeAgentOperationError.invalid }
+        guard !file.tainted else { throw PommeAgentOperationError.invalid("An earlier write to this file failed, so it can't be committed") }
         var info = stat()
-        guard fstat(file.descriptor, &info) == 0,
-              info.st_mode & S_IFMT == S_IFREG,
-              info.st_nlink == 1,
-              info.st_size == off_t(expectedBytes),
-              fsync(file.descriptor) == 0
-        else { throw PommeAgentOperationError.io }
+        guard fstat(file.descriptor, &info) == 0 else { throw PommeAgentOperationError.io("fstat of the staged file") }
+        guard info.st_mode & S_IFMT == S_IFREG, info.st_nlink == 1 else {
+            throw PommeAgentOperationError.described(.io, message: "The staged file is no longer a single regular file")
+        }
+        guard info.st_size == off_t(expectedBytes) else {
+            throw PommeAgentOperationError.described(.io, message: "The staged file has \(info.st_size) bytes, but expectedBytes is \(expectedBytes)")
+        }
+        guard fsync(file.descriptor) == 0 else { throw PommeAgentOperationError.io("fsync of the staged file") }
         let closeResult = Darwin.close(file.descriptor)
+        let closeErrno = errno
         descriptorOpen = false
-        guard closeResult == 0 else { throw PommeAgentOperationError.io }
+        guard closeResult == 0 else { throw PommeAgentOperationError.io("Closing the staged file", errno: closeErrno) }
         let actualSHA256 = try mapFileTransactionError {
             try PommeAgentFileTransaction.sha256(stage)
         }
         guard actualSHA256 == expectedSHA256 else {
-            throw PommeAgentOperationError.invalid
+            throw PommeAgentOperationError.invalid("The staged file's SHA-256 doesn't match expectedSHA256")
         }
         do {
             try mapFileTransactionError {
@@ -795,17 +809,20 @@ actor PommeAgent {
             pendingFileCleanup.removeValue(forKey: id)
             return .object(["aborted": .bool(true)])
         }
-        guard let file = files[id], let stage = file.stage, let destination = file.destination else { throw PommeAgentOperationError.invalid }
+        guard let file = files[id], let stage = file.stage, let destination = file.destination else {
+            throw PommeAgentOperationError.invalid("No staged write has file ID \(id.uuidString.lowercased())")
+        }
         files.removeValue(forKey: id)
         let closeResult = Darwin.close(file.descriptor)
+        let closeErrno = errno
         pendingFileCleanup[id] = .init(stage: stage, destination: destination, preservePriorEntry: false)
         try mapFileTransactionError { try PommeAgentFileTransaction.removeAdjacentStage(stage, for: destination) }
         pendingFileCleanup.removeValue(forKey: id)
-        guard closeResult == 0 else { throw PommeAgentOperationError.io }
+        guard closeResult == 0 else { throw PommeAgentOperationError.io("Closing the staged file", errno: closeErrno) }
         return .object(["aborted": .bool(true)])
     }
     private func remoteLogin(_ payload: JSONValue) throws -> JSONValue {
-        let values = try object(payload); guard let enabled = bool(values["enabled"]) else { throw PommeAgentOperationError.invalid }
+        let values = try object(payload); guard let enabled = bool(values["enabled"]) else { throw PommeAgentOperationError.invalid("remoteLogin.set enabled must be a Boolean") }
         let observed = try remoteLoginTransaction(enabled)
         guard observed == enabled else { throw PommeAgentOperationError.remoteLoginVerificationFailed }
         return .object(["enabled": .bool(observed)])
@@ -815,7 +832,7 @@ actor PommeAgent {
         switch try string(values, "action") {
         case "enroll":
             guard Set(values.keys) == ["action", "profilePath", "timeout"] else {
-                throw PommeAgentOperationError.invalid
+                throw PommeAgentOperationError.invalid("mdm.enrollment enroll requires exactly action, profilePath, and timeout")
             }
             let execution = try GuestMDMEnrollment(
                 requestTimeout: try timeout(values, "timeout")
@@ -824,20 +841,20 @@ actor PommeAgent {
             return .object(["completed": .bool(execution.exitCode == 0), "profileIdentifier": .string(identifier)])
         case "approve":
             guard Set(values.keys) == ["action", "profileIdentifier", "timeout"] else {
-                throw PommeAgentOperationError.invalid
+                throw PommeAgentOperationError.invalid("mdm.enrollment approve requires exactly action, profileIdentifier, and timeout")
             }
             let execution = try GuestMDMEnrollment(
                 requestTimeout: try timeout(values, "timeout")
             ).markUserApproved(profileIdentifier: try string(values, "profileIdentifier"))
             return .object(["completed": .bool(execution.exitCode == 0)])
-        default: throw PommeAgentOperationError.invalid
+        default: throw PommeAgentOperationError.invalid("mdm.enrollment action must be enroll or approve")
         }
     }
 
     private func mdmCleanup(_ payload: JSONValue) throws -> JSONValue {
         let values = try object(payload)
         guard Set(values.keys) == ["profilePath"] else {
-            throw PommeAgentOperationError.invalid
+            throw PommeAgentOperationError.invalid("mdm.staging.cleanup requires exactly profilePath")
         }
         return try GuestMDMEnrollment.cleanupStagedProfile(
             profilePath: try string(values, "profilePath")
@@ -845,28 +862,38 @@ actor PommeAgent {
     }
 
     private func beginUpdate(_ payload: JSONValue) throws -> JSONValue {
-        guard role == .persistent, update == nil else { throw PommeAgentOperationError.invalid }
+        guard role == .persistent else { throw PommeAgentOperationError.invalid("Agent updates require the persistent agent") }
+        guard update == nil else { throw PommeAgentOperationError.invalid("An agent update is already in progress") }
         let values = try object(payload)
         let target = try string(values, "targetSHA256")
         let bytes = try integer(values, "targetBytes")
         let stagedPath = try string(values, "stagedExecutable")
         let staged = URL(fileURLWithPath: stagedPath).standardizedFileURL
         let executable = URL(fileURLWithPath: executablePath).standardizedFileURL
-        guard staged.path.hasPrefix("/"), staged.deletingLastPathComponent() == executable.deletingLastPathComponent(), try PommeAgentFileTransaction.validatedRegularFile(staged) == UInt64(bytes) else { throw PommeAgentOperationError.invalid }
+        guard staged.path.hasPrefix("/"), staged.deletingLastPathComponent() == executable.deletingLastPathComponent() else {
+            throw PommeAgentOperationError.invalid("stagedExecutable must be in the agent's directory")
+        }
+        guard try PommeAgentFileTransaction.validatedRegularFile(staged) == UInt64(bytes) else {
+            throw PommeAgentOperationError.invalid("stagedExecutable size doesn't match targetBytes")
+        }
         let journal = try PommeAgentUpdateJournal(phase: .prepared, sourceSHA256: executableSHA256, targetSHA256: target, targetBytes: UInt64(bytes), stagedExecutable: staged.path)
         try PommeAgentJournalStore.write(journal, at: journalPath)
         update = journal; activationPending = true
         return .object(["transactionID": .string(journal.transactionID.uuidString.lowercased()), "accepted": .bool(true)])
     }
     private func commitUpdate(_ payload: JSONValue) throws -> JSONValue {
-        guard let current = update, current.phase == .prepared else { throw PommeAgentOperationError.invalid }
+        guard let current = update, current.phase == .prepared else { throw PommeAgentOperationError.invalid("No prepared agent update is waiting to commit") }
         let values = try object(payload)
         guard try string(values, "transactionID") == current.transactionID.uuidString.lowercased(),
-              try string(values, "targetSHA256") == current.targetSHA256 else { throw PommeAgentOperationError.invalid }
+              try string(values, "targetSHA256") == current.targetSHA256 else {
+            throw PommeAgentOperationError.invalid("transactionID or targetSHA256 doesn't match the prepared update")
+        }
         let stagedURL = URL(fileURLWithPath: current.stagedExecutable)
         let executableURL = URL(fileURLWithPath: executablePath)
         guard try PommeAgentFileTransaction.validatedRegularFile(stagedURL) == current.targetBytes,
-              try PommeAgentFileTransaction.sha256(stagedURL) == current.targetSHA256 else { throw PommeAgentOperationError.invalid }
+              try PommeAgentFileTransaction.sha256(stagedURL) == current.targetSHA256 else {
+            throw PommeAgentOperationError.invalid("The staged agent's size or SHA-256 no longer matches the prepared update")
+        }
         try PommeAgentFileTransaction.fsyncFile(stagedURL)
         let staged = try current.changing(.staged); try PommeAgentJournalStore.write(staged, at: journalPath)
         try PommeAgentFileTransaction.commit(stage: stagedURL, destination: executableURL)
@@ -875,11 +902,15 @@ actor PommeAgent {
         return .object(["activationPending": .bool(true)])
     }
     private func finalizeUpdate(_ payload: JSONValue) throws -> JSONValue {
-        guard let current = update, current.phase == .activationPending else { throw PommeAgentOperationError.invalid }
+        guard let current = update, current.phase == .activationPending else { throw PommeAgentOperationError.invalid("No agent update is waiting to finalize") }
         let values = try object(payload)
         guard try string(values, "transactionID") == current.transactionID.uuidString.lowercased(),
-              try string(values, "activatedSHA256") == current.targetSHA256,
-              try PommeAgentFileTransaction.sha256(URL(fileURLWithPath: executablePath)) == current.targetSHA256 else { throw PommeAgentOperationError.invalid }
+              try string(values, "activatedSHA256") == current.targetSHA256 else {
+            throw PommeAgentOperationError.invalid("transactionID or activatedSHA256 doesn't match the pending update")
+        }
+        guard try PommeAgentFileTransaction.sha256(URL(fileURLWithPath: executablePath)) == current.targetSHA256 else {
+            throw PommeAgentOperationError.invalid("The installed agent's SHA-256 doesn't match the pending update")
+        }
         let validated = try current.changing(.hostValidated); try PommeAgentJournalStore.write(validated, at: journalPath)
         try PommeAgentJournalStore.remove(at: journalPath)
         update = nil; activationPending = false
@@ -892,9 +923,9 @@ actor PommeAgent {
     private func describingOpenFailure<T>(_ url: URL, forWrite: Bool, _ body: () throws -> T) throws -> T {
         do {
             return try body()
-        } catch PommeAgentOperationError.invalid {
+        } catch let error as PommeAgentOperationError where error.kind == .invalid {
             guard let failure = PommeAgentFileTransaction.diagnoseOpenFailure(url, forWrite: forWrite) else {
-                throw PommeAgentOperationError.invalid
+                throw error
             }
             throw PommeAgentOperationError(failure)
         }
@@ -904,29 +935,37 @@ actor PommeAgent {
         do {
             return try body()
         } catch let error as PommeAgentProtocol.Error where error == .invalidRequest {
-            throw PommeAgentOperationError.invalid
+            throw PommeAgentOperationError.invalid("The file transaction rejected the path or its current state")
         }
     }
 
     /// The daemon calls these for correlated JSONL stream frames.  PTY output
     /// is drained by the parent process, never by the forked child.
     func writePTY(jobID: UUID, data: Data) throws {
-        guard role == .persistent else { throw PommeAgentOperationError.unsupported }
-        guard data.count <= PommeAgentProtocol.maximumStreamChunkBytes, let job = jobs[jobID], let master = job.ptyMaster ?? job.stdin else { throw PommeAgentOperationError.invalid }
+        guard role == .persistent else { throw PommeAgentOperationError.unsupported("Process input streams require the persistent agent") }
+        guard data.count <= PommeAgentProtocol.maximumStreamChunkBytes else {
+            throw PommeAgentOperationError.invalid("Input chunks can't exceed \(PommeAgentProtocol.maximumStreamChunkBytes) bytes")
+        }
+        guard let job = jobs[jobID], let master = job.ptyMaster ?? job.stdin else {
+            throw PommeAgentOperationError.invalid("Process job \(jobID.uuidString.lowercased()) has no open input stream")
+        }
         let bytes = Array(data); var offset = 0
-        while offset < bytes.count { let written = bytes.withUnsafeBytes { Darwin.write(master, $0.baseAddress!.advanced(by: offset), $0.count - offset) }; guard written > 0 else { throw PommeAgentOperationError.io }; offset += written }
+        while offset < bytes.count { let written = bytes.withUnsafeBytes { Darwin.write(master, $0.baseAddress!.advanced(by: offset), $0.count - offset) }; guard written > 0 else { throw PommeAgentOperationError.io("Writing process input") }; offset += written }
     }
     func resizePTY(jobID: UUID, columns: Int, rows: Int) throws {
-        guard role == .persistent else { throw PommeAgentOperationError.unsupported }
+        guard role == .persistent else { throw PommeAgentOperationError.unsupported("Terminal resizing requires the persistent agent") }
         let job = try refreshStatus(for: jobID)
-        guard job.ownership == .owned, let master = job.ptyMaster, columns > 0, rows > 0 else { throw PommeAgentOperationError.invalid }
+        guard job.ownership == .owned, let master = job.ptyMaster else {
+            throw PommeAgentOperationError.invalid("Process job \(jobID.uuidString.lowercased()) has no running terminal to resize")
+        }
+        guard columns > 0, rows > 0 else { throw PommeAgentOperationError.invalid("Terminal columns and rows must be positive") }
         var size = winsize(ws_row: UInt16(clamping: rows), ws_col: UInt16(clamping: columns), ws_xpixel: 0, ws_ypixel: 0)
-        guard ioctl(master, TIOCSWINSZ, &size) == 0 else { throw PommeAgentOperationError.io }
+        guard ioctl(master, TIOCSWINSZ, &size) == 0 else { throw PommeAgentOperationError.io("Resizing the terminal") }
         _ = kill(-job.pid, SIGWINCH)
     }
     func drainPTY(jobID: UUID, requestID: UUID) throws -> [PommeAgentStreamFrame] {
-        guard role == .persistent else { throw PommeAgentOperationError.unsupported }
-        guard let job = jobs[jobID] else { throw PommeAgentOperationError.invalid }
+        guard role == .persistent else { throw PommeAgentOperationError.unsupported("Process output streams require the persistent agent") }
+        guard let job = jobs[jobID] else { throw PommeAgentOperationError.invalid("No process job has ID \(jobID.uuidString.lowercased())") }
         var output: [PommeAgentStreamFrame] = []
         if let terminal = job.ptyMaster { output += try drain(descriptor: terminal, stream: .stdout, requestID: requestID, isPTY: true, jobID: jobID) }
         if let stdout = job.stdout { output += try drain(descriptor: stdout, stream: .stdout, requestID: requestID, isPTY: false, jobID: jobID) }
@@ -1043,16 +1082,16 @@ actor PommeAgent {
         return polled > 0 && readiness.revents & Int16(POLLIN) != 0
     }
     func acceptStream(_ frame: PommeAgentStreamFrame, jobID: UUID) throws -> [PommeAgentStreamFrame] {
-        guard role == .persistent else { throw PommeAgentOperationError.unsupported }
+        guard role == .persistent else { throw PommeAgentOperationError.unsupported("Process streams require the persistent agent") }
         switch frame.stream {
         case .stdin: try writePTY(jobID: jobID, data: frame.data ?? Data())
-        case .resize: guard let dimensions = frame.dimensions else { throw PommeAgentOperationError.invalid }; try resizePTY(jobID: jobID, columns: dimensions.columns, rows: dimensions.rows)
+        case .resize: guard let dimensions = frame.dimensions else { throw PommeAgentOperationError.invalid("A resize frame must include columns and rows") }; try resizePTY(jobID: jobID, columns: dimensions.columns, rows: dimensions.rows)
         case .signal:
             guard let raw = frame.signal,
                   [Int32(SIGHUP), Int32(SIGINT), Int32(SIGTERM), Int32(SIGKILL)].contains(raw)
-            else { throw PommeAgentOperationError.invalid }
+            else { throw PommeAgentOperationError.invalid("A signal frame accepts only SIGHUP, SIGINT, SIGTERM, or SIGKILL") }
             let job = try refreshStatus(for: jobID)
-            guard job.ownership == .owned else { throw PommeAgentOperationError.invalid }
+            guard job.ownership == .owned else { throw PommeAgentOperationError.invalid("Process job \(jobID.uuidString.lowercased()) has already been reaped") }
             // Bytes written before a signal may already be readable from the
             // PTY master. Drain them before killing the process group so a
             // signal arriving immediately after launch cannot discard a
@@ -1060,18 +1099,18 @@ actor PommeAgent {
             let pending = try drainPTY(jobID: jobID, requestID: frame.requestID)
             let groupSignalled = kill(-job.pid, raw) == 0
             let processSignalled = !job.exited && kill(job.pid, raw) == 0
-            guard groupSignalled || processSignalled else { throw PommeAgentOperationError.invalid }
+            guard groupSignalled || processSignalled else { throw PommeAgentOperationError.invalid("Process job \(jobID.uuidString.lowercased()) has no process left to signal") }
             return pending + (try streamEvents(jobID: jobID, requestID: frame.requestID))
         case .eof:
-            guard var job = jobs[jobID] else { throw PommeAgentOperationError.notFound }
+            guard var job = jobs[jobID] else { throw PommeAgentOperationError.notFound("No process job has ID \(jobID.uuidString.lowercased())") }
             if job.ptyMaster != nil { try writePTY(jobID: jobID, data: Data([0x04])) }
             else if let stdin = job.stdin { _ = Darwin.close(stdin); job.stdin = nil; jobs[jobID] = job }
-        case .stdout, .stderr, .exit: throw PommeAgentOperationError.invalid
+        case .stdout, .stderr, .exit: throw PommeAgentOperationError.invalid("The host can't send \(frame.stream.rawValue) frames")
         }
         return try streamEvents(jobID: jobID, requestID: frame.requestID)
     }
     func streamEvents(jobID: UUID, requestID: UUID) throws -> [PommeAgentStreamFrame] {
-        guard role == .persistent else { throw PommeAgentOperationError.unsupported }
+        guard role == .persistent else { throw PommeAgentOperationError.unsupported("Process streams require the persistent agent") }
         _ = try refreshStatus(for: jobID)
         var frames = try drainPTY(jobID: jobID, requestID: requestID)
         _ = try refreshStatus(for: jobID)
@@ -1090,9 +1129,9 @@ actor PommeAgent {
     /// from `streamEvents`: a logs or wait request must be repeatable and must
     /// never consume the pipe data a later logs request needs.
     func retainedLogEvents(jobID: UUID, requestID: UUID) throws -> [PommeAgentStreamFrame] {
-        guard role == .persistent else { throw PommeAgentOperationError.unsupported }
-        guard let job = jobs[jobID] else { throw PommeAgentOperationError.notFound }
-        guard job.detached else { throw PommeAgentOperationError.invalid }
+        guard role == .persistent else { throw PommeAgentOperationError.unsupported("Background job logs require the persistent agent") }
+        guard let job = jobs[jobID] else { throw PommeAgentOperationError.notFound("No background job has ID \(jobID.uuidString.lowercased())") }
+        guard job.detached else { throw PommeAgentOperationError.invalid("Process job \(jobID.uuidString.lowercased()) isn't a background job") }
         var frames: [PommeAgentStreamFrame] = []
         frames += try logFrames(data: job.stdoutLog, stream: .stdout, requestID: requestID)
         frames += try logFrames(data: job.stderrLog, stream: .stderr, requestID: requestID)
@@ -1117,51 +1156,99 @@ actor PommeAgent {
         return frames
     }
 
-    private func object(_ value: JSONValue) throws -> [String: JSONValue] { guard let object = value.objectValue else { throw PommeAgentOperationError.invalid }; return object }
-    private func string(_ object: [String: JSONValue], _ key: String) throws -> String { guard let value = object[key]?.stringValue, !value.isEmpty else { throw PommeAgentOperationError.invalid }; return value }
-    private func strings(_ value: JSONValue?) throws -> [String] { guard let values = value?.arrayValue else { throw PommeAgentOperationError.invalid }; return try values.map { guard let value = $0.stringValue, !value.contains("\0") else { throw PommeAgentOperationError.invalid }; return value } }
-    private func integer(_ object: [String: JSONValue], _ key: String) throws -> Int { if case .integer(let value) = object[key], let result = Int(exactly: value) { return result }; throw PommeAgentOperationError.invalid }
+    private func object(_ value: JSONValue) throws -> [String: JSONValue] { guard let object = value.objectValue else { throw PommeAgentOperationError.invalid("The request payload must be a JSON object") }; return object }
+    private func string(_ object: [String: JSONValue], _ key: String) throws -> String { guard let value = object[key]?.stringValue, !value.isEmpty else { throw PommeAgentOperationError.invalid("\(key) must be a non-empty string") }; return value }
+    private func strings(_ value: JSONValue?) throws -> [String] { guard let values = value?.arrayValue else { throw PommeAgentOperationError.invalid("arguments must be an array of strings") }; return try values.map { guard let value = $0.stringValue, !value.contains("\0") else { throw PommeAgentOperationError.invalid("Each argument must be a string without NUL bytes") }; return value } }
+    private func integer(_ object: [String: JSONValue], _ key: String) throws -> Int { if case .integer(let value) = object[key], let result = Int(exactly: value) { return result }; throw PommeAgentOperationError.invalid("\(key) must be an integer") }
     private func timeout(_ object: [String: JSONValue], _ key: String) throws -> TimeInterval {
         let value: TimeInterval
         switch object[key] {
         case .integer(let integer): value = TimeInterval(integer)
         case .number(let number): value = number
-        default: throw PommeAgentOperationError.invalid
+        default: throw PommeAgentOperationError.invalid("\(key) must be a number of seconds")
         }
         guard value.isFinite, value >= 1, value <= 300 else {
-            throw PommeAgentOperationError.invalid
+            throw PommeAgentOperationError.invalid("\(key) must be from 1 to 300 seconds")
         }
         return value
     }
     private func bool(_ value: JSONValue?) -> Bool? { if case .bool(let value) = value { return value }; return nil }
-    private func strictBoolean(_ value: JSONValue?) throws -> Bool {
-        guard let value else { return false }
-        guard case .bool(let result) = value else { throw PommeAgentOperationError.invalid }
+    private func strictBoolean(_ object: [String: JSONValue], _ key: String) throws -> Bool {
+        guard let value = object[key] else { return false }
+        guard case .bool(let result) = value else { throw PommeAgentOperationError.invalid("\(key) must be a Boolean") }
         return result
     }
-    private func uuid(_ object: [String: JSONValue], _ key: String) throws -> UUID { guard let value = object[key]?.stringValue, let uuid = UUID(uuidString: value) else { throw PommeAgentOperationError.invalid }; return uuid }
+    private func uuid(_ object: [String: JSONValue], _ key: String) throws -> UUID { guard let value = object[key]?.stringValue, let uuid = UUID(uuidString: value) else { throw PommeAgentOperationError.invalid("\(key) must be a UUID") }; return uuid }
     private func jobID(_ value: JSONValue) throws -> UUID { try uuid(try object(value), "jobID") }
     private func detachedJobID(_ value: JSONValue, keys: Set<String>) throws -> UUID {
         let values = try object(value)
-        guard Set(values.keys) == keys else { throw PommeAgentOperationError.invalid }
+        guard Set(values.keys) == keys else { throw PommeAgentOperationError.invalid("The request requires exactly \(keys.sorted().joined(separator: ", "))") }
         let id = try uuid(values, "jobID")
-        guard let job = jobs[id] else { throw PommeAgentOperationError.notFound }
-        guard job.detached else { throw PommeAgentOperationError.invalid }
+        guard let job = jobs[id] else { throw PommeAgentOperationError.notFound("No background job has ID \(id.uuidString.lowercased())") }
+        guard job.detached else { throw PommeAgentOperationError.invalid("Process job \(id.uuidString.lowercased()) isn't a background job") }
         return id
     }
-    private func file(_ object: [String: JSONValue]) throws -> OpenFile { let id = try uuid(object, "fileID"); guard let file = files[id] else { throw PommeAgentOperationError.notFound }; return file }
+    private func file(_ object: [String: JSONValue]) throws -> OpenFile { let id = try uuid(object, "fileID"); guard let file = files[id] else { throw PommeAgentOperationError.notFound("No open file has ID \(id.uuidString.lowercased())") }; return file }
 
     private static func writeChunk(_ descriptor: Int32, _ data: Data, _ offset: Int) -> Int {
         data.withUnsafeBytes { bytes in Darwin.write(descriptor, bytes.baseAddress!.advanced(by: offset), bytes.count - offset) }
     }
 }
 
+/// A guest operation failure. The bare cases are the wire categories; throw
+/// sites should prefer the factories below, whose short reason is safe to
+/// send to the host and names what was invalid, missing, or failed.
 enum PommeAgentOperationError: Error, Equatable {
     case unsupported, activationPending, invalid, notFound, io
     case remoteLoginFullDiskAccessRequired, remoteLoginVerificationFailed
+    /// The executable that a process request names doesn't exist.
+    case commandNotFound(path: String)
+    /// The guest refused access to a path.
+    case permissionDenied(path: String)
     /// A failure whose wire code comes from the inner case and whose message
     /// names the specific cause, such as the missing executable.
     indirect case described(PommeAgentOperationError, message: String)
+
+    /// A request value broke a rule; `what` says which value and why.
+    static func invalid(_ what: String) -> Self { .described(.invalid, message: what) }
+    /// Something the request names doesn't exist; `what` names it.
+    static func notFound(_ what: String) -> Self { .described(.notFound, message: what) }
+    /// The operation isn't available; `what` says which and why.
+    static func unsupported(_ what: String) -> Self { .described(.unsupported, message: what) }
+    /// A file or system operation failed with `errno`.
+    static func io(_ what: String, errno code: Int32 = errno) -> Self {
+        .described(.io, message: "\(what) failed: \(String(cString: strerror(code))) (errno \(code))")
+    }
+
+    /// The wire category, without any description.
+    var kind: PommeAgentOperationError {
+        switch self {
+        case .described(let inner, _): inner.kind
+        case .commandNotFound: .notFound
+        case .permissionDenied: .io
+        default: self
+        }
+    }
+}
+
+extension PommeAgentOperationError: PommeDescribedError {
+    var code: PommeErrorCode {
+        switch self {
+        case .described(let inner, _): inner.code
+        case .commandNotFound: .guestCommandNotFound
+        case .permissionDenied: .guestPermissionDenied
+        case .invalid: .guestInvalidRequest
+        case .notFound: .guestNotFound
+        case .io: .guestIOError
+        case .unsupported: .guestOperationUnsupported
+        case .activationPending: .guestAgentUpdatePending
+        case .remoteLoginFullDiskAccessRequired: .guestRemoteLoginFullDiskAccessRequired
+        case .remoteLoginVerificationFailed: .guestRemoteLoginVerificationFailed
+        }
+    }
+
+    /// The same short, send-safe text that the agent puts on the wire.
+    var errorDescription: String? { PommeAgentConnection.wireFailure(self).message }
 }
 
 extension PommeAgentOperationError {
@@ -1172,7 +1259,7 @@ extension PommeAgentOperationError {
         case .notRegular(let path, let isDirectory):
             self = .described(.invalid, message: isDirectory ? "\(path) is a directory" : "\(path) is not a regular file")
         case .permission(let path):
-            self = .described(.io, message: "Permission denied: \(path)")
+            self = .permissionDenied(path: path)
         case .unsafe(let path):
             self = .described(.invalid, message: "\(path) is reached through a symbolic link, which file transfers do not follow")
         }
@@ -1232,13 +1319,16 @@ enum PommeRemoteLogin {
         let standardError = Pipe()
         process.standardOutput = standardOutput
         process.standardError = standardError
-        do { try process.run() } catch { throw PommeAgentOperationError.io }
+        do { try process.run() } catch {
+            throw PommeAgentOperationError.described(.io, message: "systemsetup couldn't start")
+        }
 
         let stdoutDescriptor = standardOutput.fileHandleForReading.fileDescriptor
         let stderrDescriptor = standardError.fileHandleForReading.fileDescriptor
         guard makeNonBlocking(stdoutDescriptor), makeNonBlocking(stderrDescriptor) else {
-            guard terminateAndReap(process) else { throw PommeAgentOperationError.io }
-            throw PommeAgentOperationError.io
+            let code = errno
+            guard terminateAndReap(process) else { throw PommeAgentOperationError.described(.io, message: "systemsetup couldn't be stopped") }
+            throw PommeAgentOperationError.io("Making systemsetup output nonblocking", errno: code)
         }
 
         var stdout = Data()
@@ -1254,8 +1344,13 @@ enum PommeRemoteLogin {
                 stderrDescriptor, into: &stderr, eof: &stderrEOF, maximumBytes: maximumOutputBytes
             )
             if stdoutOverflow || stderrOverflow || ProcessInfo.processInfo.systemUptime >= deadline {
-                guard terminateAndReap(process) else { throw PommeAgentOperationError.io }
-                throw PommeAgentOperationError.io
+                guard terminateAndReap(process) else { throw PommeAgentOperationError.described(.io, message: "systemsetup couldn't be stopped") }
+                throw PommeAgentOperationError.described(
+                    .io,
+                    message: stdoutOverflow || stderrOverflow
+                        ? "systemsetup output exceeded \(maximumOutputBytes) bytes or couldn't be read"
+                        : "systemsetup didn't finish within \(Int(commandTimeout)) seconds"
+                )
             }
             if !process.isRunning && stdoutEOF && stderrEOF { break }
             usleep(10_000)
@@ -1263,11 +1358,16 @@ enum PommeRemoteLogin {
         process.waitUntilExit()
         guard let stdoutText = String(data: stdout, encoding: .utf8),
               let stderrText = String(data: stderr, encoding: .utf8)
-        else { throw PommeAgentOperationError.io }
+        else { throw PommeAgentOperationError.described(.io, message: "systemsetup output isn't valid UTF-8") }
         let captured = CommandOutput(stdout: stdoutText, stderr: stderrText)
         try rejectFullDiskAccessDenial(in: captured)
         guard process.terminationReason == .exit, process.terminationStatus == 0 else {
-            throw PommeAgentOperationError.io
+            throw PommeAgentOperationError.described(
+                .io,
+                message: process.terminationReason == .exit
+                    ? "systemsetup exited with status \(process.terminationStatus)"
+                    : "systemsetup ended with signal \(process.terminationStatus)"
+            )
         }
         return captured
     }
@@ -1337,7 +1437,8 @@ struct PommePrivilege: Sendable {
     static func resolve(_ object: [String: JSONValue]) throws -> PommePrivilege? {
         let user = object["user"]?.stringValue; let uid = object["uid"]
         let group = object["group"]?.stringValue; let gid = object["gid"]
-        guard !(user != nil && uid != nil), !(group != nil && gid != nil) else { throw PommeAgentOperationError.invalid }
+        guard !(user != nil && uid != nil) else { throw PommeAgentOperationError.invalid("Specify user or uid, not both") }
+        guard !(group != nil && gid != nil) else { throw PommeAgentOperationError.invalid("Specify group or gid, not both") }
         guard user != nil || uid != nil || group != nil || gid != nil else { return nil }
         let record: UnsafeMutablePointer<passwd>?
         if let user { record = getpwnam(user) }
@@ -1347,7 +1448,7 @@ struct PommePrivilege: Sendable {
         guard let record, let account = String(validatingCString: record.pointee.pw_name) else {
             if let user { throw PommeAgentOperationError.described(.notFound, message: "No such guest user: \(user)") }
             if case .integer(let supplied) = uid { throw PommeAgentOperationError.described(.notFound, message: "No guest user has uid \(supplied)") }
-            throw PommeAgentOperationError.invalid
+            throw PommeAgentOperationError.invalid(uid == nil ? "The agent's own user record couldn't be read" : "uid must be a non-negative integer")
         }
         let resolvedUID = record.pointee.pw_uid
         let resolvedGID: gid_t
@@ -1358,7 +1459,7 @@ struct PommePrivilege: Sendable {
             resolvedGID = groupRecord.pointee.gr_gid
         } else if let gid {
             guard case .integer(let supplied) = gid, let parsed = gid_t(exactly: supplied) else {
-                throw PommeAgentOperationError.invalid
+                throw PommeAgentOperationError.invalid("gid must be a non-negative integer")
             }
             resolvedGID = parsed
         } else {
@@ -1372,7 +1473,7 @@ struct PommePrivilege: Sendable {
         var rawGroups = [Int32](repeating: 0, count: Int(count))
         guard getgrouplist(account, baseGroup, &rawGroups, &count) >= 0,
               count > 0, count <= 1_024
-        else { throw PommeAgentOperationError.invalid }
+        else { throw PommeAgentOperationError.invalid("The groups of \(account) couldn't be listed, or exceed 1,024") }
         let groups = rawGroups.prefix(Int(count)).map { value -> gid_t in
             gid_t(bitPattern: value)
         }
@@ -1445,19 +1546,23 @@ enum PommeProcess {
                 "stdinPath", "stdoutPath", "stderrPath", "detached", "ptyEcho"
             ]
             guard Set(payload.keys).isSubset(of: allowed) else {
-                throw PommeAgentOperationError.invalid
+                let unknown = Set(payload.keys).subtracting(allowed).sorted().prefix(8).joined(separator: ", ")
+                throw PommeAgentOperationError.invalid("process.start doesn't accept these fields: \(unknown)")
             }
-            let cwd = try Self.path(payload["cwd"])
-            let stdinPath = try Self.path(payload["stdinPath"])
-            let stdoutPath = try Self.path(payload["stdoutPath"])
-            let stderrPath = try Self.path(payload["stderrPath"])
-            let attachedStdin = try Self.boolean(payload["attachStdin"])
-            let ptyEcho = try Self.boolean(payload["ptyEcho"])
-            guard !(attachedStdin && stdinPath != nil),
-                  !(pty && (stdinPath != nil || stdoutPath != nil || stderrPath != nil)),
-                  !ptyEcho || pty
-            else {
-                throw PommeAgentOperationError.invalid
+            let cwd = try Self.path(payload, "cwd")
+            let stdinPath = try Self.path(payload, "stdinPath")
+            let stdoutPath = try Self.path(payload, "stdoutPath")
+            let stderrPath = try Self.path(payload, "stderrPath")
+            let attachedStdin = try Self.boolean(payload, "attachStdin")
+            let ptyEcho = try Self.boolean(payload, "ptyEcho")
+            guard !(attachedStdin && stdinPath != nil) else {
+                throw PommeAgentOperationError.invalid("attachStdin can't be combined with stdinPath")
+            }
+            guard !(pty && (stdinPath != nil || stdoutPath != nil || stderrPath != nil)) else {
+                throw PommeAgentOperationError.invalid("A pty process can't redirect stdinPath, stdoutPath, or stderrPath")
+            }
+            guard !ptyEcho || pty else {
+                throw PommeAgentOperationError.invalid("ptyEcho requires pty")
             }
             self.init(
                 cwd: cwd,
@@ -1484,24 +1589,27 @@ enum PommeProcess {
         }
 
         fileprivate static func validateEnvironment(_ environment: [String: String]) throws {
-            guard environment.count <= 1_024 else { throw PommeAgentOperationError.invalid }
+            guard environment.count <= 1_024 else { throw PommeAgentOperationError.invalid("The environment can't have more than 1,024 variables") }
             for (key, value) in environment {
+                // Names and values stay out of the message: either can carry
+                // a credential.
                 guard !key.isEmpty,
                       key.utf8.count <= 256,
-                      value.utf8.count <= 64 * 1_024,
                       !key.contains("\0"),
-                      !value.contains("\0"),
                       key.first?.isASCII == true,
                       key.first?.isLetter == true || key.first == "_",
                       key.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") })
                 else {
-                    throw PommeAgentOperationError.invalid
+                    throw PommeAgentOperationError.invalid("Environment variable names must be 1 to 256 ASCII letters, digits, or underscores, and not start with a digit")
+                }
+                guard value.utf8.count <= 64 * 1_024, !value.contains("\0") else {
+                    throw PommeAgentOperationError.invalid("Environment variable values must be at most 64 KiB and contain no NUL bytes")
                 }
             }
         }
 
-        private static func path(_ value: JSONValue?) throws -> String? {
-            guard let value else { return nil }
+        private static func path(_ payload: [String: JSONValue], _ key: String) throws -> String? {
+            guard let value = payload[key] else { return nil }
             guard let path = value.stringValue,
                   !path.isEmpty,
                   path.utf8.count <= 4 * 1_024,
@@ -1509,26 +1617,26 @@ enum PommeProcess {
                   !path.contains("\0"),
                   !path.split(separator: "/", omittingEmptySubsequences: false).contains("..")
             else {
-                throw PommeAgentOperationError.invalid
+                throw PommeAgentOperationError.invalid("\(key) must be an absolute path of at most 4 KiB without .. components or NUL bytes")
             }
             return path
         }
 
         private static func environment(_ value: JSONValue?) throws -> [String: String] {
             guard let value else { return [:] }
-            guard let object = value.objectValue else { throw PommeAgentOperationError.invalid }
+            guard let object = value.objectValue else { throw PommeAgentOperationError.invalid("environment must be an object of strings") }
             var result: [String: String] = [:]
             for (key, value) in object {
-                guard let text = value.stringValue else { throw PommeAgentOperationError.invalid }
+                guard let text = value.stringValue else { throw PommeAgentOperationError.invalid("Every environment value must be a string") }
                 result[key] = text
             }
             try validateEnvironment(result)
             return result
         }
 
-        private static func boolean(_ value: JSONValue?) throws -> Bool {
-            guard let value else { return false }
-            guard case .bool(let result) = value else { throw PommeAgentOperationError.invalid }
+        private static func boolean(_ payload: [String: JSONValue], _ key: String) throws -> Bool {
+            guard let value = payload[key] else { return false }
+            guard case .bool(let result) = value else { throw PommeAgentOperationError.invalid("\(key) must be a Boolean") }
             return result
         }
     }
@@ -1553,12 +1661,12 @@ enum PommeProcess {
         var info = stat()
         guard stat(path, &info) == 0 else {
             if errno == ENOENT || errno == ENOTDIR {
-                throw PommeAgentOperationError.described(.notFound, message: "No such executable: \(path)")
+                throw PommeAgentOperationError.commandNotFound(path: path)
             }
-            throw PommeAgentOperationError.described(.io, message: "Executable is not permitted: \(path)")
+            throw PommeAgentOperationError.permissionDenied(path: path)
         }
         guard info.st_mode & S_IFMT != S_IFDIR, access(path, X_OK) == 0 else {
-            throw PommeAgentOperationError.described(.io, message: "Executable is not permitted: \(path)")
+            throw PommeAgentOperationError.permissionDenied(path: path)
         }
         if let cwd {
             guard stat(cwd, &info) == 0 else {
@@ -1583,29 +1691,33 @@ enum PommeProcess {
         guard path.hasPrefix("/"),
               path.utf8.count <= 4 * 1_024,
               !path.contains("\0"),
-              !path.split(separator: "/", omittingEmptySubsequences: false).contains(".."),
-              arguments.count <= 1_024,
+              !path.split(separator: "/", omittingEmptySubsequences: false).contains("..")
+        else {
+            throw PommeAgentOperationError.invalid("path must be an absolute path of at most 4 KiB without .. components or NUL bytes")
+        }
+        guard arguments.count <= 1_024,
               arguments.allSatisfy({ !$0.contains("\0") && $0.utf8.count <= 64 * 1_024 })
         else {
-            throw PommeAgentOperationError.invalid
+            throw PommeAgentOperationError.invalid("arguments can have at most 1,024 entries of at most 64 KiB each, without NUL bytes")
         }
         try launchPreflight(path: path, cwd: options.cwd)
         let environment = try options.mergedEnvironment(uid: identity?.uid ?? geteuid())
         let usesIdentityHelper = try identity.map(requiresIdentityHelper) ?? false
         if usesIdentityHelper, geteuid() != 0 {
-            throw PommeAgentOperationError.invalid
+            throw PommeAgentOperationError.invalid("Running as another user requires the root agent")
         }
         var master: Int32 = -1; var slave: Int32 = -1
         var stdinPipe: [Int32] = [-1, -1]; var stdoutPipe: [Int32] = [-1, -1]; var stderrPipe: [Int32] = [-1, -1]
         if pty {
-            guard openpty(&master, &slave, nil, nil, nil) == 0 else { throw PommeAgentOperationError.io }
+            guard openpty(&master, &slave, nil, nil, nil) == 0 else { throw PommeAgentOperationError.io("Opening a pseudo-terminal") }
             // Establish the requested echo policy before the child opens the
             // slave. Private PTYs may carry credentials, so their default is
             // fail-closed no-echo; public callers must explicitly opt in.
             var attributes = termios()
             guard tcgetattr(slave, &attributes) == 0 else {
+                let code = errno
                 _ = Darwin.close(master); _ = Darwin.close(slave)
-                throw PommeAgentOperationError.io
+                throw PommeAgentOperationError.io("Reading the pseudo-terminal attributes", errno: code)
             }
             if options.ptyEcho {
                 attributes.c_lflag |= tcflag_t(ECHO | ECHONL)
@@ -1613,13 +1725,15 @@ enum PommeProcess {
                 attributes.c_lflag &= ~tcflag_t(ECHO | ECHONL)
             }
             guard tcsetattr(slave, TCSANOW, &attributes) == 0 else {
+                let code = errno
                 _ = Darwin.close(master); _ = Darwin.close(slave)
-                throw PommeAgentOperationError.io
+                throw PommeAgentOperationError.io("Setting the pseudo-terminal echo mode", errno: code)
             }
         } else {
             guard pipe(&stdinPipe) == 0, pipe(&stdoutPipe) == 0, pipe(&stderrPipe) == 0 else {
+                let code = errno
                 [stdinPipe, stdoutPipe, stderrPipe].flatMap { $0 }.filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
-                throw PommeAgentOperationError.io
+                throw PommeAgentOperationError.io("Creating the process pipes", errno: code)
             }
         }
 
@@ -1631,21 +1745,23 @@ enum PommeProcess {
                   socketpair(AF_UNIX, SOCK_STREAM, 0, &helperEnvironmentPipe) == 0,
                   setsockopt(helperEnvironmentPipe[1], SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size)) == 0
             else {
+                let code = errno
                 closeDescriptors(master: master, slave: slave, stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe, pty: pty)
                 [helperStatusPipe, helperEnvironmentPipe].flatMap { $0 }.filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
-                throw PommeAgentOperationError.io
+                throw PommeAgentOperationError.io("Creating the identity helper channels", errno: code)
             }
         }
 
         var actions: posix_spawn_file_actions_t? = nil
         var attributes: posix_spawnattr_t? = nil
-        guard posix_spawn_file_actions_init(&actions) == 0,
-              posix_spawnattr_init(&attributes) == 0
+        let actionsInit = posix_spawn_file_actions_init(&actions)
+        let attributesInit = actionsInit == 0 ? posix_spawnattr_init(&attributes) : 0
+        guard actionsInit == 0, attributesInit == 0
         else {
             if actions != nil { _ = posix_spawn_file_actions_destroy(&actions) }
             closeDescriptors(master: master, slave: slave, stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe, pty: pty)
             [helperStatusPipe, helperEnvironmentPipe].flatMap { $0 }.filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
-            throw PommeAgentOperationError.io
+            throw PommeAgentOperationError.io("Preparing posix_spawn", errno: actionsInit != 0 ? actionsInit : attributesInit)
         }
         defer {
             _ = posix_spawn_file_actions_destroy(&actions)
@@ -1655,9 +1771,10 @@ enum PommeProcess {
         var actionResults: [Int32] = []
         if pty {
             guard let terminalName = ttyname(slave) else {
+                let code = errno
                 closeDescriptors(master: master, slave: slave, stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe, pty: pty)
                 [helperStatusPipe, helperEnvironmentPipe].flatMap { $0 }.filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
-                throw PommeAgentOperationError.io
+                throw PommeAgentOperationError.io("Naming the pseudo-terminal", errno: code)
             }
             actionResults += [
                 posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, terminalName, O_RDWR, 0),
@@ -1711,10 +1828,10 @@ enum PommeProcess {
                 actionResults.append(posix_spawn_file_actions_addclose(&actions, helperEnvironmentPipe[0]))
             }
         }
-        guard actionResults.allSatisfy({ $0 == 0 }) else {
+        if let failedAction = actionResults.first(where: { $0 != 0 }) {
             closeDescriptors(master: master, slave: slave, stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe, pty: pty)
             [helperStatusPipe, helperEnvironmentPipe].flatMap { $0 }.filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
-            throw PommeAgentOperationError.io
+            throw PommeAgentOperationError.io("Preparing the process's file actions", errno: failedAction)
         }
 
         do {
@@ -1722,7 +1839,7 @@ enum PommeProcess {
         } catch {
             closeDescriptors(master: master, slave: slave, stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe, pty: pty)
             [helperStatusPipe, helperEnvironmentPipe].flatMap { $0 }.filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
-            throw PommeAgentOperationError.io
+            throw error as? PommeAgentOperationError ?? .described(.io, message: "Configuring the process's spawn attributes failed")
         }
 
         let launchPath = usesIdentityHelper ? PommeAgentInstall.executable : path
@@ -1754,7 +1871,9 @@ enum PommeProcess {
         guard spawnStatus == 0, pid > 0 else {
             closeDescriptors(master: master, slave: slave, stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe, pty: pty)
             [helperStatusPipe, helperEnvironmentPipe].flatMap { $0 }.filter { $0 >= 0 }.forEach { _ = Darwin.close($0) }
-            throw PommeAgentOperationError.io
+            throw spawnStatus != 0
+                ? PommeAgentOperationError.io("posix_spawn of \(launchPath)", errno: spawnStatus)
+                : PommeAgentOperationError.described(.io, message: "posix_spawn of \(launchPath) returned no process ID")
         }
         if usesIdentityHelper {
             _ = Darwin.close(helperStatusPipe[1])
@@ -1762,13 +1881,16 @@ enum PommeProcess {
             do {
                 let environmentData = try JSONSerialization.data(withJSONObject: environment, options: [.sortedKeys])
                 guard environmentData.count <= PommeAgentProtocol.maximumFrameBytes else {
-                    throw PommeAgentOperationError.invalid
+                    throw PommeAgentOperationError.invalid("The process environment exceeds \(PommeAgentProtocol.maximumFrameBytes) bytes")
                 }
                 try writeAll(environmentData, to: helperEnvironmentPipe[1])
                 _ = Darwin.close(helperEnvironmentPipe[1])
                 helperEnvironmentPipe[1] = -1
                 guard try helperSucceeded(statusDescriptor: helperStatusPipe[0]) else {
-                    throw PommeAgentOperationError.io
+                    throw PommeAgentOperationError.described(
+                        .io,
+                        message: "The identity helper couldn't switch to \(identity?.account ?? "the requested user") or start \(path)"
+                    )
                 }
                 _ = Darwin.close(helperStatusPipe[0])
                 helperStatusPipe[0] = -1
@@ -1821,7 +1943,7 @@ enum PommeProcess {
               posix_spawnattr_setsigdefault(&attributes, &defaults) == 0,
               posix_spawnattr_setsigmask(&attributes, &mask) == 0
         else {
-            throw PommeAgentOperationError.io
+            throw PommeAgentOperationError.described(.io, message: "Setting the process's default signal handling failed")
         }
         let flags = Int16(POSIX_SPAWN_CLOEXEC_DEFAULT)
             | Int16(pty ? POSIX_SPAWN_SETSID : POSIX_SPAWN_SETPGROUP)
@@ -1830,7 +1952,7 @@ enum PommeProcess {
         guard posix_spawnattr_setflags(&attributes, flags) == 0,
               (pty || posix_spawnattr_setpgroup(&attributes, 0) == 0)
         else {
-            throw PommeAgentOperationError.io
+            throw PommeAgentOperationError.described(.io, message: "Setting the process's session or process group failed")
         }
     }
 
@@ -1842,29 +1964,29 @@ enum PommeProcess {
             let request = try IdentityHelperRequest(arguments: arguments)
             let environmentData = try readAll(from: helperEnvironmentDescriptor, maximumBytes: PommeAgentProtocol.maximumFrameBytes)
             guard Darwin.close(helperEnvironmentDescriptor) == 0 else {
-                throw PommeAgentOperationError.io
+                throw PommeAgentOperationError.io("Closing the helper environment channel")
             }
             guard let object = try JSONSerialization.jsonObject(with: environmentData) as? [String: String] else {
-                throw PommeAgentOperationError.invalid
+                throw PommeAgentOperationError.invalid("The helper environment must be an object of strings")
             }
             try Options.validateEnvironment(object)
             let initialGroup = Int32(bitPattern: request.identity.gid)
-            guard geteuid() == 0,
-                  request.identity.account.withCString({ initgroups($0, initialGroup) }) == 0,
+            guard geteuid() == 0 else { throw PommeAgentOperationError.invalid("The identity helper must run as root") }
+            guard request.identity.account.withCString({ initgroups($0, initialGroup) }) == 0,
                   setgid(request.identity.gid) == 0,
                   setuid(request.identity.uid) == 0
             else {
-                throw PommeAgentOperationError.invalid
+                throw PommeAgentOperationError.invalid("The identity helper couldn't switch to \(request.identity.account)")
             }
-            if let cwd = request.cwd, chdir(cwd) != 0 { throw PommeAgentOperationError.io }
+            if let cwd = request.cwd, chdir(cwd) != 0 { throw PommeAgentOperationError.io("Changing to working directory \(cwd)") }
             try redirect(request.stdinPath, descriptor: STDIN_FILENO, flags: O_RDONLY)
             try redirect(request.stdoutPath, descriptor: STDOUT_FILENO, flags: O_WRONLY | O_CREAT | O_TRUNC)
             try redirect(request.stderrPath, descriptor: STDERR_FILENO, flags: O_WRONLY | O_CREAT | O_TRUNC)
             for (key, value) in object {
-                guard setenv(key, value, 1) == 0 else { throw PommeAgentOperationError.io }
+                guard setenv(key, value, 1) == 0 else { throw PommeAgentOperationError.io("Setting an environment variable") }
             }
             guard fcntl(helperStatusDescriptor, F_SETFD, FD_CLOEXEC) == 0 else {
-                throw PommeAgentOperationError.io
+                throw PommeAgentOperationError.io("Marking the helper status channel close-on-exec")
             }
             try writeStatusMarker(helperSuccessMarker)
             var argv = ([request.path] + request.arguments).map { strdup($0) }
@@ -1873,7 +1995,7 @@ enum PommeProcess {
             _ = request.path.withCString { executable in
                 execv(executable, &argv)
             }
-            throw PommeAgentOperationError.io
+            throw PommeAgentOperationError.io("execv of \(request.path)")
         } catch {
             var failure: UInt8 = 1
             _ = withUnsafePointer(to: &failure) { Darwin.write(helperStatusDescriptor, $0, 1) }
@@ -1891,7 +2013,7 @@ enum PommeProcess {
         let arguments: [String]
 
         init(arguments: [String]) throws {
-            guard arguments.first == "--pomme-exec-helper" else { throw PommeAgentOperationError.invalid }
+            guard arguments.first == "--pomme-exec-helper" else { throw PommeAgentOperationError.invalid("The identity helper's first argument must be --pomme-exec-helper") }
             var values: [String: String] = [:]
             var index = 1
             while index < arguments.count, arguments[index] != "--" {
@@ -1900,7 +2022,7 @@ enum PommeProcess {
                       index + 1 < arguments.count,
                       values[flag] == nil
                 else {
-                    throw PommeAgentOperationError.invalid
+                    throw PommeAgentOperationError.invalid("The identity helper received an unknown, repeated, or valueless flag")
                 }
                 values[flag] = arguments[index + 1]
                 index += 2
@@ -1913,7 +2035,7 @@ enum PommeProcess {
                   account.utf8.count <= 256,
                   !account.contains("\0")
             else {
-                throw PommeAgentOperationError.invalid
+                throw PommeAgentOperationError.invalid("The identity helper requires --uid, --gid, --account, and a command after --")
             }
             let options = try Options(
                 cwd: Self.path(values["--cwd"]),
@@ -1924,7 +2046,7 @@ enum PommeProcess {
             )
             let target = arguments[index + 1]
             guard target.hasPrefix("/"), !target.contains("\0"), arguments.dropFirst(index + 2).allSatisfy({ !$0.contains("\0") }) else {
-                throw PommeAgentOperationError.invalid
+                throw PommeAgentOperationError.invalid("The identity helper's command must be an absolute path, and no argument can contain NUL bytes")
             }
             identity = .init(account: account, uid: uid, gid: gid, supplementary: [])
             cwd = options.cwd
@@ -1964,11 +2086,13 @@ enum PommeProcess {
     private static func requiresIdentityHelper(_ identity: PommePrivilege) throws -> Bool {
         guard identity.uid == geteuid(), identity.gid == getegid() else { return true }
         let count = getgroups(0, nil)
-        guard count >= 0, count <= 1_024 else { throw PommeAgentOperationError.io }
+        guard count >= 0 else { throw PommeAgentOperationError.io("Listing the agent's groups") }
+        guard count <= 1_024 else { throw PommeAgentOperationError.described(.io, message: "The agent belongs to more than 1,024 groups") }
         guard count > 0 else { return !identity.supplementary.isEmpty }
         var rawGroups = [Int32](repeating: 0, count: Int(count))
         let populated = getgroups(count, &rawGroups)
-        guard populated >= 0, populated <= count else { throw PommeAgentOperationError.io }
+        guard populated >= 0 else { throw PommeAgentOperationError.io("Listing the agent's groups") }
+        guard populated <= count else { throw PommeAgentOperationError.described(.io, message: "The agent's group list changed while it was read") }
         let current = Set(rawGroups.prefix(Int(populated)).map { gid_t(bitPattern: $0) })
         return current != Set(identity.supplementary)
     }
@@ -1978,7 +2102,7 @@ enum PommeProcess {
         var result = environment.keys.sorted().map { strdup("\($0)=\(environment[$0]!)") }
         guard !result.contains(where: { $0 == nil }) else {
             result.forEach { free($0) }
-            throw PommeAgentOperationError.io
+            throw PommeAgentOperationError.io("Copying the process environment", errno: ENOMEM)
         }
         result.append(nil)
         return result
@@ -2008,7 +2132,8 @@ enum PommeProcess {
                 let result = Darwin.write(descriptor, baseAddress.advanced(by: offset), bytes.count - offset)
                 if result > 0 { offset += result }
                 else if result < 0, errno == EINTR { continue }
-                else { throw PommeAgentOperationError.io }
+                else if result < 0 { throw PommeAgentOperationError.io("Sending the environment to the identity helper") }
+                else { throw PommeAgentOperationError.described(.io, message: "The identity helper stopped reading its environment") }
             }
         }
     }
@@ -2025,7 +2150,7 @@ enum PommeProcess {
                 continue
             }
             if errno == EINTR { continue }
-            throw PommeAgentOperationError.io
+            throw PommeAgentOperationError.io("Reading the identity helper's status")
         }
     }
 
@@ -2035,7 +2160,7 @@ enum PommeProcess {
             let count = withUnsafePointer(to: &marker) { Darwin.write(helperStatusDescriptor, $0, 1) }
             if count == 1 { return }
             if count < 0, errno == EINTR { continue }
-            throw PommeAgentOperationError.io
+            throw PommeAgentOperationError.io("Writing the identity helper's status")
         }
     }
 
@@ -2046,11 +2171,11 @@ enum PommeProcess {
             let count = Darwin.read(descriptor, &buffer, buffer.count)
             if count > 0 {
                 data.append(contentsOf: buffer.prefix(Int(count)))
-                guard data.count <= maximumBytes else { throw PommeAgentOperationError.invalid }
+                guard data.count <= maximumBytes else { throw PommeAgentOperationError.invalid("The helper environment exceeds \(maximumBytes) bytes") }
             } else if count == 0 {
                 return data
             } else if errno != EINTR {
-                throw PommeAgentOperationError.io
+                throw PommeAgentOperationError.io("Reading the helper environment")
             }
         }
     }
@@ -2058,12 +2183,12 @@ enum PommeProcess {
     private static func redirect(_ path: String?, descriptor: Int32, flags: Int32) throws {
         guard let path else { return }
         let opened = path.withCString { Darwin.open($0, flags, mode_t(0o600)) }
-        guard opened >= 0 else { throw PommeAgentOperationError.io }
+        guard opened >= 0 else { throw PommeAgentOperationError.io("Opening \(path)") }
         defer {
             if opened != descriptor { _ = Darwin.close(opened) }
         }
         guard opened == descriptor || dup2(opened, descriptor) >= 0 else {
-            throw PommeAgentOperationError.io
+            throw PommeAgentOperationError.io("Redirecting to \(path)")
         }
     }
 }

@@ -64,8 +64,8 @@ struct PommeMDMWorkflowExecutionTests {
         let execution = makeExecution(fixture: fixture, progress: progress, events: events,
             restoredStates: restored, observations: [], awaited: [],
             baseline: makeBaseline(sipDisabled: false, amfiDisabled: false, activeByte: 1))
-        await #expect(throws: PommeSecurityWorkflowError.restorationIncomplete) {
-            _ = try await execution.run(preflightError: PommeSecurityWorkflowError.restorationIncomplete)
+        await #expect(throws: PommeSecurityWorkflowError.restorationIncomplete()) {
+            _ = try await execution.run(preflightError: PommeSecurityWorkflowError.restorationIncomplete())
         }
         #expect(await events.values().isEmpty)
         #expect(await restored.values().isEmpty)
@@ -86,8 +86,8 @@ struct PommeMDMWorkflowExecutionTests {
             restoredStates: restored, observations: [verified], awaited: [],
             baseline: makeBaseline(sipDisabled: false, amfiDisabled: false, activeByte: 1),
             failingSecurityOperation: .amfiEnable,
-            securityFailure: PommeSecurityWorkflowError.restorationIncomplete)
-        await #expect(throws: PommeSecurityWorkflowError.restorationIncomplete) { _ = try await execution.run() }
+            securityFailure: PommeSecurityWorkflowError.restorationIncomplete())
+        await #expect(throws: PommeSecurityWorkflowError.restorationIncomplete()) { _ = try await execution.run() }
         #expect(await restored.values().isEmpty)
         #expect(!securityOperations(await events.values()).contains(.sipEnable))
         #expect(progress.journal.pendingChild == .amfiEnable)

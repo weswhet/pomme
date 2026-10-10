@@ -118,6 +118,7 @@ struct BundleLayout: Sendable {
     var metadataURL: URL { rootURL.appendingPathComponent("Metadata.json") }
     var securityStateURL: URL { rootURL.appendingPathComponent("SecurityState.json") }
     var helperLogURL: URL { rootURL.appendingPathComponent("pomme-helper.log") }
+    var previousHelperLogURL: URL { rootURL.appendingPathComponent("pomme-helper.previous.log") }
     var saveStateURL: URL { rootURL.appendingPathComponent("SaveFile.vzvmsave") }
     var snapshotsURL: URL { rootURL.appendingPathComponent("Snapshots", isDirectory: true) }
     var requiredSnapshotRestoreURL: URL { rootURL.appendingPathComponent("SnapshotRestore.required") }

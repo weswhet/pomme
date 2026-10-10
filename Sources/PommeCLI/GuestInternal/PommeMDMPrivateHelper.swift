@@ -241,7 +241,7 @@ enum PommeMDMPrivateHelper {
             emit(.success(profileIdentifier: identifier))
             return 0
         } catch let failure as Failure {
-            emit(.failure(failure.code))
+            emit(.failure(failure.failureCode))
             return failure.exitCode
         } catch {
             // Never expose a localized XPC, filesystem, Security.framework, or
@@ -319,7 +319,7 @@ enum PommeMDMPrivateHelper {
         }
     }
 
-    private enum Failure: Error {
+    private enum Failure: PommeDescribedError {
         case invalidArguments
         case notRoot
         case invalidRequest
@@ -331,7 +331,39 @@ enum PommeMDMPrivateHelper {
         case enrollmentFailed
         case enrollmentOutcomeUnknown
 
-        var code: FailureCode {
+        var code: PommeErrorCode {
+            switch self {
+            case .notRoot: .guestAgentRootRequired
+            case .enrollmentOutcomeUnknown: .guestMDMOutcomeUnknown
+            default: .guestMDMHelperFailed
+            }
+        }
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidArguments: "The MDM enrollment helper received invalid arguments."
+            case .notRoot: "The MDM enrollment helper must run as root."
+            case .invalidRequest: "The MDM enrollment helper rejected its request file."
+            case .unsafeFiles: "The MDM enrollment helper's staged files don't have the required owner and permissions."
+            case .leaseBusy: "Another MDM enrollment is already running in the guest."
+            case .digestMismatch: "The MDM enrollment helper's code or request doesn't match the expected SHA-256 digest."
+            case .entitlementsRejected: "The MDM enrollment helper's entitlements aren't the expected set."
+            case .amfiEnabled: "The MDM enrollment helper needs AMFI turned off in the guest."
+            case .enrollmentFailed: "The guest couldn't install the MDM profile."
+            case .enrollmentOutcomeUnknown: "The MDM enrollment outcome is unknown; identity state was retained."
+            }
+        }
+
+        var recoverySuggestion: String? {
+            switch self {
+            case .leaseBusy: "Wait for the other enrollment to finish, then retry `pomme mdm`."
+            case .amfiEnabled: "Run `pomme amfi disable NAME`, then retry `pomme mdm`."
+            case .enrollmentOutcomeUnknown: "Check the guest's installed profiles before you retry `pomme mdm`."
+            default: "Retry `pomme mdm`. If it fails again, run `pomme bug-report NAME` and attach the file to a new issue."
+            }
+        }
+
+        var failureCode: FailureCode {
             switch self {
             case .invalidArguments: .invalidArguments
             case .notRoot: .notRoot

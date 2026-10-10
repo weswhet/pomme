@@ -85,7 +85,7 @@ struct PommeAgentExecutionOptionsTests: Sendable {
         let agent = try PommeAgent(role: .persistent, executableSHA256: String(repeating: "a", count: 64))
         let cases: [(JSONValue, PommeAgentOperationError)] = [
             (.object(["path": .string("/nonexistent/bin"), "arguments": .array([])]),
-             .described(.notFound, message: "No such executable: /nonexistent/bin")),
+             .commandNotFound(path: "/nonexistent/bin")),
             (.object(["path": .string("/bin/pwd"), "arguments": .array([]), "cwd": .string("/nonexistent")]),
              .described(.notFound, message: "No such working directory: /nonexistent")),
             (.object(["path": .string("/bin/pwd"), "arguments": .array([]), "cwd": .string("/bin/pwd")]),

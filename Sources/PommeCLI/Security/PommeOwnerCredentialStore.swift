@@ -351,7 +351,7 @@ struct PommeSystemOwnerCredentialKeychainClient: PommeOwnerCredentialKeychainCli
     }
 }
 
-enum PommeOwnerCredentialStoreError: Error, Equatable, LocalizedError, Sendable {
+enum PommeOwnerCredentialStoreError: PommeDescribedError, Equatable, Sendable {
     case invalidReference
     case invalidCredential
     case keychainOpenFailed(status: OSStatus)
@@ -367,23 +367,73 @@ enum PommeOwnerCredentialStoreError: Error, Equatable, LocalizedError, Sendable 
     case malformedStoredCredential
     case secretGenerationFailed(status: OSStatus)
 
+    var code: PommeErrorCode {
+        switch self {
+        case .invalidReference, .invalidCredential, .malformedStoredCredential: .securityCredentialInvalid
+        case .keychainOpenFailed, .keychainLocked, .keychainReadFailed, .keychainCreateFailed,
+             .keychainRemoveFailed, .keychainReadBackFailed:
+            .keychainError
+        case .keychainMissing, .credentialMissingAfterStore: .credentialUnavailable
+        case .credentialCollision, .ownershipMismatch: .securityCredentialConflict
+        case .secretGenerationFailed: .systemError
+        }
+    }
+
     var errorDescription: String? {
         switch self {
-        case .invalidReference: "Pomme owner credential reference is invalid."
-        case .invalidCredential: "Pomme owner credential has an invalid format."
-        case .keychainOpenFailed: "Pomme owner credential Keychain could not be opened."
-        case .keychainLocked: "Pomme owner credential Keychain is locked."
-        case .keychainMissing: "Pomme owner credential is missing."
-        case .keychainReadFailed: "Pomme owner credential Keychain read failed."
-        case .keychainCreateFailed: "Pomme owner credential Keychain creation failed."
-        case .keychainRemoveFailed: "Pomme owner credential Keychain removal failed."
-        case .keychainReadBackFailed: "Pomme owner credential could not be read back after creation."
-        case .credentialMissingAfterStore: "Pomme owner credential is missing after a successful account transaction."
-        case .credentialCollision: "Pomme owner credential scope is occupied by an unrelated item."
-        case .ownershipMismatch: "Pomme owner credential belongs to a different immutable VM identity."
-        case .malformedStoredCredential: "Pomme owner credential has an invalid stored format."
-        case .secretGenerationFailed: "Pomme owner credential could not be generated."
+        case .invalidReference:
+            "The reference to the owner's credential in the security journal isn't valid."
+        case .invalidCredential:
+            "The owner's user name or credential has a format that Pomme can't store."
+        case .keychainOpenFailed(let status):
+            "Pomme couldn't open your login Keychain: \(Self.statusText(status))."
+        case .keychainLocked(let status):
+            "Your login Keychain is locked: \(Self.statusText(status))."
+        case .keychainMissing:
+            "Your login Keychain has no stored owner credential for this VM."
+        case .keychainReadFailed(let status):
+            "Pomme couldn't read the owner credential from your login Keychain: \(Self.statusText(status))."
+        case .keychainCreateFailed(let status):
+            "Pomme couldn't save the owner credential in your login Keychain: \(Self.statusText(status))."
+        case .keychainRemoveFailed(let status):
+            "Pomme couldn't remove the owner credential from your login Keychain: \(Self.statusText(status))."
+        case .keychainReadBackFailed(let status):
+            "Pomme saved the owner credential in your login Keychain but couldn't read it back: \(Self.statusText(status))."
+        case .credentialMissingAfterStore:
+            "The owner credential is missing from your login Keychain after Pomme created the owner account."
+        case .credentialCollision:
+            "Your login Keychain already has an item for this VM's owner credential that Pomme didn't create."
+        case .ownershipMismatch:
+            "The stored owner credential belongs to a different VM."
+        case .malformedStoredCredential:
+            "The owner credential stored in your login Keychain isn't in the format that Pomme writes."
+        case .secretGenerationFailed(let status):
+            "Pomme couldn't generate a random owner credential: \(Self.statusText(status))."
         }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .keychainLocked, .keychainOpenFailed:
+            "Unlock your login Keychain, then retry."
+        case .keychainReadFailed, .keychainReadBackFailed, .keychainCreateFailed, .keychainRemoveFailed:
+            "Unlock your login Keychain, and allow `pomme` to access the item if macOS asks, then retry."
+        case .keychainMissing, .credentialMissingAfterStore, .malformedStoredCredential:
+            "Set both POMME_AUTHORIZED_USER and POMME_AUTHORIZED_PASSWORD, or run the command in an interactive terminal to enter the owner's credentials."
+        case .credentialCollision, .ownershipMismatch:
+            "Open Keychain Access, find the item that names this VM's UUID, and remove it if you no longer need it."
+        default:
+            nil
+        }
+    }
+
+    /// A Keychain status as a clause, such as "User interaction is not
+    /// allowed (OSStatus -25308)".
+    private static func statusText(_ status: OSStatus) -> String {
+        let message = securityErrorMessage(status)
+        guard !message.hasPrefix("OSStatus") else { return "OSStatus \(status)" }
+        let trimmed = message.hasSuffix(".") ? String(message.dropLast()) : message
+        return "\(SystemErrorDescription.lowercasingFirstWord(trimmed)) (OSStatus \(status))"
     }
 }
 

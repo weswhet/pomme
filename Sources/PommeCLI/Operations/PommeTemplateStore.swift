@@ -69,13 +69,31 @@ struct PommeTemplateManifest: Codable, Equatable, Sendable {
     }
 }
 
-enum PommeTemplateError: Error, Equatable, LocalizedError {
+enum PommeTemplateError: Error, Equatable, PommeDescribedError {
     case invalidManifest
     case notFound(String)
     case alreadyExists(String)
     case incompleteBundle(String)
     case diskSizeMismatch(template: UInt64, requested: UInt64)
-    case cloneFailed(String)
+    /// Copying a template file into a VM bundle failed. `cause` keeps the
+    /// file-system reason, such as a full disk.
+    case cloneFailed(cause: PommeErrorReport)
+
+    var code: PommeErrorCode {
+        switch self {
+        case .invalidManifest: .templateManifestInvalid
+        case .notFound: .templateNotFound
+        case .alreadyExists: .templateExists
+        case .incompleteBundle: .templateIncomplete
+        case .diskSizeMismatch: .templateDiskSizeMismatch
+        case .cloneFailed: .templateCloneFailed
+        }
+    }
+
+    var underlying: (any Error)? {
+        if case .cloneFailed(let cause) = self { return cause }
+        return nil
+    }
 
     var errorDescription: String? {
         switch self {
@@ -88,9 +106,24 @@ enum PommeTemplateError: Error, Equatable, LocalizedError {
         case .incompleteBundle(let name):
             return "Template \(name) is missing its disk image, auxiliary storage, or hardware model."
         case .diskSizeMismatch(let template, let requested):
-            return "The template disk is \(template) bytes; --disk-size \(requested) does not match. Omit --disk-size to use the template's size."
-        case .cloneFailed(let detail):
-            return "Cloning the template failed: \(detail)"
+            return "The template disk is \(byteCountText(template)), and --disk-size asks for \(byteCountText(requested)). A VM cloned from a template keeps the template's disk size."
+        case .cloneFailed(let cause):
+            return "Cloning the template failed: \(PommeErrorDescriber.clause(for: cause))."
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .invalidManifest, .incompleteBundle:
+            return "Delete the template with `pomme template delete NAME`, then create it again with `pomme template create NAME`."
+        case .notFound:
+            return nil
+        case .alreadyExists(let name):
+            return "Run `pomme template delete \(name)`, then retry."
+        case .diskSizeMismatch:
+            return "Omit --disk-size to use the template's size."
+        case .cloneFailed(let cause):
+            return cause.hint
         }
     }
 }
@@ -176,12 +209,14 @@ enum PommeTemplateStore {
         if Darwin.clonefile(source.path, destination.path, 0) == 0 { return }
         let code = errno
         guard code == ENOTSUP || code == EXDEV else {
-            throw PommeTemplateError.cloneFailed(String(cString: strerror(code)))
+            throw PommeTemplateError.cloneFailed(cause: PommeErrorReport(
+                keepingSystemCause: NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+            ))
         }
         do {
             try FileManager.default.copyItem(at: source, to: destination)
         } catch {
-            throw PommeTemplateError.cloneFailed(error.localizedDescription)
+            throw PommeTemplateError.cloneFailed(cause: PommeErrorReport(keepingSystemCause: error))
         }
     }
 

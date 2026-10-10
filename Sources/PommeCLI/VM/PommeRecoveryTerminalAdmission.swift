@@ -39,16 +39,29 @@ struct PommeRecoveryDebugScreenshotMetadata: Equatable, Sendable {
 /// result. Preserve host-only screenshot metadata on that existing route so
 /// the invoking CLI can render it without extending PommeAgentProtocol or the
 /// public output schema.
-struct PommeRecoveryTerminalAdmissionControlFailure: Error, LocalizedError, Sendable {
-    let message: String
+struct PommeRecoveryTerminalAdmissionControlFailure: PommeDescribedError, Sendable {
+    let report: PommeErrorReport
     let debugMetadata: PommeRecoveryDebugScreenshotMetadata
 
     init(_ error: any Swift.Error, debugMetadata: PommeRecoveryDebugScreenshotMetadata) {
-        message = error.localizedDescription
+        report = PommeErrorReport(error)
         self.debugMetadata = debugMetadata
     }
 
-    var errorDescription: String? { message }
+    var message: String { report.message }
+    var code: PommeErrorCode { report.code }
+    var errorDescription: String? { report.message }
+    var recoverySuggestion: String? { report.hint }
+
+    /// The wrapped failure's causes, so a report reads the same with or
+    /// without debug screenshots.
+    var underlying: (any Swift.Error)? {
+        guard let first = report.causes.first else { return nil }
+        guard first.domain == "pomme" else {
+            return PommeExternalCause(domain: first.domain, code: first.code, description: first.description)
+        }
+        return PommeErrorReport(code: PommeErrorCode(first.code), message: first.description, causes: Array(report.causes.dropFirst()))
+    }
 }
 
 /// State captured by the ordinary-Recovery VSOCK listener before the first
@@ -175,25 +188,50 @@ struct PommeRecoveryTerminalVirtualizationContext: @unchecked Sendable {
 /// actor retains only the coordinator/state needed for reconnects. The
 /// terminal manager then owns all post-admission process and transcript state.
 actor PommeRecoveryTerminalAdmission {
-    enum Error: Swift.Error, LocalizedError, Equatable, Sendable {
-        case unavailable
+    enum Error: PommeDescribedError, Equatable, Sendable {
+        case unavailable(PommeRetainedCause = .init())
         case alreadyAttempted
         case launcherRejected
         case authenticationTimedOut
-        case cleanupFailed
+        case cleanupFailed(PommeRetainedCause = .init())
+
+        var code: PommeErrorCode {
+            switch self {
+            case .unavailable, .launcherRejected: .recoveryAgentFailed
+            case .alreadyAttempted: .recoverySessionInvalid
+            case .authenticationTimedOut: .recoveryTimedOut
+            case .cleanupFailed: .recoveryCleanupUnverified
+            }
+        }
 
         var errorDescription: String? {
             switch self {
-            case .unavailable:
-                "Recovery terminal admission is unavailable."
+            case .unavailable(let cause):
+                cause.describing("Pomme couldn't open a Recovery terminal session.")
             case .alreadyAttempted:
-                "Recovery terminal admission has already been attempted."
+                "This Recovery session already tried to open a terminal; each Recovery boot allows one attempt."
             case .launcherRejected:
-                "Recovery terminal bootstrap was rejected."
+                "Pomme couldn't type the command that starts its agent into Terminal in Recovery."
             case .authenticationTimedOut:
-                "Recovery terminal authority did not authenticate in time."
+                "The Pomme agent in Recovery didn't connect and authenticate within the time limit."
+            case .cleanupFailed(let cause):
+                cause.describing("Opening a Recovery terminal failed, and Pomme couldn't confirm that its staged files and directory share were removed.")
+            }
+        }
+
+        var recoverySuggestion: String? {
+            switch self {
+            case .unavailable, .alreadyAttempted, .launcherRejected, .authenticationTimedOut:
+                "Run `pomme stop NAME`, then run `pomme start NAME --mode recovery` again. Add `--debug` to save screenshots of each Recovery step."
             case .cleanupFailed:
-                "Recovery terminal admission cleanup could not be proven complete."
+                "Run `pomme stop NAME` before you start the VM again."
+            }
+        }
+
+        var underlying: (any Swift.Error)? {
+            switch self {
+            case .unavailable(let cause), .cleanupFailed(let cause): cause.underlying
+            default: nil
             }
         }
     }
@@ -324,14 +362,16 @@ actor PommeRecoveryTerminalAdmission {
             return await PommeRecoveryDebugScreenshotMetadata(recorder: debugScreenshotRecorder)
         } catch {
             let cleanupComplete = await abandonAdmission()
-            let outcome: any Swift.Error = cleanupComplete ? error : PommeRecoveryTerminalAdmission.Error.cleanupFailed
+            let outcome: any Swift.Error = cleanupComplete
+                ? error
+                : PommeRecoveryTerminalAdmission.Error.cleanupFailed(PommeRetainedCause(error))
             if let debugMetadata = await PommeRecoveryDebugScreenshotMetadata(recorder: debugScreenshotRecorder) {
                 throw PommeRecoveryTerminalAdmissionControlFailure(outcome, debugMetadata: debugMetadata)
             }
             if let admissionError = outcome as? PommeRecoveryTerminalAdmission.Error {
                 throw admissionError
             }
-            throw Error.unavailable
+            throw Error.unavailable(PommeRetainedCause(error))
         }
     }
 

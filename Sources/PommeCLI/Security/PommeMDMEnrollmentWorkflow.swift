@@ -424,32 +424,99 @@ private struct MDMJournalCodingKey: CodingKey {
     init?(intValue: Int) { nil }
 }
 
-enum PommeMDMEnrollmentWorkflowError: Error, Equatable, LocalizedError, Sendable {
+enum PommeMDMEnrollmentWorkflowError: PommeDescribedError, Equatable, Sendable {
     case leaseRequired
     case journalIdentityMismatch
     case unfinishedModeConflict
     case unfinishedFinalSecurityConflict
     case incompleteEnrollmentOutcome
     case malformedJournal
+    /// The journal couldn't be decoded or encoded; `cause` keeps the coder's reason.
+    case unreadableJournal(cause: PommeErrorReport)
     case unsafeJournal
     case staleJournal
     case invalidPhaseTransition
     case restorationFailed
     case durabilityFailure(operation: String, code: Int32)
 
+    var code: PommeErrorCode {
+        switch self {
+        case .leaseRequired, .invalidPhaseTransition: .mdmJournalStateInvalid
+        case .journalIdentityMismatch, .unfinishedModeConflict, .unfinishedFinalSecurityConflict: .mdmJournalConflict
+        case .incompleteEnrollmentOutcome: .mdmEnrollmentOutcomeUnknown
+        case .malformedJournal, .unreadableJournal, .unsafeJournal: .mdmJournalDamaged
+        case .staleJournal: .mdmJournalChanged
+        case .restorationFailed: .mdmRestorationFailed
+        case .durabilityFailure(_, let code): code == ENOSPC ? .hostDiskFull : .mdmJournalWriteFailed
+        }
+    }
+
+    var underlying: (any Error)? {
+        if case .unreadableJournal(let cause) = self { return cause }
+        return nil
+    }
+
     var errorDescription: String? {
         switch self {
-        case .leaseRequired: "MDM enrollment requires the VM mutation lease."
-        case .journalIdentityMismatch: "The retained MDM enrollment belongs to another VM or request."
-        case .unfinishedModeConflict: "An unfinished MDM enrollment uses a different enrollment mode."
-        case .unfinishedFinalSecurityConflict: "An unfinished MDM enrollment uses a different --final-security value. Repeat it with its original value."
-        case .incompleteEnrollmentOutcome: "A prior MDM enrollment was dispatched without verified outcome. Inspect evidence before retrying."
-        case .malformedJournal: "The retained MDM enrollment journal is malformed."
-        case .unsafeJournal: "The retained MDM enrollment journal is unsafe."
-        case .staleJournal: "The retained MDM enrollment journal changed concurrently."
-        case .invalidPhaseTransition: "The retained MDM enrollment phase cannot be resumed safely."
-        case .restorationFailed: "MDM enrollment could not restore the original security or run state."
-        case .durabilityFailure(let operation, let code): "MDM enrollment journal \(operation) could not be durably synchronized (errno \(code))."
+        case .leaseRequired:
+            "Pomme tried to use the MDM enrollment journal without holding the VM's lock."
+        case .journalIdentityMismatch:
+            "The VM's unfinished MDM enrollment belongs to another VM or profile."
+        case .unfinishedModeConflict:
+            "The VM's unfinished MDM enrollment uses a different `--enrollment-mode` value."
+        case .unfinishedFinalSecurityConflict:
+            "The VM's unfinished MDM enrollment uses a different `--final-security` value."
+        case .incompleteEnrollmentOutcome:
+            "An earlier MDM enrollment was sent to the VM, but Pomme didn't receive a verified outcome."
+        case .malformedJournal:
+            "The VM's MDM enrollment journal isn't valid."
+        case .unreadableJournal(let cause):
+            "The VM's MDM enrollment journal isn't valid: \(PommeErrorDescriber.clause(for: cause))."
+        case .unsafeJournal:
+            "The VM's MDM enrollment journal isn't a private regular file in the VM bundle, or Pomme couldn't open it safely."
+        case .staleJournal:
+            "The VM's MDM enrollment journal changed while Pomme was updating it."
+        case .invalidPhaseTransition:
+            "The VM's unfinished MDM enrollment can't resume safely from its recorded phase."
+        case .restorationFailed:
+            "Pomme couldn't restore the VM's original SIP, AMFI, or run state after MDM enrollment."
+        case .durabilityFailure(let operation, let code):
+            "Pomme couldn't save the VM's MDM enrollment journal because it couldn't \(Self.describe(operation: operation)): "
+                + "\(String(cString: strerror(code))) (errno \(code))."
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .leaseRequired, .invalidPhaseTransition:
+            "Run `pomme bug-report NAME` and attach the file to a new issue."
+        case .journalIdentityMismatch, .unfinishedModeConflict, .unfinishedFinalSecurityConflict:
+            "Repeat `pomme mdm` with the original profile, `--enrollment-mode`, and `--final-security` values to finish it."
+        case .incompleteEnrollmentOutcome:
+            "Repeat the same `pomme mdm` command; Pomme checks the VM's enrollment before it installs anything again."
+        case .malformedJournal, .unreadableJournal, .unsafeJournal:
+            "If you edited or copied the VM bundle's MDMEnrollmentJournal.json file, restore it."
+        case .staleJournal:
+            "Make sure that no other `pomme` command is running for the VM, then repeat the same `pomme mdm` command."
+        case .restorationFailed:
+            "Repeat the same `pomme mdm` command to resume restoration."
+        case .durabilityFailure(_, let code):
+            code == ENOSPC
+                ? "Free space on the volume that holds your VMs, then repeat the same `pomme mdm` command."
+                : "Check the VM bundle's ownership and permissions, then repeat the same `pomme mdm` command."
+        }
+    }
+
+    private static func describe(operation: String) -> String {
+        switch operation {
+        case "stage": "create its temporary file"
+        case "permissions": "set its file permissions"
+        case "write": "write it"
+        case "file": "flush it to disk"
+        case "close": "close it"
+        case "publish": "replace the previous journal"
+        case "directory": "flush the VM bundle directory to disk"
+        default: "complete the \(operation) step"
         }
     }
 }
@@ -476,7 +543,8 @@ struct PommeMDMEnrollmentJournalStore: Sendable {
             decoder.dateDecodingStrategy = .millisecondsSince1970
             value = try decoder.decode(PommeMDMEnrollmentJournal.self, from: data)
         }
-        catch { throw PommeMDMEnrollmentWorkflowError.malformedJournal }
+        catch let error as PommeMDMEnrollmentWorkflowError { throw error }
+        catch { throw PommeMDMEnrollmentWorkflowError.unreadableJournal(cause: PommeErrorReport(error)) }
         guard lease.validates(name: value.identity.vmName) else {
             throw PommeMDMEnrollmentWorkflowError.leaseRequired
         }
@@ -642,7 +710,7 @@ struct PommeMDMEnrollmentJournalStore: Sendable {
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let data: Data
         do { data = try encoder.encode(journal) }
-        catch { throw PommeMDMEnrollmentWorkflowError.malformedJournal }
+        catch { throw PommeMDMEnrollmentWorkflowError.unreadableJournal(cause: PommeErrorReport(error)) }
         guard data.count <= Self.maximumBytes else { throw PommeMDMEnrollmentWorkflowError.malformedJournal }
         try Self.writeAtomically(data, destination: journalURL, bundleURL: bundleURL)
     }

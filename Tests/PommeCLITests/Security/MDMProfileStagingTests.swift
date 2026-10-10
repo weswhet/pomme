@@ -52,7 +52,10 @@ struct MDMProfileStagingTests {
     @Test("Enrollment errors redact credentials and private details")
     func errorsAreRedacted() {
         let error = SensitiveFailure()
-        #expect(MDMEnrollmentRedaction.errorMessage(error) == "MDM enrollment failed; sensitive details were redacted.")
+        let message = MDMEnrollmentRedaction.errorMessage(error)
+        #expect(message == "MDM enrollment failed with error code internal-error.")
+        #expect(!message.contains("Password"))
+        #expect(!message.contains("pomme-mdm-enrollment"))
     }
 
     private func applicationSource() throws -> String {

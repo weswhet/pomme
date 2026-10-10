@@ -33,7 +33,7 @@ struct StartExistingRuntimeTests {
                     displayName: "dev"
                 )
             } throws: { error in
-                "\(error)".contains("dev is already \(word) in recovery boot mode")
+                error.localizedDescription.contains("dev is already \(word) in recovery boot mode")
             }
         }
     }

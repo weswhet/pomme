@@ -7,28 +7,54 @@ import Security
 /// Errors from the terminal bootstrap deliberately contain no paths, request
 /// payloads, or credential material. A Recovery session is one-shot, so an
 /// uncertain failure is terminal until its caller has completed cleanup.
-enum PommeRecoveryVirtioFSBootstrapError: Error, LocalizedError, Equatable, Sendable {
-    case invalidInput
-    case sourceRejected
-    case signatureRejected
+enum PommeRecoveryVirtioFSBootstrapError: PommeDescribedError, Equatable, Sendable {
+    case invalidInput(PommeRetainedCause = .init())
+    case sourceRejected(PommeRetainedCause = .init())
+    case signatureRejected(PommeRetainedCause = .init())
     case digestRejected
     case cleanupFailed
     case shareReleaseFailed
 
+    var code: PommeErrorCode {
+        switch self {
+        case .invalidInput: .recoveryRequestRejected
+        case .sourceRejected, .signatureRejected, .digestRejected: .recoveryLauncherRejected
+        case .cleanupFailed, .shareReleaseFailed: .recoveryCleanupUnverified
+        }
+    }
+
     var errorDescription: String? {
         switch self {
-        case .invalidInput:
-            "Recovery VirtioFS bootstrap input was rejected."
-        case .sourceRejected:
-            "Recovery VirtioFS bootstrap executable was rejected."
-        case .signatureRejected:
-            "Recovery VirtioFS bootstrap executable signature was rejected."
+        case .invalidInput(let cause):
+            cause.describing("The Recovery bootstrap request has a missing or invalid value, so Pomme didn't stage any files.")
+        case .sourceRejected(let cause):
+            cause.describing("Pomme couldn't verify the `pomme` executable that it copies into Recovery.")
+        case .signatureRejected(let cause):
+            cause.describing("The `pomme` executable's code signature didn't verify, so Pomme didn't copy it into Recovery.")
         case .digestRejected:
-            "Recovery VirtioFS bootstrap executable digest was rejected."
+            "The `pomme` executable changed while Pomme copied it for Recovery."
         case .cleanupFailed:
-            "Recovery VirtioFS bootstrap cleanup could not be proven complete."
+            "Pomme couldn't remove the Recovery bootstrap files."
         case .shareReleaseFailed:
-            "Recovery VirtioFS bootstrap share release could not be verified."
+            "Pomme couldn't detach the Recovery bootstrap directory share from the VM and confirm that it's gone."
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .sourceRejected, .signatureRejected, .digestRejected:
+            "Reinstall Pomme with `pomme update`, then run the same command again."
+        case .cleanupFailed, .shareReleaseFailed:
+            "Run `pomme stop NAME`, then run the same command again; Pomme cleans up the earlier session first."
+        case .invalidInput:
+            nil
+        }
+    }
+
+    var underlying: (any Error)? {
+        switch self {
+        case .invalidInput(let cause), .sourceRejected(let cause), .signatureRejected(let cause): cause.underlying
+        default: nil
         }
     }
 }
@@ -86,7 +112,7 @@ struct PommeRecoveryVirtioFSTerminalPlan: Equatable, Sendable {
               let operation = PommeRecoveryOperation(wireName: request.operation),
               operation.listenerPort.rawValue == request.listenerPort,
               Self.isSHA256(request.executableSHA256)
-        else { throw PommeRecoveryVirtioFSBootstrapError.invalidInput }
+        else { throw PommeRecoveryVirtioFSBootstrapError.invalidInput() }
 
         let binding = PommeRecoveryVirtioFSBinding(
             vmUUID: request.vmUUID,
@@ -103,7 +129,7 @@ struct PommeRecoveryVirtioFSTerminalPlan: Equatable, Sendable {
         let runScript = "\(mountWorkspace)/run"
         let tag = PommeRecoveryStagingBuilder.tag(for: request)
         guard Self.validTag(tag), tag.utf8.count <= Self.maximumTagLength else {
-            throw PommeRecoveryVirtioFSBootstrapError.invalidInput
+            throw PommeRecoveryVirtioFSBootstrapError.invalidInput()
         }
 
         let requestData = try Self.canonicalRequestData(request)
@@ -132,7 +158,7 @@ struct PommeRecoveryVirtioFSTerminalPlan: Equatable, Sendable {
               Self.keyboardSafe(launch),
               probe.utf8.count <= Self.maximumCommandLength,
               launch.utf8.count <= Self.maximumCommandLength
-        else { throw PommeRecoveryVirtioFSBootstrapError.invalidInput }
+        else { throw PommeRecoveryVirtioFSBootstrapError.invalidInput() }
 
         capabilityProbes = [.init(command: probe, marker: marker)]
         commands = [launch]
@@ -393,7 +419,7 @@ final class PommeRecoveryVirtioFSBootstrap: @unchecked Sendable {
               terminalPlan.binding.vmUUID == request.vmUUID,
               terminalPlan.binding.requestID == request.requestID,
               staging.proof.isComplete
-        else { throw PommeRecoveryVirtioFSBootstrapError.invalidInput }
+        else { throw PommeRecoveryVirtioFSBootstrapError.invalidInput() }
         self.request = request
         self.terminalPlan = terminalPlan
         self.staging = staging
@@ -461,10 +487,10 @@ enum PommeRecoveryVirtioFSBootstrapConfiguration {
     ) throws -> [VZDirectorySharingDeviceConfiguration] {
         guard bootMode == .recovery, recoveryAgentEnabled else { return [] }
         guard let preparedBootstrap else {
-            throw PommeRecoveryVirtioFSBootstrapError.invalidInput
+            throw PommeRecoveryVirtioFSBootstrapError.invalidInput()
         }
         guard preparedBootstrap.directorySharingDevices.count == 1 else {
-            throw PommeRecoveryVirtioFSBootstrapError.invalidInput
+            throw PommeRecoveryVirtioFSBootstrapError.invalidInput()
         }
         return preparedBootstrap.directorySharingDevices
     }
@@ -501,7 +527,7 @@ struct PommeRecoveryVirtioFSBootstrapBuilder: Sendable {
                       SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures),
                       nil
                   ) == errSecSuccess
-            else { throw PommeRecoveryVirtioFSBootstrapError.signatureRejected }
+            else { throw PommeRecoveryVirtioFSBootstrapError.signatureRejected() }
         }
     }
 
@@ -515,11 +541,11 @@ struct PommeRecoveryVirtioFSBootstrapBuilder: Sendable {
         guard input.request.isWellFormed,
               input.credential.matches(request: input.request),
               PommeRecoveryOperation(wireName: input.request.operation) != nil
-        else { throw PommeRecoveryVirtioFSBootstrapError.invalidInput }
+        else { throw PommeRecoveryVirtioFSBootstrapError.invalidInput() }
 
         let terminalPlan: PommeRecoveryVirtioFSTerminalPlan
         do { terminalPlan = try .init(request: input.request) }
-        catch { throw PommeRecoveryVirtioFSBootstrapError.invalidInput }
+        catch { throw PommeRecoveryVirtioFSBootstrapError.invalidInput(PommeRetainedCause(error)) }
 
         let staging: PommeRecoveryStaging
         do {
@@ -535,17 +561,17 @@ struct PommeRecoveryVirtioFSBootstrapBuilder: Sendable {
             ))
         } catch let error as PommeRecoveryStagingError {
             switch error {
-            case .signatureRejected:
-                throw PommeRecoveryVirtioFSBootstrapError.signatureRejected
+            case .signatureRejected(let cause):
+                throw PommeRecoveryVirtioFSBootstrapError.signatureRejected(cause)
             case .identityChanged:
                 throw PommeRecoveryVirtioFSBootstrapError.digestRejected
             case .sourceRejected:
-                throw PommeRecoveryVirtioFSBootstrapError.sourceRejected
+                throw PommeRecoveryVirtioFSBootstrapError.sourceRejected()
             default:
-                throw PommeRecoveryVirtioFSBootstrapError.invalidInput
+                throw PommeRecoveryVirtioFSBootstrapError.invalidInput(PommeRetainedCause(error))
             }
         } catch {
-            throw PommeRecoveryVirtioFSBootstrapError.sourceRejected
+            throw PommeRecoveryVirtioFSBootstrapError.sourceRejected(PommeRetainedCause(error))
         }
 
         do {
@@ -556,7 +582,7 @@ struct PommeRecoveryVirtioFSBootstrapBuilder: Sendable {
             )
         } catch {
             try? staging.removeHostArtifacts()
-            throw PommeRecoveryVirtioFSBootstrapError.invalidInput
+            throw PommeRecoveryVirtioFSBootstrapError.invalidInput(PommeRetainedCause(error))
         }
     }
 

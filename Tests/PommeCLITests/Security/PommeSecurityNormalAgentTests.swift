@@ -524,7 +524,7 @@ struct PommeSecurityNormalAgentTests {
       }
       #expect(diagnostic.stage == item.stage)
       #expect(diagnostic.reason == item.reason)
-      #expect(diagnostic.code == "normal-agent-\(item.stage.rawValue)-\(item.reason.rawValue)")
+      #expect(diagnostic.diagnosticCode == "normal-agent-\(item.stage.rawValue)-\(item.reason.rawValue)")
     }
 
     var malformedFrames = response(exitCode: Int64(0))
@@ -566,9 +566,9 @@ struct PommeSecurityNormalAgentTests {
     }
     #expect(diagnostic.stage == .aqua)
     #expect(diagnostic.reason == .timedOut)
-    #expect(diagnostic.code == "normal-agent-aqua-timedOut")
+    #expect(diagnostic.diagnosticCode == "normal-agent-aqua-timedOut")
     let description = diagnostic.errorDescription ?? ""
-    #expect(description == "Normal agent verification failed (normal-agent-aqua-timedOut).")
+    #expect(description == "Pomme couldn't verify the owner's desktop session because the check timed out (normal-agent-aqua-timedOut).")
     #expect(!description.contains("pinned"))
     #expect(!description.contains(secret))
   }
@@ -637,7 +637,7 @@ struct PommeSecurityNormalAgentTests {
   func transportDiagnosticIsRedacted() throws {
     let diagnostic = PommeSecurityNormalAgent.transportDiagnostic(stage: .processList)
     #expect(diagnostic == .init(stage: .processList, reason: .transport))
-    #expect(diagnostic.code == "normal-agent-ps-transport")
+    #expect(diagnostic.diagnosticCode == "normal-agent-ps-transport")
     #expect(!(diagnostic.errorDescription ?? "").contains("password"))
 
     let helperFailure: [String: Any] = [
@@ -661,7 +661,7 @@ struct PommeSecurityNormalAgentTests {
     let responseDiagnostic = try #require(PommeSecurityNormalAgent.diagnostic(
       for: response, stage: .console))
     let responseDescription = responseDiagnostic.errorDescription ?? ""
-    #expect(responseDiagnostic.code == "normal-agent-console-incomplete")
+    #expect(responseDiagnostic.diagnosticCode == "normal-agent-console-incomplete")
     #expect(!responseDescription.contains("do-not-log"))
     #expect(!responseDescription.contains("/private/secret"))
   }
@@ -699,7 +699,7 @@ struct PommeSecurityNormalAgentTests {
     #expect(failure["ok"] as? Bool == false)
     #expect(failure["hostExitCode"] as? Int == 1)
     #expect(PommeSecurityNormalAgent.transportCause(in: failure) == expected)
-    #expect(PommeSecurityNormalAgent.diagnostic(for: failure, stage: .processList)?.code == "normal-agent-ps-transport")
+    #expect(PommeSecurityNormalAgent.diagnostic(for: failure, stage: .processList)?.diagnosticCode == "normal-agent-ps-transport")
     #expect(!expected.rawValue.contains("private-synthetic-sentinel"))
 
     var untrusted = failure
@@ -931,7 +931,7 @@ struct PommeSecurityNormalAgentTests {
     trace.scheduleError = true
     let agent = makeRebootAgent(trace: trace)
 
-    await #expect(throws: PommeSecurityNormalAgentError.rebootRequestFailed) {
+    await #expect(throws: PommeSecurityNormalAgentError.rebootRequestFailed()) {
       try await agent.rebootAndAuthenticate(timeout: 5)
     }
     #expect(trace.starts == 0)
@@ -946,7 +946,7 @@ struct PommeSecurityNormalAgentTests {
     trace.authenticationError = true
     let agent = makeRebootAgent(trace: trace)
 
-    await #expect(throws: PommeSecurityNormalAgentError.rebootAgentUnverified) {
+    await #expect(throws: PommeSecurityNormalAgentError.rebootAgentUnverified()) {
       try await agent.rebootAndAuthenticate(timeout: 5)
     }
     #expect(trace.events == [.authenticate])

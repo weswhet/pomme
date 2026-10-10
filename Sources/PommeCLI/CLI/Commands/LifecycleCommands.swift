@@ -354,7 +354,7 @@ struct StartCommand: ParsableCommand {
         var options = CLIOptions()
         options.timeout = timeout
         options.debug = output.debug
-        let results = try targets.map {
+        let results = try CLIOutputWriter.batch(targets) {
             try PommeApplication.boot(name: $0, mode: mode, options: options)
         }
         try CLIOutputWriter.write(results, options: output)
@@ -384,7 +384,7 @@ struct StopCommand: ParsableCommand {
         let targets = all
             ? try VMTargetResolver.allNames(states: ["running", "paused"])
             : try VMTargetResolver.names(from: names)
-        let results = try targets.map { try PommeEnvironment.live().lifecycle.stop($0, force) }
+        let results = try CLIOutputWriter.batch(targets) { try PommeEnvironment.live().lifecycle.stop($0, force) }
         try CLIOutputWriter.write(results, options: output)
     }
 }
@@ -413,7 +413,7 @@ struct RestartCommand: ParsableCommand {
         var options = CLIOptions()
         options.timeout = timeout
         options.debug = output.debug
-        let results = try targets.map {
+        let results = try CLIOutputWriter.batch(targets) {
             try PommeApplication.restart(name: $0, mode: mode, options: options)
         }
         try CLIOutputWriter.write(results, options: output)
@@ -440,7 +440,7 @@ struct PauseCommand: ParsableCommand {
         let targets = all
             ? try VMTargetResolver.allNames(states: ["running"])
             : try VMTargetResolver.names(from: names)
-        let results = try targets.map(PommeEnvironment.live().lifecycle.pause)
+        let results = try CLIOutputWriter.batch(targets) { try PommeEnvironment.live().lifecycle.pause($0) }
         try CLIOutputWriter.write(results, options: output)
     }
 }
@@ -465,7 +465,7 @@ struct ResumeCommand: ParsableCommand {
         let targets = all
             ? try VMTargetResolver.allNames(states: ["paused"])
             : try VMTargetResolver.names(from: names)
-        let results = try targets.map(PommeEnvironment.live().lifecycle.resume)
+        let results = try CLIOutputWriter.batch(targets) { try PommeEnvironment.live().lifecycle.resume($0) }
         try CLIOutputWriter.write(results, options: output)
     }
 }
@@ -502,7 +502,7 @@ struct DeleteCommand: ParsableCommand {
         if !targets.isEmpty {
             try CLIConfirmation.confirmDeletion(of: targets, force: force)
         }
-        let results = try targets.map { try PommeEnvironment.live().lifecycle.destroy($0, force) }
+        let results = try CLIOutputWriter.batch(targets) { try PommeEnvironment.live().lifecycle.destroy($0, force) }
         try CLIOutputWriter.write(results, options: output)
     }
 }
@@ -518,7 +518,7 @@ struct StatusCommand: ParsableCommand {
 
     mutating func run() throws {
         let targets = try VMTargetResolver.names(from: names)
-        let results = try targets.map(PommeEnvironment.live().lifecycle.status)
+        let results = try CLIOutputWriter.batch(targets) { try PommeEnvironment.live().lifecycle.status($0) }
         try CLIOutputWriter.write(results, options: output)
     }
 }
@@ -534,7 +534,7 @@ struct InspectCommand: ParsableCommand {
 
     mutating func run() throws {
         let targets = try VMTargetResolver.names(from: names)
-        let results = try targets.map(PommeEnvironment.live().lifecycle.inspect)
+        let results = try CLIOutputWriter.batch(targets) { try PommeEnvironment.live().lifecycle.inspect($0) }
         try CLIOutputWriter.write(results, options: output)
     }
 }

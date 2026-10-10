@@ -62,7 +62,7 @@ enum PommeRecoveryOperation: Equatable, Sendable {
     }
 }
 
-enum PommeRecoverySessionError: Error, LocalizedError, Equatable, Sendable {
+enum PommeRecoverySessionError: PommeDescribedError, Equatable, Sendable {
     case invalidRequest
     case expiredCredential
     case invalidCredential
@@ -75,45 +75,87 @@ enum PommeRecoverySessionError: Error, LocalizedError, Equatable, Sendable {
     case observationTimedOut
     case terminalProofFailed
     case rootEvidenceRejected
-    case preparationFailed
-    case guestOperationFailed
-    case cleanupFailed
+    case preparationFailed(PommeRetainedCause = .init())
+    case guestOperationFailed(PommeRetainedCause = .init())
+    case cleanupFailed(PommeRetainedCause = .init())
     case finalStateUnverified
+
+    /// A cleanup failure for `error`, or `error` itself when it already is one.
+    static func cleanupFailure(_ error: any Error) -> Self {
+        if let session = error as? Self, case .cleanupFailed = session { return session }
+        return .cleanupFailed(PommeRetainedCause(error))
+    }
+
+    var code: PommeErrorCode {
+        switch self {
+        case .invalidRequest, .requestMismatch: .recoveryRequestRejected
+        case .expiredCredential, .invalidCredential, .invalidProof, .replayedCredential: .recoveryAuthenticationFailed
+        case .notPrepared, .unauthenticated, .invalidLifecycle: .recoverySessionInvalid
+        case .observationTimedOut: .recoveryTimedOut
+        case .terminalProofFailed: .uiRecoveryTerminalUnverified
+        case .rootEvidenceRejected: .recoveryWorkspaceUnverified
+        case .preparationFailed, .guestOperationFailed: .recoveryOperationFailed
+        case .cleanupFailed: .recoveryCleanupUnverified
+        case .finalStateUnverified: .recoveryFinalStateUnverified
+        }
+    }
 
     var errorDescription: String? {
         switch self {
         case .invalidRequest:
-            "Recovery request was rejected."
+            "The Recovery request has a missing or out-of-range value, so Pomme didn't send it."
         case .expiredCredential:
-            "Recovery credential has expired."
+            "The one-time Recovery credential expired before the Recovery agent used it."
         case .invalidCredential:
-            "Recovery credential was rejected."
+            "The Recovery agent presented a one-time credential that doesn't match the request."
         case .invalidProof:
-            "Recovery authentication proof was rejected."
+            "The Recovery agent's authentication proof doesn't match the request."
         case .replayedCredential:
-            "Recovery credential has already been consumed."
+            "The one-time Recovery credential was already used."
         case .requestMismatch:
-            "Recovery request binding did not match the active VM."
+            "The Recovery request doesn't match this VM, its executable, or its requested final state."
         case .notPrepared:
-            "Recovery session has not prepared its request-bound workspace."
+            "The Recovery session ran a step before it prepared its workspace."
         case .unauthenticated:
-            "Recovery operation requires an authenticated session."
+            "The Recovery session tried to run an operation before the Recovery agent authenticated."
         case .invalidLifecycle:
-            "Recovery session lifecycle transition was rejected."
+            "The Recovery session ran a step out of order or more than once."
         case .observationTimedOut:
-            "Recovery display observation timed out."
+            "macOS Recovery didn't show the expected screen within the time limit."
         case .terminalProofFailed:
-            "Recovery Terminal capability proof failed."
+            "Pomme couldn't confirm that Terminal in Recovery can run the Pomme agent."
         case .rootEvidenceRejected:
-            "Recovery workspace evidence was incomplete."
-        case .preparationFailed:
-            "Recovery session preparation failed."
-        case .guestOperationFailed:
-            "Recovery operation did not complete."
-        case .cleanupFailed:
-            "Recovery cleanup could not be proven complete."
+            "The Recovery agent's workspace doesn't match the one that Pomme prepared."
+        case .preparationFailed(let cause):
+            cause.describing("Pomme couldn't prepare the Recovery session.")
+        case .guestOperationFailed(let cause):
+            cause.describing("The Recovery agent didn't complete the operation.")
+        case .cleanupFailed(let cause):
+            cause.describing("Pomme couldn't confirm that the Recovery session's files were removed.")
         case .finalStateUnverified:
-            "The requested VM final state could not be verified."
+            "Pomme couldn't confirm that the VM reached the requested final state after Recovery."
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .expiredCredential, .invalidCredential, .invalidProof, .replayedCredential, .observationTimedOut:
+            "Run `pomme stop NAME`, then run the same command again to start a new Recovery session."
+        case .terminalProofFailed:
+            "Run `pomme stop NAME`, then run the same command again with `--debug` to save Recovery screenshots."
+        case .cleanupFailed:
+            "Run `pomme stop NAME`, then run the same command again; Pomme cleans up the earlier session first."
+        case .finalStateUnverified:
+            "Run `pomme status NAME` to see the VM's state."
+        default:
+            nil
+        }
+    }
+
+    var underlying: (any Error)? {
+        switch self {
+        case .preparationFailed(let cause), .guestOperationFailed(let cause), .cleanupFailed(let cause): cause.underlying
+        default: nil
         }
     }
 }
@@ -583,7 +625,7 @@ actor PommeRecoverySession {
             throw CancellationError()
         } catch {
             lifecycle = .failed
-            throw PommeRecoverySessionError.preparationFailed
+            throw PommeRecoverySessionError.preparationFailed(PommeRetainedCause(error))
         }
     }
 
@@ -646,7 +688,7 @@ actor PommeRecoverySession {
                 payload: payload
             )
             guard result.count <= 256 * 1024 else {
-                throw PommeRecoverySessionError.guestOperationFailed
+                throw PommeRecoverySessionError.guestOperationFailed()
             }
             return result
         } catch let error as PommeRecoveryGuestOperationFailure {
@@ -657,7 +699,7 @@ actor PommeRecoverySession {
             throw error
         } catch {
             lifecycle = .failed
-            throw PommeRecoverySessionError.guestOperationFailed
+            throw PommeRecoverySessionError.guestOperationFailed(PommeRetainedCause(codesOnly: error))
         }
     }
 
@@ -671,7 +713,7 @@ actor PommeRecoverySession {
             // No root was prepared, so there is no known artifact set to
             // clean. This is an unknown state and must fail closed.
             lifecycle = .failed
-            throw PommeRecoverySessionError.cleanupFailed
+            throw PommeRecoverySessionError.cleanupFailed()
         }
         lifecycle = .cleanup
         await guest.close()
@@ -679,7 +721,7 @@ actor PommeRecoverySession {
             let cleanup = try await root.cleanup(request: request)
             guard cleanup.isComplete else {
                 lifecycle = .failed
-                throw PommeRecoverySessionError.cleanupFailed
+                throw PommeRecoverySessionError.cleanupFailed()
             }
             cleaned = true
             lifecycle = .cleaned
@@ -689,14 +731,14 @@ actor PommeRecoverySession {
             throw error
         } catch {
             lifecycle = .failed
-            throw PommeRecoverySessionError.cleanupFailed
+            throw PommeRecoverySessionError.cleanupFailed(PommeRetainedCause(error))
         }
     }
 
     /// Cleanup precedes the requested final-state transition. A failed
     /// cleanup intentionally leaves final state untouched and unverified.
     func finalize(_ finalState: VMFinalState) async throws -> PommeRecoverySessionEvidence {
-        guard lifecycle == .cleaned else { throw PommeRecoverySessionError.cleanupFailed }
+        guard lifecycle == .cleaned else { throw PommeRecoverySessionError.cleanupFailed() }
         guard request.requestedFinalState == finalState.rawValue else {
             lifecycle = .failed
             throw PommeRecoverySessionError.requestMismatch
@@ -780,9 +822,9 @@ actor PommeRecoverySession {
 
         do {
             if lifecycle != .created { _ = try await teardown() }
-            else { throw PommeRecoverySessionError.cleanupFailed }
+            else { throw PommeRecoverySessionError.cleanupFailed() }
         } catch {
-            throw PommeRecoverySessionError.cleanupFailed
+            throw PommeRecoverySessionError.cleanupFailure(error)
         }
         _ = try await finalize(finalState)
         return try primary.get()
@@ -808,13 +850,13 @@ actor PommeRecoverySession {
         }
 
         guard preparationAttempted else {
-            throw PommeRecoverySessionError.cleanupFailed
+            throw PommeRecoverySessionError.cleanupFailed()
         }
         let cleanup: PommeRecoveryCleanupEvidence
         do {
             cleanup = try await teardown()
         } catch {
-            throw PommeRecoverySessionError.cleanupFailed
+            throw PommeRecoverySessionError.cleanupFailure(error)
         }
         _ = try await finalize(finalState)
         let output: Data

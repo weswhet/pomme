@@ -153,7 +153,7 @@ struct PommeRecoverySessionTests {
         _ = try await session.prepare()
         let challenge = try await session.challenge()
         let proof = credential.proof(for: request, challenge: challenge)
-        await #expect(throws: PommeRecoverySessionError.guestOperationFailed) {
+        await #expect(throws: PommeRecoverySessionError.guestOperationFailed()) {
             try await session.execute(
                 challenge: challenge,
                 proof: proof,
@@ -183,7 +183,7 @@ struct PommeRecoverySessionTests {
         _ = try await session.prepare()
         let challenge = try await session.challenge()
         let proof = credential.proof(for: request, challenge: challenge)
-        await #expect(throws: PommeRecoverySessionError.cleanupFailed) {
+        await #expect(throws: PommeRecoverySessionError.cleanupFailed()) {
             try await session.execute(challenge: challenge, proof: proof, finalState: .normal)
         }
         #expect(await vm.finalStateRequests.isEmpty)
@@ -243,7 +243,7 @@ struct PommeRecoverySessionTests {
             now: { now }
         )
 
-        await #expect(throws: PommeRecoverySessionError.preparationFailed) {
+        await #expect(throws: PommeRecoverySessionError.preparationFailed()) {
             _ = try await session.run(finalState: .previous)
         }
         #expect(await root.cleanupCount == 1)
@@ -358,9 +358,9 @@ struct PommeRecoverySessionTests {
             _ = try await session.run(finalState: .stopped)
             Issue.record("The typed guest failure was reported as success.")
         } catch let error as PommeRecoveryGuestOperationFailure {
-            #expect(error.code == .rollbackFailed)
+            #expect(error.failureCode == .rollbackFailed)
             #expect(error.phase == .rollbackFailed)
-            #expect(error.localizedDescription.contains("retained transaction"))
+            #expect(error.localizedDescription.contains("kept the operation's progress"))
         }
         #expect(await root.cleanupCount == 1)
         #expect(await vm.finalStateRequests == [.stopped])
@@ -482,7 +482,7 @@ private actor GuestMock: PommeRecoveryGuestPort {
 
     func perform(operation: String, requestID: UUID, payload: Data) async throws -> Data {
         if let failureCode { throw PommeRecoveryGuestOperationFailure(code: failureCode) }
-        if failure { throw PommeRecoverySessionError.guestOperationFailed }
+        if failure { throw PommeRecoverySessionError.guestOperationFailed() }
         return Data("ok".utf8)
     }
 

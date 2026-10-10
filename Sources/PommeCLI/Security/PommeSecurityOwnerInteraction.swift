@@ -36,7 +36,7 @@ struct PommeSecurityOwnerInteraction: Sendable {
       (try? validateGuestAccountName(user, flag: "owner account")) != nil,
       let password = readPrivate("Password for \(user) on \(vmName): ")
     else {
-      throw PommeSecurityWorkflowError.ownerUnavailable
+      throw PommeSecurityWorkflowError.ownerUnavailable()
     }
     return try .init(username: user, password: password)
   }
@@ -55,7 +55,7 @@ struct PommeSecurityOwnerInteraction: Sendable {
     guard let user, let password,
       (try? validateGuestAccountName(user, flag: "POMME_AUTHORIZED_USER")) != nil
     else {
-      throw PommeSecurityWorkflowError.ownerUnavailable
+      throw PommeSecurityWorkflowError.ownerUnavailable()
     }
     return try .init(username: user, password: password)
   }

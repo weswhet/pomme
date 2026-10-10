@@ -48,9 +48,33 @@ struct PommeControlRequest: Codable, Equatable, Sendable {
     }
 }
 
-struct PommeControlError: Codable, Equatable, Error, Sendable {
+struct PommeControlError: Codable, Equatable, LocalizedError, Sendable {
     let code: String
     let message: String
+    /// The helper's description of the failure, with its Pomme code and
+    /// causes. Helpers before 0.2.1 don't send it, and older clients ignore
+    /// it.
+    let report: PommeErrorReport?
+
+    var errorDescription: String? { report?.message ?? message }
+
+    init(code: String, message: String, report: PommeErrorReport? = nil) {
+        self.code = code
+        self.message = message
+        self.report = report
+    }
+
+    /// The error a client throws for this failure: the helper's own report
+    /// when it sent one, or the code and message from an older helper.
+    var clientError: any Error {
+        if let report { return RemotePommeError(report) }
+        return RunnerError.controlCommandFailed("\(code): \(message)")
+    }
+
+    /// The error for a failed response, or for a response that was missing.
+    static func clientError(_ error: PommeControlError?, missing: String) -> any Error {
+        error?.clientError ?? RunnerError.controlCommandFailed(missing)
+    }
 }
 
 struct PommeControlResponse: Codable, Equatable, Sendable {
@@ -65,8 +89,8 @@ struct PommeControlResponse: Codable, Equatable, Sendable {
         .init(type: "response", protocolVersion: PommeControlProtocol.version, id: id, ok: true, result: result, error: nil)
     }
 
-    static func failure(id: UUID, code: String, message: String) -> Self {
-        .init(type: "response", protocolVersion: PommeControlProtocol.version, id: id, ok: false, result: nil, error: .init(code: code, message: message))
+    static func failure(id: UUID, code: String, message: String, report: PommeErrorReport? = nil) -> Self {
+        .init(type: "response", protocolVersion: PommeControlProtocol.version, id: id, ok: false, result: nil, error: .init(code: code, message: message, report: report))
     }
 }
 
@@ -302,7 +326,7 @@ final class PommeControlStreamSession: @unchecked Sendable {
                     }
                     return try reader.readFrame(from: fileDescriptor, deadline: deadline)
                 }
-            } catch let error as POSIXError where error.code == .ETIMEDOUT {
+            } catch RunnerError.controlSocketTimedOut {
                 // A partial JSONL frame stays buffered inside FrameReader and
                 // remains subject to the caller's next bounded deadline.
                 return nil
@@ -345,7 +369,9 @@ struct PommeSnapshotSaveRequest: Sendable {
 
     static func parse(from object: [String: Any]) throws -> Self {
         guard let stageName = object["stageName"] as? String, !stageName.isEmpty, stageName.count <= 256, !stageName.contains("/"), stageName != ".", stageName != ".." else {
-            throw RunnerError.invalidControlCommand("snapshot-save")
+            throw RunnerError.invalidRequest(
+                field: "stageName",
+                reason: "must be 1 to 256 characters, must not contain a slash, and must not be . or ..")
         }
         return .init(stageName: stageName)
     }
@@ -479,15 +505,19 @@ struct PommeAgentPerformRequest: Sendable {
     let payload: JSONValue?
 
     static func parse(from object: [String: JSONValue]) throws -> Self {
-        guard let operation = object["operation"]?.stringValue,
-              operation.count <= 128,
-              allowed(operation)
-        else { throw RunnerError.invalidControlCommand("agent.perform") }
+        guard let operation = object["operation"]?.stringValue, !operation.isEmpty, operation.count <= 128 else {
+            throw RunnerError.invalidRequest(field: "operation", reason: "must be an operation name of 1 to 128 characters.")
+        }
+        // An operation outside the allowlist is one the helper doesn't
+        // support, not a malformed value.
+        guard allowed(operation) else { throw RunnerError.invalidControlCommand(operation) }
         let payload = object["payload"]
-        if let payload, payload.objectValue == nil { throw RunnerError.invalidControlCommand("agent.perform") }
+        if let payload, payload.objectValue == nil {
+            throw RunnerError.invalidRequest(field: "payload", reason: "must be a JSON object.")
+        }
         if operation == "buddy.preferences.status" {
             guard Set(object.keys) == ["operation", "payload"], payload == .object([:]) else {
-                throw RunnerError.invalidControlCommand("agent.perform")
+                throw RunnerError.invalidRequest(field: "payload", reason: "must be an empty JSON object for buddy.preferences.status.")
             }
         }
         return .init(operation: operation, payload: payload)
@@ -549,17 +579,16 @@ struct PommeLogShowRequest: Sendable {
     static func parse(from object: [String: JSONValue]) throws -> Self {
         let allowed: Set<String> = ["last", "categories", "level", "format", "timeout"]
         guard Set(object.keys).isSubset(of: allowed) else {
-            throw RunnerError.invalidControlCommand("logs.show")
+            throw RunnerError.invalidRequest(
+                field: "logs.show request",
+                reason: "accepts only the keys last, categories, level, format, and timeout.")
         }
-        let lastValue = try optionalString(object["last"], default: defaultLast, command: "logs.show")
-        let last = try validatedLast(lastValue, command: "logs.show")
-        let categories = try validatedCategories(object["categories"], command: "logs.show")
-        let level = try validatedLevel(
-            optionalString(object["level"], default: "info", command: "logs.show"), command: "logs.show")
-        let format = try validatedFormat(
-            optionalString(object["format"], default: "text", command: "logs.show"), command: "logs.show")
-        let timeout = try validatedTimeout(
-            object["timeout"] ?? .number(defaultTimeout), command: "logs.show")
+        let lastValue = try optionalString(object["last"], default: defaultLast, field: "--last")
+        let last = try validatedLast(lastValue)
+        let categories = try validatedCategories(object["categories"])
+        let level = try validatedLevel(optionalString(object["level"], default: "info", field: "--level"))
+        let format = try validatedFormat(optionalString(object["format"], default: "text", field: "--format"))
+        let timeout = try validatedTimeout(object["timeout"] ?? .number(defaultTimeout))
         return .init(last: last, categories: categories, level: level, format: format, timeout: timeout)
     }
 
@@ -598,14 +627,16 @@ struct PommeLogStreamRequest: Sendable {
     static func parse(from object: [String: JSONValue]) throws -> Self {
         let allowed: Set<String> = ["categories", "level", "format"]
         guard Set(object.keys).isSubset(of: allowed) else {
-            throw RunnerError.invalidControlCommand("logs.stream")
+            throw RunnerError.invalidRequest(
+                field: "logs.stream request",
+                reason: "accepts only the keys categories, level, and format.")
         }
-        let categories = try validatedCategories(object["categories"], command: "logs.stream")
-        let level = try validatedLevel(
-            optionalString(object["level"], default: "info", command: "logs.stream"), command: "logs.stream")
-        let format = try validatedFormat(
-            optionalString(object["format"], default: "text", command: "logs.stream"), command: "logs.stream")
-        guard format != .json else { throw RunnerError.invalidControlCommand("logs.stream") }
+        let categories = try validatedCategories(object["categories"])
+        let level = try validatedLevel(optionalString(object["level"], default: "info", field: "--level"))
+        let format = try validatedFormat(optionalString(object["format"], default: "text", field: "--format"))
+        guard format != .json else {
+            throw RunnerError.invalidRequest(field: "--format", reason: "must be text or jsonl with --follow.")
+        }
         return .init(categories: categories, level: level, format: format)
     }
 
@@ -642,32 +673,35 @@ private enum PommeLogPredicate {
     }
 }
 
-private func validatedLast(_ value: String, command: String) throws -> String {
+private func validatedLast(_ value: String) throws -> String {
+    let rule = "must be boot or a duration such as 30s, 5m, 2h, or 1d."
     guard value == "boot" else {
         guard let unit = value.last, ["s", "m", "h", "d"].contains(unit) else {
-            throw RunnerError.invalidControlCommand(command)
+            throw RunnerError.invalidRequest(field: "--last", reason: rule)
         }
         let number = value.dropLast()
         guard !number.isEmpty,
               number.utf8.allSatisfy({ (48...57).contains($0) || $0 == 46 }),
               number.utf8.filter({ $0 == 46 }).count <= 1,
               let parsed = Double(String(number)), parsed.isFinite, parsed > 0
-        else { throw RunnerError.invalidControlCommand(command) }
+        else { throw RunnerError.invalidRequest(field: "--last", reason: rule) }
         return value
     }
     return value
 }
 
-private func optionalString(_ value: JSONValue?, default defaultValue: String, command: String) throws -> String {
+private func optionalString(_ value: JSONValue?, default defaultValue: String, field: String) throws -> String {
     guard let value else { return defaultValue }
-    guard let text = value.stringValue else { throw RunnerError.invalidControlCommand(command) }
+    guard let text = value.stringValue else {
+        throw RunnerError.invalidRequest(field: field, reason: "must be a string.")
+    }
     return text
 }
 
-private func validatedCategories(_ value: JSONValue?, command: String) throws -> [String] {
+private func validatedCategories(_ value: JSONValue?) throws -> [String] {
     guard let value else { return [] }
     guard case .array(let raw) = value, raw.count <= 64 else {
-        throw RunnerError.invalidControlCommand(command)
+        throw RunnerError.invalidRequest(field: "--category", reason: "accepts at most 64 categories.")
     }
     let categories = raw.compactMap(\.stringValue)
     guard categories.count == raw.count,
@@ -676,33 +710,38 @@ private func validatedCategories(_ value: JSONValue?, command: String) throws ->
                   && $0.utf8.count <= 1_024
                   && !$0.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
           })
-    else { throw RunnerError.invalidControlCommand(command) }
+    else {
+        throw RunnerError.invalidRequest(
+            field: "--category",
+            reason: "must be non-empty text of at most 1,024 bytes without control characters.")
+    }
     return categories
 }
 
-private func validatedLevel(_ value: String, command: String) throws -> String {
+private func validatedLevel(_ value: String) throws -> String {
     guard ["default", "info", "debug"].contains(value) else {
-        throw RunnerError.invalidControlCommand(command)
+        throw RunnerError.invalidRequest(field: "--level", reason: "must be default, info, or debug.")
     }
     return value
 }
 
-private func validatedFormat(_ value: String, command: String) throws -> PommeLogFormat {
+private func validatedFormat(_ value: String) throws -> PommeLogFormat {
     guard let format = PommeLogFormat(rawValue: value) else {
-        throw RunnerError.invalidControlCommand(command)
+        throw RunnerError.invalidRequest(field: "--format", reason: "must be text, json, or jsonl.")
     }
     return format
 }
 
-private func validatedTimeout(_ value: JSONValue, command: String) throws -> TimeInterval {
+private func validatedTimeout(_ value: JSONValue) throws -> TimeInterval {
+    let rule = "must be a number of seconds greater than 0 and at most \(Int(PommeLogShowRequest.maximumTimeout))."
     let timeout: TimeInterval
     switch value {
     case .integer(let value): timeout = TimeInterval(value)
     case .number(let value): timeout = value
-    default: throw RunnerError.invalidControlCommand(command)
+    default: throw RunnerError.invalidRequest(field: "--timeout", reason: rule)
     }
     guard timeout.isFinite, timeout > 0, timeout <= PommeLogShowRequest.maximumTimeout else {
-        throw RunnerError.invalidControlCommand(command)
+        throw RunnerError.invalidRequest(field: "--timeout", reason: rule)
     }
     return timeout
 }
@@ -732,6 +771,20 @@ enum PommeVMControlRequest: Sendable {
         // the terminal-session capability. The socket client checks the
         // transport feature separately.
         case .terminalSession: .terminalSessions
+        }
+    }
+
+    /// A short name for the helper log.
+    var logName: String {
+        switch self {
+        case .lifecycle(let command, _): command.rawValue
+        case .snapshotSave: "snapshot.save"
+        case .status: "status"
+        case .inspect: "inspect"
+        case .agentPerform(let request, _): request.operation
+        case .logsShow, .logsStream: "logs"
+        case .guestUI: "ui"
+        case .terminalSession(let request, _): request.operation
         }
     }
 }

@@ -8,22 +8,47 @@ import Foundation
 /// exact agent after Homebrew, the install script, or `pomme update` has
 /// replaced `pomme`.
 struct PommeAgentArtifactArchiver: Sendable {
-    enum Error: Swift.Error, LocalizedError, Equatable, Sendable {
+    enum Error: Swift.Error, PommeDescribedError, Equatable, Sendable {
         case unsafeStore
         case sourceRejected
         case digestMismatch
-        case writeFailed
+        /// `errno` is the system's reason, or 0 when there was none.
+        case writeFailed(errno: Int32)
+
+        var code: PommeErrorCode {
+            switch self {
+            case .unsafeStore: .agentArtifactStoreUnavailable
+            case .sourceRejected: .executableIdentityRejected
+            case .digestMismatch: .agentArtifactRejected
+            case .writeFailed(let code): code == ENOSPC ? .hostDiskFull : .agentArtifactWriteFailed
+            }
+        }
 
         var errorDescription: String? {
             switch self {
             case .unsafeStore:
-                "The Pomme agent artifact store is not a private directory."
+                "The Pomme agent artifact store isn't a private directory that you own."
             case .sourceRejected:
-                "The Pomme executable is not a readable regular file."
+                "The Pomme executable isn't a readable regular file."
             case .digestMismatch:
-                "The Pomme executable changed while it was copied."
+                "The Pomme executable changed while Pomme copied it into the agent artifact store."
+            case .writeFailed(let code) where code != 0:
+                "Pomme couldn't write the agent artifact: \(String(cString: strerror(code))) (errno \(code))."
             case .writeFailed:
-                "The Pomme agent artifact couldn't be written."
+                "Pomme couldn't write the agent artifact."
+            }
+        }
+
+        var recoverySuggestion: String? {
+            switch self {
+            case .unsafeStore:
+                "Make sure that `~/Library/Application Support/pomme/AgentArtifacts` and its parent directories belong to you and aren't writable by other users, then retry."
+            case .sourceRejected, .digestMismatch:
+                "Wait for any `pomme` update or reinstall to finish, then retry."
+            case .writeFailed(let code) where code == ENOSPC:
+                "Free space on the volume that holds your home directory, then retry."
+            case .writeFailed:
+                nil
             }
         }
     }
@@ -84,7 +109,7 @@ struct PommeAgentArtifactArchiver: Sendable {
         // RENAME_EXCL never replaces an entry that another process added
         // first. That entry is checked like any other.
         if renamex_np(temporary.path, destination.path, UInt32(RENAME_EXCL)) != 0, errno != EEXIST {
-            throw Error.writeFailed
+            throw Error.writeFailed(errno: errno)
         }
     }
 
@@ -128,7 +153,7 @@ struct PommeAgentArtifactArchiver: Sendable {
 
     private static func write(_ bytes: Data, to url: URL) throws {
         let descriptor = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-        guard descriptor >= 0 else { throw Error.writeFailed }
+        guard descriptor >= 0 else { throw Error.writeFailed(errno: errno) }
         defer { close(descriptor) }
         let written = bytes.withUnsafeBytes { buffer -> Int in
             var total = 0
@@ -140,8 +165,9 @@ struct PommeAgentArtifactArchiver: Sendable {
             }
             return total
         }
-        guard written == bytes.count, fchmod(descriptor, 0o555) == 0, fsync(descriptor) == 0 else {
-            throw Error.writeFailed
+        guard written == bytes.count else { throw Error.writeFailed(errno: errno) }
+        guard fchmod(descriptor, 0o555) == 0, fsync(descriptor) == 0 else {
+            throw Error.writeFailed(errno: errno)
         }
     }
 

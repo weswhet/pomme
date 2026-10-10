@@ -138,7 +138,7 @@ extension PommeSecurityWorkflow {
         if retained?.phase == .preflightIntent {
           try await PommeCore.restoreStableVMRunState(journal.originalRunState, reference: reference)
           guard try PommeCore.provesStableVMRunState(journal.originalRunState, reference: reference) else {
-            throw PommeSecurityWorkflowError.restorationIncomplete
+            throw PommeSecurityWorkflowError.restorationIncomplete()
           }
         }
         initialAMFIObservation = try await PommeSecurityAMFIPreflight.inspectRetained(
@@ -155,20 +155,20 @@ extension PommeSecurityWorkflow {
       } catch {
         let primary = error
         // A failed temporary-session cleanup is a barrier to another boot.
-        if (error as? PommeRecoverySessionError) == .cleanupFailed
-          || (error as? PommeLiveRecoveryIntegration.Error) == .cleanupFailed
-          || (error as? PommeSecurityWorkflowError) == .restorationIncomplete {
-          throw resumeGuided(PommeSecurityWorkflowError.restorationIncomplete)
+        if (error as? PommeRecoverySessionError) == .cleanupFailed()
+          || (error as? PommeLiveRecoveryIntegration.Error) == .cleanupFailed()
+          || (error as? PommeSecurityWorkflowError) == .restorationIncomplete() {
+          throw resumeGuided(PommeSecurityWorkflowError.restorationIncomplete(after: error))
         }
         do {
           try await PommeCore.restoreStableVMRunState(journal.originalRunState, reference: reference)
           guard try PommeCore.provesStableVMRunState(journal.originalRunState, reference: reference) else {
-            throw PommeSecurityWorkflowError.restorationIncomplete
+            throw PommeSecurityWorkflowError.restorationIncomplete()
           }
           if progress.journal.phase == .preflightIntent {
             try progress.advance(.preflightRejected)
           }
-        } catch { throw resumeGuided(PommeSecurityWorkflowError.restorationIncomplete) }
+        } catch { throw resumeGuided(PommeSecurityWorkflowError.restorationIncomplete(after: error)) }
         throw resumeGuided(primary)
       }
     }
@@ -313,7 +313,7 @@ extension PommeSecurityWorkflow {
       restore: { state in
         try await PommeCore.restoreStableVMRunState(state, reference: reference)
         guard try PommeCore.provesStableVMRunState(state, reference: reference) else {
-          throw PommeSecurityWorkflowError.restorationIncomplete
+          throw PommeSecurityWorkflowError.restorationIncomplete()
         }
       },
       log: { PommeCore.log($0, vmName: reference.displayName) },

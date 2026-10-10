@@ -35,19 +35,37 @@ protocol PommeVMFinalStatePort: Sendable {
     func prove(_ state: VMRunStateSnapshot) async throws -> Bool
 }
 
-enum VMStateTransactionError: Error, LocalizedError, Equatable, Sendable {
-    case captureFailed
-    case transitionFailed
-    case finalStateUnverified
+enum VMStateTransactionError: PommeDescribedError, Equatable, Sendable {
+    case captureFailed(PommeRetainedCause = .init())
+    case transitionFailed(PommeRetainedCause = .init())
+    case finalStateUnverified(PommeRetainedCause = .init())
+
+    var code: PommeErrorCode {
+        switch self {
+        case .captureFailed: .recoveryRunStateUnavailable
+        case .transitionFailed: .recoveryCleanupUnverified
+        case .finalStateUnverified: .recoveryFinalStateUnverified
+        }
+    }
 
     var errorDescription: String? {
         switch self {
-        case .captureFailed:
-            "VM run-state capture failed."
-        case .transitionFailed:
-            "VM run-state transition failed."
-        case .finalStateUnverified:
-            "VM final run state could not be verified."
+        case .captureFailed(let cause):
+            cause.describing("Pomme couldn't record whether the VM was running, paused, or stopped.")
+        case .transitionFailed(let cause):
+            cause.describing("Pomme couldn't finish Recovery cleanup before it restored the VM's run state.")
+        case .finalStateUnverified(let cause):
+            cause.describing("Pomme couldn't confirm that the VM returned to the requested run state.")
+        }
+    }
+
+    var recoverySuggestion: String? {
+        "Run `pomme status NAME` to see the VM's state."
+    }
+
+    var underlying: (any Error)? {
+        switch self {
+        case .captureFailed(let cause), .transitionFailed(let cause), .finalStateUnverified(let cause): cause.underlying
         }
     }
 }
@@ -70,19 +88,19 @@ struct VMStateTransaction: Sendable {
     func restore(finalState: VMFinalState, afterCleanup: @escaping @Sendable () async throws -> Void) async throws -> VMStateTransactionResult {
         let original: VMRunStateSnapshot
         do { original = try await port.captureRunState() }
-        catch { throw VMStateTransactionError.captureFailed }
+        catch { throw VMStateTransactionError.captureFailed(PommeRetainedCause(error)) }
         do { try await afterCleanup() }
-        catch { throw VMStateTransactionError.transitionFailed }
+        catch { throw VMStateTransactionError.transitionFailed(PommeRetainedCause(error)) }
         let requested = original.resolving(finalState)
         do {
             try await port.request(requested)
             guard try await port.prove(requested) else {
-                throw VMStateTransactionError.finalStateUnverified
+                throw VMStateTransactionError.finalStateUnverified()
             }
         } catch let error as VMStateTransactionError {
             throw error
         } catch {
-            throw VMStateTransactionError.finalStateUnverified
+            throw VMStateTransactionError.finalStateUnverified(PommeRetainedCause(error))
         }
         return .init(original: original, requested: requested, verified: true)
     }

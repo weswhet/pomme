@@ -283,7 +283,33 @@ enum PommePrivatePTYRunner {
         }
     }
 
-    enum Error: Swift.Error, Equatable, LocalizedError, Sendable {
+    enum Error: Swift.Error, Equatable, PommeDescribedError, Sendable {
+        var code: PommeErrorCode {
+            switch self {
+            case .invalidCommand, .invalidSecret, .secretInCommand, .invalidPrompt, .invalidTimeout: .invalidRequest
+            case .invalidCompletion, .unrelatedJobFrame: .guestAgentProtocolError
+            case .unsafePrompt, .secretEchoed: .guestCredentialPromptRefused
+            case .promptTimedOut, .promptMissing, .processExitedBeforePrompt, .repeatedPrompt, .promptOutputLimit:
+                .guestCredentialPromptFailed
+            case .processTimedOut: .timedOut
+            case .cancelled: .operationCancelled
+            case .transportFailure: .guestAgentDisconnected
+            case .cleanupUnverified: .guestProcessCleanupUnverified
+            }
+        }
+
+        var recoverySuggestion: String? {
+            switch self {
+            case .invalidCommand, .invalidSecret, .secretInCommand, .invalidPrompt, .invalidTimeout, .cancelled: nil
+            case .invalidCompletion, .unrelatedJobFrame: "Run `pomme agent update NAME` to update the guest agent."
+            case .unsafePrompt, .secretEchoed, .promptTimedOut, .promptMissing, .processExitedBeforePrompt,
+                 .repeatedPrompt, .promptOutputLimit, .processTimedOut:
+                "Run `pomme log NAME --last 5m` to see the guest's log, then retry."
+            case .transportFailure: "Run `pomme agent status NAME` to check the agent's connection, then retry."
+            case .cleanupUnverified: "Run `pomme jobs list NAME` and stop any leftover job with `pomme jobs kill NAME --job ID`."
+            }
+        }
+
         case invalidCommand
         case invalidSecret
         case secretInCommand
@@ -305,24 +331,24 @@ enum PommePrivatePTYRunner {
 
         var errorDescription: String? {
             switch self {
-            case .invalidCommand: "Private PTY command is invalid."
-            case .invalidSecret: "Private PTY secret is invalid."
-            case .secretInCommand: "Private PTY command contains the secret."
-            case .invalidPrompt: "Private PTY prompt policy is invalid."
-            case .invalidTimeout: "Private PTY timeout is invalid."
-            case .invalidCompletion: "Private PTY process completion is invalid."
-            case .unrelatedJobFrame: "Private PTY output belongs to another job."
-            case .unsafePrompt: "Private PTY produced an unsafe credential prompt."
-            case .promptTimedOut: "Private PTY password prompt timed out."
-            case .promptMissing: "Private PTY exited without the required password prompt."
-            case .processExitedBeforePrompt: "Private PTY exited before its password prompt could be answered."
-            case .repeatedPrompt: "Private PTY requested more prompts than permitted."
-            case .secretEchoed: "Private PTY echoed the secret; the operation was refused."
-            case .promptOutputLimit: "Private PTY prompt output exceeded the bounded limit."
-            case .processTimedOut: "Private PTY process timed out."
-            case .cancelled: "Private PTY process was cancelled."
-            case .transportFailure: "Private PTY transport failed."
-            case .cleanupUnverified: "Private PTY process cleanup could not be verified."
+            case .invalidCommand: "The guest command that needs a credential is invalid."
+            case .invalidSecret: "The credential for the guest command is empty, too long, or contains a line break."
+            case .secretInCommand: "The guest command's arguments contain its credential, so Pomme refused to run it."
+            case .invalidPrompt: "The expected credential prompt for the guest command is invalid."
+            case .invalidTimeout: "The timeout for the guest command that needs a credential is invalid."
+            case .invalidCompletion: "The guest agent reported an invalid completion for the command that needs a credential."
+            case .unrelatedJobFrame: "The guest agent sent output from another job while a command waited for its credential."
+            case .unsafePrompt: "The guest command showed an unexpected credential prompt, so Pomme didn't answer it."
+            case .promptTimedOut: "The guest command didn't prompt for its credential in time."
+            case .promptMissing: "The guest command exited without prompting for its credential."
+            case .processExitedBeforePrompt: "The guest command exited before Pomme could answer its credential prompt."
+            case .repeatedPrompt: "The guest command prompted for its credential more times than allowed, which usually means that the guest rejected the credential."
+            case .secretEchoed: "The guest command echoed its credential, so Pomme stopped the operation."
+            case .promptOutputLimit: "The guest command printed too much output before its credential prompt."
+            case .processTimedOut: "The guest command that needs a credential timed out."
+            case .cancelled: "The guest command that needs a credential was cancelled."
+            case .transportFailure: "The connection to the guest agent failed while a command waited for its credential."
+            case .cleanupUnverified: "Pomme couldn't confirm that the guest command that needs a credential stopped."
             }
         }
     }

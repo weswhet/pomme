@@ -51,7 +51,7 @@ struct PommeGuestJobWait {
                     output["hostExitCode"] = exitCode
                     return output
                 }
-            } catch let error as POSIXError where error.code == .ETIMEDOUT {
+            } catch RunnerError.controlSocketTimedOut {
                 return timedOut(lastResponse)
             } catch VMBundleMutationLease.Error.activeMutation(_) {
                 // Another command may be signalling the job between polls.

@@ -18,7 +18,7 @@ enum PommeSecurityRunStateRestoration {
         if observed != .stopped {
             try await stop()
             guard try await observe() == .stopped else {
-                throw PommeSecurityWorkflowError.restorationIncomplete
+                throw PommeSecurityWorkflowError.restorationIncomplete()
             }
         }
 
@@ -26,7 +26,7 @@ enum PommeSecurityRunStateRestoration {
 
         try await start(desired)
         guard try await observe() == desired else {
-            throw PommeSecurityWorkflowError.restorationIncomplete
+            throw PommeSecurityWorkflowError.restorationIncomplete()
         }
     }
 }

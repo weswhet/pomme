@@ -41,16 +41,24 @@ struct PommeGuestDirectory: Sendable {
         }
         switch operation {
         case Self.readUsersOperation:
-            guard payload.objectValue?.isEmpty == true else { throw PommeAgentOperationError.invalid }
+            guard payload.objectValue?.isEmpty == true else { throw PommeAgentOperationError.invalid("\(operation) accepts no fields") }
             return .object(["users": .array(try users().map(JSONValue.object))])
         case Self.verifyPasswordOperation:
-            guard let values = payload.objectValue, Set(values.keys) == ["username", "password"],
-                  let username = values["username"]?.stringValue, Self.isRecordName(username),
-                  let password = values["password"]?.stringValue, !password.isEmpty,
-                  password.utf8.count <= 1024 else { throw PommeAgentOperationError.invalid }
+            // The messages avoid naming the credential field, which would
+            // make redaction withhold them; they never include its value.
+            guard let values = payload.objectValue, Set(values.keys) == ["username", "password"] else {
+                throw PommeAgentOperationError.invalid("Credential verification requires exactly a username and the credential")
+            }
+            guard let username = values["username"]?.stringValue, Self.isRecordName(username) else {
+                throw PommeAgentOperationError.invalid("username must be a local record name of at most 255 bytes without slashes")
+            }
+            guard let password = values["password"]?.stringValue, !password.isEmpty,
+                  password.utf8.count <= 1024 else {
+                throw PommeAgentOperationError.invalid("The credential to verify must be 1 to 1,024 bytes")
+            }
             return .object(["verified": .bool(try verify(username, password))])
         default:
-            throw PommeAgentOperationError.unsupported
+            throw PommeAgentOperationError.unsupported("The directory service doesn't support \(operation)")
         }
     }
 
@@ -61,7 +69,7 @@ struct PommeGuestDirectory: Sendable {
     /// to judge. An absent attribute is omitted; an oversized one is refused.
     func users() throws -> [[String: JSONValue]] {
         let records = try readRecords()
-        guard records.count <= Self.maximumUsers else { throw PommeAgentOperationError.invalid }
+        guard records.count <= Self.maximumUsers else { throw PommeAgentOperationError.invalid("The guest has more than \(Self.maximumUsers) local users") }
         return try records.map { record in
             var user: [String: JSONValue] = [:]
             for (name, _) in Self.attributes {
@@ -69,11 +77,13 @@ struct PommeGuestDirectory: Sendable {
                 let value = name == "RecordName" ? values[0] : values.joined(separator: " ")
                 guard value.utf8.count <= Self.maximumValueBytes, !value.contains("\0"),
                       !value.contains(where: \.isNewline)
-                else { throw PommeAgentOperationError.invalid }
+                else {
+                    throw PommeAgentOperationError.invalid("A local user's \(name) is longer than \(Self.maximumValueBytes) bytes or contains a NUL byte or line break")
+                }
                 user[name] = .string(value)
             }
             guard let name = user["RecordName"]?.stringValue, Self.isRecordName(name) else {
-                throw PommeAgentOperationError.invalid
+                throw PommeAgentOperationError.invalid("A local user record has a missing or malformed RecordName")
             }
             return user
         }
@@ -91,14 +101,14 @@ struct PommeGuestDirectory: Sendable {
                                 queryValues: nil, returnAttributes: Array(attributes.values),
                                 maximumResults: maximumUsers + 1)
         guard let records = try query.resultsAllowingPartial(false) as? [ODRecord] else {
-            throw PommeAgentOperationError.io
+            throw PommeAgentOperationError.described(.io, message: "The local directory query returned no user records")
         }
         return try records.map { record in
             var values: [String: [String]] = [:]
             for (name, attribute) in attributes {
                 // A missing attribute is reported by the framework as an error.
                 guard let read = try? record.values(forAttribute: attribute) else { continue }
-                guard let strings = read as? [String] else { throw PommeAgentOperationError.invalid }
+                guard let strings = read as? [String] else { throw PommeAgentOperationError.invalid("A local user's \(name) isn't text") }
                 values[name] = strings
             }
             return values

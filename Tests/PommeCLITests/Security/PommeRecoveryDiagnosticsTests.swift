@@ -88,7 +88,8 @@ struct PommeRecoveryDiagnosticsTests {
         let serialized = String(data: try JSONSerialization.data(withJSONObject: payload), encoding: .utf8)!
 
         #expect(failure.phase == nil)
-        #expect(failure.errorDescription == "Recovery denied the AMFI boot-argument write; the retained transaction requires inspection before retry.")
+        #expect(failure.errorDescription == "Recovery refused to write the AMFI boot arguments to NVRAM. Pomme kept the operation's progress.")
+        #expect(failure.code == .securityRecoveryCommandFailed)
         #expect(diagnostic.code == .operationRejected)
         #expect(diagnostic.phase == nil)
         #expect(!serialized.contains("rollback"))

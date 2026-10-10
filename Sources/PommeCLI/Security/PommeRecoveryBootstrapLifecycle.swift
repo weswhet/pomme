@@ -1,25 +1,48 @@
 import Foundation
 
-enum PommeRecoveryBootstrapLifecycleError: Error, LocalizedError, Equatable, Sendable {
+enum PommeRecoveryBootstrapLifecycleError: PommeDescribedError, Equatable, Sendable {
     case invalidTimeout
     case timedOut
-    case cleanupFailed
+    case cleanupFailed(PommeRetainedCause = .init())
     case finalStateFailed
     case cleanupAndFinalStateFailed
+
+    var code: PommeErrorCode {
+        switch self {
+        case .invalidTimeout: .recoveryRequestRejected
+        case .timedOut: .recoveryTimedOut
+        case .cleanupFailed, .cleanupAndFinalStateFailed: .recoveryCleanupUnverified
+        case .finalStateFailed: .recoveryFinalStateUnverified
+        }
+    }
 
     var errorDescription: String? {
         switch self {
         case .invalidTimeout:
-            "Recovery lifecycle timeout was invalid."
+            "The Recovery bootstrap time limit isn't a positive number of seconds."
         case .timedOut:
-            "Recovery lifecycle callback timed out."
-        case .cleanupFailed:
-            "Recovery lifecycle cleanup could not be proven."
+            "The Recovery bootstrap step didn't finish within its time limit."
+        case .cleanupFailed(let cause):
+            cause.describing("Pomme couldn't confirm that the Recovery bootstrap files were removed.")
         case .finalStateFailed:
-            "Recovery lifecycle final state could not be proven."
+            "Pomme couldn't confirm the VM's final state after the Recovery bootstrap."
         case .cleanupAndFinalStateFailed:
-            "Recovery lifecycle cleanup and final state could not be proven."
+            "Pomme couldn't confirm that the Recovery bootstrap files were removed or that the VM reached its final state."
         }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .invalidTimeout: nil
+        case .timedOut, .cleanupFailed, .cleanupAndFinalStateFailed:
+            "Run `pomme stop NAME`, then run the same command again."
+        case .finalStateFailed: "Run `pomme status NAME` to see the VM's state."
+        }
+    }
+
+    var underlying: (any Error)? {
+        if case .cleanupFailed(let cause) = self { return cause.underlying }
+        return nil
     }
 }
 
@@ -101,7 +124,7 @@ enum PommeRecoveryBootstrapAttempt {
         do { primary = .success(try await operation()) }
         catch { primary = .failure(error) }
         do { try await cleanupAndVerifyAbsent() }
-        catch { throw PommeRecoveryBootstrapLifecycleError.cleanupFailed }
+        catch { throw PommeRecoveryBootstrapLifecycleError.cleanupFailed(PommeRetainedCause(error)) }
         return try primary.get()
     }
 }

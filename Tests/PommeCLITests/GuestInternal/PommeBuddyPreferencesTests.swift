@@ -30,7 +30,7 @@ struct PommeBuddyPreferencesTests {
         await PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies).run()
         await PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies).run()
         #expect(fixture.state.withLock { $0.writes } == ["LastSeenBuddyBuildVersion"])
-        #expect(fixture.state.withLock { $0.receipt?.error?.code } == "preference-file-write")
+        #expect(fixture.state.withLock { $0.receipt?.error?.failureCode } == "preference-file-write")
     }
 
     @Test("Diagnostics establish owner validation before writes and stay closed")
@@ -134,7 +134,7 @@ struct PommeBuddyPreferencesTests {
             fixture.state.withLock { $0.owner = owner }
             let engine = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
             await engine.run()
-            #expect(await engine.status()?.error?.code == "invalid-owner")
+            #expect(await engine.status()?.error?.failureCode == "invalid-owner")
             #expect(fixture.state.withLock { $0.writes.isEmpty })
         }
     }
@@ -157,7 +157,7 @@ struct PommeBuddyPreferencesTests {
             let engine = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
             await engine.run()
             #expect(await engine.status()?.outcome == "failed")
-            #expect(await engine.status()?.error?.code == (corruptReadback ? "preference-readback-mismatch" : "preference-file-write"))
+            #expect(await engine.status()?.error?.failureCode == (corruptReadback ? "preference-readback-mismatch" : "preference-file-write"))
             #expect(fixture.state.withLock { $0.writes == ["LastSeenBuddyBuildVersion"] })
         }
     }
@@ -190,7 +190,7 @@ struct PommeBuddyPreferencesTests {
             await engine.run()
             #expect(await engine.status()?.outcome == (outcome == "running" ? "failed" : "succeeded"))
             if outcome == "running" {
-                #expect(await engine.status()?.error?.code == "interrupted-attempt")
+                #expect(await engine.status()?.error?.failureCode == "interrupted-attempt")
                 #expect(fixture.state.withLock { $0.commands.isEmpty && $0.writes.isEmpty })
             }
         }
@@ -211,7 +211,7 @@ struct PommeBuddyPreferencesTests {
         fixture.state.withLock { $0.replaceAfterWrite = true }
         let engine = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
         await engine.run()
-        #expect(await engine.status()?.error?.code == "owner-changed")
+        #expect(await engine.status()?.error?.failureCode == "owner-changed")
         #expect(fixture.state.withLock { $0.writes.count == 1 })
     }
 
@@ -221,7 +221,7 @@ struct PommeBuddyPreferencesTests {
         fixture.state.withLock { $0.build = "not-a-build" }
         let engine = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
         await engine.run()
-        #expect(await engine.status()?.error?.code == "os-detection-failed")
+        #expect(await engine.status()?.error?.failureCode == "os-detection-failed")
         #expect(fixture.state.withLock { $0.writes.isEmpty })
     }
 
@@ -233,7 +233,7 @@ struct PommeBuddyPreferencesTests {
         }
         let engine = PommeBuddyPreferencesMaintenance(dependencies: fixture.dependencies)
         await engine.run()
-        #expect(await engine.status()?.error?.code == "invalid-receipt")
+        #expect(await engine.status()?.error?.failureCode == "invalid-receipt")
         #expect(fixture.state.withLock { $0.commands.isEmpty && $0.writes.isEmpty })
     }
 
@@ -419,7 +419,7 @@ struct PommeBuddyPreferencesCommandTests {
                 "/bin/sh", ["-c", "kill -TERM $$"])
             Issue.record("Expected a signal failure")
         } catch let failure as PommeBuddyPreferencesFailure {
-            #expect(failure.code == "command-signal")
+            #expect(failure.failureCode == "command-signal")
             #expect(failure.numericCode == Int(SIGTERM))
         } catch {
             Issue.record("Unexpected runner error: \(error)")
@@ -434,7 +434,7 @@ struct PommeBuddyPreferencesCommandTests {
                 "/bin/sh", ["-c", "while :; do printf '0123456789012345678901234567890123456789012345678901234567890123456789'; done"])
             Issue.record("Expected an output limit failure")
         } catch let failure as PommeBuddyPreferencesFailure {
-            #expect(failure.code == "command-output-limit")
+            #expect(failure.failureCode == "command-output-limit")
         } catch {
             Issue.record("Unexpected runner error: \(error)")
         }
@@ -458,7 +458,7 @@ struct PommeBuddyPreferencesCommandTests {
                 "/bin/sh", ["-c", "/bin/sleep 60 & child=$!; printf '%s %s' \"$$\" \"$child\" > \"$1\"; wait", "buddy-test", record.path], 1, { _ in })
             Issue.record("Expected a timeout failure")
         } catch let failure as PommeBuddyPreferencesFailure {
-            #expect(failure.code == "command-timeout")
+            #expect(failure.failureCode == "command-timeout")
         }
         #expect(start.duration(to: .now) < .seconds(5))
         let pids = try String(contentsOf: record, encoding: .utf8)

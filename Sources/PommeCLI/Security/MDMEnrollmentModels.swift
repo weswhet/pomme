@@ -205,7 +205,7 @@ struct PommeMDMEnrollmentAgentSessionAdapter: PommeMDMEnrollmentAgentTransport {
         } catch let error as PommeMDMEnrollmentError {
             throw error
         } catch {
-            throw PommeMDMEnrollmentError.agentUnavailable
+            throw PommeMDMEnrollmentError.wrapping(.agentUnavailable, error)
         }
     }
 
@@ -407,12 +407,19 @@ struct PommeMDMEnrollmentStateDependencies: PommeMDMEnrollmentStatePort {
     func verifyBaseline(_ baseline: PommeMDMEnrollmentStateBaseline) async throws -> Bool { try await verify(baseline) }
 }
 
-enum PommeMDMEnrollmentError: Error, LocalizedError, Equatable, Sendable {
+enum PommeMDMEnrollmentError: PommeDescribedError, Equatable, Sendable {
     case invalidRequest
     case invalidProfile
     case invalidTransfer
     case agentUnavailable
     case agentUnverified
+    /// The agent isn't an authenticated, attested persistent agent on
+    /// protocol v1.
+    case agentNotAttested
+    /// The agent isn't the signed executable recorded for the VM.
+    case agentExecutableMismatch
+    /// The agent lacks the enrollment or maintenance capability.
+    case agentCapabilitiesMissing
     case baselineCaptureFailed
     case stagingPreparationFailed
     case transferFailed
@@ -426,23 +433,122 @@ enum PommeMDMEnrollmentError: Error, LocalizedError, Equatable, Sendable {
     case helperProcessTerminationUnproven
     case cleanupFailed
     case restorationFailed
+    /// A step failed because of `cause`. Equality ignores the cause, so
+    /// `error == .transferFailed` holds whether or not a cause is attached.
+    indirect case failed(PommeMDMEnrollmentError, cause: PommeErrorReport)
+
+    /// Wraps `error` as the cause of `kind`. An error that is already this
+    /// kind is returned unchanged, so a step doesn't repeat its own message.
+    static func wrapping(_ kind: Self, _ error: any Error) -> Self {
+        if let existing = error as? Self, existing == kind { return existing }
+        return .failed(kind.kind, cause: PommeErrorReport(error))
+    }
+
+    /// The failure without any attached cause.
+    var kind: Self {
+        if case .failed(let kind, _) = self { return kind.kind }
+        return self
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        String(describing: lhs.kind) == String(describing: rhs.kind)
+    }
+
+    var underlying: (any Error)? {
+        if case .failed(_, let cause) = self { return cause }
+        return nil
+    }
+
+    var code: PommeErrorCode {
+        switch kind {
+        case .invalidRequest: .invalidRequest
+        case .invalidProfile: .mdmProfileUnreadable
+        case .invalidTransfer, .transferFailed: .mdmProfileTransferFailed
+        case .agentUnavailable: .guestAgentUnavailable
+        case .agentUnverified, .agentNotAttested, .agentExecutableMismatch, .agentCapabilitiesMissing: .mdmAgentUnverified
+        case .baselineCaptureFailed: .mdmSecurityBaselineUnavailable
+        case .stagingPreparationFailed: .mdmStagingFailed
+        case .enrollmentFailed: .mdmEnrollmentFailed
+        case .enrollmentOutcomeUnknown: .mdmEnrollmentOutcomeUnknown
+        case .evidenceUnavailable: .mdmEvidenceUnavailable
+        case .helperProcessTerminationUnproven: .mdmHelperNotStopped
+        case .cleanupFailed: .mdmCleanupFailed
+        case .restorationFailed: .mdmRestorationFailed
+        case .failed: .internalError
+        }
+    }
+
+    /// What happened, as one sentence without its final period.
+    private var summary: String {
+        switch kind {
+        case .invalidRequest:
+            "The MDM enrollment request has a value that isn't valid, such as the timeout or the guest staging path"
+        case .invalidProfile:
+            "Pomme couldn't read the MDM enrollment profile"
+        case .invalidTransfer:
+            "Pomme couldn't verify the copy of the MDM profile in the VM"
+        case .agentUnavailable:
+            "The VM's guest agent isn't available for MDM enrollment"
+        case .agentUnverified:
+            "Pomme couldn't verify the VM's guest agent for MDM enrollment"
+        case .agentNotAttested:
+            "MDM enrollment needs an authenticated, attested PommeAgent that uses protocol version 1, and the VM's agent isn't one"
+        case .agentExecutableMismatch:
+            "The VM's guest agent isn't the signed PommeAgent executable that Pomme recorded for the VM"
+        case .agentCapabilitiesMissing:
+            "The VM's guest agent doesn't have the MDM enrollment and maintenance capabilities"
+        case .baselineCaptureFailed:
+            "Pomme couldn't read the VM's SIP, AMFI, and run state before MDM enrollment"
+        case .stagingPreparationFailed:
+            "Pomme couldn't prepare the private MDM staging directory in the VM"
+        case .transferFailed:
+            "Pomme couldn't copy the MDM profile to the VM"
+        case .enrollmentFailed:
+            "MDM enrollment failed in the VM"
+        case .enrollmentOutcomeUnknown:
+            "Pomme can't tell whether the VM installed the MDM profile"
+        case .evidenceUnavailable:
+            "Pomme couldn't verify the MDM enrollment from the VM's profile and enrollment state"
+        case .helperProcessTerminationUnproven:
+            "Pomme couldn't confirm that the MDM enrollment helper stopped, so it kept the staged files in the VM"
+        case .cleanupFailed:
+            "Pomme couldn't remove the staged MDM files from the VM, and the enrollment might have finished"
+        case .restorationFailed:
+            "Pomme couldn't restore and verify the VM's SIP, AMFI, and run state after MDM enrollment, and the enrollment might have finished"
+        case .failed:
+            "MDM enrollment failed"
+        }
+    }
 
     var errorDescription: String? {
-        switch self {
-        case .invalidRequest: "The MDM enrollment request is invalid."
-        case .invalidProfile: "The MDM profile is unavailable."
-        case .invalidTransfer: "The MDM profile transfer could not be verified."
-        case .agentUnavailable: "The persistent PommeAgent is unavailable."
-        case .agentUnverified: "The persistent PommeAgent could not be verified for MDM enrollment."
-        case .baselineCaptureFailed: "The SIP, AMFI, and VM baseline could not be captured."
-        case .stagingPreparationFailed: "The private MDM staging directory could not be prepared."
-        case .transferFailed: "The MDM profile transfer failed."
-        case .enrollmentFailed: "The PommeAgent MDM enrollment operation failed."
-        case .enrollmentOutcomeUnknown: "The MDM enrollment outcome is unknown; verify the guest profile state before retrying."
-        case .evidenceUnavailable: "Independent MDM enrollment evidence is unavailable or invalid."
-        case .helperProcessTerminationUnproven: "The MDM helper process could not be proven terminated; staged artifacts were retained. Verify process termination and guest enrollment state before retrying."
-        case .cleanupFailed: "The private MDM staging file could not be cleaned up. Enrollment may have completed; verify the guest profile state before retrying."
-        case .restorationFailed: "The SIP, AMFI, and VM baseline could not be restored and verified. Enrollment may have completed; verify security and guest profile state before retrying."
+        if case .failed(_, let cause) = self {
+            return "\(summary): \(PommeErrorDescriber.clause(for: cause))."
+        }
+        return summary + "."
+    }
+
+    var recoverySuggestion: String? {
+        switch kind {
+        case .invalidRequest:
+            "Check the `--timeout` and `--guest-path` values, then run `pomme mdm` again."
+        case .invalidProfile:
+            "Check that `--profile` names a regular `.mobileconfig` file that you can read, not a link."
+        case .agentUnavailable:
+            "Run `pomme agent status NAME` to check the agent, then repeat the same `pomme mdm` command."
+        case .agentUnverified, .agentNotAttested, .agentExecutableMismatch, .agentCapabilitiesMissing:
+            "Run `pomme agent update NAME` to install this build's agent, then repeat the same `pomme mdm` command."
+        case .baselineCaptureFailed:
+            "Run `pomme sip status NAME` and `pomme amfi status NAME` to check the settings, then repeat the same `pomme mdm` command."
+        case .stagingPreparationFailed, .invalidTransfer, .transferFailed, .enrollmentFailed:
+            "Repeat the same `pomme mdm` command to retry. Add `--debug --format json` to see the failure stage."
+        case .enrollmentOutcomeUnknown, .evidenceUnavailable:
+            "Repeat the same `pomme mdm` command; Pomme checks the VM's enrollment before it installs anything again."
+        case .helperProcessTerminationUnproven:
+            "Check that no helper process remains with `pomme exec NAME -- /bin/ps -ax`, then repeat the same `pomme mdm` command."
+        case .cleanupFailed, .restorationFailed:
+            "Repeat the same `pomme mdm` command to finish cleanup and restoration."
+        case .failed:
+            nil
         }
     }
 }
@@ -473,7 +579,7 @@ enum MDMEnrollmentStateTransaction {
             do {
                 try restorer.restoreAfterMDMEnrollment()
             } catch {
-                throw MDMEnrollmentRestorationError.operationAndRestorationFailed
+                throw MDMEnrollmentRestorationError.operationAndRestorationFailed(cause: PommeErrorReport(error))
             }
             throw error
         }
@@ -485,7 +591,7 @@ enum MDMEnrollmentStateTransaction {
             do {
                 try restorer.restoreAfterMDMEnrollment()
             } catch {
-                throw MDMEnrollmentRestorationError.operationAndRestorationFailed
+                throw MDMEnrollmentRestorationError.operationAndRestorationFailed(cause: PommeErrorReport(error))
             }
             throw error
         }
@@ -493,28 +599,44 @@ enum MDMEnrollmentStateTransaction {
         do {
             try restorer.restoreAfterMDMEnrollment()
         } catch {
-            throw MDMEnrollmentRestorationError.operationAndRestorationFailed
+            throw MDMEnrollmentRestorationError.operationAndRestorationFailed(cause: PommeErrorReport(error))
         }
         return output
     }
 }
 
-enum MDMEnrollmentRestorationError: LocalizedError, Sendable {
-    case operationAndRestorationFailed
+/// The VM's state couldn't be restored around MDM enrollment work. It keeps
+/// the restoration failure as its cause, never the enrollment's own error.
+enum MDMEnrollmentRestorationError: PommeDescribedError, Sendable {
+    case operationAndRestorationFailed(cause: PommeErrorReport?)
+
+    var code: PommeErrorCode { .mdmRestorationFailed }
+
+    var underlying: (any Error)? {
+        switch self {
+        case .operationAndRestorationFailed(let cause): cause
+        }
+    }
 
     var errorDescription: String? {
-        "MDM enrollment failed and required state restoration could not be confirmed."
+        switch self {
+        case .operationAndRestorationFailed(let cause?):
+            "Pomme couldn't confirm that it restored the VM's state around MDM enrollment: \(PommeErrorDescriber.clause(for: cause))."
+        case .operationAndRestorationFailed(nil):
+            "Pomme couldn't confirm that it restored the VM's state around MDM enrollment."
+        }
+    }
+
+    var recoverySuggestion: String? {
+        "Repeat the same `pomme mdm` command to resume restoration."
     }
 }
 
 enum MDMEnrollmentRedaction {
     /// Do not return profile content, private paths, credentials, or raw guest
-    /// diagnostics from an enrollment error.
+    /// diagnostics from an enrollment error. The message names only the
+    /// error's stable code, never its text.
     static func errorMessage(_ error: Error) -> String {
-        let text = error.localizedDescription.lowercased()
-        if text.contains("credential") || text.contains("password") || text.contains("secret") || text.contains("token") {
-            return "MDM enrollment failed; sensitive details were redacted."
-        }
-        return "MDM enrollment failed."
+        "MDM enrollment failed with error code \(PommeErrorReport(codesOnly: error).code)."
     }
 }

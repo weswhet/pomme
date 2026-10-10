@@ -11,7 +11,25 @@ extension PommeAuthenticatedAgentSession: PommeDesktopCleanupSession {}
 
 enum PommeSecurityDesktopCleanup {
   static let digestMarker = "_pommeExpectedDesktopCleanupExecutableSHA256"
-  private enum Rejection: Error { case invalidRequest, identity, status }
+  private enum Rejection: PommeDescribedError {
+    case invalidRequest, identity, status
+
+    var code: PommeErrorCode {
+      switch self {
+      case .invalidRequest: .invalidRequest
+      case .identity: .securityAgentUnverified
+      case .status: .guestAgentProtocolError
+      }
+    }
+
+    var errorDescription: String? {
+      switch self {
+      case .invalidRequest: "The desktop cleanup status request has a missing or invalid job or executable digest."
+      case .identity: "The guest agent didn't prove the identity that the desktop cleanup request expects."
+      case .status: "The guest agent's job status reply doesn't match the desktop cleanup job."
+      }
+    }
+  }
 
   /// Presence reserves the request even when the operation or marker is bad.
   /// Malformed security requests must never fall through to ordinary forwarding.

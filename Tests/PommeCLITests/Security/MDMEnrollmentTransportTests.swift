@@ -15,39 +15,39 @@ struct MDMEnrollmentAgentGateTests {
 
     @Test("Status-projection and Recovery role spellings fail before staging")
     func rejectsConnectionRoleAndProtocol() {
-        #expect(throws: RunnerError.self) {
+        #expect(throws: PommeMDMEnrollmentError.self) {
             try MDMEnrollmentAgentGate.verify(agent(connected: false))
         }
-        #expect(throws: RunnerError.self) {
+        #expect(throws: PommeMDMEnrollmentError.self) {
             try MDMEnrollmentAgentGate.verify(agent(role: "recovery"))
         }
-        #expect(throws: RunnerError.self) {
+        #expect(throws: PommeMDMEnrollmentError.self) {
             try MDMEnrollmentAgentGate.verify(agent(role: "normal"))
         }
-        #expect(throws: RunnerError.self) {
+        #expect(throws: PommeMDMEnrollmentError.self) {
             try MDMEnrollmentAgentGate.verify(agent(protocolVersion: 2))
         }
     }
 
     @Test("Missing authentication or digest rejects the agent attestation")
     func rejectsMissingAuthenticationAndDigest() {
-        #expect(throws: RunnerError.self) {
+        #expect(throws: PommeMDMEnrollmentError.self) {
             try MDMEnrollmentAgentGate.verify(agent(authenticated: false))
         }
-        #expect(throws: RunnerError.self) {
+        #expect(throws: PommeMDMEnrollmentError.self) {
             try MDMEnrollmentAgentGate.verify(agent(executableDigest: nil))
         }
-        #expect(throws: RunnerError.self) {
+        #expect(throws: PommeMDMEnrollmentError.self) {
             try MDMEnrollmentAgentGate.verify(agent(executableDigest: "not-a-digest"))
         }
     }
 
     @Test("Missing enrollment or maintenance capability fails closed")
     func rejectsMissingCapabilities() {
-        #expect(throws: RunnerError.self) {
+        #expect(throws: PommeMDMEnrollmentError.self) {
             try MDMEnrollmentAgentGate.verify(agent(capabilities: ["maintenance"]))
         }
-        #expect(throws: RunnerError.self) {
+        #expect(throws: PommeMDMEnrollmentError.self) {
             try MDMEnrollmentAgentGate.verify(agent(capabilities: ["mdm.enrollment"]))
         }
     }

@@ -85,7 +85,7 @@ struct VirtualizationPrivateHeadlessBackendTests {
                 )
                 Issue.record("Expected a private ABI mismatch for \(requirement.identity)")
             } catch let error as VirtualizationPrivateHeadlessError {
-                #expect(error.code == .privateABIMismatch)
+                #expect(error.kind == .privateABIMismatch)
                 #expect(!error.partialInputPossible)
             }
 
@@ -115,7 +115,7 @@ struct VirtualizationPrivateHeadlessBackendTests {
             )
             Issue.record("Expected an unsupported architecture failure")
         } catch let error as VirtualizationPrivateHeadlessError {
-            #expect(error.code == .unsupportedArchitecture)
+            #expect(error.kind == .unsupportedArchitecture)
         }
 
         let unexpectedFramework = VirtualizationPrivateABIEnvironment(
@@ -133,7 +133,7 @@ struct VirtualizationPrivateHeadlessBackendTests {
             )
             Issue.record("Expected a private ABI mismatch")
         } catch let error as VirtualizationPrivateHeadlessError {
-            #expect(error.code == .privateABIMismatch)
+            #expect(error.kind == .privateABIMismatch)
         }
     }
 
@@ -163,8 +163,8 @@ struct VirtualizationPrivateHeadlessBackendTests {
             }
         } catch let error as VirtualizationPrivateHeadlessError {
             #expect(
-                !isSupportedHost || error.code == .unsupportedArchitecture,
-                "A supported host no longer qualifies: \(error.code.rawValue)."
+                !isSupportedHost || error.kind == .unsupportedArchitecture,
+                "A supported host no longer qualifies: \(error.kind.rawValue)."
             )
         }
     }
@@ -329,7 +329,7 @@ struct VirtualizationPrivateHeadlessBackendTests {
                 _ = try VirtualizationPrivateABIPreflight.resolveFrameObservation(using: probe)
                 Issue.record("Expected a private ABI mismatch")
             } catch let error as VirtualizationPrivateHeadlessError {
-                #expect(error.code == .privateABIMismatch)
+                #expect(error.kind == .privateABIMismatch)
                 let description = error.errorDescription ?? ""
                 for secret in secrets {
                     #expect(!description.contains(secret))

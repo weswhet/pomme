@@ -71,13 +71,66 @@ enum PommeRecoveryInteractionCleanupSignal: Equatable, Sendable {
   case terminalVerified
 }
 
-enum PommeRecoveryInteractionError: Error, Equatable, Sendable {
+enum PommeRecoveryInteractionError: PommeDescribedError, Equatable, Sendable {
   case incompleteQualification
   case noInputDelivered(PommeRecoveryInteractionCleanupSignal)
   case observationTimedOut(PommeRecoveryInteractionCleanupSignal)
   case terminalProofFailed(PommeRecoveryInteractionCleanupSignal)
   case recoveryCleanupRequired(PommeRecoveryInteractionCleanupSignal)
   case alreadyComplete
+
+  var code: PommeErrorCode {
+    switch self {
+    case .incompleteQualification: .uiRecoveryUnqualified
+    case .noInputDelivered: .uiRecoveryNoInput
+    case .observationTimedOut: .uiRecoveryTimedOut
+    case .terminalProofFailed: .uiRecoveryTerminalUnverified
+    case .recoveryCleanupRequired: .uiRecoveryCleanupRequired
+    case .alreadyComplete: .uiRecoverySequenceInvalid
+    }
+  }
+
+  var errorDescription: String? {
+    switch self {
+    case .incompleteQualification:
+      "Recovery navigation isn't qualified for this VM's macOS build, language, display size, or ownership, so Pomme sent no input."
+    case .noInputDelivered:
+      "Recovery navigation stopped before Pomme sent any input to the VM."
+    case .observationTimedOut(let signal):
+      "Recovery didn't reach the expected screen before the time limit."
+        + Self.inputNote(signal)
+    case .terminalProofFailed(let signal):
+      "Pomme couldn't confirm that Terminal opened in Recovery, so it didn't type a command."
+        + Self.inputNote(signal)
+    case .recoveryCleanupRequired:
+      "An earlier Recovery action might have reached the VM, and Pomme couldn't confirm its result, so it sent no more input."
+    case .alreadyComplete:
+      "Recovery navigation was asked for another step after it finished. This is a bug in Pomme."
+    }
+  }
+
+  var recoverySuggestion: String? {
+    switch self {
+    case .incompleteQualification:
+      "Run `pomme inspect NAME` to check the VM's macOS version."
+    case .noInputDelivered:
+      "Run the same command again. Add `--debug` to save a screenshot before each Recovery action."
+    case .observationTimedOut(let signal), .terminalProofFailed(let signal):
+      signal == .noInputDelivered
+        ? "Run the same command again. Add `--debug` to save a screenshot before each Recovery action."
+        : "Stop the VM with `pomme stop NAME`, then run the same command again."
+    case .recoveryCleanupRequired, .alreadyComplete:
+      "Stop the VM with `pomme stop NAME`, then run the same command again."
+    }
+  }
+
+  private static func inputNote(_ signal: PommeRecoveryInteractionCleanupSignal) -> String {
+    switch signal {
+    case .noInputDelivered: " Pomme sent no input."
+    case .recoveryCleanupRequired, .inputCommitted: " Some input might have reached the VM."
+    case .terminalVerified: ""
+    }
+  }
 }
 
 enum PommeRecoveryTerminalLaunchDisposition: Equatable, Sendable {
@@ -334,10 +387,37 @@ struct PommeDisplayOnlyNormalBootReceipt: Equatable, Sendable {
   let height: Int
 }
 
-enum PommeDisplayOnlyNormalBootError: Error, Equatable, Sendable {
+enum PommeDisplayOnlyNormalBootError: PommeDescribedError, Equatable, Sendable {
   case displayUnavailable
   case unqualifiedGeometry
   case cancelled
+
+  var code: PommeErrorCode {
+    switch self {
+    case .displayUnavailable: .displayUnavailable
+    case .unqualifiedGeometry: .displayGeometryUnsupported
+    case .cancelled: .operationCancelled
+    }
+  }
+
+  var errorDescription: String? {
+    switch self {
+    case .displayUnavailable:
+      "The VM display isn't available, so Pomme can't confirm that macOS finished starting."
+    case .unqualifiedGeometry:
+      "The VM display isn't 1280 by 800 pixels, the only size that Pomme automates."
+    case .cancelled:
+      "Waiting for the VM display was cancelled."
+    }
+  }
+
+  var recoverySuggestion: String? {
+    switch self {
+    case .displayUnavailable: "Run `pomme status NAME` to check that the VM is running, then retry."
+    case .unqualifiedGeometry: "Run `pomme inspect NAME` to check the VM's display configuration."
+    case .cancelled: nil
+    }
+  }
 }
 
 /// Requires two consecutive 1280x800 display observations before normal boot

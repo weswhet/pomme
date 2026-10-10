@@ -215,14 +215,20 @@ actor RecoveryRuntimeAgentCoordinator {
         stage = .failed
         if error is CancellationError {
             errorCode = .cancelled
-        } else if (error as? RunnerError).map({
-            if case .sipCredentialUnavailable = $0 { return true }
-            return false
-        }) == true || error.localizedDescription.contains("stage=recoveryAuthentication") {
+        } else if Self.isCredentialUnavailable(error) {
             errorCode = .credentialUnavailable
         } else {
             errorCode = .bootstrapFailed
         }
+    }
+
+    /// Whether the bootstrap stopped because no owner credential was
+    /// available, judged by the stable code of the error or of any error
+    /// underneath it, never by message text.
+    private static func isCredentialUnavailable(_ error: Error) -> Bool {
+        let report = PommeErrorReport(error, redaction: .none)
+        return report.code == .credentialUnavailable
+            || report.causes.contains { $0.domain == "pomme" && $0.code == PommeErrorCode.credentialUnavailable.rawValue }
     }
 
     private func refreshConnectionState() {
@@ -310,8 +316,15 @@ actor RecoveryRuntimeAgentCoordinator {
     }
 }
 
-private struct RecoveryRuntimeAgentTimeoutError: Error {}
-private struct RecoveryRuntimeAgentBootstrapError: Error {}
+private struct RecoveryRuntimeAgentTimeoutError: PommeDescribedError {
+    var code: PommeErrorCode { .recoveryTimedOut }
+    var errorDescription: String? { "Timed out waiting for the authenticated Recovery agent." }
+}
+
+private struct RecoveryRuntimeAgentBootstrapError: PommeDescribedError {
+    var code: PommeErrorCode { .recoveryAgentFailed }
+    var errorDescription: String? { "The authenticated Recovery agent couldn't be established." }
+}
 
 final class RecoveryRuntimeAgentStageReporter: @unchecked Sendable {
     private let body: RecoveryRuntimeAgentCoordinator.StageReporter

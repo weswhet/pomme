@@ -47,16 +47,18 @@ enum PommeAgentUpdateApply {
         guard staged.path == staged.standardized.path,
               staged.path.hasPrefix(stagedPrefix),
               selfExecutable.resolvingSymlinksInPath().path == staged.resolvingSymlinksInPath().path
-        else { throw PommeAgentOperationError.invalid }
+        else { throw PommeAgentOperationError.invalid("The update must run from the staged agent under \(stagedPrefix)") }
         phase(Phase.stagedFile)
         var info = stat()
         guard lstat(staged.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
               info.st_uid == expectedOwner, info.st_nlink == 1, info.st_mode & 0o022 == 0
-        else { throw PommeAgentOperationError.invalid }
+        else { throw PommeAgentOperationError.invalid("The staged agent \(staged.path) must be a single-link regular file that only its owner can write") }
         let executable = try PommeAgentFileTransaction.readRegular(
             staged, maximumBytes: PommeRecoveryStagingBuilder.maximumExecutableBytes)
         phase(Phase.digest)
-        guard PommeBootstrapRequest.digest(executable) == target else { throw PommeAgentOperationError.invalid }
+        guard PommeBootstrapRequest.digest(executable) == target else {
+            throw PommeAgentOperationError.invalid("The staged agent's SHA-256 doesn't match the requested update")
+        }
         let plist = Data(try PommeAgentInstall.definition(digest: target).utf8)
 
         let installed = (try? PommeAgentFileTransaction.readRegular(
@@ -72,13 +74,19 @@ enum PommeAgentUpdateApply {
             let token = try PommeAgentFileTransaction.readRegular(paths.token, maximumBytes: 128)
             guard let text = String(data: token, encoding: .utf8),
                   try PommeAgentAuthentication.normalized(text) == text
-            else { throw PommeAgentOperationError.invalid }
+            else { throw PommeAgentOperationError.invalid("The installed agent credential file is malformed") }
             phase(Phase.install)
             try install(executable, token, plist, paths)
             outcome = .applied
         }
         phase(Phase.cleanup)
-        guard unlink(staged.path) == 0 else { throw PommeAgentOperationError.invalid }
+        guard unlink(staged.path) == 0 else {
+            let code = errno
+            throw PommeAgentOperationError.described(
+                .invalid,
+                message: "Removing the staged agent \(staged.path) failed: \(String(cString: strerror(code))) (errno \(code))"
+            )
+        }
         return outcome
     }
 

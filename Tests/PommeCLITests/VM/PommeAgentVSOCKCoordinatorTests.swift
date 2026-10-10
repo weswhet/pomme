@@ -164,7 +164,7 @@ struct PommeAgentVSOCKCoordinatorTests {
             _ = try await coordinator.performCorrelated(operation: "amfi.disable", payload: .object([:]))
             Issue.record("Expected the closed Recovery error envelope to be thrown.")
         } catch let error as PommeAgentSessionError {
-            #expect(error.code == "recovery-command-failed")
+            #expect(error.wireCode == "recovery-command-failed")
             #expect(error.message == "closed test failure")
         } catch {
             Issue.record("Unexpected error type: \(error)")

@@ -20,8 +20,10 @@ enum HostAutomationFailureCode: String, CaseIterable, Codable, Equatable, Sendab
     case inputTimeout = "input_timeout"
 }
 
-struct VirtualizationPrivateHeadlessError: LocalizedError, Equatable, Sendable {
-    let code: HostAutomationFailureCode
+struct VirtualizationPrivateHeadlessError: PommeDescribedError, Equatable, Sendable {
+    /// The backend's own failure kind. Its raw value is the diagnostic
+    /// `failureCode`; `code` is the public Pomme error code.
+    let kind: HostAutomationFailureCode
     let partialInputPossible: Bool
     /// True only when the framebuffer contains no visible pixels. During a
     /// Recovery boot this is an expected transition surface; malformed frame
@@ -35,14 +37,56 @@ struct VirtualizationPrivateHeadlessError: LocalizedError, Equatable, Sendable {
         partialInputPossible: Bool = false,
         isBlankFrame: Bool = false
     ) {
-        self.code = code
+        self.kind = code
         self.partialInputPossible = partialInputPossible
         self.isBlankFrame = isBlankFrame
         self.detail = detail
     }
 
+    var code: PommeErrorCode {
+        switch kind {
+        case .unsupportedArchitecture: .hostUnsupported
+        case .privateABIMismatch: .displayInterfaceMismatch
+        case .vmStateInvalid: .vmNotRunning
+        case .displayNotReady: .displayNotReady
+        case .displayUnavailable: .displayUnavailable
+        case .inputUnavailable: .displayInputUnavailable
+        case .frameTimeout: .displayFrameTimeout
+        case .frameInvalid: .displayFrameInvalid
+        case .inputInterrupted: .displayInputInterrupted
+        case .inputTimeout: .displayInputTimeout
+        }
+    }
+
+    /// A summary of the failure, then the backend's specific reason.
     var errorDescription: String? {
-        "Headless VM automation failed [code=\(code.rawValue), partialInputPossible=\(partialInputPossible)]: \(detail)"
+        let summary: String = switch kind {
+        case .unsupportedArchitecture: "VM display automation needs a Mac with Apple silicon."
+        case .privateABIMismatch: "Pomme can't use this Mac's VM display interface."
+        case .vmStateInvalid: "VM display automation needs a running VM."
+        case .displayNotReady: "The VM display isn't ready yet."
+        case .displayUnavailable: "The VM display isn't available."
+        case .inputUnavailable: "The VM keyboard or pointer isn't available."
+        case .frameTimeout: "The VM display didn't send a frame in time."
+        case .frameInvalid: "Pomme couldn't read the VM display."
+        case .inputInterrupted: "Input to the VM was interrupted."
+        case .inputTimeout: "Input to the VM timed out."
+        }
+        let partial = partialInputPossible ? " Some input might have reached the VM." : ""
+        return "\(summary) \(detail)\(partial)"
+    }
+
+    var recoverySuggestion: String? {
+        switch kind {
+        case .unsupportedArchitecture: "Run Pomme on a Mac with Apple silicon."
+        case .privateABIMismatch: "Update Pomme with `pomme update`, then retry."
+        case .vmStateInvalid: "Start the VM with `pomme start NAME`, then retry."
+        case .displayNotReady, .inputUnavailable, .frameTimeout, .frameInvalid:
+            "Wait for the VM to finish starting, then retry."
+        case .displayUnavailable: "Run `pomme status NAME` to check that the VM is running."
+        case .inputInterrupted, .inputTimeout:
+            "Take a screenshot with `pomme ui screenshot` to check the VM's screen before you retry."
+        }
     }
 
     func payload(operation: String, width: Int? = nil, height: Int? = nil) -> [String: Any] {
@@ -52,8 +96,8 @@ struct VirtualizationPrivateHeadlessError: LocalizedError, Equatable, Sendable {
             "operation": operation,
             "backend": VirtualizationPrivateHeadlessBackend.backendName,
             "hostBuild": VirtualizationPrivateHeadlessBackend.hostBuild,
-            "errorCode": code.rawValue,
-            "error": errorDescription ?? code.rawValue,
+            "errorCode": kind.rawValue,
+            "error": errorDescription ?? kind.rawValue,
             "partialInputPossible": partialInputPossible,
             "hostExitCode": 1
         ]
@@ -1287,7 +1331,7 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
                 "available": .bool(false),
                 "backend": .string(Self.backendName),
                 "hostBuild": .string(Self.hostBuild),
-                "failureCode": .string(error.code.rawValue)
+                "failureCode": .string(error.kind.rawValue)
             ]
         } catch {
             return [
@@ -1542,9 +1586,9 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
 
     static func isTransientCaptureFailure(_ error: Error) -> Bool {
         guard let error = error as? VirtualizationPrivateHeadlessError else { return false }
-        return error.code == .displayNotReady
-            || error.code == .frameTimeout
-            || error.code == .frameInvalid
+        return error.kind == .displayNotReady
+            || error.kind == .frameTimeout
+            || error.kind == .frameInvalid
     }
 
     /// Recovery navigation may legitimately observe a blank framebuffer while
@@ -1554,14 +1598,14 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
     /// closed immediately.
     static func isTransientRecoveryCaptureFailure(_ error: Error) -> Bool {
         guard let error = error as? VirtualizationPrivateHeadlessError else { return false }
-        return error.code == .displayNotReady
-            || error.code == .frameTimeout
-            || (error.code == .frameInvalid && error.isBlankFrame)
+        return error.kind == .displayNotReady
+            || error.kind == .frameTimeout
+            || (error.kind == .frameInvalid && error.isBlankFrame)
     }
 
     static func isTransientInputReadinessFailure(_ error: Error) -> Bool {
         guard let error = error as? VirtualizationPrivateHeadlessError else { return false }
-        return error.code == .displayNotReady || error.code == .inputUnavailable
+        return error.kind == .displayNotReady || error.kind == .inputUnavailable
     }
 
     static func selectPointingDeviceIndex(

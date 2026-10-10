@@ -11,6 +11,39 @@ Pomme 0.2.1 isn't released yet. Each change to the `main` branch that passes
 CI publishes an alpha, such as `0.2.1-alpha.1`. To install the newest alpha,
 run `curl -fsSL https://pommevm.dev/install.pl | POMME_CHANNEL=alpha perl`.
 
+### Features
+
+- Every error now has a stable code, such as `vm-not-found`. Pomme prints it
+  after the message, with a link to its entry on the new
+  [Errors](/reference/errors/) page, which describes each code's cause and
+  resolution.
+- `pomme bug-report [NAME]` collects the Pomme version, this Mac's details,
+  the last error, and a VM's inspect output, helper logs, and guest logs into
+  one redacted Markdown file to attach to an issue. It never uploads anything.
+- In JSON and JSONL output, every failed result has `errorCode`, `hint`, and
+  `causes` fields. For details, see
+  [Structured output](/reference/structured-output/#errors).
+
+### Changes
+
+- Error messages say what happened, give the operating-system or framework
+  reason when there is one, and name the next step. For example, a guest
+  command that doesn't exist reports the missing path instead of "The
+  requested operation could not be completed," and a failed creation phase
+  names the phase and its cause.
+- With `--format json` or `--format jsonl`, an error that stops a command
+  before it starts an operation, such as a VM that doesn't exist, now prints
+  a failed result on standard output. Before, standard output stayed empty.
+- A command that acts on several VMs, such as `pomme stop a b`, finishes every
+  VM when one of them fails, and reports each failure in that VM's result.
+  Before, it stopped at the first error.
+- When a VM helper starts, Pomme keeps the previous helper's log as
+  `pomme-helper.previous.log` instead of erasing it. Each log starts with the
+  Pomme version, the host's macOS version, and the boot mode, and it records
+  every failed request with its error code.
+- `pomme log --last` and other flags report the flag and the rule that a value
+  broke, instead of an unknown control command.
+
 ## Pomme 0.2.0
 
 Pomme 0.2.0 fixes `pomme start` on a paused VM and redraws the progress

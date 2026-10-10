@@ -83,12 +83,12 @@ struct PommeRecoverySessionAdapter: PommeRecoveryOperationAdapter, Sendable {
         let request = await session.requestSnapshot()
         let requestOperation = request.operation
         guard requestOperation == operation.wireName else {
-            throw PommeRecoverySecurityError.operationRejected
+            throw PommeRecoverySecurityError.operationRejected()
         }
         // Touch the immutable binding before entering the actor transaction.
         // This also makes construction mistakes fail before any guest call.
         guard credential.matches(request: request) else {
-            throw PommeRecoverySecurityError.operationRejected
+            throw PommeRecoverySecurityError.operationRejected()
         }
         return try await session.run(payload: payload, finalState: finalState)
     }

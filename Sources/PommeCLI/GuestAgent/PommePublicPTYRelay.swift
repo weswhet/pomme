@@ -13,14 +13,30 @@ enum PommePublicPTYRelay {
     typealias ReceiveControl = @Sendable (TimeInterval) throws -> PommeControlStreamFrame?
     typealias FrameHandler = @Sendable ([PommeAgentJobStreamFrame]) throws -> Void
 
-    enum Error: Swift.Error, Equatable, LocalizedError {
+    enum Error: Swift.Error, Equatable, PommeDescribedError {
         case invalidPayload, invalidTimeout, invalidControlFrame, invalidCompletion, unrelatedJobFrame, publicEchoUnavailable
+
+        var code: PommeErrorCode {
+            switch self {
+            case .invalidPayload, .invalidTimeout: .invalidRequest
+            case .invalidControlFrame, .invalidCompletion, .unrelatedJobFrame: .guestAgentProtocolError
+            case .publicEchoUnavailable: .guestFeatureUnsupported
+            }
+        }
+
+        var recoverySuggestion: String? {
+            switch self {
+            case .invalidPayload, .invalidTimeout, .invalidControlFrame: nil
+            case .invalidCompletion, .unrelatedJobFrame, .publicEchoUnavailable:
+                "Run `pomme agent update NAME` to update the guest agent."
+            }
+        }
 
         var errorDescription: String? {
             switch self {
-            case .invalidPayload: "Invalid public PTY process payload."
+            case .invalidPayload: "The interactive command request is invalid; it must use a PTY and must not be detached."
             case .invalidTimeout: "Public PTY timeout must be finite and between zero and 300 seconds."
-            case .invalidControlFrame: "Invalid public PTY control frame."
+            case .invalidControlFrame: "The terminal sent an invalid control message to the interactive command."
             case .invalidCompletion: "Public PTY process completion is invalid."
             case .unrelatedJobFrame: "Public PTY output belongs to another job."
             case .publicEchoUnavailable: "Public PTY execution requires a current Pomme agent with terminal echo enabled."
@@ -283,8 +299,7 @@ struct PommePublicPTYTerminalBridge {
 
     private func terminalResponse(_ response: PommeControlResponse, localTimeout: Bool) throws -> [String: Any] {
         guard response.ok, let object = response.result?.objectValue else {
-            let error = response.error
-            throw RunnerError.controlCommandFailed(error.map { "\($0.code): \($0.message)" } ?? "Missing public PTY completion response.")
+            throw PommeControlError.clientError(response.error, missing: "Missing public PTY completion response.")
         }
         var payload = object.mapValues(\.publicValue)
         if localTimeout {

@@ -238,6 +238,16 @@ enum PommeProvisioningPhase: String, Codable, CaseIterable, Equatable, Sendable 
     case installRecoveryAgent
     case verifyNormalAgent
     case restoreFinalState
+
+    /// The phase as a sentence subject, such as "Installing macOS".
+    var displayName: String {
+        switch self {
+        case .install: "Installing macOS"
+        case .installRecoveryAgent: "Installing the Pomme agent"
+        case .verifyNormalAgent: "Verifying the Pomme agent"
+        case .restoreFinalState: "Restoring the VM's final state"
+        }
+    }
 }
 
 struct PommeProvisioningEvent: Codable, Equatable, Sendable {
@@ -292,7 +302,7 @@ struct PommeProvisioningJournal: Codable, Equatable, Sendable {
     fileprivate var unsigned: Unsigned { .init(schema: schema, generation: generation, plan: plan, planDigest: planDigest, events: events) }
 }
 
-enum PommeProvisioningError: Error, Equatable, LocalizedError, Sendable {
+enum PommeProvisioningError: Error, Equatable, PommeDescribedError, Sendable {
     case invalidPlan
     case invalidOwnership
     case invalidAgent
@@ -304,29 +314,99 @@ enum PommeProvisioningError: Error, Equatable, LocalizedError, Sendable {
     case nothingToRepair(vmName: String)
     case repairUnavailable(phase: PommeProvisioningPhase, vmName: String)
     case repairInterrupted(phase: PommeProvisioningPhase, vmName: String)
-    case phaseFailed(PommeProvisioningPhase, vmName: String? = nil)
+    /// A phase failed after its intent was journaled. `cause` keeps the
+    /// redacted reason, such as a full disk.
+    case phaseFailed(PommeProvisioningPhase, vmName: String? = nil, cause: PommeErrorReport? = nil)
     case unavailableIntegration(String)
+
+    var code: PommeErrorCode {
+        switch self {
+        case .invalidPlan: .provisioningPlanInvalid
+        case .invalidOwnership, .ownershipMismatch: .provisioningOwnershipMismatch
+        case .invalidAgent: .provisioningAgentInvalid
+        case .invalidJournal, .unexpectedEvent: .provisioningJournalInvalid
+        case .integrityFailure: .provisioningJournalIntegrityFailed
+        case .generationFailure: .provisioningJournalStale
+        case .nothingToRepair: .provisioningNothingToRepair
+        case .repairUnavailable: .provisioningRepairUnavailable
+        case .repairInterrupted: .provisioningPhaseInterrupted
+        case .phaseFailed: .provisioningPhaseFailed
+        case .unavailableIntegration: .provisioningIntegrationUnavailable
+        }
+    }
+
+    var underlying: (any Error)? {
+        if case .phaseFailed(_, _, let cause?) = self { return cause }
+        return nil
+    }
 
     var errorDescription: String? {
         switch self {
-        case .invalidPlan: "Pomme provisioning plan is not an accepted immutable profile."
-        case .invalidOwnership: "Pomme VM ownership evidence is invalid."
-        case .invalidAgent: "Pomme agent identity is invalid."
-        case .invalidJournal: "Pomme provisioning journal is not a closed valid schema."
-        case .integrityFailure: "Pomme provisioning journal integrity verification failed."
-        case .generationFailure: "Pomme provisioning journal generation is stale or non-monotonic."
-        case .unexpectedEvent: "Pomme provisioning journal has an invalid phase transition."
-        case .ownershipMismatch: "The VM is not the exact Pomme-owned VM bound to this plan."
+        case .invalidPlan: "The VM's provisioning plan isn't one that this version of Pomme accepts."
+        case .invalidOwnership: "The VM's ownership record isn't valid."
+        case .invalidAgent: "The Pomme agent identity in the VM's provisioning plan isn't valid."
+        case .invalidJournal: "The VM's provisioning journal isn't valid."
+        case .integrityFailure: "Pomme couldn't verify the integrity of the VM's provisioning records."
+        case .generationFailure: "The VM's provisioning journal is older than the last one that Pomme recorded, or another process changed it."
+        case .unexpectedEvent: "The VM's provisioning journal records its steps in an order that isn't valid."
+        case .ownershipMismatch: "The VM isn't the exact Pomme-owned VM that its provisioning plan names. It might have been moved, copied, or replaced."
         case .nothingToRepair(let vmName):
             "Nothing to repair for \(vmName): agent provisioning is complete. Agent repair does not reconcile SIP or AMFI security transactions."
         case .repairUnavailable(let phase, let vmName):
-            "Agent repair is unavailable during provisioning phase \(phase.rawValue). Resume creation with `pomme create \(vmName) --resume`."
+            "Agent repair can't continue the creation of \(vmName) at its current step "
+                + "(\(SystemErrorDescription.lowercasingFirstWord(phase.displayName))). "
+                + "Resume creation with `pomme create \(vmName) --resume`."
         case .repairInterrupted(let phase, let vmName):
-            "Agent repair cannot reconcile an interrupted \(phase.rawValue) intent for \(vmName). The VM and journal were retained; inspect `pomme agent status \(vmName)` and obtain recovery assistance before retrying."
-        case .phaseFailed(let phase, let vmName):
-            "\(vmName.map { "\($0) " } ?? "")provisioning phase \(phase.rawValue) failed; the VM and journal were retained."
-        case .unavailableIntegration(let operation): "Pomme integration is unavailable for \(operation)."
+            "\(phase.displayName) was interrupted for \(vmName), and agent repair can't reconcile an interrupted step. "
+                + "The VM and journal were retained; inspect `pomme agent status \(vmName)` and obtain recovery assistance before retrying."
+        case .phaseFailed(let phase, let vmName, let cause):
+            phase.displayName + " failed"
+                + (vmName.map { " for \($0)" } ?? "")
+                + (cause.map { ": \(PommeErrorDescriber.clause(for: $0))" } ?? "")
+                + ". The VM and journal were retained."
+        case .unavailableIntegration(let operation):
+            "Pomme can't continue because a component that it needs isn't available: \(operation)."
         }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .phaseFailed(_, let vmName, let cause):
+            if let hint = cause?.hint {
+                "\(hint) To continue creating the VM, run `pomme create \(vmName ?? "NAME") --resume`."
+            } else {
+                "Correct the cause, then run `pomme create \(vmName ?? "NAME") --resume` to continue."
+            }
+        case .ownershipMismatch, .invalidOwnership, .invalidJournal, .unexpectedEvent, .integrityFailure:
+            "Delete the VM with `pomme delete NAME`, then create it again."
+        case .generationFailure:
+            "Make sure that no other Pomme command is using the VM, then retry."
+        default:
+            nil
+        }
+    }
+}
+
+extension PommeProvisioningError {
+    /// The cause to keep for a failed phase. A bare `phaseFailed` that a
+    /// phase threw itself adds nothing, so it keeps that one's cause instead.
+    static func phaseCause(of error: any Error) -> PommeErrorReport? {
+        if case .phaseFailed(_, _, let cause)? = error as? PommeProvisioningError { return cause }
+        return PommeErrorReport(keepingSystemCause: error)
+    }
+}
+
+extension PommeErrorReport {
+    /// A report for a cause that a wrapping error stores. When `error` is
+    /// itself an operating-system or framework error, its domain and number
+    /// become the first cause, so the wrapping message reads, for example,
+    /// "the disk is out of space (VZErrorDomain 8)". With `codesOnly`, the
+    /// report keeps only codes, for an error whose text might contain
+    /// credentials.
+    init(keepingSystemCause error: any Error, codesOnly: Bool = false) {
+        // `PommeErrorReport` already keeps a framework error's own domain and
+        // number as its first cause.
+        self = codesOnly ? PommeErrorReport(codesOnly: error) : PommeErrorReport(error)
     }
 }
 
@@ -405,7 +485,7 @@ enum PommeProvisioningFailureDiagnostic {
             }
         }
         if let error = error as? VirtualizationPrivateHeadlessError {
-            return "headless.\(error.code.rawValue)"
+            return "headless.\(error.kind.rawValue)"
         }
 
         let bridged = error as NSError
@@ -687,7 +767,11 @@ struct PommeProvisioningOrchestrator: Sendable {
                 signer: signer
             )
             try repository.commit(failed, replacing: journal.generation)
-            throw PommeProvisioningError.phaseFailed(phase, vmName: journal.plan.vm.name)
+            throw PommeProvisioningError.phaseFailed(
+                phase,
+                vmName: journal.plan.vm.name,
+                cause: PommeProvisioningError.phaseCause(of: error)
+            )
         }
     }
 

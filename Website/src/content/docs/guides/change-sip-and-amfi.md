@@ -96,7 +96,8 @@ to verify the effective arguments. If SIP is still on, the AMFI command stops
 with the following error:
 
 ```text
-AMFI changes require SIP disabled while boot arguments are written and verified. Run pomme sip disable <vm> first; restore AMFI before re-enabling SIP.
+Error: Changing AMFI requires SIP to be off while Pomme writes and verifies boot arguments. Run `pomme sip disable NAME` first, and restore AMFI before you turn SIP on again.
+Error code: amfi-requires-sip-disabled. For help, see https://pommevm.dev/reference/errors/#amfi-requires-sip-disabled
 ```
 
 If the guest already has the requested setting, Pomme records the result
@@ -131,10 +132,12 @@ instead.
 `pomme amfi enable` restores the exact AMFI configuration that Pomme saved when
 it turned AMFI off. If AMFI is off but Pomme has no saved configuration, for
 example because AMFI was turned off outside Pomme, the command stops before it
-changes anything and reports the `missingBaseline` error:
+changes anything and reports the `amfi-baseline-missing` error:
 
 ```text
-AMFI enable requires the exact recorded baseline. No guessed LocalPolicy reset was attempted.
+Error: Pomme has no recorded AMFI baseline for this VM, so it can't restore AMFI. Pomme didn't change the boot policy.
+Run `pomme amfi status NAME` to see the VM's AMFI state.
+Error code: amfi-baseline-missing. For help, see https://pommevm.dev/reference/errors/#amfi-baseline-missing
 ```
 
 ## Provide owner authorization

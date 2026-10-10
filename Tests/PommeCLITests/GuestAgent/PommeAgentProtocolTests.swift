@@ -191,8 +191,8 @@ struct PommeAgentProtocolTests {
         }
         let response = try PommeAgentProtocol.decode(Data(line.dropLast()))
         #expect(response.error?.code == PommeRecoveryGuestFailureCode.rollbackFailed.rawValue)
-        #expect(response.error?.message == "The requested operation could not be completed.")
-        #expect(response.error?.message.contains("rollback") == false)
+        // The message carries only the closed failure code, never details.
+        #expect(response.error?.message == "The Recovery security operation failed (recovery-rollback-failed).")
     }
 }
 

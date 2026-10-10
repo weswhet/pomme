@@ -1,31 +1,59 @@
 import CryptoKit
 import Foundation
 
-enum PommeRecoverySecurityError: Error, LocalizedError, Equatable, Sendable {
+enum PommeRecoverySecurityError: PommeDescribedError, Equatable, Sendable {
     case invalidSnapshot
     case invalidPolicy
     case invalidNVRAM
-    case operationRejected
+    case operationRejected(PommeRetainedCause = .init())
     case verificationFailed
-    case rollbackFailed
-    case journalFailed
+    case rollbackFailed(PommeRetainedCause = .init())
+    case journalFailed(PommeRetainedCause = .init())
+
+    var code: PommeErrorCode {
+        switch self {
+        case .invalidSnapshot, .invalidPolicy, .invalidNVRAM: .recoverySecurityStateRejected
+        case .operationRejected: .recoveryOperationFailed
+        case .verificationFailed: .securityChangeUnverified
+        case .rollbackFailed: .securityRollbackUnverified
+        case .journalFailed: .securityJournalWriteFailed
+        }
+    }
 
     var errorDescription: String? {
         switch self {
         case .invalidSnapshot:
-            "Security snapshot was rejected."
+            "The recorded security baseline is empty or incomplete, so Pomme didn't use it."
         case .invalidPolicy:
-            "LocalPolicy mutation was rejected."
+            "The requested boot policy is empty, so Pomme didn't write it."
         case .invalidNVRAM:
-            "NVRAM mutation was rejected."
-        case .operationRejected:
-            "Recovery security operation was rejected."
+            "An NVRAM name or value isn't valid: values must be under 64 KB without null bytes, so Pomme didn't use it."
+        case .operationRejected(let cause):
+            cause.describing("The Recovery security operation failed.")
         case .verificationFailed:
-            "Recovery security operation could not be verified."
-        case .rollbackFailed:
-            "Recovery security rollback could not be verified."
+            "Pomme read the boot policy and NVRAM again after the change and they didn't match the requested values."
+        case .rollbackFailed(let cause):
+            cause.describing("Pomme couldn't verify that it restored the recorded boot policy and NVRAM values.")
+        case .journalFailed(let cause):
+            cause.describing("Pomme couldn't save the security baseline before it changed the boot policy.")
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .rollbackFailed, .verificationFailed:
+            "Run `pomme amfi status NAME` to check the VM, then repeat the same action with the same `--final-state` value."
         case .journalFailed:
-            "Recovery security snapshot could not be durably recorded."
+            "Check that the volume that holds the VM has free space, then run the same command again."
+        default:
+            nil
+        }
+    }
+
+    var underlying: (any Error)? {
+        switch self {
+        case .operationRejected(let cause), .rollbackFailed(let cause), .journalFailed(let cause): cause.underlying
+        default: nil
         }
     }
 }
@@ -323,7 +351,7 @@ struct PommeAMFITransaction: Sendable {
         do {
             try dependencies.persistSnapshot(snapshot)
         } catch {
-            throw PommeRecoverySecurityError.journalFailed
+            throw PommeRecoverySecurityError.journalFailed(PommeRetainedCause(error))
         }
 
         do {
@@ -348,14 +376,15 @@ struct PommeAMFITransaction: Sendable {
                 try await dependencies.applyNVRAM(snapshot.nvram)
                 let restored = try await dependencies.read()
                 guard restored.resourcesEqual(to: snapshot) else {
-                    throw PommeRecoverySecurityError.rollbackFailed
+                    throw PommeRecoverySecurityError.rollbackFailed()
                 }
             } catch {
-                throw PommeRecoverySecurityError.rollbackFailed
+                if case PommeRecoverySecurityError.rollbackFailed = error { throw error }
+                throw PommeRecoverySecurityError.rollbackFailed(PommeRetainedCause(codesOnly: error))
             }
             throw (error is PommeRecoverySecurityError)
                 ? error
-                : PommeRecoverySecurityError.operationRejected
+                : PommeRecoverySecurityError.operationRejected(PommeRetainedCause(codesOnly: error))
         }
     }
 
@@ -421,12 +450,12 @@ struct PommeRecoverySecurityRouter: PommeRecoverySecurityPort, Sendable {
         let request = await session.requestSnapshot()
         let requestOperation = request.operation
         guard operation.wireName == requestOperation else {
-            throw PommeRecoverySecurityError.operationRejected
+            throw PommeRecoverySecurityError.operationRejected()
         }
         do {
             return try await session.perform(payload: payload)
         } catch {
-            throw PommeRecoverySecurityError.operationRejected
+            throw PommeRecoverySecurityError.operationRejected(PommeRetainedCause(codesOnly: error))
         }
     }
 }

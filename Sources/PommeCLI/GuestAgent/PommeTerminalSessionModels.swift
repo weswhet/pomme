@@ -61,7 +61,26 @@ enum PommeTerminalSessionStorageHealth: String, Codable, CaseIterable, Sendable 
     case corrupt
 }
 
-enum PommeTerminalSessionError: Error, Equatable, LocalizedError, Sendable {
+enum PommeTerminalSessionError: Error, Equatable, PommeDescribedError, Sendable {
+    var code: PommeErrorCode {
+        switch self {
+        case .invalidIdentifier, .invalidOffset, .invalidRange: .invalidRequest
+        case .recoveryCannotPersist: .guestTerminalSessionTransient
+        case .invalidGeneration, .invalidMutationSequence, .invalidDigest, .invalidExecutable, .invalidMetadata,
+             .roleMismatch, .unsafePath, .symbolicLink, .notRegularFile, .transcriptChanged, .storageUnavailable, .ioFailure:
+            .guestTerminalSessionStorageFailed
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .invalidIdentifier: "Run `pomme sessions list NAME` to see the VM's sessions."
+        case .invalidOffset, .invalidRange: "Run `pomme sessions inspect NAME --session ID` to see the transcript's length."
+        case .recoveryCannotPersist: nil
+        default: "Run `pomme bug-report NAME` and attach the file to a new issue."
+        }
+    }
+
     case invalidIdentifier
     case invalidOffset
     case invalidRange

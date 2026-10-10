@@ -435,9 +435,12 @@ struct PommeAgentTests {
                 .init(stdout: "Remote Login status unavailable", stderr: "")
             }
         }
-        #expect(throws: PommeAgentOperationError.io) {
-            try PommeRemoteLogin.apply(enabled: true) { _ in throw PommeAgentOperationError.io }
+        let failure = #expect(throws: PommeAgentOperationError.self) {
+            try PommeRemoteLogin.apply(enabled: true) { _ in
+                throw PommeAgentOperationError.described(.io, message: "systemsetup exited with status 1")
+            }
         }
+        #expect(failure?.kind == .io)
     }
 
     @Test("An unresolved activation journal survives restart and fails closed")

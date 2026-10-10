@@ -36,7 +36,7 @@ struct PommeProvisioningFailureDiagnosticTests {
         )
         #expect(
             PommeProvisioningFailureDiagnostic.code(
-                for: PommeRecoverySessionError.preparationFailed
+                for: PommeRecoverySessionError.preparationFailed()
             ) == "recovery_session.preparation_failed"
         )
     }

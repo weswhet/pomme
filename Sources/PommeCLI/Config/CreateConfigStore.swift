@@ -629,7 +629,7 @@ enum ConfigDecodingMessage {
         }
     }
 
-    private static func dottedPath(_ path: [any CodingKey]) -> String {
+    static func dottedPath(_ path: [any CodingKey]) -> String {
         path.map { $0.intValue.map { "[\($0)]" } ?? $0.stringValue }
             .joined(separator: ".")
             .replacingOccurrences(of: ".[", with: "[")

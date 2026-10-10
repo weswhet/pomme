@@ -123,7 +123,7 @@ struct PommeAgentRecoveryInstaller: Sendable {
 
     func install(payload: JSONValue, requestID: UUID) throws -> JSONValue {
         guard !configuration.requiresRoot || geteuid() == 0 else {
-            throw PommeAgentOperationError.invalid
+            throw PommeAgentOperationError.invalid("agent.install requires the Recovery agent to run as root")
         }
         let workspace = try workspaceRoot(from: payload, requestID: requestID)
         let manifestURL = workspace.appendingPathComponent(PommeRecoveryArtifactNames.request)
@@ -134,14 +134,14 @@ struct PommeAgentRecoveryInstaller: Sendable {
               request.operation == PommeRecoveryOperation.installAgent.wireName,
               request.requestID == requestID,
               workspace.lastPathComponent == "pomme-recovery-\(requestID.uuidString.lowercased())"
-        else { throw PommeAgentOperationError.invalid }
+        else { throw PommeAgentOperationError.invalid("The staged install request doesn't match this agent.install request") }
         let executable = try PommeAgentFileTransaction.readRegular(
             executableURL,
             maximumBytes: PommeRecoveryStagingBuilder.maximumExecutableBytes
         )
         guard !executable.isEmpty,
               SHA256.hash(data: executable).map({ String(format: "%02x", $0) }).joined() == request.executableSHA256
-        else { throw PommeAgentOperationError.invalid }
+        else { throw PommeAgentOperationError.invalid("The staged agent executable is empty or doesn't match executableSHA256") }
 
         let tokenText = try persistentToken(from: payload, requestID: requestID)
         let plist = try PommeAgentInstall.definition(
@@ -172,19 +172,21 @@ struct PommeAgentRecoveryInstaller: Sendable {
               let path = values["workspacePath"]?.stringValue,
               path.utf8.count <= 256,
               !path.contains("\0")
-        else { throw PommeAgentOperationError.invalid }
+        else {
+            throw PommeAgentOperationError.invalid("agent.install requires installMode, the credential, a matching requestID, and a workspacePath of at most 256 bytes")
+        }
         // The request binds a lexical spelling, not Foundation's preferred
         // filesystem alias. Existing /private/var paths may otherwise become
         // /var paths and incorrectly reject their own authenticated request.
         let root = URL(fileURLWithPath: path).standardized
         guard root.path == path,
               configuration.validateGuestWorkspace(root, requestID)
-        else { throw PommeAgentOperationError.invalid }
+        else { throw PommeAgentOperationError.invalid("workspacePath \(path) isn't this request's Recovery workspace") }
         do {
             try PommeAgentFileTransaction.verifyRecoveryWorkspaceDirectory(
                 root, owner: configuration.expectedOwner, group: configuration.expectedGroup
             )
-        } catch { throw PommeAgentOperationError.invalid }
+        } catch { throw PommeAgentOperationError.invalid("The Recovery workspace \(path) has the wrong type, owner, or permissions") }
         return root
     }
 
@@ -196,9 +198,11 @@ struct PommeAgentRecoveryInstaller: Sendable {
               let suppliedID = values["requestID"]?.stringValue.flatMap(UUID.init(uuidString:)),
               suppliedID == requestID,
               let token = values["persistentToken"]?.stringValue
-        else { throw PommeAgentOperationError.invalid }
+        else { throw PommeAgentOperationError.invalid("agent.install requires the persistent agent credential and a matching requestID") }
+        // The messages name the credential without its field name or value,
+        // so redaction doesn't withhold them.
         do { return try PommeAgentAuthentication.normalized(token) }
-        catch { throw PommeAgentOperationError.invalid }
+        catch { throw PommeAgentOperationError.invalid("The persistent agent credential is malformed") }
     }
 
     private func targetDataRoot(
@@ -206,17 +210,21 @@ struct PommeAgentRecoveryInstaller: Sendable {
     ) throws -> (root: URL, volumeGroupUUID: UUID) {
         guard let values = payload.objectValue,
               let mode = values["installMode"]?.stringValue,
-              ["initial", "repair"].contains(mode) else { throw PommeAgentOperationError.invalid }
+              ["initial", "repair"].contains(mode) else { throw PommeAgentOperationError.invalid("installMode must be initial or repair") }
         let uuid = values["targetVolumeGroupUUID"]?.stringValue.flatMap(UUID.init(uuidString:))
-        guard mode == "initial" ? uuid == nil : uuid != nil else { throw PommeAgentOperationError.invalid }
+        guard mode == "initial" ? uuid == nil : uuid != nil else {
+            throw PommeAgentOperationError.invalid(mode == "initial"
+                ? "An initial install can't set targetVolumeGroupUUID"
+                : "A repair install requires a targetVolumeGroupUUID")
+        }
         let selected = try configuration.resolveTargetDataRoot(uuid)
         let root = selected.root.standardized
-        guard root.path == selected.root.path else { throw PommeAgentOperationError.invalid }
+        guard root.path == selected.root.path else { throw PommeAgentOperationError.invalid("The target Data volume path \(selected.root.path) isn't in standard form") }
         guard uuid == nil || selected.volumeGroupUUID == uuid else {
-            throw PommeAgentOperationError.invalid
+            throw PommeAgentOperationError.invalid("The selected Data volume isn't in volume group \(uuid?.uuidString ?? "")")
         }
         guard configuration.validateTargetDataRoot(root) else {
-            throw PommeAgentOperationError.invalid
+            throw PommeAgentOperationError.invalid("\(root.path) isn't a mounted macOS Data volume")
         }
         return (root, selected.volumeGroupUUID)
     }
@@ -227,7 +235,9 @@ struct PommeAgentRecoveryInstaller: Sendable {
               configuration.paths.token == defaults.token,
               configuration.paths.plist == defaults.plist,
               configuration.paths.privateDirectory == defaults.privateDirectory else {
-            guard targetsAreWithinDataVolume(root, paths: configuration.paths) else { throw PommeAgentOperationError.invalid }
+            guard targetsAreWithinDataVolume(root, paths: configuration.paths) else {
+                throw PommeAgentOperationError.invalid("The agent install paths must be inside \(root.path)")
+            }
             return configuration.paths
         }
         return .init(
@@ -245,7 +255,7 @@ struct PommeAgentRecoveryInstaller: Sendable {
     /// by group/other; symbolic links are never followed.
     private func prepareTargetDirectories(under root: URL, paths: Paths) throws {
         guard targetsAreWithinDataVolume(root, paths: paths) else {
-            throw PommeAgentOperationError.invalid
+            throw PommeAgentOperationError.invalid("The agent install paths must be inside \(root.path)")
         }
         for parent in [
             paths.executable.deletingLastPathComponent(),
@@ -285,7 +295,13 @@ struct PommeAgentRecoveryInstaller: Sendable {
                     guard fchmod(prepared.descriptor, mode) == 0,
                           fchown(prepared.descriptor, configuration.expectedOwner, configuration.expectedGroup) == 0,
                           fsync(prepared.descriptor) == 0
-                    else { throw PommeAgentOperationError.invalid }
+                    else {
+                        let code = errno
+                        throw PommeAgentOperationError.described(
+                            .invalid,
+                            message: "Setting the mode, owner, or contents of \(Self.displayName(target)) failed: \(String(cString: strerror(code))) (errno \(code))"
+                        )
+                    }
                     _ = Darwin.close(prepared.descriptor)
                     staged.append((target, prepared.url))
                 } catch {
@@ -300,8 +316,17 @@ struct PommeAgentRecoveryInstaller: Sendable {
             try verifyInstalled(files: files)
         } catch {
             for item in staged { try? PommeAgentFileTransaction.removeAdjacentStage(item.stage, for: item.target) }
-            throw PommeAgentOperationError.invalid
+            if case .described(_, let reason)? = error as? PommeAgentOperationError {
+                throw PommeAgentOperationError.invalid("Installing the agent files failed: \(reason)")
+            }
+            throw PommeAgentOperationError.invalid("Installing the agent files failed with \(String(describing: type(of: error)))")
         }
+    }
+
+    /// A file's name for a failure message. The credential file is described
+    /// rather than named, so redaction doesn't withhold the whole message.
+    private static func displayName(_ url: URL) -> String {
+        url.pathExtension == "token" ? "agent credential file" : url.lastPathComponent
     }
 
     private func targetsAreWithinDataVolume(_ root: URL, paths: Paths) -> Bool {
@@ -319,7 +344,7 @@ struct PommeAgentRecoveryInstaller: Sendable {
                   info.st_mode & 0o777 == mode,
                   info.st_nlink == 1,
                   try PommeAgentFileTransaction.readRegular(url, maximumBytes: max(expected.count, 1)) == expected
-            else { throw PommeAgentOperationError.invalid }
+            else { throw PommeAgentOperationError.invalid("The installed \(Self.displayName(url)) doesn't have the expected type, owner, mode, or contents") }
             try PommeAgentFileTransaction.fsyncParentDirectory(of: url)
         }
     }
@@ -741,8 +766,14 @@ enum PommeAgentFileTransaction {
         try PommeAgentInstallJournalStore.remove(at: journalURL)
     }
 
-    enum CommitError: Error, Equatable, LocalizedError {
+    enum CommitError: Error, Equatable, PommeDescribedError {
         case destinationPublishedCleanupFailed
+
+        var code: PommeErrorCode { .guestFileCommitUnverified }
+
+        var recoverySuggestion: String? {
+            "Check the destination's directory in the guest and remove any leftover staging file."
+        }
 
         var errorDescription: String? {
             "The destination was replaced, but retirement of its prior entry could not be verified; a prior entry may remain at the staging path."

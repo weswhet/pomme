@@ -138,7 +138,7 @@ struct PommeSecurityRunStateRestorationTests {
             )
             Issue.record("An unproven stop unexpectedly completed")
         } catch {
-            #expect(error as? PommeSecurityWorkflowError == .restorationIncomplete)
+            #expect(error as? PommeSecurityWorkflowError == .restorationIncomplete())
         }
         #expect(fixture.startedStates.isEmpty)
         #expect(fixture.events == [.observe, .stop, .observe])
@@ -159,7 +159,7 @@ struct PommeSecurityRunStateRestorationTests {
             )
             Issue.record("A mismatched target proof unexpectedly completed")
         } catch {
-            #expect(error as? PommeSecurityWorkflowError == .restorationIncomplete)
+            #expect(error as? PommeSecurityWorkflowError == .restorationIncomplete())
         }
         #expect(fixture.startedStates == [.running(.recovery)])
         #expect(fixture.events == [.observe, .start(.running(.recovery)), .observe])

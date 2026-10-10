@@ -1,13 +1,15 @@
 import Foundation
 
 /// Errors raised before an AMFI workflow can publish a durable journal.
-enum PommeSecurityAMFIPreflightError: Error, Equatable, LocalizedError, Sendable {
+enum PommeSecurityAMFIPreflightError: PommeDescribedError, Equatable, Sendable {
   case invalidOperation
+
+  var code: PommeErrorCode { .internalError }
 
   var errorDescription: String? {
     switch self {
     case .invalidOperation:
-      "AMFI preflight received a SIP operation."
+      "Pomme ran its AMFI checks for a SIP operation. This is a bug in Pomme."
     }
   }
 }
@@ -53,7 +55,7 @@ enum PommeSecurityAMFIPreflight {
     do {
       state = try await observeAMFI()
     } catch let failure as PommeRecoveryGuestOperationFailure {
-      guard failure.code == .snapshotPending,
+      guard failure.failureCode == .snapshotPending,
         PommeSecurityWorkflow.canResumeRetainedAMFINormalCheckpoint(journal)
       else { throw failure }
       try await requireSIPDisabled()

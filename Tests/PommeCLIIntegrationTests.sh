@@ -747,6 +747,84 @@ else
   fail "guest options stay outside host presentation settings"
 fi
 
+# Errors carry a stable code in text and JSON output.
+expect_exit_1 "missing VM fails with exit 1" "$runner" status pomme-contract-errors-missing --progress off
+if grep -q '^Error: No Pomme-owned VM named pomme-contract-errors-missing exists.' "$work/stderr" \
+  && grep -q '^Error code: vm-not-found. For help, see https://pommevm.dev/reference/errors/#vm-not-found' "$work/stderr" \
+  && [[ ! -s "$work/stdout" ]]; then
+  pass "missing VM error keeps its first line and adds its error code"
+else
+  fail "missing VM error keeps its first line and adds its error code"
+  sed -n '1,20p' "$work/stderr" >&2
+fi
+for representation in json jsonl; do
+  expect_exit_1 "missing VM fails with exit 1 in $representation" \
+    "$runner" status pomme-contract-errors-missing --format "$representation" --progress off
+  if python3 - "$work/stdout" <<'PY'
+import json, sys
+lines = [line for line in open(sys.argv[1]) if line.strip()]
+assert len(lines) == 1, lines
+result = json.loads(lines[0])
+assert result["ok"] is False, result
+assert result["errorCode"] == "vm-not-found", result
+assert result["hostExitCode"] == 1, result
+assert "pomme-contract-errors-missing" in result["error"], result
+assert "hint" in result and isinstance(result["causes"], list), result
+PY
+  then
+    pass "missing VM prints a $representation failure with errorCode"
+  else
+    fail "missing VM prints a $representation failure with errorCode"
+    sed -n '1,20p' "$work/stdout" >&2
+  fi
+done
+
+expect_failure "invalid log window is rejected" "$runner" log pomme-contract-errors-missing --last bogus --progress off
+if grep -q -- '--last' "$work/stderr" && ! grep -qi 'unknown control command\|doesn.t support the command' "$work/stderr"; then
+  pass "invalid log window names the flag instead of an unknown command"
+else
+  fail "invalid log window names the flag instead of an unknown command"
+  sed -n '1,20p' "$work/stderr" >&2
+fi
+
+expect_exit_1 "multi-VM stop reports every VM" \
+  "$runner" stop pomme-contract-errors-a pomme-contract-errors-b --json --progress off
+if python3 - "$work/stdout" <<'PY'
+import json, sys
+result = json.load(open(sys.argv[1]))
+assert result["ok"] is False, result
+names = [entry["name"] for entry in result["results"]]
+assert names == ["pomme-contract-errors-a", "pomme-contract-errors-b"], names
+assert all(entry["errorCode"] == "vm-not-found" for entry in result["results"]), result
+PY
+then
+  pass "multi-VM stop continues after a VM fails"
+else
+  fail "multi-VM stop continues after a VM fails"
+  sed -n '1,20p' "$work/stdout" >&2
+fi
+
+bug_report="$work/bug-report.md"
+expect_success "bug report writes a file" "$runner" bug-report --output "$bug_report" --progress off
+if [[ -f "$bug_report" ]] \
+  && grep -q '^# Pomme bug report' "$bug_report" \
+  && grep -q '^## Last error' "$bug_report" \
+  && ! grep -q -- "$HOME" "$bug_report" \
+  && ! grep -qiE 'password|secret|token' <(grep -v 'withheld lines that mention a token, password, or secret' "$bug_report") \
+  && [[ "$(stat -f '%Lp' "$bug_report")" == "600" ]]; then
+  pass "bug report is redacted and private"
+else
+  fail "bug report is redacted and private"
+  sed -n '1,40p' "$bug_report" >&2
+fi
+expect_failure "bug report keeps an existing file" "$runner" bug-report --output "$bug_report" --progress off
+if grep -q 'already exists' "$work/stderr"; then
+  pass "bug report refuses to replace a file"
+else
+  fail "bug report refuses to replace a file"
+fi
+rm -f -- "$bug_report"
+
 if [[ $failures -ne 0 ]]; then
   printf '%d of %d contract checks failed\n' "$failures" "$checks" >&2
   exit 1
