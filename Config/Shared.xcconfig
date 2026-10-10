@@ -10,7 +10,7 @@ PRODUCT_NAME = pomme
 PRODUCT_DISPLAY_NAME = pomme
 PRODUCT_BUNDLE_IDENTIFIER = com.github.weswhet.pomme
 OTHER_CODE_SIGN_FLAGS = --identifier $(PRODUCT_BUNDLE_IDENTIFIER)
-MARKETING_VERSION = 0.2.0
+MARKETING_VERSION = 0.2.1
 CURRENT_PROJECT_VERSION = 1
 // Scripts/build-local.sh passes the commit; other builds report unknown.
 POMME_GIT_COMMIT = unknown
