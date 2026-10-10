@@ -198,11 +198,17 @@ users or scripts rely on. Don't leave the site to a follow-up change.
    `Website/src/content/docs` for the command name and check the related
    guide and concept pages, `resources/troubleshooting.md`,
    `guides/script-pomme.md`, and `resources/release-notes.md`.
-4. When you add a subcommand, add it to `CommandCatalog` in
+4. Update the Crawler mode page for each hand-written page that you change,
+   at the same path under `Website/src/content/docs/crawler/`, following
+   `Website/CRAWLER_VOICE.md`. If you don't update it, delete it so that the
+   page falls back to the normal text. Never leave a crawler page that
+   contradicts the facts. Run `rtk proxy npm run check:crawler` from
+   `Website/`.
+5. When you add a subcommand, add it to `CommandCatalog` in
    `Sources/PommeCLI/CLI/Commands/UIUtilityCommands.swift` so that
    `pomme tools` and `pomme agent-help` list it.
-5. Follow `Website/CONTRIBUTING.md`. Run `rtk proxy npm run build` and
+6. Follow `Website/CONTRIBUTING.md`. Run `rtk proxy npm run build` and
    `rtk proxy npm run lint:style` from `Website/`, and don't add new Vale
    errors or warnings to the pages that you change.
-6. Describe only behavior that you verified against the source or the
+7. Describe only behavior that you verified against the source or the
    installed CLI.

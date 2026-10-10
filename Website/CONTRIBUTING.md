@@ -16,6 +16,7 @@ npm run build      # static output in Website/dist
 npm run preview    # serve the built site locally
 npm run lint:style # check prose against the Google style rules with Vale
 npm run reference  # regenerate the command-line reference
+npm run check:crawler # check that Crawler mode pages match the normal pages
 npm run tailnet    # build and serve to your tailnet at https://HOST.TAILNET.ts.net/
 npm run tailnet:stop
 ```
@@ -53,6 +54,27 @@ from the installed CLI's help text. Don't edit those files by hand. Build and
 install the CLI first (`rtk proxy bash Scripts/build-local.sh` from the
 repository root), then run `npm run reference`. To document a different
 executable, set `POMME_RUNNER` to its absolute path.
+
+## Crawler mode
+
+Crawler mode at `/crawler/` retells the hand-written pages in the voice of a
+sarcastic game-show System. It's a Starlight locale, so each page in
+`src/content/docs/crawler/` mirrors the normal page at the same path, and a
+page without a crawler version shows the normal text under a notice. The
+generated pages, the command-line reference and the Errors page, always fall
+back this way.
+
+When you change a hand-written page, update its crawler page in the same
+change, or delete the crawler page so that the page falls back. Never leave a
+crawler page that contradicts the normal page. Follow
+[`CRAWLER_VOICE.md`](CRAWLER_VOICE.md) when you write one, and run
+`npm run check:crawler` before you finish. The check fails when a crawler
+page's code blocks or tables differ from the normal page, or when its links
+leave Crawler mode or point to a missing page or heading. It warns when the
+normal page has a newer commit.
+
+The rest of this file applies to the normal pages. Vale checks crawler pages
+for spelling only.
 
 ## Page types
 

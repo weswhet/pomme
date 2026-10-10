@@ -86,6 +86,40 @@ jobs:
           path: ${{ runner.temp }}/pomme-binary.tar.gz
           retention-days: 3
 
+  # Cloudflare Pages builds and publishes the site; this job catches a broken
+  # build, and Crawler mode pages that no longer match the normal pages,
+  # before they reach main.
+  website:
+    name: Check the documentation site
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: Website
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          # The crawler check compares page history to find stale pages.
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: Website/.node-version
+          cache: npm
+          cache-dependency-path: Website/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check Crawler mode pages
+        run: npm run check:crawler
+
+      - name: Build the site
+        run: npm run build
+
   # Unit tests run only on macOS 27: Xcode 26.6's test runner can't load a
   # test bundle built by Xcode 27 (its Swift Testing runtime lacks newer
   # symbols). This job checks the command-line contract on macOS 26 instead.

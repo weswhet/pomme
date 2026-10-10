@@ -1,0 +1,18 @@
+{
+	"skipLink.label": "Skip the cutscene",
+	"search.label": "Search the dungeon",
+	"search.cancelLabel": "Flee",
+	"themeSelect.accessibleLabel": "Select lighting (for ambiance)",
+	"menuButton.accessibleLabel": "Inventory",
+	"sidebarNav.accessibleLabel": "Dungeon map",
+	"tableOfContents.onThisPage": "Quest log",
+	"tableOfContents.overview": "Briefing",
+	"i18n.untranslatedContent": "SYSTEM NOTICE: The System couldn't be bothered to narrate this page. Enjoy the boring version, Crawler. The facts are the same either way.",
+	"page.previousLink": "Retreat",
+	"page.nextLink": "Descend",
+	"404.text": "You have wandered into a wall. There is no page here, Crawler. Check the URL or use the search bar before the viewers notice.",
+	"aside.note": "System Notice",
+	"aside.tip": "Pro Tip from the System",
+	"aside.caution": "Hazard Detected",
+	"aside.danger": "Death Notice"
+}

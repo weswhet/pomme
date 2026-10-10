@@ -33,7 +33,7 @@ Intermediates.noindex/
 /dist/
 
 ## Local CLI binaries
-pomme
+/pomme
 
 ## Playgrounds
 timeline.xctimeline

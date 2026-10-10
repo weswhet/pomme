@@ -1,0 +1,85 @@
+---
+// Links to the same page in the other mode by adding or removing the
+// /crawler prefix. It's a plain link, so it works without JavaScript.
+const prefix = '/crawler';
+const isCrawler = Astro.locals.starlightRoute.locale === 'crawler';
+const { pathname } = Astro.url;
+
+let target: string;
+if (isCrawler) {
+	target = pathname.replace(/^\/crawler(?=\/|$)/, '') || '/';
+} else {
+	target = prefix + (pathname === '/' ? '/' : pathname);
+}
+
+const label = isCrawler ? 'Turn off Crawler mode' : 'Turn on Crawler mode';
+---
+
+<a
+	class="crawler-toggle"
+	href={target}
+	data-on={isCrawler ? 'true' : 'false'}
+	aria-label={label}
+	title={label}
+>
+	<svg aria-hidden="true" class="skull" viewBox="0 0 24 24" width="16" height="16">
+		<path
+			fill="currentColor"
+			d="M12 2C6.9 2 3 5.6 3 10.3c0 2.7 1.3 4.9 3.3 6.3V19a1 1 0 0 0 1 1h1.2v-1.6a.8.8 0 0 1 1.6 0V20h3.8v-1.6a.8.8 0 0 1 1.6 0V20h1.2a1 1 0 0 0 1-1v-2.4c2-1.4 3.3-3.6 3.3-6.3C21 5.6 17.1 2 12 2Zm-3.4 11.6a2.1 2.1 0 1 1 0-4.2 2.1 2.1 0 0 1 0 4.2Zm3.4 2.6-1.2-2h2.4l-1.2 2Zm3.4-2.6a2.1 2.1 0 1 1 0-4.2 2.1 2.1 0 0 1 0 4.2Z"
+		></path>
+	</svg>
+	<span class="track" aria-hidden="true"><span class="thumb"></span></span>
+	<span class="text" aria-hidden="true">Crawler</span>
+</a>
+
+<style>
+	.crawler-toggle {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.375rem;
+		color: var(--sl-color-gray-1);
+		font-size: var(--sl-text-sm);
+		text-decoration: none;
+		white-space: nowrap;
+	}
+	.crawler-toggle:hover {
+		color: var(--sl-color-white);
+	}
+	.track {
+		position: relative;
+		display: inline-block;
+		width: 1.75rem;
+		height: 1rem;
+		border-radius: 1rem;
+		border: 1px solid var(--sl-color-gray-4);
+		background: var(--sl-color-gray-6);
+		transition: background-color 0.15s;
+	}
+	.thumb {
+		position: absolute;
+		top: 1px;
+		inset-inline-start: 1px;
+		width: 0.75rem;
+		height: 0.75rem;
+		border-radius: 50%;
+		background: var(--sl-color-gray-2);
+		transition: transform 0.15s;
+	}
+	.crawler-toggle[data-on='true'] {
+		color: var(--sl-color-accent-high);
+	}
+	.crawler-toggle[data-on='true'] .track {
+		background: var(--sl-color-accent);
+		border-color: var(--sl-color-accent);
+	}
+	.crawler-toggle[data-on='true'] .thumb {
+		background: var(--sl-color-white);
+		transform: translateX(0.75rem);
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.track,
+		.thumb {
+			transition: none;
+		}
+	}
+</style>

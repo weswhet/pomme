@@ -1,0 +1,98 @@
+---
+title: Pomme
+description: Welcome to the dungeon, Crawler. Pomme is a container-style command-line tool for headless macOS virtual machines on Apple silicon, now with live narration.
+template: splash
+hero:
+  tagline: "SYSTEM NOTICE: Congratulations, Crawler! You have been selected to create, run, and automate headless macOS virtual machines on your Apple silicon Mac, the way you manage containers. Attendance is mandatory. Viewers are watching."
+  actions:
+    - text: Enter the dungeon
+      link: /crawler/get-started/quickstart/
+      icon: right-arrow
+    - text: Open the spellbook
+      link: /crawler/reference/cli/
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Hello, Crawler. The System will be your guide today, mostly because it lost a
+bet. Pomme is a container-style command-line tool for macOS virtual machines
+(VMs) on Apple silicon. You create, start, run commands in, and delete VMs from
+the terminal, much as you manage containers, and every VM runs completely
+headless, with no window on the host. Pomme uses Apple's Virtualization
+framework to install macOS from a restore image, and then installs an
+authenticated guest agent so that you can run programs, open shells, and
+transfer files without a network connection.
+
+The System has been asked to narrate the docs. The facts are exactly the same
+as the [normal docs](/). The tone is not. Use the Crawler switch next to the
+theme selector to escape at any time. Nobody ever does.
+
+:::caution[Hazard Detected: Beta]
+Pomme is beta software. Commands, flags, output formats, and behavior can
+change or break from one release to the next. Version 0.1.0 was released
+before its release qualification was complete. For details, see
+[Supported macOS versions](/crawler/concepts/os-qualification/#release-qualification).
+The viewers consider this a feature.
+:::
+
+## Your starting loadout
+
+<CardGrid>
+	<Card title="Respawnable VMs" icon="rocket">
+		Install macOS from a version, a build, or a local restore image. If creation
+		stops, run the same command with `--resume` to continue from the last
+		verified step. Death is a minor setback here.
+	</Card>
+	<Card title="Clone from templates" icon="document">
+		Restore macOS once into a template, then create new VMs from copy-on-write
+		clones of it instead of restoring the image again. Infinite minions, one
+		download.
+	</Card>
+	<Card title="Get inside the box" icon="seti:shell">
+		Run programs, open durable terminal sessions, run background jobs, copy
+		files, and read the guest agent's logs.
+	</Card>
+	<Card title="Disarm the traps" icon="setting">
+		Turn System Integrity Protection (SIP) and AMFI off and back on through
+		journaled workflows that you can resume after a failure.
+	</Card>
+	<Card title="Pledge allegiance to MDM" icon="approve-check">
+		Take a VM from any state to a supervised or unapproved mobile device
+		management (MDM) enrollment with one command.
+	</Card>
+	<Card title="Automate the grind" icon="puzzle">
+		Get JSON or JSONL output from every command, send keys and clicks to the
+		guest display, and take screenshots without a host window.
+	</Card>
+</CardGrid>
+
+## Choose your first door
+
+<CardGrid>
+	<LinkCard
+		title="System requirements"
+		description="Find out whether your Mac survives the entrance exam."
+		href="/crawler/get-started/requirements/"
+	/>
+	<LinkCard
+		title="Install Pomme"
+		description="Acquire the pomme command with Homebrew, the install script, or from source."
+		href="/crawler/get-started/install/"
+	/>
+	<LinkCard
+		title="Quickstart"
+		description="Create your first VM, run a command in it, and delete it. Try not to cry."
+		href="/crawler/get-started/quickstart/"
+	/>
+	<LinkCard
+		title="Architecture"
+		description="Learn how the pomme command, the helper, and the guest agent conspire together."
+		href="/crawler/concepts/architecture/"
+	/>
+</CardGrid>
+
+## About the name
+
+Pomme is named after the Tiddly Pomme, one of the smallest apples. The System
+has been informed that this is not a weapon.
