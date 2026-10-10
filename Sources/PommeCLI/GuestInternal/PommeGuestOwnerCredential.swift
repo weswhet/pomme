@@ -3,7 +3,7 @@ import Foundation
 
 /// Closed failures for owner-credential recovery. Each case is a fixed
 /// diagnostic; none carries guest text, the artifact's bytes, or the password.
-enum PommeGuestOwnerCredentialError: Error, Equatable, LocalizedError, Sendable, CaseIterable {
+enum PommeGuestOwnerCredentialError: Error, Equatable, PommeDescribedError, Sendable, CaseIterable {
     case rootRequired
     case invalidPayload
     case autoLoginUnavailable
@@ -12,9 +12,29 @@ enum PommeGuestOwnerCredentialError: Error, Equatable, LocalizedError, Sendable,
     case artifactUnsafe
     case credentialUnreadable
 
+    var code: PommeErrorCode {
+        switch self {
+        case .rootRequired: .guestAgentRootRequired
+        case .invalidPayload: .guestInvalidRequest
+        case .autoLoginUnavailable, .accountMismatch, .artifactMissing: .guestOwnerCredentialUnavailable
+        case .artifactUnsafe, .credentialUnreadable: .guestOwnerCredentialInvalid
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .rootRequired: "Run `pomme agent repair NAME` to reinstall the agent."
+        case .invalidPayload: nil
+        case .autoLoginUnavailable, .accountMismatch, .artifactMissing:
+            "Turn on automatic login for the owner account in the guest's System Settings > Users & Groups, then retry."
+        case .artifactUnsafe, .credentialUnreadable:
+            "Turn automatic login off and on again in the guest's System Settings > Users & Groups, then retry."
+        }
+    }
+
     /// Stable, allowlisted wire code. Safe for a host log or a closed
     /// diagnostic field because it is derived from the case alone.
-    var code: String {
+    var wireCode: String {
         switch self {
         case .rootRequired: "owner-credential-root-required"
         case .invalidPayload: "owner-credential-invalid-payload"

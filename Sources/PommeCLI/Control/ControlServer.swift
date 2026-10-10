@@ -3,6 +3,10 @@ import Foundation
 import Synchronization
 
 final class PommeControlServer: Sendable {
+    /// A stream handler returns this prefix and a JSON `PommeErrorReport` to
+    /// fail its request with a code and causes.
+    static let reportLinePrefix = "ERROR-REPORT "
+
     private let socketURL: URL
     private let features: [PommeControlFeature]
     private let handler: @Sendable (PommeVMControlRequest) async -> String
@@ -79,7 +83,7 @@ final class PommeControlServer: Sendable {
         }
         catch {
             let id = requestID(in: frame) ?? UUID()
-            try? write(PommeControlResponse.failure(id: id, code: "incompatible-protocol", message: error.localizedDescription), to: fd)
+            try? write(PommeControlResponse.failure(id: id, code: "incompatible-protocol", message: error.localizedDescription, report: PommeErrorReport(error)), to: fd)
         }
         return true
     }
@@ -88,13 +92,13 @@ final class PommeControlServer: Sendable {
         let request: PommeControlRequest
         do { request = try ControlWireCodec.decodeRequest(frame) }
         catch {
-            try? write(PommeControlResponse.failure(id: requestID(in: frame) ?? UUID(), code: "invalid-request", message: error.localizedDescription), to: fd)
+            try? write(PommeControlResponse.failure(id: requestID(in: frame) ?? UUID(), code: "invalid-request", message: error.localizedDescription, report: PommeErrorReport(error)), to: fd)
             return
         }
         let routed: PommeVMControlRequest
         do { routed = try PommeVMControlRouter.route(request) }
         catch {
-            try? write(PommeControlResponse.failure(id: request.id, code: "invalid-command", message: error.localizedDescription), to: fd)
+            try? write(PommeControlResponse.failure(id: request.id, code: "invalid-command", message: error.localizedDescription, report: PommeErrorReport(error)), to: fd)
             return
         }
         guard features.contains(routed.requiredFeature) else {
@@ -120,6 +124,11 @@ final class PommeControlServer: Sendable {
     }
 
     private func response(id: UUID, value: String) -> PommeControlResponse {
+        if value.hasPrefix(Self.reportLinePrefix),
+           let report = try? JSONDecoder().decode(PommeErrorReport.self, from: Data(value.dropFirst(Self.reportLinePrefix.count).utf8)) {
+            let redacted = report.redacted()
+            return .failure(id: id, code: "command-failed", message: redacted.message, report: redacted)
+        }
         if value.hasPrefix("ERROR ") { return .failure(id: id, code: "command-failed", message: String(value.dropFirst(6))) }
         if let data = value.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]), let json = try? JSONValue(any: object) { return .success(id: id, result: json) }
         return .success(id: id, result: .string(value))

@@ -52,7 +52,7 @@ A command that acts on several VMs, such as `pomme stop dev test`, prints one
 object that wraps the individual results:
 
 ```json
-{"ok":false,"results":[{"ok":true,"hostExitCode":0,"name":"dev"},{"ok":false,"hostExitCode":1,"name":"test"}]}
+{"ok":false,"results":[{"ok":true,"hostExitCode":0,"name":"dev"},{"ok":false,"hostExitCode":1,"name":"test","error":"No Pomme-owned VM named test exists. Create it with `pomme create test` or run `pomme list`.","errorCode":"vm-not-found","hint":null,"causes":[]}]}
 ```
 
 The top-level `ok` field is `true` only if every result succeeded.
@@ -76,13 +76,35 @@ pomme list --format jsonl | jq -r '"\(.name) \(.vmState)"'
 ## Errors
 
 When an operation fails, its result has `"ok": false` and a nonzero
-`hostExitCode`, and `pomme` exits with that code.
+`hostExitCode`, and `pomme` exits with that code. A failed result also has the
+following fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `error` | String | What happened, in the same words that table output prints after `Error:`. |
+| `errorCode` | String | A stable code for the kind of failure, such as `vm-not-found`. Codes don't change meaning between releases. For every code, see [Errors](/reference/errors/). |
+| `hint` | String or `null` | The next step, when Pomme knows one. |
+| `causes` | Array | The underlying reasons, outermost first. Each element has a `domain`, such as `pomme`, `VZErrorDomain`, or `NSPOSIXErrorDomain`; a `code`, which is a Pomme error code or the domain's number; and a `description`. The array is empty when there's no underlying reason. |
+
+For example, the following result reports a VM that doesn't exist:
+
+```json
+{"ok":false,"error":"No Pomme-owned VM named test exists. Create it with `pomme create test` or run `pomme list`.","errorCode":"vm-not-found","hint":null,"causes":[],"hostExitCode":1}
+```
+
+Pomme prints this object even when the command fails before an operation
+starts, for example when the named VM doesn't exist. With `--format jsonl`, it
+prints the object as one line. Pomme also prints the error as text on standard
+error.
+
+A command that acts on several VMs, such as `pomme stop dev test`, finishes
+every VM even when one of them fails, and reports each failure in that VM's
+result.
 
 :::caution
-Some errors occur before Pomme starts an operation, for example when a flag is
-invalid or when the named VM doesn't exist. For these errors, Pomme prints an
-`Error:` message to standard error and doesn't print a JSON result, even if you
-passed `--json`. Always check the exit code before you parse standard output.
+A command line that Pomme can't parse, such as one with an unknown flag, exits
+with code `64` and prints only a usage message on standard error. Always check
+the exit code before you parse standard output.
 :::
 
 ## Diagnostics
@@ -101,4 +123,5 @@ output and standard error to the matching host streams, byte for byte. Pomme doe
 
 - [Use Pomme in scripts and coding agents](/guides/script-pomme/)
 - [Exit codes](/reference/exit-codes/)
+- [Errors](/reference/errors/)
 - [Command-line reference](/reference/cli/)

@@ -31,7 +31,7 @@ struct PommeRemoteLoginExchangeTests {
             )
             Issue.record("A failed transaction returned a success receipt")
         } catch let failure as PommeAgentSessionError {
-            #expect(failure.code == "operation-failed")
+            #expect(failure.wireCode == "operation-failed")
         }
     }
 
@@ -50,7 +50,7 @@ struct PommeRemoteLoginExchangeTests {
                 )
                 Issue.record("A failed Remote Login transaction returned a success receipt")
             } catch let failure as PommeAgentSessionError {
-                #expect(failure.code == code)
+                #expect(failure.wireCode == code)
                 #expect(failure.message.localizedCaseInsensitiveContains(diagnostic))
             }
         }

@@ -15,40 +15,79 @@ enum PommeLiveRecoveryIntegration {
     /// performed immediately before the one mutating launcher input.
     static let credentialAuthenticationReserve: TimeInterval = 30
 
-    enum Error: Swift.Error, LocalizedError, Equatable, Sendable {
+    enum Error: PommeDescribedError, Equatable, Sendable {
         case unsupportedOperation
         case invalidDependencies
         case ownershipMismatch
         case executableMismatch
         case requestBindingRejected
         case credentialRejected
-        case launcherRejected
+        case launcherRejected(PommeRetainedCause = .init())
         case runtimeRejected
         case guestRejected
-        case cleanupFailed
+        case cleanupFailed(PommeRetainedCause = .init())
+
+        var code: PommeErrorCode {
+            switch self {
+            case .unsupportedOperation, .invalidDependencies: .internalError
+            case .ownershipMismatch: .vmBundleDamaged
+            case .executableMismatch, .launcherRejected: .recoveryLauncherRejected
+            case .requestBindingRejected: .recoveryRequestRejected
+            case .credentialRejected: .recoveryAuthenticationFailed
+            case .runtimeRejected: .recoveryAgentFailed
+            case .guestRejected: .recoveryOperationFailed
+            case .cleanupFailed: .recoveryCleanupUnverified
+            }
+        }
 
         var errorDescription: String? {
             switch self {
             case .unsupportedOperation:
-                "The Recovery operation is not supported by Pomme."
+                "Pomme doesn't support the requested Recovery operation. This is a bug in Pomme."
             case .invalidDependencies:
-                "The Pomme Recovery integration dependencies are invalid."
+                "Pomme set up its Recovery session with an invalid time limit or VM identity. This is a bug in Pomme."
             case .ownershipMismatch:
-                "The VM is not the exact Pomme-owned VM bound to this request."
+                "Pomme couldn't confirm that the VM is the Pomme-owned VM that the Recovery request names."
             case .executableMismatch:
-                "The signed Pomme executable identity changed."
+                "The signed `pomme` executable changed while Pomme prepared the Recovery session."
             case .requestBindingRejected:
-                "The Recovery request binding was rejected."
+                "The Recovery request doesn't match the VM's helper or its Recovery boot."
             case .credentialRejected:
-                "The one-shot Recovery credential was rejected."
-            case .launcherRejected:
-                "The bounded Recovery launcher was not verified."
+                "Pomme couldn't create or read the one-time Recovery credential."
+            case .launcherRejected(let cause):
+                cause.describing("Pomme couldn't prepare and verify the launcher that starts its agent in Recovery.")
             case .runtimeRejected:
-                "The Recovery runtime could not be verified."
+                "Pomme couldn't start its agent in the VM's Recovery system."
             case .guestRejected:
-                "The authenticated Recovery operation was rejected."
+                "The Recovery agent rejected the operation."
+            case .cleanupFailed(let cause):
+                cause.describing("Pomme couldn't confirm that the Recovery session's files and directory share were removed.")
+            }
+        }
+
+        var recoverySuggestion: String? {
+            switch self {
+            case .ownershipMismatch:
+                "Run `pomme inspect NAME` to check the VM, then run the same command again."
+            case .executableMismatch, .launcherRejected:
+                "Don't replace `pomme` while a command runs. Run the same command again."
+            case .credentialRejected:
+                "Run the same command again to start a new Recovery session."
+            case .runtimeRejected:
+                "Run `pomme stop NAME`, then run the same command again with `--debug` to save Recovery screenshots."
             case .cleanupFailed:
-                "Recovery cleanup could not be proven complete."
+                "Run `pomme stop NAME`, then run the same command again; Pomme cleans up the earlier session first."
+            default:
+                nil
+            }
+        }
+
+        var underlying: (any Swift.Error)? {
+            switch self {
+            case .launcherRejected(let cause), .cleanupFailed(let cause):
+                cause.underlying
+            default:
+                nil
             }
         }
     }
@@ -340,11 +379,11 @@ enum PommeLiveRecoveryIntegration {
         init(request: PommeRecoverySessionRequest) throws {
             let plan: PommeRecoveryVirtioFSTerminalPlan
             do { plan = try .init(request: request) }
-            catch { throw Error.launcherRejected }
+            catch { throw Error.launcherRejected(PommeRetainedCause(error)) }
             guard PommeRecoveryTerminalCommand.isKeyboardSafe(plan.command),
                   PommeRecoveryTerminalCommand.isSafeMarker(plan.completionMarker),
                   !plan.script.contains(request.credentialSHA256)
-            else { throw Error.launcherRejected }
+            else { throw Error.launcherRejected() }
 
             capabilityProbes = plan.capabilityProbes
             command = plan.command
@@ -415,6 +454,8 @@ enum PommeLiveRecoveryIntegration {
             } catch let error as Error {
                 throw error
             } catch {
+                // PommeProvisioningFailureDiagnostic switches over these
+                // cases exhaustively, so the resolver's error isn't kept.
                 throw Error.ownershipMismatch
             }
             guard identity.matches(reference),
@@ -505,7 +546,7 @@ enum PommeLiveRecoveryIntegration {
                     )
                 )
             } catch {
-                throw Error.launcherRejected
+                throw Error.launcherRejected(PommeRetainedCause(error))
             }
             PommeCore.log("Recovery bootstrap milestone: hostStagingPrepared.", vmName: vmName)
 
@@ -584,14 +625,15 @@ enum PommeLiveRecoveryIntegration {
                 if !sessionOwnsRuntime, let runtime {
                     do {
                         let cleanup = try await runtime.effects.stopReapAndClean()
-                        guard cleanup.isComplete else { throw Error.cleanupFailed }
+                        guard cleanup.isComplete else { throw Error.cleanupFailed() }
                         try await runtime.restoreCapturedState()
                     } catch {
-                        throw Error.cleanupFailed
+                        if case Error.cleanupFailed = error { throw error }
+                        throw Error.cleanupFailed(PommeRetainedCause(error))
                     }
                 }
                 do { try staging.removeHostArtifacts() }
-                catch { throw Error.cleanupFailed }
+                catch { throw Error.cleanupFailed(PommeRetainedCause(error)) }
                 throw error
             }
         }
@@ -661,7 +703,7 @@ enum PommeLiveRecoveryIntegration {
                     case .terminalProofFailed:
                         throw PommeRecoverySessionError.terminalProofFailed
                     case .noInputDelivered, .recoveryCleanupRequired:
-                        throw Error.launcherRejected
+                        throw Error.launcherRejected()
                     }
                 },
                 verifyRecoveryBoot: base.verifyRecoveryBoot,
@@ -758,7 +800,7 @@ enum PommeLiveRecoveryIntegration {
             do {
                 guestSession = try root.authenticatedGuestSession()
             } catch {
-                throw PommeRecoverySessionError.guestOperationFailed
+                throw PommeRecoverySessionError.guestOperationFailed(PommeRetainedCause(codesOnly: error))
             }
             session = guestSession
             guard verifySessionBinding(request) else {
@@ -778,7 +820,7 @@ enum PommeLiveRecoveryIntegration {
             do {
                 try await clearHostStagingBeforeOperation()
             } catch {
-                throw PommeRecoverySessionError.cleanupFailed
+                throw PommeRecoverySessionError.cleanupFailure(error)
             }
             do {
                 let label: String
@@ -810,14 +852,14 @@ enum PommeLiveRecoveryIntegration {
                 // Only the closed Recovery security vocabulary crosses this
                 // boundary. Unknown agent codes retain the historical generic
                 // failure and never expose the transport message.
-                if let code = PommeRecoveryGuestFailureCode(rawValue: error.code) {
+                if let code = PommeRecoveryGuestFailureCode(rawValue: error.wireCode) {
                     throw PommeRecoveryGuestOperationFailure(code: code)
                 }
-                throw PommeRecoverySessionError.guestOperationFailed
+                throw PommeRecoverySessionError.guestOperationFailed(PommeRetainedCause(codesOnly: error))
             } catch let error as PommeRecoverySessionError {
                 throw error
             } catch {
-                throw PommeRecoverySessionError.guestOperationFailed
+                throw PommeRecoverySessionError.guestOperationFailed(PommeRetainedCause(codesOnly: error))
             }
         }
 
@@ -839,9 +881,9 @@ enum PommeLiveRecoveryIntegration {
 
             let token: String
             do { token = try await persistentAgentSecret(reference) }
-            catch { throw PommeRecoverySessionError.guestOperationFailed }
+            catch { throw PommeRecoverySessionError.guestOperationFailed(PommeRetainedCause(codesOnly: error)) }
             guard (try? PommeAgentAuthentication.normalized(token)) != nil else {
-                throw PommeRecoverySessionError.guestOperationFailed
+                throw PommeRecoverySessionError.guestOperationFailed()
             }
             var result: [String: JSONValue] = [
                 "persistentToken": .string(token),

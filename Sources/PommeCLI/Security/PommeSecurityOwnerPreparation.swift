@@ -176,7 +176,7 @@ enum PommeSecurityOwnerAutologinRefusal: String, CaseIterable, Equatable, Sendab
 /// Errors intentionally contain only closed operation names and exit status.
 /// In particular, command output and credential material are never embedded in
 /// an error or forwarded to the parent journal.
-enum PommeSecurityOwnerPreparationError: Error, LocalizedError, Equatable, Sendable {
+enum PommeSecurityOwnerPreparationError: PommeDescribedError, Equatable, Sendable {
   case invalidIdentity
   case credentialRequired
   case commandFailed(PommeSecurityOwnerCommandKind, exitCode: Int?)
@@ -192,60 +192,148 @@ enum PommeSecurityOwnerPreparationError: Error, LocalizedError, Equatable, Senda
   case autoLoginRefused(PommeSecurityOwnerAutologinRefusal)
   case loginRestricted
   case autoLoginUnsupported
-  case setupAssistantContextUnavailable
+  case setupAssistantContextUnavailable(PommeRetainedCause = .init())
   case ownerCompletionVerificationFailed
   case buddyPreferencesAgentRequired
   case buddyPreferencesFailed
-  case privatePTYUnavailable
+  case privatePTYUnavailable(PommeRetainedCause = .init())
   case phaseCallbackFailed
+
+  var code: PommeErrorCode {
+    switch self {
+    case .invalidIdentity: .invalidRequest
+    case .credentialRequired: .credentialUnavailable
+    case .commandFailed, .malformedEvidence, .evidenceUnavailable, .setupAssistantContextUnavailable,
+         .ownerCompletionVerificationFailed, .buddyPreferencesFailed, .phaseCallbackFailed:
+      .securityOwnerPreparationFailed
+    case .freshnessRejected: .securityOwnerNotFresh
+    case .accountCollision, .retryIntentRequired, .existingAccountNotExact: .securityOwnerAccountConflict
+    case .passwordVerificationFailed, .ownerVerificationFailed: .securityOwnerUnverified
+    case .autoLoginVerificationFailed, .autoLoginRefused, .loginRestricted, .autoLoginUnsupported:
+      .securityAutoLoginUnavailable
+    case .buddyPreferencesAgentRequired: .securityAgentUnsupported
+    case .privatePTYUnavailable: .securityPrivateInputFailed
+    }
+  }
 
   var errorDescription: String? {
     switch self {
     case .invalidIdentity:
-      return "The normal guest owner identity is invalid."
+      return "The owner account's short name or full name isn't valid for macOS."
     case .credentialRequired:
-      return "The normal guest owner credential is required."
+      return "Preparing the owner account requires the owner's credential, and none was provided."
     case .commandFailed(let kind, let exitCode):
-      let suffix = exitCode.map { " with status \($0)" } ?? ""
-      return "The normal guest \(kind.rawValue) command failed\(suffix)."
+      let suffix = exitCode.map { " with exit status \($0)" } ?? ""
+      return "The guest command that \(kind.userDescription) failed\(suffix)."
     case .malformedEvidence(let kind):
-      return "Normal guest \(kind.rawValue) evidence was malformed."
+      return "Pomme couldn't parse the guest's report of \(kind.userDescription)."
     case .evidenceUnavailable(let kind):
-      return "Normal guest \(kind.rawValue) evidence was unavailable."
+      return "Pomme couldn't read \(kind.userDescription) from the guest."
     case .freshnessRejected:
-      return "The normal guest cannot be proven fresh for owner preparation."
+      return "Pomme can't prove that this VM is a fresh VM that it created, so it won't create an owner account."
     case .accountCollision:
-      return "The normal guest owner account already exists."
+      return "The guest already has an account with the owner's name."
     case .retryIntentRequired:
-      return "Reusing an existing normal guest owner account requires explicit retry intent."
+      return "The guest already has the owner account from an earlier attempt, and Pomme reuses it only when it resumes that attempt."
     case .existingAccountNotExact:
-      return "The existing normal guest owner account is not the exact intended owner."
+      return "The guest's existing owner account doesn't match the account that Pomme created."
     case .passwordVerificationFailed:
-      return "The normal guest owner password could not be verified."
+      return "The guest didn't accept the owner's credential."
     case .ownerVerificationFailed:
-      return "The normal guest owner identity could not be verified."
+      return "Pomme couldn't verify that the owner account is an administrator that owns the startup volume."
     case .autoLoginVerificationFailed:
-      return
-        "The native normal guest automatic-login state could not be verified; Setup Assistant completion was not recorded."
+      return "Pomme couldn't verify the guest's automatic-login setting, so it didn't record Setup Assistant as finished."
     case .autoLoginRefused(let refusal):
-      return
-        "The native normal guest automatic-login step was refused because \(refusal.localizedDescription); the prepared owner remains for retry and security restrictions were not overridden."
+      return "macOS refused to turn on automatic login because \(refusal.localizedDescription). Pomme kept the owner account so that you can retry, and it didn't override the restriction."
     case .loginRestricted:
-      return "Normal guest automatic login is restricted by the current security policy."
+      return "The guest's security policy doesn't allow automatic login."
     case .autoLoginUnsupported:
-      return "The native normal guest automatic-login command is unsupported."
-    case .setupAssistantContextUnavailable:
-      return "The native Setup Assistant Aqua session could not be verified."
+      return "The guest's macOS version doesn't support turning on automatic login from the command line."
+    case .setupAssistantContextUnavailable(let cause):
+      return cause.describing("Pomme couldn't find the guest's Setup Assistant session.")
     case .buddyPreferencesAgentRequired:
-      return "Buddy preference maintenance requires an updated guest agent."
+      return "The VM's guest agent is too old to update the Setup Assistant preferences."
     case .buddyPreferencesFailed:
-      return "Guest Buddy preference maintenance failed; the VM and diagnostics were retained."
+      return "The guest agent couldn't update the Setup Assistant preferences. Pomme kept the VM and its diagnostics."
     case .ownerCompletionVerificationFailed:
-      return "The fresh normal guest owner completion state could not be verified."
-    case .privatePTYUnavailable:
-      return "The private normal guest PTY is unavailable."
+      return "Pomme couldn't verify that the guest finished setting up the new owner account."
+    case .privatePTYUnavailable(let cause):
+      return cause.describing("Pomme couldn't pass the owner's credential to a guest command through a private terminal.")
     case .phaseCallbackFailed:
-      return "The normal guest owner phase could not be durably recorded."
+      return "Pomme couldn't record the owner account's progress in the security journal."
+    }
+  }
+
+  var recoverySuggestion: String? {
+    switch self {
+    case .credentialRequired:
+      "Run the command in an interactive terminal, or set both POMME_AUTHORIZED_USER and POMME_AUTHORIZED_PASSWORD."
+    case .freshnessRejected, .accountCollision, .existingAccountNotExact:
+      "Provide the existing owner's credentials with POMME_AUTHORIZED_USER and POMME_AUTHORIZED_PASSWORD."
+    case .retryIntentRequired:
+      "Repeat the same command with the same `--final-state` value to resume the earlier attempt."
+    case .passwordVerificationFailed:
+      "Check the owner's user name and credential, then retry."
+    case .autoLoginRefused, .loginRestricted:
+      "Turn off the restriction in the guest's System Settings, then repeat the same command."
+    case .buddyPreferencesAgentRequired:
+      "Run `pomme agent update NAME` to install the current agent, then retry."
+    case .commandFailed, .malformedEvidence, .evidenceUnavailable, .setupAssistantContextUnavailable,
+         .ownerCompletionVerificationFailed, .autoLoginVerificationFailed, .privatePTYUnavailable, .phaseCallbackFailed:
+      "Repeat the same command with the same `--final-state` value to resume."
+    default:
+      nil
+    }
+  }
+
+  var underlying: (any Error)? {
+    switch self {
+    case .setupAssistantContextUnavailable(let cause), .privatePTYUnavailable(let cause): cause.underlying
+    default: nil
+    }
+  }
+}
+
+extension PommeSecurityOwnerEvidenceKind {
+  /// What the evidence describes, as a noun phrase for a message.
+  var userDescription: String {
+    switch self {
+    case .setupAssistant: "the Setup Assistant state"
+    case .localUsers: "the list of local user accounts"
+    case .localUserRecord: "the owner's user record"
+    case .startupVolume: "the startup volume group"
+    case .apfsUsers: "the startup volume's owners"
+    case .secureToken: "whether the owner can unlock the startup volume"
+    case .administratorMembership: "the owner's administrator membership"
+    case .accountIdentity: "the owner's account identifier"
+    case .fileVault: "the FileVault state"
+    case .loginWindow: "the login window settings"
+    case .autoLoginSupport: "whether automatic login is supported"
+    }
+  }
+}
+
+extension PommeSecurityOwnerCommandKind {
+  /// What the command does, as a verb phrase for a message.
+  var userDescription: String {
+    switch self {
+    case .setupAssistant: "checks Setup Assistant"
+    case .listLocalUsers: "lists local user accounts"
+    case .readLocalUser: "reads the owner's user record"
+    case .startupVolumeGroups: "lists the startup volume groups"
+    case .startupVolumeInfo: "reads the startup volume"
+    case .apfsUsers: "lists the startup volume's owners"
+    case .secureToken: "checks whether the owner can unlock the startup volume"
+    case .administratorMembership: "checks administrator membership"
+    case .accountID: "reads the owner's account identifier"
+    case .createOwner: "creates the owner account"
+    case .fileVault: "checks FileVault"
+    case .loginWindow: "reads the login window settings"
+    case .managedLoginWindow: "reads the managed login window settings"
+    case .autoLoginSupport: "checks automatic-login support"
+    case .autoLogin: "turns on automatic login"
+    case .ownerCompletion: "finishes the owner account setup"
+    case .finishSetupAssistant: "finishes Setup Assistant"
     }
   }
 }
@@ -610,7 +698,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
       freshnessRequirements: freshnessRequirements,
       executeGuest: executeGuest,
       executePrivatePTY: { _, _ in
-        throw PommeSecurityOwnerPreparationError.privatePTYUnavailable
+        throw PommeSecurityOwnerPreparationError.privatePTYUnavailable()
       },
       reportPhase: reportPhase
     )
@@ -682,9 +770,9 @@ struct PommeSecurityOwnerPreparation: Sendable {
       if case .autoLoginRefused = error {
         throw error
       }
-      throw PommeSecurityOwnerPreparationError.privatePTYUnavailable
+      throw PommeSecurityOwnerPreparationError.privatePTYUnavailable(PommeRetainedCause(codesOnly: error))
     } catch {
-      throw PommeSecurityOwnerPreparationError.privatePTYUnavailable
+      throw PommeSecurityOwnerPreparationError.privatePTYUnavailable(PommeRetainedCause(codesOnly: error))
     }
     guard status == 0 else {
       throw PommeSecurityOwnerPreparationError.commandFailed(.createOwner, exitCode: Int(status))
@@ -787,7 +875,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
     do {
       authStatus = try await executePrivatePTY(authCommand, password)
     } catch {
-      throw PommeSecurityOwnerPreparationError.privatePTYUnavailable
+      throw PommeSecurityOwnerPreparationError.privatePTYUnavailable(PommeRetainedCause(codesOnly: error))
     }
     guard authStatus == 0 else {
       throw PommeSecurityOwnerPreparationError.passwordVerificationFailed
@@ -1016,7 +1104,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
       // The restart exception requires a currently proven stock Aqua context;
       // it never creates that authorization through Language Chooser handoff.
       guard reconciliation != .setupAssistantRecovery, !setupAssistantAlreadyComplete else {
-        throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+        throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
       }
       context = try await handoffLanguageChooserToSetupAssistant()
     }
@@ -1037,9 +1125,9 @@ struct PommeSecurityOwnerPreparation: Sendable {
         if case .autoLoginRefused = error {
           throw error
         }
-        throw PommeSecurityOwnerPreparationError.privatePTYUnavailable
+        throw PommeSecurityOwnerPreparationError.privatePTYUnavailable(PommeRetainedCause(codesOnly: error))
       } catch {
-        throw PommeSecurityOwnerPreparationError.privatePTYUnavailable
+        throw PommeSecurityOwnerPreparationError.privatePTYUnavailable(PommeRetainedCause(codesOnly: error))
       }
       guard status == 0 else {
         throw PommeSecurityOwnerPreparationError.commandFailed(.autoLogin, exitCode: Int(status))
@@ -1438,14 +1526,14 @@ struct PommeSecurityOwnerPreparation: Sendable {
         try consoleIdentity()
           == "\(Self.setupAssistantRecordName):\(Self.setupAssistantUID)"
       else {
-        throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+        throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
       }
       let setupUser = try setupAssistantUser()
       guard setupUser.uniqueID == Int64(Self.setupAssistantUID),
         setupUser.homeDirectory == "/var/setup",
         Self.isDeterministicSystemGeneratedUID(
           setupUser.generatedUID, uniqueID: setupUser.uniqueID)
-      else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable }
+      else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable() }
 
       let listed = try run(
         .init(
@@ -1458,11 +1546,11 @@ struct PommeSecurityOwnerPreparation: Sendable {
       guard candidates.count == 1, let candidate = candidates.first,
         candidate.userID == Self.setupAssistantUID,
         candidate.executablePath == Self.setupAssistantExecutablePath
-      else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable }
+      else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable() }
 
       let firstRecheck = try setupAssistantProcess(candidate.processID)
       guard firstRecheck == candidate else {
-        throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+        throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
       }
 
       let guiOutput = try run(
@@ -1493,7 +1581,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
         guiContext.auditSessionID == processContext.auditSessionID,
         processContext.handle == UInt64(candidate.processID),
         let processContextUID = UInt32(exactly: processContext.userID)
-      else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable }
+      else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable() }
 
       let managerName = try asuserOutput(
         userID: processContextUID,
@@ -1513,14 +1601,14 @@ struct PommeSecurityOwnerPreparation: Sendable {
       guard managerName == guiContext.sessionType,
         managerUID == String(processContextUID),
         callerUID == "0"
-      else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable }
+      else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable() }
 
       let finalRecheck = try setupAssistantProcess(candidate.processID)
       guard finalRecheck == candidate,
         try consoleIdentity()
           == "\(Self.setupAssistantRecordName):\(Self.setupAssistantUID)"
       else {
-        throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+        throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
       }
       return .init(
         processID: candidate.processID,
@@ -1533,9 +1621,9 @@ struct PommeSecurityOwnerPreparation: Sendable {
       )
     } catch let error as PommeSecurityOwnerPreparationError {
       if case .setupAssistantContextUnavailable = error { throw error }
-      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable(PommeRetainedCause(codesOnly: error))
     } catch {
-      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable(PommeRetainedCause(codesOnly: error))
     }
   }
 
@@ -1548,7 +1636,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
   {
     try phase(.setupAssistantHandoff, .intent)
     guard try !setupAssistantComplete() else {
-      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     }
     let languageChooser = try discoverLanguageChooserContext()
     let languageOutput = try run(
@@ -1557,7 +1645,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
       acceptedExitCodes: [0]
     )
     guard normalized(languageOutput) == "system language set to: en" else {
-      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     }
     let languageReadback = try run(
       .init(
@@ -1568,11 +1656,11 @@ struct PommeSecurityOwnerPreparation: Sendable {
       acceptedExitCodes: [0]
     )
     guard Self.isEnglishLanguageReadback(languageReadback) else {
-      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     }
     let afterLanguage = try discoverLanguageChooserContext()
     guard afterLanguage == languageChooser else {
-      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     }
     _ = try runStatus(
       .init(executable: "/usr/bin/notifyutil", arguments: ["-p", "com.apple.lca.done"]),
@@ -1591,13 +1679,13 @@ struct PommeSecurityOwnerPreparation: Sendable {
         try await Task.sleep(for: .milliseconds(100))
       }
     }
-    throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+    throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
   }
 
   private func discoverLanguageChooserContext() throws -> SetupAssistantProcessIdentity {
     do {
       guard try consoleIdentity() == Self.consoleWindowServerIdentity else {
-        throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+        throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
       }
       let listed = try run(
         .init(
@@ -1611,24 +1699,24 @@ struct PommeSecurityOwnerPreparation: Sendable {
         $0.executablePath == Self.setupAssistantExecutablePath
       }
       guard setupAssistantCandidates.isEmpty else {
-        throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+        throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
       }
       let candidates = processes.filter {
         $0.executablePath == Self.languageChooserExecutablePath
       }
       guard candidates.count == 1, let candidate = candidates.first,
         candidate.userID == 0
-      else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable }
+      else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable() }
       let recheck = try languageChooserProcess(candidate.processID)
       guard recheck == candidate, try consoleIdentity() == Self.consoleWindowServerIdentity else {
-        throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+        throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
       }
       return candidate
     } catch let error as PommeSecurityOwnerPreparationError {
       if case .setupAssistantContextUnavailable = error { throw error }
-      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable(PommeRetainedCause(codesOnly: error))
     } catch {
-      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable(PommeRetainedCause(codesOnly: error))
     }
   }
 
@@ -1647,7 +1735,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
       process.processID == processID,
       process.userID == 0,
       process.executablePath == Self.languageChooserExecutablePath
-    else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable }
+    else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable() }
     return process
   }
 
@@ -1675,7 +1763,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
     guard record.uniqueID == Int64(Self.setupAssistantUID),
       record.homeDirectory == "/var/setup",
       Self.isDeterministicSystemGeneratedUID(record.generatedUID, uniqueID: record.uniqueID)
-    else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable }
+    else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable() }
     return record
   }
 
@@ -1692,7 +1780,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
     let processes = try Self.parseSetupAssistantProcesses(output)
     guard processes.count == 1, let process = processes.first,
       process.processID == processID
-    else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable }
+    else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable() }
     return process
   }
 
@@ -2342,13 +2430,13 @@ struct PommeSecurityOwnerPreparation: Sendable {
         let rawUID = UInt64(String(fields[1])),
         rawUID <= UInt64(UInt32.max),
         let userID = UInt32(exactly: rawUID)
-      else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable }
+      else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable() }
 
       let startIdentity = fields[2...6].map(String.init).joined(separator: " ")
       let executablePath = String(fields[7]).trimmingCharacters(in: .whitespacesAndNewlines)
       guard !startIdentity.isEmpty,
         !executablePath.isEmpty
-      else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable }
+      else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable() }
       processes.append(
         .init(
           processID: processID,
@@ -2357,7 +2445,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
           startIdentity: startIdentity))
     }
     guard !processes.isEmpty else {
-      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     }
     return processes
   }
@@ -2368,7 +2456,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
     let processes = try parseProcessIdentities(output)
     let candidates = processes.filter { $0.executablePath == setupAssistantExecutablePath }
     guard candidates.count == 1 else {
-      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     }
     return candidates
   }
@@ -2392,7 +2480,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
       exactlyOne(header, equals: "type = login"),
       exactlyOne(header, equals: "session = Aqua"),
       security.userID == expectedUID
-    else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable }
+    else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable() }
     return .init(
       handle: handle,
       sessionType: "Aqua",
@@ -2417,7 +2505,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
       creatorUID == Self.setupAssistantUID,
       uniqueID == UInt64(expectedPID),
       security.userID == Self.setupAssistantUID
-    else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable }
+    else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable() }
     return .init(
       handle: handle,
       sessionType: "",
@@ -2428,23 +2516,23 @@ struct PommeSecurityOwnerPreparation: Sendable {
 
   private static func launchdPrintLines(_ output: String) throws -> [String] {
     guard output.utf8.count <= 1024 * 1024 else {
-      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     }
     let lines = output.split(whereSeparator: \.isNewline).map { rawLine in
       rawLine.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
     guard !lines.isEmpty, lines.last == "}" else {
-      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     }
     return lines
   }
 
   private static func launchdDomainHeaderLines(_ lines: [String]) throws -> [String] {
     guard let securityIndex = lines.firstIndex(of: "security context = {") else {
-      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     }
     guard securityIndex > 0 else {
-      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     }
     return Array(lines[..<securityIndex])
   }
@@ -2459,13 +2547,13 @@ struct PommeSecurityOwnerPreparation: Sendable {
     let prefix = "\(key) = "
     let matchingLines = lines.filter { $0.hasPrefix(prefix) }
     guard matchingLines.count == 1, let line = matchingLines.first else {
-      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     }
     let rawValue = String(line.dropFirst(prefix.count))
     guard rawValue.range(of: "^(0|[1-9][0-9]*)$", options: .regularExpression) != nil,
       let value = UInt64(rawValue)
     else {
-      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     }
     return value
   }
@@ -2477,7 +2565,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
     guard starts.count == 1, let index = starts.first,
       index + 3 < lines.count,
       lines[index + 3] == "}"
-    else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable }
+    else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable() }
     let uidLine = lines[index + 1]
     let asidLine = lines[index + 2]
     guard uidLine.hasPrefix("uid = "), asidLine.hasPrefix("asid = "),
@@ -2486,7 +2574,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
       let userID = UInt32(exactly: rawUID),
       let auditSessionID = UInt64(asidLine.dropFirst("asid = ".count)),
       auditSessionID > 0
-    else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable }
+    else { throw PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable() }
     return (userID, auditSessionID)
   }
 

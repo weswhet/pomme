@@ -3,7 +3,7 @@ import Foundation
 
 /// Errors intentionally name a failed proof rather than exposing guest,
 /// credential, or staging details in a host diagnostic.
-enum PommeRecoveryRuntimeError: Error, LocalizedError, Equatable, Sendable {
+enum PommeRecoveryRuntimeError: PommeDescribedError, Equatable, Sendable {
     case requestBindingRejected
     case recoveryBootRequired
     case attachmentConflict
@@ -16,19 +16,47 @@ enum PommeRecoveryRuntimeError: Error, LocalizedError, Equatable, Sendable {
     case invalidLifecycle
     case cleanupMismatch
 
+    var code: PommeErrorCode {
+        switch self {
+        case .requestBindingRejected, .invalidListener: .recoveryRequestRejected
+        case .recoveryBootRequired: .vmStartFailed
+        case .attachmentConflict, .attachmentNotApplied, .attachmentUnverified, .invalidLifecycle:
+            .recoverySessionInvalid
+        case .listenerAuthenticationRejected: .recoveryAuthenticationFailed
+        case .listenerAuthenticationTimedOut: .recoveryTimedOut
+        case .helperExited: .helperStartFailed
+        case .cleanupMismatch: .recoveryCleanupUnverified
+        }
+    }
+
     var errorDescription: String? {
         switch self {
-        case .requestBindingRejected: "Recovery runtime request binding was rejected."
-        case .recoveryBootRequired: "Recovery runtime requires a Recovery boot configuration."
-        case .attachmentConflict: "Recovery runtime refused an existing directory share."
-        case .attachmentNotApplied: "Recovery bootstrap attachment was not applied."
-        case .attachmentUnverified: "Recovery bootstrap attachment could not be verified."
-        case .invalidListener: "Recovery runtime listener is not allowlisted."
-        case .listenerAuthenticationRejected: "Recovery runtime listener authentication was rejected."
-        case .listenerAuthenticationTimedOut: "Recovery runtime listener did not authenticate in time."
-        case .helperExited: "Recovery runtime helper exited before authentication completed."
-        case .invalidLifecycle: "Recovery runtime lifecycle transition was rejected."
-        case .cleanupMismatch: "Recovery runtime cleanup could not be proven complete."
+        case .requestBindingRejected: "The Recovery request doesn't match the files that Pomme staged for it."
+        case .recoveryBootRequired: "The VM isn't configured to start, or didn't start, in macOS Recovery."
+        case .attachmentConflict: "The VM already has a directory share, so Pomme didn't attach its Recovery files."
+        case .attachmentNotApplied: "Pomme's Recovery directory share wasn't attached to the VM."
+        case .attachmentUnverified: "Pomme couldn't confirm that its Recovery directory share is attached to the VM."
+        case .invalidListener: "The Recovery agent tried to connect on a port that Pomme didn't assign."
+        case .listenerAuthenticationRejected: "The Recovery agent's connection didn't authenticate."
+        case .listenerAuthenticationTimedOut: "The Recovery agent didn't connect and authenticate within the time limit."
+        case .helperExited: "The VM helper exited before the Recovery agent authenticated."
+        case .invalidLifecycle: "The Recovery runtime ran a step out of order or more than once."
+        case .cleanupMismatch: "Pomme couldn't confirm that the Recovery runtime's directory share and files were removed."
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .attachmentConflict, .recoveryBootRequired:
+            "Run `pomme stop NAME`, then run the same command again."
+        case .listenerAuthenticationRejected, .listenerAuthenticationTimedOut:
+            "Run `pomme stop NAME`, then run the same command again to start a new Recovery session."
+        case .helperExited:
+            "Run `pomme bug-report NAME` to collect the helper log for a bug report."
+        case .cleanupMismatch:
+            "Run `pomme stop NAME`, then run the same command again; Pomme cleans up the earlier session first."
+        default:
+            nil
         }
     }
 }

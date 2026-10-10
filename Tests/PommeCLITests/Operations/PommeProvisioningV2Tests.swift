@@ -241,9 +241,16 @@ struct PommeProvisioningV2Tests {
         let orchestrator = PommeProvisioningV2Orchestrator(signer: signer, repository: repo,
             effects: try effects(repo: repo, calls: calls, plan: plan, verifiedOwner: enriched))
         if changeBinding {
-            await #expect(throws: PommeProvisioningV2Error.phaseFailed(.verifyNormalAgent)) {
+            let error = await #expect(throws: PommeProvisioningV2Error.self) {
                 try await orchestrator.resume(expectedPlan: plan)
             }
+            guard case .phaseFailed(.verifyNormalAgent, let cause)? = error else {
+                Issue.record("Expected verifyNormalAgent to fail, got \(String(describing: error))")
+                return
+            }
+            // The cause keeps only codes, never guest-provided text.
+            #expect(cause?.code == .provisioningOwnershipMismatch)
+            #expect(cause?.message == PommeErrorCatalog.entry(for: .provisioningOwnershipMismatch)?.title)
             #expect(try repo.load().ownerReference == old)
         } else {
             try await orchestrator.resume(expectedPlan: plan)

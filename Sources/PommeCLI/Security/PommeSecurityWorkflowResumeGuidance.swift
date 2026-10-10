@@ -2,13 +2,19 @@ import Foundation
 
 /// A CLI-facing wrapper that keeps the original failure while telling the
 /// caller how to resume the exact retained security request.
-struct PommeSecurityWorkflowResumeDiagnostic: Error, LocalizedError {
-  let underlyingDescription: String
+struct PommeSecurityWorkflowResumeDiagnostic: PommeDescribedError {
+  let failure: any Error
   let command: String
 
-  var errorDescription: String? {
-    "\(underlyingDescription) Resume the retained security operation with `\(command)` after resolving any reported cleanup or restoration failure; the operation and final state must match the retained transaction."
+  var code: PommeErrorCode { PommeErrorDescriber.describe(failure).code }
+
+  var errorDescription: String? { PommeErrorDescriber.describe(failure).message }
+
+  var recoverySuggestion: String? {
+    "After you resolve any cleanup or restoration failure that the message reports, run `\(command)` to resume. The action and `--final-state` value must match the unfinished operation."
   }
+
+  var underlying: (any Error)? { PommeErrorDescriber.underlying(of: failure) }
 }
 
 enum PommeSecurityWorkflowResumeGuidance {
@@ -42,7 +48,7 @@ enum PommeSecurityWorkflowResumeGuidance {
     journal: PommeSecurityWorkflowJournal
   ) -> PommeSecurityWorkflowResumeDiagnostic {
     .init(
-      underlyingDescription: error.localizedDescription,
+      failure: error,
       command: command(for: journal)
     )
   }
@@ -76,9 +82,9 @@ enum PommeSecurityWorkflowResumeGuidance {
   }
 
   private static func isRestorationBarrier(_ error: Error) -> Bool {
-    (error as? PommeSecurityWorkflowError) == .restorationIncomplete
-      || (error as? PommeRecoverySessionError) == .cleanupFailed
-      || (error as? PommeLiveRecoveryIntegration.Error) == .cleanupFailed
+    (error as? PommeSecurityWorkflowError) == .restorationIncomplete()
+      || (error as? PommeRecoverySessionError) == .cleanupFailed()
+      || (error as? PommeLiveRecoveryIntegration.Error) == .cleanupFailed()
   }
 }
 

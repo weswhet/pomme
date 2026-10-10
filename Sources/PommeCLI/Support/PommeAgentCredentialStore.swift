@@ -37,7 +37,7 @@ struct PommeAgentCredentialStore {
 
     /// Errors intentionally contain no service, account, path, or credential
     /// values. Security status codes remain available for diagnostics.
-    enum Error: Swift.Error, Equatable, LocalizedError {
+    enum Error: Swift.Error, Equatable, PommeDescribedError {
         case keychainOpenFailed(status: OSStatus)
         case keychainLocked(status: OSStatus)
         case credentialMissing(status: OSStatus)
@@ -48,27 +48,58 @@ struct PommeAgentCredentialStore {
         case duplicateCredentialReadFailed(status: OSStatus)
         case credentialRemoveFailed(status: OSStatus)
 
+        var code: PommeErrorCode {
+            switch self {
+            case .credentialMissing: .agentCredentialMissing
+            case .malformedCredential, .unexpectedCredentialData: .agentCredentialInvalid
+            case .keychainOpenFailed, .keychainLocked, .credentialReadFailed, .credentialCreateFailed,
+                 .duplicateCredentialReadFailed, .credentialRemoveFailed:
+                .keychainError
+            }
+        }
+
         var errorDescription: String? {
             switch self {
             case .keychainOpenFailed(let status):
-                "Pomme agent credential Keychain open failed (Security status \(status))."
+                "Pomme couldn't open your login Keychain to use the VM's agent credential: \(Self.reason(status))."
             case .keychainLocked(let status):
-                "Pomme agent credential Keychain is locked (Security status \(status))."
+                "Your login Keychain is locked, so Pomme can't use the VM's agent credential: \(Self.reason(status))."
             case .credentialMissing(let status):
-                "Pomme agent credential is unavailable (Security status \(status))."
+                "The VM's agent credential isn't in your login Keychain: \(Self.reason(status))."
             case .malformedCredential:
-                "Pomme agent credential has an invalid format."
+                "The VM's agent credential in your login Keychain has an invalid format."
             case .unexpectedCredentialData:
-                "Pomme agent credential returned unexpected data."
+                "The Keychain returned data of an unexpected type for the VM's agent credential."
             case .credentialReadFailed(let status):
-                "Pomme agent credential read failed (Security status \(status))."
+                "Pomme couldn't read the VM's agent credential from your login Keychain: \(Self.reason(status))."
             case .credentialCreateFailed(let status):
-                "Pomme agent credential creation failed (Security status \(status))."
+                "Pomme couldn't save the VM's agent credential in your login Keychain: \(Self.reason(status))."
             case .duplicateCredentialReadFailed(let status):
-                "Concurrently created Pomme agent credential could not be read (Security status \(status))."
+                "Another Pomme process created the VM's agent credential at the same time, and Pomme couldn't read it: \(Self.reason(status))."
             case .credentialRemoveFailed(let status):
-                "Pomme agent credential removal failed (Security status \(status))."
+                "Pomme couldn't remove the VM's agent credential from your login Keychain: \(Self.reason(status))."
             }
+        }
+
+        var recoverySuggestion: String? {
+            switch self {
+            case .keychainLocked, .keychainOpenFailed:
+                "Unlock your login Keychain, then retry."
+            case .credentialMissing:
+                "Run `pomme agent repair NAME` to reinstall the VM's agent and its credential."
+            case .malformedCredential, .unexpectedCredentialData:
+                "Run `pomme agent repair NAME` to reinstall the VM's agent and its credential."
+            case .credentialReadFailed, .credentialCreateFailed, .duplicateCredentialReadFailed, .credentialRemoveFailed:
+                "Unlock your login Keychain, then retry. If macOS asks whether `pomme` can access an item, allow it."
+            }
+        }
+
+        /// The Security framework's text for `status`, with its number.
+        private static func reason(_ status: OSStatus) -> String {
+            let message = securityErrorMessage(status)
+            guard message != "OSStatus \(status)" else { return message }
+            let trimmed = message.hasSuffix(".") ? String(message.dropLast()) : message
+            return "\(SystemErrorDescription.lowercasingFirstWord(trimmed)) (OSStatus \(status))"
         }
     }
 

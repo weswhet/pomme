@@ -65,9 +65,9 @@ struct PommeSecurityWorkflowState: Equatable, Sendable {
   }
 }
 
-enum PommeSecurityWorkflowError: Error, LocalizedError, Equatable, Sendable {
+enum PommeSecurityWorkflowError: PommeDescribedError, Equatable, Sendable {
   case statusUnverified
-  case ownerUnavailable
+  case ownerUnavailable(PommeRetainedCause = .init())
   case confirmationRequired
   case confirmationDeclined
   case agentUnverified
@@ -75,37 +75,85 @@ enum PommeSecurityWorkflowError: Error, LocalizedError, Equatable, Sendable {
   case privateInputUnsupported
   case ownerLoginUnverified
   case normalBootUnverified
-  case restorationIncomplete
+  case restorationIncomplete(PommeRetainedCause = .init())
   case incompleteTransaction
   case missingBaseline
   case amfiRequiresSIPDisabled
 
+  var code: PommeErrorCode {
+    switch self {
+    case .statusUnverified: .securityStatusUnverified
+    case .ownerUnavailable: .credentialUnavailable
+    case .confirmationRequired: .securityConfirmationRequired
+    case .confirmationDeclined: .operationCancelled
+    case .agentUnverified: .securityAgentUnverified
+    case .commandIncomplete: .securityCommandIncomplete
+    case .privateInputUnsupported: .securityAgentUnsupported
+    case .ownerLoginUnverified: .securityOwnerLoginUnverified
+    case .normalBootUnverified: .securityChangeUnverified
+    case .restorationIncomplete: .securityRestorationIncomplete
+    case .incompleteTransaction: .securityOperationPending
+    case .missingBaseline: .amfiBaselineMissing
+    case .amfiRequiresSIPDisabled: .amfiRequiresSIPDisabled
+    }
+  }
+
+  /// A restoration failure caused by `error`, or `error` itself when it
+  /// already is one.
+  static func restorationIncomplete(after error: any Error) -> Self {
+    if let workflow = error as? Self, case .restorationIncomplete = workflow { return workflow }
+    return .restorationIncomplete(PommeRetainedCause(error))
+  }
+
+  var underlying: (any Error)? {
+    switch self {
+    case .ownerUnavailable(let cause), .restorationIncomplete(let cause): cause.underlying
+    default: nil
+    }
+  }
+
+  var recoverySuggestion: String? {
+    switch self {
+    case .statusUnverified: "Run `pomme agent status NAME` to check that the guest agent is connected, then retry."
+    case .agentUnverified: "Run `pomme agent status NAME`. If the agent is damaged, run `pomme agent repair NAME`."
+    case .privateInputUnsupported: "Run `pomme agent update NAME` to install the current agent, then retry."
+    case .commandIncomplete, .ownerLoginUnverified, .normalBootUnverified:
+      "Repeat the same command with the same `--final-state` value to resume."
+    case .missingBaseline: "Run `pomme amfi status NAME` to see the VM's AMFI state."
+    default: nil
+    }
+  }
+
   var errorDescription: String? {
     switch self {
-    case .statusUnverified: "The VM security state could not be verified."
-    case .ownerUnavailable:
-      "Owner credentials are required. Set both POMME_AUTHORIZED_USER and POMME_AUTHORIZED_PASSWORD, restore the exact VM-scoped Keychain item, or run from an interactive terminal."
+    case .statusUnverified: "Pomme couldn't verify the VM's SIP or AMFI state from the guest's reply."
+    case .ownerUnavailable(let cause):
+      cause.describing(
+        "Owner credentials are required.",
+        then: "Set both POMME_AUTHORIZED_USER and POMME_AUTHORIZED_PASSWORD, restore the exact VM-scoped Keychain item, or run from an interactive terminal.")
     case .confirmationRequired:
       "Creating the owner account on this verified fresh VM requires confirmation. Run from an interactive terminal or pass -f/--force."
     case .confirmationDeclined: "Owner account creation was declined; security is unchanged."
     case .agentUnverified:
-      "The existing persistent Pomme agent could not be authenticated with its creation-pinned identity."
+      "Pomme couldn't authenticate the VM's guest agent with the identity that it recorded when it created the VM."
     case .commandIncomplete:
-      "A guest command did not finish cleanly: it timed out, was cancelled, or its output was incomplete or truncated."
+      "A guest command didn't finish cleanly: it timed out, was cancelled, or its output was incomplete. Pomme kept the operation's progress."
     case .privateInputUnsupported:
-      "This VM's pinned agent does not support verified private password input. Owner preparation is unavailable; the agent and creation record were retained. Create a VM with this Pomme build to use this workflow."
+      "The VM's guest agent can't pass the owner's credential to guest commands privately, so Pomme can't prepare the owner account. Pomme didn't change the agent."
     case .ownerLoginUnverified:
-      "Automatic login as the verified owner could not be confirmed after a normal boot. Security is unchanged; the account, credentials, and progress were retained."
+      "Pomme couldn't confirm that the owner signed in automatically after a normal boot. Security is unchanged; Pomme kept the account, its credential, and the operation's progress."
     case .normalBootUnverified:
-      "The requested security configuration could not be verified after a normal boot; progress was retained."
-    case .restorationIncomplete:
-      "VM state restoration is incomplete. The account, credentials, and security journal were retained; repeat the same command after inspecting the VM."
+      "Pomme couldn't verify the requested SIP or AMFI setting after a normal boot. Pomme kept the operation's progress."
+    case .restorationIncomplete(let cause):
+      cause.describing(
+        "VM state restoration is incomplete.",
+        then: "The account, credentials, and security journal were retained; repeat the same command after inspecting the VM.")
     case .incompleteTransaction:
-      "A security transaction remains unresolved; repeat its original command before starting another operation."
+      "An earlier SIP or AMFI operation on this VM is unfinished. Repeat its original command before you start another operation."
     case .amfiRequiresSIPDisabled:
-      "AMFI changes require SIP disabled while boot arguments are written and verified. Run pomme sip disable <vm> first; restore AMFI before re-enabling SIP."
+      "Changing AMFI requires SIP to be off while Pomme writes and verifies boot arguments. Run `pomme sip disable NAME` first, and restore AMFI before you turn SIP on again."
     case .missingBaseline:
-      "AMFI enable requires the exact recorded baseline. No guessed LocalPolicy reset was attempted."
+      "Pomme has no recorded AMFI baseline for this VM, so it can't restore AMFI. Pomme didn't change the boot policy."
     }
   }
 }

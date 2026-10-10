@@ -32,7 +32,7 @@ struct PommeRecoveryTerminalAdmissionTests {
             sensitiveFramesCleared: framesCleared,
             clearStaging: {
                 calls.append("staging")
-                throw PommeRecoveryTerminalAdmission.Error.cleanupFailed
+                throw PommeRecoveryTerminalAdmission.Error.cleanupFailed()
             },
             clearState: { calls.append("state") },
             removeBootstrap: { calls.append("bootstrap") }

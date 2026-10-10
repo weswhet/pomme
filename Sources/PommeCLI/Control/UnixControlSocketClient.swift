@@ -15,7 +15,7 @@ struct PommeControlSocketClient: Sendable {
     func send(_ request: PommeControlRequest, timeout: TimeInterval? = nil) throws -> JSONValue {
         let deadline: TimeInterval?
         if let timeout {
-            guard timeout.isFinite, timeout > 0 else { throw POSIXError(.ETIMEDOUT) }
+            guard timeout.isFinite, timeout > 0 else { throw RunnerError.controlSocketTimedOut }
             deadline = ProcessInfo.processInfo.systemUptime + timeout
         } else { deadline = nil }
         let hello = try negotiatedHello(deadline: deadline)
@@ -26,8 +26,7 @@ struct PommeControlSocketClient: Sendable {
         do { response = try ControlWireCodec.decodeResponse(responseData, matching: request.id) }
         catch { throw incompatibleError(from: responseData) }
         guard response.ok, let result = response.result else {
-            let error = response.error ?? .init(code: "control-error", message: "The Pomme helper rejected the request.")
-            throw RunnerError.controlCommandFailed("\(error.code): \(error.message)")
+            throw PommeControlError.clientError(response.error, missing: "control-error: The Pomme helper rejected the request.")
         }
         return result
     }
@@ -45,7 +44,7 @@ struct PommeControlSocketClient: Sendable {
     func openStream(_ request: PommeControlRequest, timeout: TimeInterval? = nil) throws -> PommeControlSocketStream {
         let deadline: TimeInterval?
         if let timeout {
-            guard timeout.isFinite, timeout > 0 else { throw POSIXError(.ETIMEDOUT) }
+            guard timeout.isFinite, timeout > 0 else { throw RunnerError.controlSocketTimedOut }
             deadline = ProcessInfo.processInfo.systemUptime + timeout
         } else { deadline = nil }
         let hello = try negotiatedHello(deadline: deadline)
@@ -100,7 +99,7 @@ struct PommeControlSocketClient: Sendable {
                         var size = socklen_t(MemoryLayout<Int32>.size)
                         guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &status, &size) == 0 else { try throwPOSIX("getsockopt") }
                         if status == 0 { return }
-                        throw POSIXError(POSIXErrorCode(rawValue: status) ?? .EIO)
+                        throw RunnerError.posix(function: "connect", code: status)
                     }
                     if errno == ENOENT || errno == ECONNREFUSED { throw RunnerError.noRunningVM(url) }
                     try throwPOSIX("connect")

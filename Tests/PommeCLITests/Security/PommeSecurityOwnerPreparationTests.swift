@@ -209,10 +209,10 @@ struct PommeSecurityOwnerPreparationTests {
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
       freshnessRequirements: .verifiedFresh,
       executeGuest: fixture.execute, executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus)
-    await #expect(throws: PommeSecurityOwnerPreparationError.privatePTYUnavailable) {
+    await #expect(throws: PommeSecurityOwnerPreparationError.privatePTYUnavailable()) {
       try await preparation.configureLogin(password: "opaque-owner-secret", labSetter: { _ in
         calls.withLock { $0 += 1 }
-        throw PommeSecurityOwnerPreparationError.privatePTYUnavailable
+        throw PommeSecurityOwnerPreparationError.privatePTYUnavailable()
       })
     }
     #expect(calls.withLock { $0 } == 1)
@@ -308,7 +308,7 @@ struct PommeSecurityOwnerPreparationTests {
     case "restricted": expected = .loginRestricted
     case "unsupported": expected = .autoLoginUnsupported
     case "contextUID", "contextPath", "contextDuplicate", "contextStale", "contextSession", "contextAudit", "languageChooser", "completedContext":
-      expected = .setupAssistantContextUnavailable
+      expected = .setupAssistantContextUnavailable()
     default: expected = .autoLoginVerificationFailed
     }
     await #expect(throws: expected) {
@@ -1684,7 +1684,7 @@ struct PommeSecurityOwnerPreparationTests {
     )
 
     await #expect(
-      throws: PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throws: PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     ) {
       try await preparation.configureLogin(password: "opaque-owner-secret")
     }
@@ -1712,7 +1712,7 @@ struct PommeSecurityOwnerPreparationTests {
     )
 
     await #expect(
-      throws: PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throws: PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     ) {
       try await preparation.configureLogin(password: "opaque-owner-secret")
     }
@@ -1738,7 +1738,7 @@ struct PommeSecurityOwnerPreparationTests {
     )
 
     await #expect(
-      throws: PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throws: PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     ) {
       try await preparation.configureLogin(password: "opaque-owner-secret")
     }
@@ -1766,7 +1766,7 @@ struct PommeSecurityOwnerPreparationTests {
       )
 
       await #expect(
-        throws: PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+        throws: PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
       ) {
         try await preparation.configureLogin(password: "opaque-owner-secret")
       }
@@ -1793,7 +1793,7 @@ struct PommeSecurityOwnerPreparationTests {
     )
 
     await #expect(
-      throws: PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throws: PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     ) {
       try await preparation.configureLogin(password: "opaque-owner-secret")
     }
@@ -1819,7 +1819,7 @@ struct PommeSecurityOwnerPreparationTests {
     )
 
     await #expect(
-      throws: PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throws: PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     ) {
       try await preparation.configureLogin(password: "opaque-owner-secret")
     }
@@ -1845,7 +1845,7 @@ struct PommeSecurityOwnerPreparationTests {
     )
 
     await #expect(
-      throws: PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable
+      throws: PommeSecurityOwnerPreparationError.setupAssistantContextUnavailable()
     ) {
       try await preparation.configureLogin(password: "opaque-owner-secret")
     }

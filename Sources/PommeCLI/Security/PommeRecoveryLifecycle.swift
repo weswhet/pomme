@@ -1,21 +1,47 @@
 import Foundation
 
-enum PommeRecoveryLifecycleError: Error, LocalizedError, Equatable, Sendable {
-    case operationFailed
-    case cleanupFailed
-    case finalStateFailed
-    case cleanupAndFinalStateFailed
+enum PommeRecoveryLifecycleError: PommeDescribedError, Equatable, Sendable {
+    case operationFailed(PommeRetainedCause = .init())
+    case cleanupFailed(PommeRetainedCause = .init())
+    case finalStateFailed(PommeRetainedCause = .init())
+    case cleanupAndFinalStateFailed(PommeRetainedCause = .init())
+
+    var code: PommeErrorCode {
+        switch self {
+        case .operationFailed: .recoveryOperationFailed
+        case .cleanupFailed, .cleanupAndFinalStateFailed: .recoveryCleanupUnverified
+        case .finalStateFailed: .recoveryFinalStateUnverified
+        }
+    }
 
     var errorDescription: String? {
         switch self {
-        case .operationFailed:
-            "Recovery operation did not complete."
-        case .cleanupFailed:
-            "Recovery cleanup could not be proven complete."
+        case .operationFailed(let cause):
+            cause.describing("The Recovery operation didn't finish.")
+        case .cleanupFailed(let cause):
+            cause.describing("Pomme couldn't confirm that the Recovery session's files were removed.")
+        case .finalStateFailed(let cause):
+            cause.describing("Pomme couldn't confirm that the VM reached the requested final state after Recovery.")
+        case .cleanupAndFinalStateFailed(let cause):
+            cause.describing("The Recovery operation failed, and Pomme couldn't confirm that its files were removed or that the VM reached its final state.")
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .operationFailed: nil
+        case .cleanupFailed, .cleanupAndFinalStateFailed:
+            "Run `pomme stop NAME`, then run the same command again; Pomme cleans up the earlier session first."
         case .finalStateFailed:
-            "Recovery final-state transition could not be proven."
-        case .cleanupAndFinalStateFailed:
-            "Recovery cleanup and final-state transition could not be proven."
+            "Run `pomme status NAME` to see the VM's state."
+        }
+    }
+
+    var underlying: (any Error)? {
+        switch self {
+        case .operationFailed(let cause), .cleanupFailed(let cause), .finalStateFailed(let cause),
+             .cleanupAndFinalStateFailed(let cause):
+            cause.underlying
         }
     }
 }
@@ -51,22 +77,23 @@ enum PommeRecoveryLifecycle {
             do {
                 let evidence = try await cleanup()
                 guard evidence.isComplete else {
-                    throw PommeRecoveryLifecycleError.cleanupFailed
+                    throw PommeRecoveryLifecycleError.cleanupFailed()
                 }
                 cleanupResult = .success(evidence)
             } catch {
                 cleanupResult = .failure(error)
             }
         } else {
-            cleanupResult = .failure(PommeRecoveryLifecycleError.cleanupFailed)
+            cleanupResult = .failure(PommeRecoveryLifecycleError.cleanupFailed())
         }
 
         guard case .success(let cleanupEvidence) = cleanupResult else {
             // Final state is intentionally not requested when cleanup is
             // unknown. This is the key safety ordering of the lifecycle.
+            let cause = cleanupResult.failureValue.map(PommeRetainedCause.wrapping) ?? .init()
             throw operationResult.isFailure
-                ? PommeRecoveryLifecycleError.cleanupAndFinalStateFailed
-                : PommeRecoveryLifecycleError.cleanupFailed
+                ? PommeRecoveryLifecycleError.cleanupAndFinalStateFailed(cause)
+                : PommeRecoveryLifecycleError.cleanupFailed(cause)
         }
 
         var finalStateSucceeded = false
@@ -74,16 +101,17 @@ enum PommeRecoveryLifecycle {
             try await requestFinalState(finalState)
             finalStateSucceeded = try await proveFinalState(finalState)
             guard finalStateSucceeded else {
-                throw PommeRecoveryLifecycleError.finalStateFailed
+                throw PommeRecoveryLifecycleError.finalStateFailed()
             }
         } catch {
+            let cause = PommeRetainedCause.wrapping(error)
             throw operationResult.isFailure
-                ? PommeRecoveryLifecycleError.cleanupAndFinalStateFailed
-                : PommeRecoveryLifecycleError.finalStateFailed
+                ? PommeRecoveryLifecycleError.cleanupAndFinalStateFailed(cause)
+                : PommeRecoveryLifecycleError.finalStateFailed(cause)
         }
 
         guard case .success(let output) = operationResult else {
-            throw PommeRecoveryLifecycleError.operationFailed
+            throw PommeRecoveryLifecycleError.operationFailed(operationResult.failureValue.map(PommeRetainedCause.wrapping) ?? .init())
         }
         return .init(
             output: output,
@@ -99,5 +127,20 @@ private extension Result {
     var isFailure: Bool {
         if case .failure = self { return true }
         return false
+    }
+
+    var failureValue: Failure? {
+        if case .failure(let error) = self { return error }
+        return nil
+    }
+}
+
+private extension PommeRetainedCause {
+    /// Keeps `error` unless it's this lifecycle's own bare failure, which
+    /// adds nothing to the message. Operation errors can carry guest output,
+    /// so only codes are kept.
+    static func wrapping(_ error: any Error) -> PommeRetainedCause {
+        if let lifecycle = error as? PommeRecoveryLifecycleError, lifecycle.underlying == nil { return .init() }
+        return PommeRetainedCause(codesOnly: error)
     }
 }

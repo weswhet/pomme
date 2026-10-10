@@ -52,8 +52,9 @@ actor PommeTerminalService {
                 attributes: [.posixPermissions: NSNumber(value: 0o700)]
             )
             guard Darwin.chmod(root.path, S_IRWXU) == 0 else {
+                let code = errno
                 try? FileManager.default.removeItem(at: root)
-                throw PommeAgentOperationError.io
+                throw PommeAgentOperationError.io("Restricting the terminal spool directory", errno: code)
             }
             self.spoolRoot = root
             self.removesSpoolRoot = true
@@ -85,8 +86,13 @@ actor PommeTerminalService {
         case "terminal.terminate": return try terminate(payload)
         case "terminal.release": return try release(payload)
         case "terminal.list": return try list(payload)
-        default: throw PommeAgentOperationError.unsupported
+        default: throw PommeAgentOperationError.unsupported("The terminal service doesn't support \(operation)")
         }
+    }
+
+    /// The failure for a session ID that names no terminal session.
+    private static func missingSession(_ id: UUID) -> PommeAgentOperationError {
+        .notFound("No terminal session has ID \(id.uuidString.lowercased())")
     }
 
     func describe() -> JSONValue {
@@ -111,10 +117,14 @@ actor PommeTerminalService {
             "sessionID", "sequence", "mutationDigest", "path", "arguments", "shell",
             "cwd", "environment", "user", "uid", "group", "gid", "columns", "rows"
         ]
-        guard Set(values.keys).isSubset(of: allowed), values["sequence"] != nil,
+        guard Set(values.keys).isSubset(of: allowed) else {
+            let unknown = Set(values.keys).subtracting(allowed).sorted().prefix(8).joined(separator: ", ")
+            throw PommeAgentOperationError.invalid("terminal.create doesn't accept these fields: \(unknown)")
+        }
+        guard values["sequence"] != nil,
               values["mutationDigest"]?.stringValue != nil,
               values["sessionID"] != nil
-        else { throw PommeAgentOperationError.invalid }
+        else { throw PommeAgentOperationError.invalid("terminal.create requires sessionID, sequence, and mutationDigest") }
 
         let sessionID = try uuid(values, "sessionID")
         let sequence = try uint64(values, "sequence")
@@ -123,11 +133,11 @@ actor PommeTerminalService {
             guard sequence == 0,
                   existing.mutationDigests[sequence] == digest,
                   let result = existing.mutationResults[sequence]
-            else { throw PommeAgentOperationError.invalid }
+            else { throw PommeAgentOperationError.invalid("Terminal session \(sessionID.uuidString.lowercased()) already exists with a different request") }
             return result
         }
-        guard sequence == 0 else { throw PommeAgentOperationError.invalid }
-        let shell = try boolean(values["shell"])
+        guard sequence == 0 else { throw PommeAgentOperationError.invalid("terminal.create sequence must be 0") }
+        let shell = try boolean(values, "shell")
         let rawPath = values["path"]?.stringValue
         let rawArguments = try strings(values["arguments"])
         let identity = try PommePrivilege.resolve(values)
@@ -142,9 +152,9 @@ actor PommeTerminalService {
             guard identity == nil,
                   resolved.path == "/bin/sh",
                   rawPath == nil || rawPath == "/bin/sh"
-            else { throw PommeAgentOperationError.invalid }
+            else { throw PommeAgentOperationError.invalid("Recovery terminal sessions run only /bin/sh as the current user") }
             guard FileManager.default.isExecutableFile(atPath: "/bin/sh") else {
-                throw PommeAgentOperationError.io
+                throw PommeAgentOperationError.described(.io, message: "/bin/sh isn't executable in Recovery")
             }
         }
 
@@ -158,7 +168,7 @@ actor PommeTerminalService {
         )
         guard let master = launched.ptyMaster else {
             _ = kill(-launched.pid, SIGKILL)
-            throw PommeAgentOperationError.io
+            throw PommeAgentOperationError.described(.io, message: "The terminal process started without a pseudo-terminal")
         }
 
         var spoolFD: Int32 = -1
@@ -167,15 +177,15 @@ actor PommeTerminalService {
             if role == .persistent {
                 let url = spoolRoot.appendingPathComponent("\(sessionID.uuidString.lowercased()).spool")
                 spoolFD = Darwin.open(url.path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, S_IRUSR | S_IWUSR)
-                guard spoolFD >= 0 else { throw PommeAgentOperationError.io }
+                guard spoolFD >= 0 else { throw PommeAgentOperationError.io("Creating the terminal spool file") }
                 spoolURL = url
                 try Self.validatePrivateFileDescriptor(spoolFD)
             } else {
                 var template = Array(spoolRoot.appendingPathComponent("pomme-terminal-XXXXXX").path.utf8) + [0]
                 spoolFD = template.withUnsafeMutableBufferPointer { Darwin.mkstemp($0.baseAddress) }
-                guard spoolFD >= 0 else { throw PommeAgentOperationError.io }
+                guard spoolFD >= 0 else { throw PommeAgentOperationError.io("Creating the terminal spool file") }
                 _ = Darwin.unlink(String(cString: template.withUnsafeBufferPointer { $0.baseAddress! }))
-                guard fcntl(spoolFD, F_SETFD, FD_CLOEXEC) == 0 else { throw PommeAgentOperationError.io }
+                guard fcntl(spoolFD, F_SETFD, FD_CLOEXEC) == 0 else { throw PommeAgentOperationError.io("Marking the terminal spool file close-on-exec") }
             }
         } catch {
             _ = Darwin.close(master)
@@ -213,17 +223,18 @@ actor PommeTerminalService {
         let values = try exactObject(payload, keys: ["sessionID"])
         let id = try uuid(values, "sessionID")
         try refresh(id)
-        guard let terminal = terminals[id] else { throw PommeAgentOperationError.notFound }
+        guard let terminal = terminals[id] else { throw Self.missingSession(id) }
         return try statusResult(for: terminal, includeOffsets: true)
     }
 
     private func list(_ payload: JSONValue) throws -> JSONValue {
         let values = try object(payload)
-        guard Set(values.keys).isSubset(of: ["pageToken", "pageSize"]) else { throw PommeAgentOperationError.invalid }
+        guard Set(values.keys).isSubset(of: ["pageToken", "pageSize"]) else { throw PommeAgentOperationError.invalid("terminal.list accepts only pageToken and pageSize") }
         let token = values["pageToken"]?.stringValue ?? ""
         let start = token.isEmpty ? 0 : Int(token) ?? -1
         let requested = try optionalInt(values, "pageSize") ?? Self.maximumPageSize
-        guard start >= 0, requested > 0, requested <= Self.maximumPageSize else { throw PommeAgentOperationError.invalid }
+        guard start >= 0 else { throw PommeAgentOperationError.invalid("terminal.list pageToken isn't a token from an earlier page") }
+        guard requested > 0, requested <= Self.maximumPageSize else { throw PommeAgentOperationError.invalid("terminal.list pageSize must be from 1 to \(Self.maximumPageSize)") }
         let ids = terminals.keys.sorted { $0.uuidString < $1.uuidString }
         let slice = ids.dropFirst(min(start, ids.count)).prefix(requested)
         var entries: [JSONValue] = []
@@ -240,7 +251,7 @@ actor PommeTerminalService {
     private func release(_ payload: JSONValue) throws -> JSONValue {
         let values = try exactObject(payload, keys: ["sessionID"])
         let id = try uuid(values, "sessionID")
-        guard let terminal = terminals.removeValue(forKey: id) else { throw PommeAgentOperationError.notFound }
+        guard let terminal = terminals.removeValue(forKey: id) else { throw Self.missingSession(id) }
         pumpTasks.removeValue(forKey: id)?.cancel()
         _ = Darwin.close(terminal.master)
         _ = Darwin.close(terminal.spoolFD)
@@ -255,9 +266,11 @@ actor PommeTerminalService {
         let id = try uuid(values, "sessionID")
         let offset = try uint64(values, "offset")
         let requested = try integer(values, "count")
-        guard requested >= 0, requested <= PommeAgentProtocol.maximumStreamChunkBytes else { throw PommeAgentOperationError.invalid }
+        guard requested >= 0, requested <= PommeAgentProtocol.maximumStreamChunkBytes else {
+            throw PommeAgentOperationError.invalid("terminal.read count must be from 0 to \(PommeAgentProtocol.maximumStreamChunkBytes)")
+        }
         try refresh(id)
-        guard var terminal = terminals[id] else { throw PommeAgentOperationError.notFound }
+        guard var terminal = terminals[id] else { throw Self.missingSession(id) }
         do {
             try drain(&terminal)
         } catch {
@@ -270,7 +283,7 @@ actor PommeTerminalService {
             throw error
         }
         terminals[id] = terminal
-        guard offset <= terminal.spoolLength else { throw PommeAgentOperationError.invalid }
+        guard offset <= terminal.spoolLength else { throw PommeAgentOperationError.invalid("terminal.read offset \(offset) is past the \(terminal.spoolLength) bytes of output") }
         let count = min(requested, Int(terminal.spoolLength - offset))
         let data = try pread(fd: terminal.spoolFD, offset: offset, count: count)
         let nextOffset = offset + UInt64(data.count)
@@ -292,8 +305,10 @@ actor PommeTerminalService {
         let values = try exactObject(payload, keys: ["sessionID", "offset"])
         let id = try uuid(values, "sessionID")
         let offset = try uint64(values, "offset")
-        guard var terminal = terminals[id], offset <= terminal.spoolLength,
-              offset >= terminal.acknowledgedOffset else { throw PommeAgentOperationError.invalid }
+        guard var terminal = terminals[id] else { throw PommeAgentOperationError.invalid("No terminal session has ID \(id.uuidString.lowercased())") }
+        guard offset <= terminal.spoolLength, offset >= terminal.acknowledgedOffset else {
+            throw PommeAgentOperationError.invalid("terminal.ack offset must be from \(terminal.acknowledgedOffset) to \(terminal.spoolLength)")
+        }
         terminal.acknowledgedOffset = offset
         terminals[id] = terminal
         return .object(["sessionID": .string(id.uuidString.lowercased()), "acknowledgedOffset": .integer(Int64(offset))])
@@ -306,7 +321,8 @@ actor PommeTerminalService {
         let sequence = try uint64(values, "sequence")
         let digest = try string(values, "mutationDigest")
         return try applyMutation(id: id, sequence: sequence, digest: digest) {
-            guard let terminal = self.terminals[id], !terminal.exited else { throw PommeAgentOperationError.notFound }
+            guard let terminal = self.terminals[id] else { throw Self.missingSession(id) }
+            guard !terminal.exited else { throw PommeAgentOperationError.notFound("Terminal session \(id.uuidString.lowercased()) has exited and accepts no input") }
             try writeAll(data, to: terminal.master)
             return .object(["sessionID": .string(id.uuidString.lowercased()), "sequence": .integer(Int64(sequence)), "accepted": .bool(true)])
         }
@@ -319,7 +335,7 @@ actor PommeTerminalService {
         let digest = try string(values, "mutationDigest")
         let columns = try integer(values, "columns")
         let rows = try integer(values, "rows")
-        guard columns > 0, rows > 0, columns <= 32_768, rows <= 32_768 else { throw PommeAgentOperationError.invalid }
+        guard columns > 0, rows > 0, columns <= 32_768, rows <= 32_768 else { throw PommeAgentOperationError.invalid("Terminal columns and rows must each be from 1 to 32,768") }
         return try applyMutation(id: id, sequence: sequence, digest: digest) {
             try self.applyResize(sessionID: id, columns: columns, rows: rows)
             return .object(["sessionID": .string(id.uuidString.lowercased()), "sequence": .integer(Int64(sequence)), "accepted": .bool(true)])
@@ -332,10 +348,10 @@ actor PommeTerminalService {
         let sequence = try uint64(values, "sequence")
         let digest = try string(values, "mutationDigest")
         let raw = try integer(values, "signal")
-        guard [SIGHUP, SIGINT, SIGTERM, SIGKILL].contains(Int32(raw)) else { throw PommeAgentOperationError.invalid }
+        guard [SIGHUP, SIGINT, SIGTERM, SIGKILL].contains(Int32(raw)) else { throw PommeAgentOperationError.invalid("terminal.signal accepts only SIGHUP, SIGINT, SIGTERM, or SIGKILL") }
         return try applyMutation(id: id, sequence: sequence, digest: digest) {
-            guard let terminal = self.terminals[id] else { throw PommeAgentOperationError.notFound }
-            guard kill(-terminal.pid, Int32(raw)) == 0 || kill(terminal.pid, Int32(raw)) == 0 else { throw PommeAgentOperationError.io }
+            guard let terminal = self.terminals[id] else { throw Self.missingSession(id) }
+            guard kill(-terminal.pid, Int32(raw)) == 0 || kill(terminal.pid, Int32(raw)) == 0 else { throw PommeAgentOperationError.io("Signalling the terminal process") }
             return .object(["sessionID": .string(id.uuidString.lowercased()), "sequence": .integer(Int64(sequence)), "accepted": .bool(true)])
         }
     }
@@ -345,11 +361,11 @@ actor PommeTerminalService {
         let id = try uuid(values, "sessionID")
         let sequence = try uint64(values, "sequence")
         let digest = try string(values, "mutationDigest")
-        let force = try boolean(values["force"])
+        let force = try boolean(values, "force")
         return try applyMutation(id: id, sequence: sequence, digest: digest) {
-            guard let terminal = self.terminals[id] else { throw PommeAgentOperationError.notFound }
+            guard let terminal = self.terminals[id] else { throw Self.missingSession(id) }
             let signal = force ? SIGKILL : SIGHUP
-            guard kill(-terminal.pid, signal) == 0 || kill(terminal.pid, signal) == 0 else { throw PommeAgentOperationError.io }
+            guard kill(-terminal.pid, signal) == 0 || kill(terminal.pid, signal) == 0 else { throw PommeAgentOperationError.io("Terminating the terminal process") }
             return .object(["sessionID": .string(id.uuidString.lowercased()), "sequence": .integer(Int64(sequence)), "accepted": .bool(true), "signal": .integer(Int64(signal))])
         }
     }
@@ -360,15 +376,17 @@ actor PommeTerminalService {
         digest: String,
         operation: () throws -> JSONValue
     ) throws -> JSONValue {
-        guard var terminal = terminals[id] else { throw PommeAgentOperationError.notFound }
-        guard !digest.isEmpty, digest.count <= 128 else { throw PommeAgentOperationError.invalid }
+        guard var terminal = terminals[id] else { throw Self.missingSession(id) }
+        guard !digest.isEmpty, digest.count <= 128 else { throw PommeAgentOperationError.invalid("mutationDigest must be 1 to 128 characters") }
         if sequence <= terminal.lastMutationSequence {
             guard terminal.mutationDigests[sequence] == digest,
                   let result = terminal.mutationResults[sequence]
-            else { throw PommeAgentOperationError.invalid }
+            else { throw PommeAgentOperationError.invalid("Sequence \(sequence) was already used for a different request") }
             return result
         }
-        guard sequence == terminal.lastMutationSequence + 1 else { throw PommeAgentOperationError.invalid }
+        guard sequence == terminal.lastMutationSequence + 1 else {
+            throw PommeAgentOperationError.invalid("sequence must be \(terminal.lastMutationSequence + 1), not \(sequence)")
+        }
         let result = try operation()
         terminal.lastMutationSequence = sequence
         terminal.mutationDigests[sequence] = digest
@@ -408,7 +426,7 @@ actor PommeTerminalService {
     }
 
     private func refresh(_ id: UUID) throws {
-        guard var terminal = terminals[id] else { throw PommeAgentOperationError.notFound }
+        guard var terminal = terminals[id] else { throw Self.missingSession(id) }
         if !terminal.exited {
             var status: Int32 = 0
             let result = waitpid(terminal.pid, &status, WNOHANG)
@@ -416,7 +434,7 @@ actor PommeTerminalService {
                 terminal.exited = true
                 terminal.rawStatus = status
             } else if result < 0, errno != EINTR, errno != ECHILD {
-                throw PommeAgentOperationError.io
+                throw PommeAgentOperationError.io("Checking the terminal process status")
             }
         }
         do {
@@ -444,7 +462,7 @@ actor PommeTerminalService {
                 try flushPending(&terminal)
                 return
             } else {
-                throw PommeAgentOperationError.io
+                throw PommeAgentOperationError.io("Reading terminal output")
             }
         }
     }
@@ -467,17 +485,18 @@ actor PommeTerminalService {
             }
             else if count < 0 && errno == EINTR { continue }
             else {
+                let code = count < 0 ? errno : ENOSPC
                 terminal.storageBlocked = true
-                throw PommeAgentOperationError.io
+                throw PommeAgentOperationError.io("Writing the terminal spool file", errno: code)
             }
         }
         terminal.storageBlocked = false
     }
 
     private func applyResize(sessionID: UUID, columns: Int, rows: Int) throws {
-        guard let terminal = terminals[sessionID] else { throw PommeAgentOperationError.notFound }
+        guard let terminal = terminals[sessionID] else { throw Self.missingSession(sessionID) }
         var window = winsize(ws_row: UInt16(rows), ws_col: UInt16(columns), ws_xpixel: 0, ws_ypixel: 0)
-        guard ioctl(terminal.master, TIOCSWINSZ, &window) == 0 else { throw PommeAgentOperationError.io }
+        guard ioctl(terminal.master, TIOCSWINSZ, &window) == 0 else { throw PommeAgentOperationError.io("Resizing the terminal") }
     }
 
     private func statusResult(for terminal: Terminal, includeOffsets: Bool) throws -> JSONValue {
@@ -522,7 +541,9 @@ actor PommeTerminalService {
         values: [String: JSONValue]
     ) throws -> ResolvedCommand {
         if shell {
-            guard path == nil || path == "/bin/sh", arguments.isEmpty else { throw PommeAgentOperationError.invalid }
+            guard path == nil || path == "/bin/sh", arguments.isEmpty else {
+                throw PommeAgentOperationError.invalid("A shell session can't also set path or arguments")
+            }
             let account = identity ?? PommePrivilege.current()
             let passwd = try? passwdRecord(uid: account.uid)
             let home = passwd?.home ?? "/"
@@ -532,7 +553,7 @@ actor PommeTerminalService {
         }
         guard let path, path.hasPrefix("/"), !path.contains("\0"),
               !path.split(separator: "/", omittingEmptySubsequences: false).contains("..")
-        else { throw PommeAgentOperationError.invalid }
+        else { throw PommeAgentOperationError.invalid("path must be an absolute path without .. components or NUL bytes, or set shell") }
         let home: String?
         if let identity { home = try? passwdRecord(uid: identity.uid).home }
         else { home = nil }
@@ -559,7 +580,7 @@ actor PommeTerminalService {
 
     private func passwdRecord(uid: uid_t) throws -> (home: String, shell: String) {
         guard let record = PommeGuestIdentityEnvironment.passwdRecord(uid: uid), !record.home.isEmpty else {
-            throw PommeAgentOperationError.invalid
+            throw PommeAgentOperationError.invalid("No home directory is recorded for uid \(uid)")
         }
         return (record.home, record.shell)
     }
@@ -569,36 +590,38 @@ actor PommeTerminalService {
     }
 
     private func object(_ value: JSONValue) throws -> [String: JSONValue] {
-        guard let object = value.objectValue else { throw PommeAgentOperationError.invalid }
+        guard let object = value.objectValue else { throw PommeAgentOperationError.invalid("The request payload must be a JSON object") }
         return object
     }
 
     private func exactObject(_ value: JSONValue, keys: Set<String>) throws -> [String: JSONValue] {
         let object = try self.object(value)
-        guard Set(object.keys) == keys else { throw PommeAgentOperationError.invalid }
+        guard Set(object.keys) == keys else { throw PommeAgentOperationError.invalid("The request requires exactly \(keys.sorted().joined(separator: ", "))") }
         return object
     }
 
     private func string(_ object: [String: JSONValue], _ key: String) throws -> String {
-        guard let value = object[key]?.stringValue, !value.isEmpty, !value.contains("\0") else { throw PommeAgentOperationError.invalid }
+        guard let value = object[key]?.stringValue, !value.isEmpty, !value.contains("\0") else { throw PommeAgentOperationError.invalid("\(key) must be a non-empty string without NUL bytes") }
         return value
     }
 
     private func uuid(_ object: [String: JSONValue], _ key: String) throws -> UUID {
-        guard let value = object[key]?.stringValue, let uuid = UUID(uuidString: value) else { throw PommeAgentOperationError.invalid }
+        guard let value = object[key]?.stringValue, let uuid = UUID(uuidString: value) else { throw PommeAgentOperationError.invalid("\(key) must be a UUID") }
         return uuid
     }
 
     private func strings(_ value: JSONValue?) throws -> [String] {
-        guard let values = value?.arrayValue, values.count <= 1_024 else { throw PommeAgentOperationError.invalid }
+        guard let values = value?.arrayValue, values.count <= 1_024 else { throw PommeAgentOperationError.invalid("arguments must be an array of at most 1,024 strings") }
         return try values.map { value in
-            guard let string = value.stringValue, !string.contains("\0"), string.utf8.count <= 64 * 1_024 else { throw PommeAgentOperationError.invalid }
+            guard let string = value.stringValue, !string.contains("\0"), string.utf8.count <= 64 * 1_024 else {
+                throw PommeAgentOperationError.invalid("Each argument must be a string of at most 64 KiB without NUL bytes")
+            }
             return string
         }
     }
 
     private func integer(_ object: [String: JSONValue], _ key: String) throws -> Int {
-        guard case .integer(let value) = object[key], let result = Int(exactly: value) else { throw PommeAgentOperationError.invalid }
+        guard case .integer(let value) = object[key], let result = Int(exactly: value) else { throw PommeAgentOperationError.invalid("\(key) must be an integer") }
         return result
     }
 
@@ -609,13 +632,13 @@ actor PommeTerminalService {
 
     private func uint64(_ object: [String: JSONValue], _ key: String) throws -> UInt64 {
         let value = try integer(object, key)
-        guard value >= 0 else { throw PommeAgentOperationError.invalid }
+        guard value >= 0 else { throw PommeAgentOperationError.invalid("\(key) must not be negative") }
         return UInt64(value)
     }
 
-    private func boolean(_ value: JSONValue?) throws -> Bool {
-        guard let value else { return false }
-        guard case .bool(let result) = value else { throw PommeAgentOperationError.invalid }
+    private func boolean(_ object: [String: JSONValue], _ key: String) throws -> Bool {
+        guard let value = object[key] else { return false }
+        guard case .bool(let result) = value else { throw PommeAgentOperationError.invalid("\(key) must be a Boolean") }
         return result
     }
 
@@ -623,66 +646,79 @@ actor PommeTerminalService {
         guard let value = object[key] else { return nil }
         guard let path = value.stringValue, path.hasPrefix("/"), !path.contains("\0"),
               !path.split(separator: "/", omittingEmptySubsequences: false).contains("..")
-        else { throw PommeAgentOperationError.invalid }
+        else { throw PommeAgentOperationError.invalid("\(key) must be an absolute path without .. components or NUL bytes") }
         return path
     }
 
     private func environment(_ value: JSONValue?) throws -> [String: String] {
         guard let value else { return [:] }
-        guard let object = value.objectValue else { throw PommeAgentOperationError.invalid }
+        guard let object = value.objectValue else { throw PommeAgentOperationError.invalid("environment must be an object of strings") }
         var result: [String: String] = [:]
         for (key, value) in object {
-            guard let text = value.stringValue else { throw PommeAgentOperationError.invalid }
+            guard let text = value.stringValue else { throw PommeAgentOperationError.invalid("Every environment value must be a string") }
             result[key] = text
         }
-        guard result.count <= 1_024 else { throw PommeAgentOperationError.invalid }
+        guard result.count <= 1_024 else { throw PommeAgentOperationError.invalid("The environment can't have more than 1,024 variables") }
+        // Names and values stay out of the messages: either can carry a
+        // credential.
         for (key, text) in result {
-            guard !key.isEmpty, key.utf8.count <= 256, text.utf8.count <= 64 * 1_024,
+            guard !key.isEmpty, key.utf8.count <= 256,
                   key.first?.isASCII == true,
                   key.first?.isLetter == true || key.first == "_",
                   key.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") }),
-                  !key.contains("\0"), !text.contains("\0")
-            else { throw PommeAgentOperationError.invalid }
+                  !key.contains("\0")
+            else {
+                throw PommeAgentOperationError.invalid("Environment variable names must be 1 to 256 ASCII letters, digits, or underscores, and not start with a digit")
+            }
+            guard text.utf8.count <= 64 * 1_024, !text.contains("\0") else {
+                throw PommeAgentOperationError.invalid("Environment variable values must be at most 64 KiB and contain no NUL bytes")
+            }
         }
         return result
     }
 
     private func decodedData(_ object: [String: JSONValue], key: String) throws -> Data {
         guard let encoded = object[key]?.stringValue,
-              let data = Data(base64Encoded: encoded),
-              data.count <= PommeAgentProtocol.maximumStreamChunkBytes
-        else { throw PommeAgentOperationError.invalid }
+              let data = Data(base64Encoded: encoded)
+        else { throw PommeAgentOperationError.invalid("\(key) must be valid base64") }
+        guard data.count <= PommeAgentProtocol.maximumStreamChunkBytes else {
+            throw PommeAgentOperationError.invalid("\(key) can't decode to more than \(PommeAgentProtocol.maximumStreamChunkBytes) bytes")
+        }
         return data
     }
 
     private static func validatePrivateDirectory(_ url: URL) throws {
         var info = stat()
-        guard lstat(url.path, &info) == 0,
-              info.st_mode & S_IFMT == S_IFDIR,
+        guard lstat(url.path, &info) == 0 else { throw PommeAgentOperationError.io("lstat of \(url.path)") }
+        guard info.st_mode & S_IFMT == S_IFDIR,
               info.st_uid == geteuid(),
               info.st_mode & 0o077 == 0,
               info.st_nlink >= 2
-        else { throw PommeAgentOperationError.io }
+        else {
+            throw PommeAgentOperationError.described(.io, message: "\(url.path) must be a directory that only the agent's user can access")
+        }
     }
 
     private func ensurePersistentSpoolRoot() throws {
         try FileManager.default.createDirectory(at: spoolRoot, withIntermediateDirectories: true)
-        guard Darwin.chmod(spoolRoot.path, S_IRWXU) == 0 else { throw PommeAgentOperationError.io }
+        guard Darwin.chmod(spoolRoot.path, S_IRWXU) == 0 else { throw PommeAgentOperationError.io("Restricting \(spoolRoot.path)") }
         try Self.validatePrivateDirectory(spoolRoot)
     }
 
     private static func validatePrivateFileDescriptor(_ descriptor: Int32) throws {
         var info = stat()
-        guard fstat(descriptor, &info) == 0,
-              info.st_mode & S_IFMT == S_IFREG,
+        guard fstat(descriptor, &info) == 0 else { throw PommeAgentOperationError.io("fstat of the terminal spool file") }
+        guard info.st_mode & S_IFMT == S_IFREG,
               info.st_uid == geteuid(),
               info.st_mode & 0o077 == 0,
               info.st_nlink == 1
-        else { throw PommeAgentOperationError.io }
+        else {
+            throw PommeAgentOperationError.described(.io, message: "The terminal spool file must be a private regular file with one link")
+        }
     }
 
     private func pread(fd: Int32, offset: UInt64, count: Int) throws -> Data {
-        guard count >= 0 else { throw PommeAgentOperationError.invalid }
+        guard count >= 0 else { throw PommeAgentOperationError.invalid("The terminal read count must not be negative") }
         var buffer = [UInt8](repeating: 0, count: count)
         while true {
             let result = buffer.withUnsafeMutableBytes { bytes in
@@ -690,7 +726,7 @@ actor PommeTerminalService {
             }
             if result >= 0 { return Data(buffer.prefix(Int(result))) }
             if errno == EINTR { continue }
-            throw PommeAgentOperationError.io
+            throw PommeAgentOperationError.io("Reading the terminal spool file")
         }
     }
 
@@ -702,7 +738,8 @@ actor PommeTerminalService {
             }
             if count > 0 { offset += count }
             else if count < 0 && errno == EINTR { continue }
-            else { throw PommeAgentOperationError.io }
+            else if count < 0 { throw PommeAgentOperationError.io("Writing terminal input") }
+            else { throw PommeAgentOperationError.described(.io, message: "The terminal accepted no input bytes") }
         }
     }
 }

@@ -4,37 +4,66 @@ import Foundation
 import Security
 @preconcurrency import Virtualization
 
-enum PommeRecoveryStagingError: Error, LocalizedError, Equatable, Sendable {
+enum PommeRecoveryStagingError: PommeDescribedError, Equatable, Sendable {
     case invalidInput
     case sourceRejected
-    case signatureRejected
+    case signatureRejected(PommeRetainedCause = .init())
     case identityChanged
     case unsafeParent
     case unsafeArtifact
     case unknownCleanupState
-    case cleanupFailed
+    case cleanupFailed(PommeRetainedCause = .init())
     case shareNotCleared
+
+    var code: PommeErrorCode {
+        switch self {
+        case .invalidInput: .recoveryRequestRejected
+        case .sourceRejected, .signatureRejected, .identityChanged: .recoveryLauncherRejected
+        case .unsafeParent, .unsafeArtifact: .recoveryStagingUnsafe
+        case .unknownCleanupState, .cleanupFailed, .shareNotCleared: .recoveryCleanupUnverified
+        }
+    }
 
     var errorDescription: String? {
         switch self {
         case .invalidInput:
-            "Recovery staging input was rejected."
+            "The Recovery staging request has a missing or invalid value, so Pomme didn't stage any files."
         case .sourceRejected:
-            "Recovery staging executable was rejected."
-        case .signatureRejected:
-            "Recovery staging executable signature was rejected."
+            "The `pomme` executable isn't a regular file that your account owns and only it can write, so Pomme didn't copy it into Recovery."
+        case .signatureRejected(let cause):
+            cause.describing("The `pomme` executable's code signature didn't verify, so Pomme didn't copy it into Recovery.")
         case .identityChanged:
-            "Recovery staging executable identity changed while it was read."
+            "The `pomme` executable changed while Pomme copied it for Recovery."
         case .unsafeParent:
-            "Recovery staging parent is not private and stable."
+            "The directory that holds Pomme's Recovery staging files isn't private to your account."
         case .unsafeArtifact:
-            "Recovery staging artifact is not owner-private."
+            "A Recovery staging file doesn't have the owner and permissions that Pomme set."
         case .unknownCleanupState:
-            "Recovery staging cleanup encountered an unknown artifact."
-        case .cleanupFailed:
-            "Recovery staging cleanup could not be proven complete."
+            "The Recovery staging directory contains a file that Pomme didn't create, so Pomme didn't remove it."
+        case .cleanupFailed(let cause):
+            cause.describing("Pomme couldn't remove the Recovery staging files.")
         case .shareNotCleared:
-            "Recovery staging share could not be detached and verified."
+            "Pomme couldn't detach the Recovery staging directory share from the VM and confirm that it's gone."
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .sourceRejected, .signatureRejected, .identityChanged:
+            "Reinstall Pomme with `pomme update`, then run the same command again."
+        case .unsafeParent, .unsafeArtifact, .unknownCleanupState:
+            "Check the ownership and permissions of the VM bundle, then run the same command again."
+        case .cleanupFailed, .shareNotCleared:
+            "Run `pomme stop NAME`, then run the same command again; Pomme cleans up the earlier session first."
+        case .invalidInput:
+            nil
+        }
+    }
+
+    var underlying: (any Error)? {
+        switch self {
+        case .signatureRejected(let cause), .cleanupFailed(let cause): cause.underlying
+        default: nil
         }
     }
 }
@@ -172,7 +201,7 @@ final class PommeRecoveryStaging: @unchecked Sendable {
             throw PommeRecoveryStagingError.unknownCleanupState
         }
         let parentFD = open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard parentFD >= 0 else { throw PommeRecoveryStagingError.cleanupFailed }
+        guard parentFD >= 0 else { throw PommeRecoveryStagingError.cleanupFailed() }
         defer { close(parentFD) }
         var parentInfo = stat()
         guard fstat(parentFD, &parentInfo) == 0,
@@ -183,7 +212,7 @@ final class PommeRecoveryStaging: @unchecked Sendable {
 
         let rootFD = openat(parentFD, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         if rootFD < 0, errno == ENOENT { return }
-        guard rootFD >= 0 else { throw PommeRecoveryStagingError.cleanupFailed }
+        guard rootFD >= 0 else { throw PommeRecoveryStagingError.cleanupFailed() }
         defer { close(rootFD) }
         var rootInfo = stat()
         guard fstat(rootFD, &rootInfo) == 0,
@@ -211,7 +240,7 @@ final class PommeRecoveryStaging: @unchecked Sendable {
             else { throw PommeRecoveryStagingError.unsafeArtifact }
         }
 
-        guard fsync(rootFD) == 0 else { throw PommeRecoveryStagingError.cleanupFailed }
+        guard fsync(rootFD) == 0 else { throw PommeRecoveryStagingError.cleanupFailed() }
 
         var namedInfo = stat()
         guard fstatat(parentFD, name, &namedInfo, AT_SYMLINK_NOFOLLOW) == 0,
@@ -220,15 +249,15 @@ final class PommeRecoveryStaging: @unchecked Sendable {
               namedInfo.st_dev == rootInfo.st_dev,
               namedInfo.st_ino == rootInfo.st_ino,
               unlinkat(parentFD, name, AT_REMOVEDIR) == 0
-        else { throw PommeRecoveryStagingError.cleanupFailed }
-        guard fsync(parentFD) == 0 else { throw PommeRecoveryStagingError.cleanupFailed }
+        else { throw PommeRecoveryStagingError.cleanupFailed() }
+        guard fsync(parentFD) == 0 else { throw PommeRecoveryStagingError.cleanupFailed() }
     }
 
     private static func names(in descriptor: Int32) throws -> [String] {
         let duplicate = dup(descriptor)
         guard duplicate >= 0, let stream = fdopendir(duplicate) else {
             if duplicate >= 0 { close(duplicate) }
-            throw PommeRecoveryStagingError.cleanupFailed
+            throw PommeRecoveryStagingError.cleanupFailed()
         }
         defer { closedir(stream) }
         var result: [String] = []
@@ -280,7 +309,7 @@ struct PommeRecoveryStagingBuilder: Sendable {
                       SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures),
                       nil
                   ) == errSecSuccess
-            else { throw PommeRecoveryStagingError.signatureRejected }
+            else { throw PommeRecoveryStagingError.signatureRejected() }
         }
     }
 
@@ -331,7 +360,7 @@ struct PommeRecoveryStagingBuilder: Sendable {
         let rootURL = parent.appendingPathComponent(rootName, isDirectory: true)
         do {
             let rootFD = openat(parentFD, rootName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-            guard rootFD >= 0 else { throw PommeRecoveryStagingError.cleanupFailed }
+            guard rootFD >= 0 else { throw PommeRecoveryStagingError.cleanupFailed() }
             var rootInfo = stat()
             let safeRoot = fchmod(rootFD, 0o700) == 0
                 && fstat(rootFD, &rootInfo) == 0
@@ -381,7 +410,10 @@ struct PommeRecoveryStagingBuilder: Sendable {
             // known entries; if an unexpected entry appeared, preserve it and
             // report the cleanup failure rather than broadening the target.
             do { try PommeRecoveryStaging.cleanupRoot(rootURL) }
-            catch { throw PommeRecoveryStagingError.cleanupFailed }
+            catch {
+                if case PommeRecoveryStagingError.cleanupFailed = error { throw error }
+                throw PommeRecoveryStagingError.cleanupFailed(PommeRetainedCause(error))
+            }
             throw error
         }
     }
@@ -413,7 +445,7 @@ struct PommeRecoveryStagingBuilder: Sendable {
               before.st_size <= Self.maximumExecutableBytes
         else { throw PommeRecoveryStagingError.sourceRejected }
         do { try dependencies.verifyCodeSignature(url) }
-        catch { throw PommeRecoveryStagingError.signatureRejected }
+        catch { throw PommeRecoveryStagingError.signatureRejected(PommeRetainedCause(error)) }
 
         let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard descriptor >= 0 else { throw PommeRecoveryStagingError.sourceRejected }
@@ -457,7 +489,7 @@ struct PommeRecoveryStagingBuilder: Sendable {
               !name.contains("/"), name != ".", name != ".."
         else { throw PommeRecoveryStagingError.invalidInput }
         let rootFD = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard rootFD >= 0 else { throw PommeRecoveryStagingError.cleanupFailed }
+        guard rootFD >= 0 else { throw PommeRecoveryStagingError.cleanupFailed() }
         defer { close(rootFD) }
         let descriptor = openat(rootFD, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode)
         guard descriptor >= 0 else { throw PommeRecoveryStagingError.unsafeArtifact }

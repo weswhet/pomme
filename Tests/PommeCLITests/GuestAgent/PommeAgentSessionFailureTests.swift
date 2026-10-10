@@ -18,7 +18,7 @@ struct PommeAgentSessionFailureTests {
             _ = try await harness.session.request(operation: "file.open")
         }
 
-        #expect(failure.code == "not-found")
+        #expect(failure.wireCode == "not-found")
         #expect(failure.message == "The agent rejected the request.")
         #expect(failure.localizedDescription.contains(failure.message))
         #expect(!failure.localizedDescription.contains("super-secret-value"))
@@ -39,7 +39,7 @@ struct PommeAgentSessionFailureTests {
             _ = try await harness.session.requestCorrelated(operation: "agent.health")
         }
 
-        #expect(failure.code == "unsupported-operation")
+        #expect(failure.wireCode == "unsupported-operation")
         #expect(failure.message == "The requested operation is not available.")
         #expect(failure.localizedDescription.contains(failure.message))
         #expect(failure == failure)
@@ -55,8 +55,15 @@ struct PommeAgentSessionFailureTests {
 
         #expect(failure.code == "not-found")
         #expect(failure.message == "No such executable: /nonexistent/bin")
-        #expect(plain.message == "The requested operation could not be completed.")
-        #expect(rendered.localizedDescription == "Pomme agent request failed (not-found): No such executable: /nonexistent/bin")
+        #expect(plain.code == "not-found")
+        #expect(plain.message == "The item that the request names doesn't exist in the guest.")
+        #expect(rendered.localizedDescription == "The guest agent couldn't complete the request. No such executable: /nonexistent/bin.")
+        #expect(rendered.code == .guestNotFound)
+        let command = PommeAgentConnection.operationFailure(PommeAgentOperationError.commandNotFound(path: "/nonexistent/bin"))
+        let commandError = PommeAgentSessionError(code: command.code, message: command.message)
+        #expect(command.code == "command-not-found")
+        #expect(commandError.code == .guestCommandNotFound)
+        #expect(commandError.localizedDescription == "The command doesn't exist in the guest. No such executable: /nonexistent/bin.")
     }
 
     @Test("correlation failures remain protocol errors")
@@ -174,7 +181,7 @@ struct PommeAgentSessionFailureTests {
             )
         }
 
-        #expect(failure.code == "operation-failed")
+        #expect(failure.wireCode == "operation-failed")
         #expect(failure.message == "The agent rejected the request.")
         #expect(!failure.localizedDescription.contains("secret token"))
     }
@@ -195,8 +202,8 @@ struct PommeAgentSessionFailureTests {
             _ = try await harness.session.request(operation: "amfi.disable")
         }
 
-        #expect(failure.code == wireCode)
-        #expect(PommeRecoveryGuestFailureCode(rawValue: failure.code) == .rollbackFailed)
+        #expect(failure.wireCode == wireCode)
+        #expect(PommeRecoveryGuestFailureCode(rawValue: failure.wireCode) == .rollbackFailed)
         #expect(!failure.localizedDescription.contains("must-never-escape"))
     }
 
@@ -214,7 +221,7 @@ struct PommeAgentSessionFailureTests {
             let failure = try await captureGuestFailure {
                 _ = try await harness.session.request(operation: "remoteLogin.set")
             }
-            #expect(failure.code == code)
+            #expect(failure.wireCode == code)
             #expect(failure.message == message)
         }
     }
@@ -234,7 +241,7 @@ struct PommeAgentSessionFailureTests {
             _ = try await harness.session.request(operation: "amfi.disable")
         }
 
-        #expect(failure.code == "guest-failure")
+        #expect(failure.wireCode == "guest-failure")
         #expect(!failure.localizedDescription.contains("must-never-escape"))
     }
 }

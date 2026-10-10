@@ -5,7 +5,9 @@ enum PommeVMControlRouter {
         let object: [String: Any]
         let jsonObject: [String: JSONValue]
         if let payload = request.payload {
-            guard let payloadObject = payload.objectValue else { throw RunnerError.invalidControlCommand(request.command) }
+            guard let payloadObject = payload.objectValue else {
+                throw RunnerError.invalidRequest(field: "payload", reason: "must be a JSON object for \(request.command).")
+            }
             object = payloadObject.mapValues(\.publicValue)
             jsonObject = payloadObject
         } else { object = [:]; jsonObject = [:] }

@@ -22,7 +22,7 @@ struct VirtualizationPrivateHeadlessBackendInputBudgetTests {
             try budget.requireFullPlan([plan])
             Issue.record("An over-budget key plan was accepted")
         } catch let error as VirtualizationPrivateHeadlessError {
-            #expect(error.code == .inputTimeout)
+            #expect(error.kind == .inputTimeout)
             #expect(!error.partialInputPossible)
         } catch {
             Issue.record("Unexpected input-budget error: \(error)")
@@ -52,7 +52,7 @@ struct VirtualizationPrivateHeadlessBackendInputBudgetTests {
             try budget.requireNextChord(plan, partialInputPossible: true)
             Issue.record("The second chord was allowed after its deadline")
         } catch let error as VirtualizationPrivateHeadlessError {
-            #expect(error.code == .inputTimeout)
+            #expect(error.kind == .inputTimeout)
             #expect(error.partialInputPossible)
         } catch {
             Issue.record("Unexpected input-budget error: \(error)")
@@ -88,7 +88,7 @@ struct VirtualizationPrivateHeadlessBackendInputBudgetTests {
             )
             Issue.record("A cancelled key chord completed without reporting interruption")
         } catch let error as VirtualizationPrivateHeadlessError {
-            #expect(error.code == .inputInterrupted)
+            #expect(error.kind == .inputInterrupted)
             #expect(error.partialInputPossible)
             #expect(recorder.events == delays.indices.map {
                 InputDispatchEvent(unitIndex: 0, eventIndex: $0)
@@ -122,7 +122,7 @@ struct VirtualizationPrivateHeadlessBackendInputBudgetTests {
             )
             Issue.record("A cancelled pointer click completed without reporting interruption")
         } catch let error as VirtualizationPrivateHeadlessError {
-            #expect(error.code == .inputInterrupted)
+            #expect(error.kind == .inputInterrupted)
             #expect(error.partialInputPossible)
             #expect(recorder.events == [
                 InputDispatchEvent(unitIndex: 0, eventIndex: 0),
@@ -149,7 +149,7 @@ struct VirtualizationPrivateHeadlessBackendInputBudgetTests {
             )
             Issue.record("A click shorter than its hover interval was accepted")
         } catch let error as VirtualizationPrivateHeadlessError {
-            #expect(error.code == .inputTimeout)
+            #expect(error.kind == .inputTimeout)
             #expect(!error.partialInputPossible)
         } catch {
             Issue.record("Unexpected input-budget error: \(error)")
@@ -167,7 +167,7 @@ struct VirtualizationPrivateHeadlessBackendInputBudgetTests {
                 )
                 Issue.record("Invalid timeout was accepted: \(timeout)")
             } catch let error as VirtualizationPrivateHeadlessError {
-                #expect(error.code == .inputTimeout)
+                #expect(error.kind == .inputTimeout)
                 #expect(!error.partialInputPossible)
             } catch {
                 Issue.record("Unexpected timeout error: \(error)")

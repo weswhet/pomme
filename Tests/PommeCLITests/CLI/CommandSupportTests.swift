@@ -189,11 +189,11 @@ struct CommandSupportTests {
         let failed = operationResult(ok: false, text: "The terminal session was not found.")
 
         #expect(CLIOutputWriter.tableRendering(for: failed)
-                == .text(descriptor: STDERR_FILENO, text: "Error: The terminal session was not found."))
+                == .text(descriptor: STDERR_FILENO, text: "Error: The terminal session was not found." + "\n" + PommeErrorOutput.codeLine(for: .operationFailed)))
         #expect(CLIOutputWriter.tableRendering(for: failed, label: "t1")
-                == .text(descriptor: STDERR_FILENO, text: "Error: t1: The terminal session was not found."))
+                == .text(descriptor: STDERR_FILENO, text: "Error: t1: The terminal session was not found." + "\n" + PommeErrorOutput.codeLine(for: .operationFailed)))
         #expect(CLIOutputWriter.tableRendering(for: operationResult(ok: false, text: ""))
-                == .text(descriptor: STDERR_FILENO, text: "Error: The operation failed."))
+                == .text(descriptor: STDERR_FILENO, text: "Error: The operation failed." + "\n" + PommeErrorOutput.codeLine(for: .operationFailed)))
     }
 
     @Test("Successful text results stay on stdout without a prefix")
@@ -218,9 +218,9 @@ struct CommandSupportTests {
         #expect(CLIOutputWriter.tableRendering(for: job) == .jobFrames)
         #expect(CLIOutputWriter.tableRendering(for: logs) == .terminalBytes)
         #expect(CLIOutputWriter.tableRendering(for: failedLogs)
-                == .text(descriptor: STDERR_FILENO, text: "Error: The transcript offset is invalid."))
+                == .text(descriptor: STDERR_FILENO, text: "Error: The transcript offset is invalid." + "\n" + PommeErrorOutput.codeLine(for: .operationFailed)))
         #expect(CLIOutputWriter.tableRendering(for: failedRead)
-                == .text(descriptor: STDERR_FILENO, text: "Error: The file is missing."))
+                == .text(descriptor: STDERR_FILENO, text: "Error: The file is missing." + "\n" + PommeErrorOutput.codeLine(for: .operationFailed)))
     }
 
     private func operationResult(ok: Bool, text: String, payload: [String: Any] = [:]) -> PommeOperationResult {

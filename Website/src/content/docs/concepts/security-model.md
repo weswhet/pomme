@@ -36,7 +36,9 @@ The `--force` flag doesn't bypass this ordering.
 
 AMFI enable restores the exact configuration that Pomme saved when it turned
 AMFI off. If AMFI is off and Pomme has no saved configuration for it, the
-workflow stops with a `missingBaseline` result rather than guessing at a reset.
+workflow stops with the
+[`amfi-baseline-missing`](/reference/errors/#amfi-baseline-missing) error
+rather than guessing at a reset.
 
 ## State first
 

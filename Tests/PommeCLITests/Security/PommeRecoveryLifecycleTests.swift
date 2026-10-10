@@ -14,9 +14,9 @@ struct PommeRecoveryLifecycleTests {
             sensitiveFramesCleared: true,
             unknownStateRejected: true
         )
-        await #expect(throws: PommeRecoveryLifecycleError.operationFailed) {
+        await #expect(throws: PommeRecoveryLifecycleError.operationFailed()) {
             try await PommeRecoveryLifecycle.run(
-                operation: { throw PommeRecoverySessionError.guestOperationFailed },
+                operation: { throw PommeRecoverySessionError.guestOperationFailed() },
                 cleanup: {
                     calls.incrementCleanup()
                     return evidence
@@ -41,7 +41,7 @@ struct PommeRecoveryLifecycleTests {
             sensitiveFramesCleared: true,
             unknownStateRejected: false
         )
-        await #expect(throws: PommeRecoveryLifecycleError.cleanupFailed) {
+        await #expect(throws: PommeRecoveryLifecycleError.cleanupFailed()) {
             try await PommeRecoveryLifecycle.run(
                 operation: { 1 },
                 cleanup: { incomplete },

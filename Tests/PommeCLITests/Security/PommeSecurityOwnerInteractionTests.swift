@@ -16,7 +16,7 @@ struct PommeSecurityOwnerInteractionTests {
     #expect(PommeSecurityWorkflowError.confirmationRequired.errorDescription?
       .hasSuffix("Run from an interactive terminal or pass -f/--force.") == true)
     try interaction.authorizeFreshOwner(vmName: "fresh", force: true)
-    #expect(throws: PommeSecurityWorkflowError.ownerUnavailable) {
+    #expect(throws: PommeSecurityWorkflowError.ownerUnavailable()) {
       try interaction.existingOwner(vmName: "existing")
     }
   }

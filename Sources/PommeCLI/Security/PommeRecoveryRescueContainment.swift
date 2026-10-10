@@ -1,22 +1,24 @@
 import Darwin
 import Foundation
 
-enum PommeAPFSAttachmentError: Error, LocalizedError, Equatable, Sendable {
+enum PommeAPFSAttachmentError: PommeDescribedError, Equatable, Sendable {
     case malformed
     case ambiguous
     case imageMismatch
     case missingVolume
 
+    var code: PommeErrorCode { .recoveryWorkspaceUnverified }
+
     var errorDescription: String? {
         switch self {
         case .malformed:
-            "Recovery attachment evidence was malformed."
+            "Pomme couldn't read the details of the attached disk image."
         case .ambiguous:
-            "Recovery attachment evidence was ambiguous."
+            "The disk image attachment matched more than one disk or volume, so Pomme didn't use it."
         case .imageMismatch:
-            "Recovery attachment did not identify the requested image."
+            "The attached disk image isn't the one that Pomme requested."
         case .missingVolume:
-            "Recovery attachment did not identify one APFS volume."
+            "The attached disk image has no single APFS volume that Pomme can use."
         }
     }
 }
@@ -139,23 +141,46 @@ protocol PommeRecoveryRescueAttachmentPort: Sendable {
     func detach(_ attachment: PommeAPFSAttachment) throws
 }
 
-enum PommeRecoveryRescueCleanupError: Error, LocalizedError, Equatable, Sendable {
+enum PommeRecoveryRescueCleanupError: PommeDescribedError, Equatable, Sendable {
     case unsafePath
     case unknownState
-    case detachFailed
+    case detachFailed(PommeRetainedCause = .init())
     case removeFailed
+
+    var code: PommeErrorCode {
+        switch self {
+        case .unsafePath: .recoveryStagingUnsafe
+        case .unknownState, .detachFailed, .removeFailed: .recoveryCleanupUnverified
+        }
+    }
 
     var errorDescription: String? {
         switch self {
         case .unsafePath:
-            "Recovery containment path was rejected."
+            "The Recovery rescue image directory isn't private to your account, so Pomme didn't clean it up."
         case .unknownState:
-            "Recovery containment cleanup state was unknown."
-        case .detachFailed:
-            "Recovery containment attachment could not be detached."
+            "The Recovery rescue image or its directory changed unexpectedly, so Pomme didn't remove it."
+        case .detachFailed(let cause):
+            cause.describing("Pomme couldn't detach the Recovery rescue image.")
         case .removeFailed:
-            "Recovery containment artifact could not be removed."
+            "Pomme couldn't remove the Recovery rescue image directory."
         }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .unsafePath, .unknownState:
+            "Check the ownership and permissions of the VM bundle, then run the same command again."
+        case .detachFailed:
+            "Eject the Recovery rescue image in Finder or Disk Utility, then run the same command again."
+        case .removeFailed:
+            nil
+        }
+    }
+
+    var underlying: (any Error)? {
+        if case .detachFailed(let cause) = self { return cause.underlying }
+        return nil
     }
 }
 
@@ -212,7 +237,7 @@ struct PommeRecoveryRescueContainment: Sendable {
               imageInfo.st_nlink == 1
         else { throw PommeRecoveryRescueCleanupError.unknownState }
         do { try attachmentPort.detach(attachment) }
-        catch { throw PommeRecoveryRescueCleanupError.detachFailed }
+        catch { throw PommeRecoveryRescueCleanupError.detachFailed(PommeRetainedCause(error)) }
 
         let parentFD = open(directoryURL.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard parentFD >= 0 else { throw PommeRecoveryRescueCleanupError.removeFailed }

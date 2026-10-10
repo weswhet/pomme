@@ -24,14 +24,24 @@ struct PommeMDMCommandRequest: Sendable {
     }
 }
 
-enum PommeMDMOrchestrationError: Error, LocalizedError, Equatable {
+enum PommeMDMOrchestrationError: PommeDescribedError, Equatable {
     case preparationRepeated(String)
+    /// Preparation ran its maximum number of steps without becoming ready.
+    case preparationDidNotFinish
+
+    var code: PommeErrorCode { .mdmPreparationIncomplete }
 
     var errorDescription: String? {
         switch self {
         case .preparationRepeated(let step):
-            "MDM preparation step \(step) did not reach the state it should have produced. Repeat the same command to resume."
+            "The MDM preparation step \(step) finished, but the VM didn't reach the state that the step should produce."
+        case .preparationDidNotFinish:
+            "MDM preparation ran every step that it allows, but the VM still isn't ready for enrollment."
         }
+    }
+
+    var recoverySuggestion: String? {
+        "Repeat the same `pomme mdm` command to resume, or add `--dry-run` to see the detected state."
     }
 }
 
@@ -172,7 +182,7 @@ extension PommeApplication {
                 return mdmFailureResult(context, steps: steps + [mdmStep(step, status: "failed")], error: error)
             }
         }
-        throw PommeMDMOrchestrationError.preparationRepeated("preparation")
+        throw PommeMDMOrchestrationError.preparationDidNotFinish
     }
 
     /// Host facts, retained journals, and, only when the VM is already
@@ -292,7 +302,8 @@ extension PommeApplication {
         details["retryAllowed"] = true
         progressWarning("MDM stopped; state is preserved. Repeat the same command to resume.", vmName: context.request.name)
         return mdmResult(title: "MDM enrollment", operation: "mdm", reference: context.reference, ok: false,
-            agent: [:], steps: steps, result: details, error: error.localizedDescription)
+            agent: [:], steps: steps, result: details, error: error.localizedDescription,
+            errorReport: PommeErrorReport(error))
     }
 
     /// The engine's result, with the steps that preceded it and the plan.

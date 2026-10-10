@@ -39,8 +39,7 @@ struct PommeDurableTerminalBridge {
                     try handleOutput(frame)
                 case .response(let response):
                     guard response.ok else {
-                        let error = response.error ?? .init(code: "control-error", message: "The terminal attachment failed.")
-                        throw RunnerError.controlCommandFailed("\(error.code): \(error.message)")
+                        throw PommeControlError.clientError(response.error, missing: "control-error: The terminal attachment failed.")
                     }
                     return response.result?.objectValue?.mapValues(\.publicValue)
                         ?? ["hostExitCode": 0]

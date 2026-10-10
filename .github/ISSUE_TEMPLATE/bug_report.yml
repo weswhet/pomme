@@ -1,0 +1,42 @@
+name: Bug report
+description: Report a problem with Pomme.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Before you file it, run `pomme bug-report`
+        (add the VM name, such as `pomme bug-report my-vm`, if the problem involves
+        a VM). It writes one Markdown file with the Pomme version, this Mac's
+        details, the last error, and the VM's logs. Review the file, then attach it
+        below. Pomme never uploads it for you.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what Pomme did instead. Include the `Error code:` line if Pomme printed one.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The commands you ran, in order.
+      placeholder: |
+        1. pomme create my-vm --memory 4GB
+        2. pomme start my-vm
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: bug-report
+    attributes:
+      label: Bug report file
+      description: Drag the file that `pomme bug-report` wrote into this box, or paste its contents.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Other details, such as whether the problem happens every time.

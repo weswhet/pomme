@@ -75,7 +75,31 @@ enum PommeTerminalMutationDigest {
     }
 }
 
-enum PommeDurableTerminalError: Error, Equatable, LocalizedError, Sendable {
+enum PommeDurableTerminalError: Error, Equatable, PommeDescribedError, Sendable {
+    var code: PommeErrorCode {
+        switch self {
+        case .invalidSessionID, .invalidOffset, .offsetBeyondEnd: .invalidRequest
+        case .notFound: .guestTerminalSessionNotFound
+        case .attachmentBusy: .guestTerminalSessionBusy
+        case .attachmentReplaced: .guestTerminalSessionReplaced
+        case .invalidState: .guestTerminalSessionStateInvalid
+        case .transcriptChanged, .storageBlocked: .guestTerminalSessionStorageFailed
+        case .recoveryNotPersistent: .guestTerminalSessionTransient
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .invalidSessionID, .notFound: "Run `pomme sessions list NAME` to see the VM's sessions."
+        case .invalidOffset, .offsetBeyondEnd: "Run `pomme sessions inspect NAME --session ID` to see the transcript's length."
+        case .attachmentBusy: "Run `pomme sessions attach NAME --session ID --takeover` to replace the other attachment."
+        case .attachmentReplaced: "Run `pomme sessions attach NAME --session ID --takeover` to attach again."
+        case .invalidState: "Run `pomme sessions inspect NAME --session ID` to see the session's state."
+        case .transcriptChanged, .storageBlocked: "Run `pomme sessions list NAME` to check the session store."
+        case .recoveryNotPersistent: nil
+        }
+    }
+
     case invalidSessionID
     case notFound
     case attachmentBusy
@@ -114,9 +138,10 @@ struct PommeTerminalSessionControlRequest: Sendable {
     ]
 
     static func parse(from object: [String: JSONValue]) throws -> Self {
-        guard let operation = object["operation"]?.stringValue,
-              operations.contains(operation), operation.utf8.count <= 128
-        else { throw RunnerError.invalidControlCommand("terminal.session") }
+        guard let operation = object["operation"]?.stringValue, !operation.isEmpty, operation.utf8.count <= 128 else {
+            throw RunnerError.invalidRequest(field: "operation", reason: "must be a terminal operation name of 1 to 128 bytes.")
+        }
+        guard operations.contains(operation) else { throw RunnerError.invalidControlCommand(operation) }
         let payload = object.filter { $0.key != "operation" }
         let allowed: Set<String>
         switch operation {
@@ -138,8 +163,8 @@ struct PommeTerminalSessionControlRequest: Sendable {
         default:
             allowed = []
         }
-        guard Set(payload.keys).isSubset(of: allowed) else {
-            throw RunnerError.invalidControlCommand("terminal.session")
+        if let unexpected = Set(payload.keys).subtracting(allowed).sorted().first {
+            throw RunnerError.invalidRequest(field: unexpected, reason: "isn't accepted by \(operation).")
         }
         try validateTypes(payload, operation: operation)
         return .init(operation: operation, payload: payload)
@@ -147,23 +172,31 @@ struct PommeTerminalSessionControlRequest: Sendable {
 
     private static func validateTypes(_ payload: [String: JSONValue], operation: String) throws {
         for key in ["sessionID", "path", "cwd", "user", "group", "pageToken"] where payload[key] != nil {
-            guard payload[key]?.stringValue != nil else { throw RunnerError.invalidControlCommand(operation) }
+            guard payload[key]?.stringValue != nil else {
+                throw RunnerError.invalidRequest(field: key, reason: "must be a string.")
+            }
         }
         for key in ["offset", "pageSize", "uid", "gid", "columns", "rows"] where payload[key] != nil {
             guard case .integer(let value)? = payload[key], value >= 0 else {
-                throw RunnerError.invalidControlCommand(operation)
+                throw RunnerError.invalidRequest(field: key, reason: "must be a whole number of zero or more.")
             }
         }
         for key in ["shell", "takeover", "force", "recoveryDebugScreenshots"] where payload[key] != nil {
-            guard case .bool? = payload[key] else { throw RunnerError.invalidControlCommand(operation) }
+            guard case .bool? = payload[key] else {
+                throw RunnerError.invalidRequest(field: key, reason: "must be true or false.")
+            }
         }
         if let arguments = payload["arguments"] {
             guard case .array(let values) = arguments,
-                  values.allSatisfy({ $0.stringValue != nil }) else { throw RunnerError.invalidControlCommand(operation) }
+                  values.allSatisfy({ $0.stringValue != nil }) else {
+                throw RunnerError.invalidRequest(field: "arguments", reason: "must be an array of strings.")
+            }
         }
         if let environment = payload["environment"] {
             guard case .object(let values) = environment,
-                  values.values.allSatisfy({ $0.stringValue != nil }) else { throw RunnerError.invalidControlCommand(operation) }
+                  values.values.allSatisfy({ $0.stringValue != nil }) else {
+                throw RunnerError.invalidRequest(field: "environment", reason: "must map each variable name to a string.")
+            }
         }
     }
 }

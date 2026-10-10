@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Connection state is deliberately independent of VSOCK so integration can
 /// bind it to a persistent normal daemon or a bounded Recovery session.
@@ -93,21 +94,46 @@ final class PommeAgentConnection: @unchecked Sendable {
         if lifetime == .oneShot { consumed = true }
     }
 
+    private static let failureLogger = Logger(subsystem: "com.github.weswhet.pomme", category: "operation-failure")
+
+    /// The wire code and message for a failed operation. The message is a
+    /// short reason that the thrower chose to be safe to send; the protocol
+    /// redacts it again. The original error goes only to the guest's unified
+    /// log, marked private.
     static func operationFailure(_ error: Error) -> (code: String, message: String) {
+        let failure = wireFailure(error)
+        failureLogger.error(
+            "Operation failed [code=\(failure.code, privacy: .public)]: \(String(describing: error), privacy: .private)"
+        )
+        return failure
+    }
+
+    /// The wire code and message for `error`, without logging it.
+    static func wireFailure(_ error: Error) -> (code: String, message: String) {
         if let recoveryError = error as? PommeGuestRecoverySecurityError {
-            return (recoveryError.recoveryFailureCode.rawValue, "The requested operation could not be completed.")
+            return (recoveryError.recoveryFailureCode.rawValue, "The Recovery security operation failed (\(recoveryError.recoveryFailureCode.rawValue)).")
         }
         guard let operationError = error as? PommeAgentOperationError else {
-            return ("operation-failed", "The requested operation could not be completed.")
+            if let described = error as? any PommeDescribedError, let message = described.errorDescription {
+                return ("operation-failed", message)
+            }
+            if let system = SystemErrorDescription(error) {
+                return ("operation-failed", "\(system.message) (\(system.domain) \(system.code))")
+            }
+            return ("operation-failed", "The guest agent hit an unexpected \(String(describing: type(of: error))) error.")
         }
         switch operationError {
         case .described(let inner, let message):
-            return (operationFailure(inner).code, message)
-        case .unsupported: return ("unsupported-operation", "The requested operation could not be completed.")
-        case .activationPending: return ("activation-pending", "The requested operation could not be completed.")
-        case .invalid: return ("invalid-operation", "The requested operation could not be completed.")
-        case .notFound: return ("not-found", "The requested operation could not be completed.")
-        case .io: return ("operation-failed", "The requested operation could not be completed.")
+            return (wireFailure(inner).code, message)
+        case .commandNotFound(let path):
+            return ("command-not-found", "No such executable: \(path)")
+        case .permissionDenied(let path):
+            return ("permission-denied", "Permission denied: \(path)")
+        case .unsupported: return ("unsupported-operation", "The guest agent doesn't support this operation.")
+        case .activationPending: return ("activation-pending", "A guest agent update is waiting to activate.")
+        case .invalid: return ("invalid-operation", "The guest agent rejected a value in the request.")
+        case .notFound: return ("not-found", "The item that the request names doesn't exist in the guest.")
+        case .io: return ("operation-failed", "A file or system operation failed in the guest.")
         case .remoteLoginFullDiskAccessRequired:
             return ("remote-login-full-disk-access-required", "Full Disk Access is required to change Remote Login.")
         case .remoteLoginVerificationFailed:

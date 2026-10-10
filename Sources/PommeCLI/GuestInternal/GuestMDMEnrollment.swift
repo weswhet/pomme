@@ -54,7 +54,7 @@ enum GuestMDMDiagnostics {
             ]
             if let status { value["status"] = .integer(status) }
             if let flags { value["flags"] = .integer(flags) }
-            if let credentialError { value["credentialError"] = .string(credentialError.code) }
+            if let credentialError { value["credentialError"] = .string(credentialError.wireCode) }
             records.append(.object(value))
         }
         var value: JSONValue {
@@ -110,7 +110,7 @@ enum GuestMDMDiagnostics {
             if let code = fields["credentialError"] {
                 guard raw == Stage.privateKeychainCredential.rawValue,
                       let code = code.stringValue,
-                      PommeGuestOwnerCredentialError.allCases.contains(where: { $0.code == code }) else {
+                      PommeGuestOwnerCredentialError.allCases.contains(where: { $0.wireCode == code }) else {
                     throw PommeMDMEnrollmentError.enrollmentFailed
                 }
             }
@@ -134,16 +134,32 @@ enum GuestMDMDiagnostics {
     }
 }
 
-enum GuestInternalError: LocalizedError {
+enum GuestInternalError: PommeDescribedError {
     case mdm(String)
     case timedOut
     case mdmOutcomeUnknown
+
+    var code: PommeErrorCode {
+        switch self {
+        case .mdm: .guestMDMFailed
+        case .timedOut: .guestMDMTimedOut
+        case .mdmOutcomeUnknown: .guestMDMOutcomeUnknown
+        }
+    }
 
     var errorDescription: String? {
         switch self {
         case .mdm(let message): message
         case .timedOut: "The guest MDM operation timed out."
         case .mdmOutcomeUnknown: "The MDM enrollment outcome is unknown; identity state was retained. Verify installed-profile state before retrying."
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .mdm: "Run `pomme log NAME --last 5m` to see the guest's log, then retry `pomme mdm`."
+        case .timedOut: "Check that the guest can reach the MDM server, then retry `pomme mdm`."
+        case .mdmOutcomeUnknown: "Check the guest's installed profiles before you retry `pomme mdm`."
         }
     }
 }
@@ -156,7 +172,7 @@ struct GuestOperationExecution {
 /// Errors for the private MDM staging boundary deliberately contain no
 /// pathname, profile bytes, or filesystem diagnostics. The persistent agent
 /// turns these into its redacted protocol error envelope.
-enum GuestMDMStagingError: Error, LocalizedError, Equatable {
+enum GuestMDMStagingError: Error, PommeDescribedError, Equatable {
     case rootRequired
     case invalidRoot
     case invalidProfile
@@ -164,6 +180,22 @@ enum GuestMDMStagingError: Error, LocalizedError, Equatable {
     case unsafeProfile
     case cleanupFailed
     case wheelGroupUnavailable
+
+    var code: PommeErrorCode {
+        switch self {
+        case .rootRequired: .guestAgentRootRequired
+        case .invalidProfile: .guestInvalidRequest
+        default: .guestMDMStagingFailed
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .rootRequired: "Run `pomme agent repair NAME` to reinstall the agent."
+        case .invalidProfile: nil
+        default: "Retry `pomme mdm`. If it fails again, run `pomme agent repair NAME`."
+        }
+    }
 
     var errorDescription: String? {
         switch self {
@@ -406,26 +438,27 @@ enum PersistentMDMEnrollmentOperation: Equatable {
               let action = values["action"]?.stringValue,
               let timeout = Self.timeout(values["timeout"])
         else {
-            throw PommeAgentOperationError.invalid
+            throw PommeAgentOperationError.invalid("mdm.enrollment requires an action and a timeout from 1 to 300 seconds")
         }
 
+        // The messages name fields but never echo their values.
         switch action {
         case "enroll":
             guard Set(values.keys) == ["action", "profilePath", "timeout"],
                   let path = values["profilePath"]?.stringValue,
                   GuestMDMEnrollment.isStagedProfilePath(path) else {
-                throw PommeAgentOperationError.invalid
+                throw PommeAgentOperationError.invalid("mdm.enrollment enroll requires exactly action, timeout, and a profilePath in the staging directory")
             }
             self = .enroll(profilePath: path, timeout: timeout)
         case "approve":
             guard Set(values.keys) == ["action", "profileIdentifier", "timeout"],
                   let identifier = values["profileIdentifier"]?.stringValue,
                   Self.isProfileIdentifier(identifier) else {
-                throw PommeAgentOperationError.invalid
+                throw PommeAgentOperationError.invalid("mdm.enrollment approve requires exactly action, timeout, and a well-formed profileIdentifier")
             }
             self = .approve(profileIdentifier: identifier, timeout: timeout)
         default:
-            throw PommeAgentOperationError.invalid
+            throw PommeAgentOperationError.invalid("mdm.enrollment action must be enroll or approve")
         }
     }
 
@@ -471,10 +504,12 @@ enum PersistentMDMEnrollmentOperation: Equatable {
     }
 }
 
-private enum PersistentMDMEnrollmentError: LocalizedError {
+private enum PersistentMDMEnrollmentError: PommeDescribedError {
     case failed
 
-    var errorDescription: String? { "The MDM operation could not be completed." }
+    var code: PommeErrorCode { .guestMDMFailed }
+    var errorDescription: String? { "The guest agent couldn't complete the MDM request." }
+    var recoverySuggestion: String? { "Run `pomme log NAME --last 5m` to see the guest's log, then retry `pomme mdm`." }
 }
 
 @objc private protocol PommeMDMPrivateProtocol {
@@ -1290,7 +1325,7 @@ private struct ImportedMDMIdentity {
             if let keychain { query[kSecMatchSearchList] = [keychain] }
             let status = SecItemDelete(query as CFDictionary)
             guard status == errSecSuccess || status == errSecItemNotFound else {
-                throw GuestInternalError.mdm("Could not remove the newly imported MDM identity (OSStatus \(status)).")
+                throw GuestInternalError.mdm("Could not remove the newly imported MDM identity: \(securityErrorMessage(status)) (OSStatus \(status)).")
             }
         }
     }

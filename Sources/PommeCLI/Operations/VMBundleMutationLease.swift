@@ -5,25 +5,44 @@ import Foundation
 /// file is deliberately never unlinked: replacing it could let two processes
 /// lock distinct inodes for the same VM name.
 final class VMBundleMutationLease: @unchecked Sendable {
-  enum Error: LocalizedError, Equatable, Sendable {
+  enum Error: PommeDescribedError, Equatable, Sendable {
     case unsafeLockFile
     case activeMutation(name: String)
     case invalidScope(name: String)
     case releasedScope
     case descriptorTransfer
 
+    var code: PommeErrorCode {
+      switch self {
+      case .unsafeLockFile: .vmLockUnsafe
+      case .activeMutation: .vmMutationInProgress
+      case .invalidScope, .releasedScope, .descriptorTransfer: .vmLockInvalid
+      }
+    }
+
     var errorDescription: String? {
       switch self {
       case .unsafeLockFile:
-        "VM_MUTATION_LEASE_UNSAFE_LOCK_FILE"
+        "Pomme couldn't open the VM's lock file safely. The file is missing, isn't a regular file, or has the wrong owner or permissions."
       case .activeMutation(let name):
-        "VM_MUTATION_IN_PROGRESS name=\(name)"
+        "Another Pomme command is changing \(name), such as a create, start, stop, or delete."
       case .invalidScope(let name):
-        "VM_MUTATION_LEASE_SCOPE_MISMATCH name=\(name)"
+        "Pomme's lock for \(name) doesn't belong to this VM."
       case .releasedScope:
-        "VM_MUTATION_LEASE_RELEASED"
+        "Pomme's VM lock was released before the operation finished."
       case .descriptorTransfer:
-        "VM_MUTATION_LEASE_DESCRIPTOR_TRANSFER_FAILED"
+        "Pomme couldn't pass the VM lock to its helper process."
+      }
+    }
+
+    var recoverySuggestion: String? {
+      switch self {
+      case .unsafeLockFile:
+        "Run Pomme as the user who created the VM, not with `sudo`, then retry."
+      case .activeMutation:
+        "Wait for the other command to finish, then retry."
+      case .invalidScope, .releasedScope, .descriptorTransfer:
+        nil
       }
     }
   }

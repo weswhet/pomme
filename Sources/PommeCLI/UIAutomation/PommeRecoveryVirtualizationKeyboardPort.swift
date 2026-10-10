@@ -878,7 +878,7 @@ actor PommeRecoveryVirtualizationKeyboardPort: PommeRecoveryTerminalPort {
   }
 }
 
-enum PommeRecoveryVirtualizationPortError: Error, Equatable, Sendable {
+enum PommeRecoveryVirtualizationPortError: PommeDescribedError, Equatable, Sendable {
   case unexpectedKey
   case navigationRouteLocked
   case unprovenFrame
@@ -886,4 +886,46 @@ enum PommeRecoveryVirtualizationPortError: Error, Equatable, Sendable {
   case observationTimedOut(PommeRecoveryFrame)
   case unsafeLauncher
   case unsafeMarker
+
+  var code: PommeErrorCode {
+    switch self {
+    case .unexpectedKey, .navigationRouteLocked: .uiRecoverySequenceInvalid
+    case .unprovenFrame: .uiRecoveryScreenUnrecognized
+    case .invalidObservationTimeout: .invalidRequest
+    case .observationTimedOut: .uiRecoveryTimedOut
+    case .unsafeLauncher, .unsafeMarker: .uiRecoveryUnsafeCommand
+    }
+  }
+
+  var errorDescription: String? {
+    switch self {
+    case .unexpectedKey:
+      "Recovery navigation tried to send a key out of sequence, so Pomme didn't send it. This is a bug in Pomme."
+    case .navigationRouteLocked:
+      "Recovery navigation tried to change its route after it started. This is a bug in Pomme."
+    case .unprovenFrame:
+      "Pomme didn't recognize the Recovery screen, so it stopped before sending more input."
+    case .invalidObservationTimeout:
+      "The time limit for watching the Recovery screen must be greater than zero."
+    case .observationTimedOut:
+      "Recovery didn't reach the expected screen before the time limit."
+    case .unsafeLauncher:
+      "Pomme refused to type a Recovery Terminal command that contains characters it can't type safely. This is a bug in Pomme."
+    case .unsafeMarker:
+      "Pomme refused to look for a Recovery Terminal marker that contains characters it can't type safely. This is a bug in Pomme."
+    }
+  }
+
+  var recoverySuggestion: String? {
+    switch self {
+    case .unexpectedKey, .navigationRouteLocked:
+      "Stop the VM with `pomme stop NAME`, then run the same command again."
+    case .unprovenFrame, .observationTimedOut:
+      "Run the same command again with `--debug` to save a screenshot before each Recovery action."
+    case .invalidObservationTimeout:
+      "Retry with a `--timeout` value greater than zero."
+    case .unsafeLauncher, .unsafeMarker:
+      "Run `pomme bug-report` and attach the file to a new issue."
+    }
+  }
 }

@@ -18,7 +18,7 @@ struct PommeAgentArtifactStore: Sendable {
     /// valid signature from another product cannot enter the retained store.
     static let signingRequirement = "anchor apple generic and identifier \"com.github.weswhet.pomme\" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"2D8XQ77EBQ\""
 
-    enum Error: Swift.Error, LocalizedError, Equatable, Sendable {
+    enum Error: Swift.Error, PommeDescribedError, Equatable, Sendable {
         case invalidDigest
         case storeUnavailable
         case unsafeStore
@@ -46,6 +46,26 @@ struct PommeAgentArtifactStore: Sendable {
                 "The retained Pomme agent artifact changed while it was read."
             case .digestMismatch:
                 "The retained Pomme agent artifact does not match the pinned digest."
+            }
+        }
+
+        var code: PommeErrorCode {
+            switch self {
+            case .invalidDigest, .artifactRejected, .identityChanged, .digestMismatch: .agentArtifactRejected
+            case .storeUnavailable, .unsafeStore: .agentArtifactStoreUnavailable
+            case .artifactMissing: .agentArtifactMissing
+            case .signatureRejected: .agentArtifactSignatureRejected
+            }
+        }
+
+        var recoverySuggestion: String? {
+            switch self {
+            case .storeUnavailable, .unsafeStore:
+                "Make sure that `~/Library/Application Support/pomme/AgentArtifacts` and its parent directories belong to you and aren't writable by other users, then retry."
+            case .artifactMissing:
+                "Reinstall the Pomme build that created the VM, then retry. Pomme keeps a copy of its agent only when it creates a VM."
+            default:
+                nil
             }
         }
     }

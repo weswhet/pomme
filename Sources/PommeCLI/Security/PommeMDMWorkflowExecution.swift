@@ -4,7 +4,7 @@ enum PommeMDMChildScope {
     @TaskLocal static var vmName: String?
 }
 
-enum PommeMDMWorkflowFailure: Error, LocalizedError, Equatable {
+enum PommeMDMWorkflowFailure: PommeDescribedError, Equatable {
     case conflictingEnrollment
     case downgradeUnsupported
     case evidenceUnavailable
@@ -13,15 +13,39 @@ enum PommeMDMWorkflowFailure: Error, LocalizedError, Equatable {
     case restorationIncomplete
     case competingSecurityOperation
 
+    var code: PommeErrorCode {
+        switch self {
+        case .conflictingEnrollment: .mdmEnrollmentConflict
+        case .downgradeUnsupported: .mdmDowngradeUnsupported
+        case .evidenceUnavailable: .mdmEvidenceUnavailable
+        case .outcomeUnknown: .mdmEnrollmentOutcomeUnknown
+        case .securityBaselineUnsupported: .mdmSecurityBaselineUnsupported
+        case .restorationIncomplete: .mdmRestorationFailed
+        case .competingSecurityOperation: .mdmOperationPending
+        }
+    }
+
     var errorDescription: String? {
         switch self {
-        case .conflictingEnrollment: "The installed MDM profile or server conflicts with the supplied profile."
-        case .downgradeUnsupported: "Unapproved mode cannot downgrade an approved or supervised enrollment."
-        case .evidenceUnavailable: "The requested enrollment, approval, and supervision could not all be verified."
-        case .outcomeUnknown: "The enrollment outcome is unknown. Repeat the same MDM request to inspect retained work; installation will not be repeated without evidence."
-        case .securityBaselineUnsupported: "The original SIP/AMFI configuration cannot be reproduced exactly; security was not changed."
-        case .restorationIncomplete: "MDM security or VM state restoration is incomplete. Repeat the same command and profile to resume its journal."
-        case .competingSecurityOperation: "An unfinished MDM or security operation owns this VM. Resume its original command first."
+        case .conflictingEnrollment: "The VM's installed MDM profile or server doesn't match the profile that you supplied."
+        case .downgradeUnsupported: "`--enrollment-mode unapproved` can't downgrade the VM's approved or supervised MDM enrollment."
+        case .evidenceUnavailable: "Pomme couldn't verify the requested MDM enrollment, user approval, and supervision in the VM."
+        case .outcomeUnknown: "Pomme can't tell whether the VM installed the MDM profile, so it won't install it again without evidence."
+        case .securityBaselineUnsupported: "Pomme can't reproduce the VM's original SIP and AMFI configuration exactly, so it didn't change them."
+        case .restorationIncomplete: "Pomme didn't finish restoring the VM's SIP, AMFI, and run state after MDM enrollment."
+        case .competingSecurityOperation: "An unfinished `pomme mdm`, `pomme sip`, or `pomme amfi` operation owns this VM."
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .conflictingEnrollment: "Supply the profile that the VM is enrolled with, or enroll a different VM."
+        case .downgradeUnsupported: "Run `pomme mdm` without `--enrollment-mode unapproved`."
+        case .evidenceUnavailable, .outcomeUnknown:
+            "Repeat the same `pomme mdm` command; Pomme checks the VM's enrollment before it installs anything again."
+        case .securityBaselineUnsupported: "Run `pomme sip status NAME` and `pomme amfi status NAME` to see the current settings."
+        case .restorationIncomplete: "Repeat the same `pomme mdm` command with the same profile to resume restoration."
+        case .competingSecurityOperation: "Repeat the original command with its original arguments to finish it first."
         }
     }
 }
@@ -304,7 +328,7 @@ struct PommeMDMWorkflowExecution: Sendable {
         PommeProgressContext.sink?.step(vm: progress.journal.identity.vmName, "Cleaning up MDM enrollment")
         do { try await dependencies.cleanup() }
         catch let failure as PommeMDMCleanupFailure { throw failure }
-        catch { throw PommeMDMEnrollmentError.cleanupFailed }
+        catch { throw PommeMDMEnrollmentError.wrapping(.cleanupFailed, error) }
         if ![.securityRestored, .runStateRestorationIntent, .restorationComplete].contains(progress.journal.phase) {
             try progress.record(phase: .securityRestorationIntent)
             if progress.journal.finalSecurity == .restore {

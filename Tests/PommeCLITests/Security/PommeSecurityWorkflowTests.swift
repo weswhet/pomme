@@ -484,7 +484,7 @@ struct PommeSecurityWorkflowTests {
                 Issue.record("Workflow unexpectedly succeeded for failure \(failure)")
             } catch {
                 if failure == .restore {
-                    #expect(error as? PommeSecurityWorkflowError == .restorationIncomplete)
+                    #expect(error as? PommeSecurityWorkflowError == .restorationIncomplete())
                 } else {
                     #expect(error as? WorkflowDependencyFailure == failure)
                 }
@@ -581,7 +581,7 @@ struct PommeSecurityWorkflowTests {
                 )
                 Issue.record("Cleanup failure unexpectedly succeeded for \(cleanupFailure)")
             } catch {
-                #expect(error as? PommeSecurityWorkflowError == .restorationIncomplete)
+                #expect(error as? PommeSecurityWorkflowError == .restorationIncomplete())
             }
             #expect(recorder.count(.observe) == 1)
             #expect(recorder.restoreStates.isEmpty)
@@ -1041,7 +1041,7 @@ struct PommeSecurityWorkflowTests {
                 Issue.record("Retained normal AMFI failure case unexpectedly succeeded for \(name)")
             } catch {
                 if restoreFailure {
-                    #expect(error as? PommeSecurityWorkflowError == .restorationIncomplete)
+                    #expect(error as? PommeSecurityWorkflowError == .restorationIncomplete())
                 } else if let dependencyFailure {
                     #expect(error as? WorkflowDependencyFailure == dependencyFailure)
                 } else if let recoveryFailure {
@@ -1445,9 +1445,9 @@ private struct WorkflowHarness: Sendable {
                 if let cleanupFailure {
                     switch cleanupFailure {
                     case .session:
-                        throw PommeRecoverySessionError.cleanupFailed
+                        throw PommeRecoverySessionError.cleanupFailed()
                     case .integration:
-                        throw PommeLiveRecoveryIntegration.Error.cleanupFailed
+                        throw PommeLiveRecoveryIntegration.Error.cleanupFailed()
                     }
                 }
                 if failure == .observe { throw WorkflowDependencyFailure.observe }

@@ -18,9 +18,32 @@ struct PommeBuddyPreferencesOwner: Codable, Sendable, Equatable {
     }
 }
 
-struct PommeBuddyPreferencesFailure: Error, Codable, Sendable, Equatable {
-    var code: String
+/// A closed failure label and its optional numeric status. `failureCode`
+/// is encoded as `code` for compatibility with existing receipts.
+struct PommeBuddyPreferencesFailure: Error, Codable, Sendable, Equatable, PommeDescribedError {
+    var failureCode: String
     var numericCode: Int?
+
+    init(code: String, numericCode: Int?) {
+        failureCode = code
+        self.numericCode = numericCode
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case failureCode = "code"
+        case numericCode
+    }
+
+    var code: PommeErrorCode { .guestSetupAssistantPreferencesFailed }
+
+    var errorDescription: String? {
+        let status = numericCode.map { ", status \($0)" } ?? ""
+        return "The guest couldn't update its Setup Assistant preferences (\(failureCode)\(status))."
+    }
+
+    var recoverySuggestion: String? {
+        "Restart the guest with `pomme restart NAME` so that the agent tries again."
+    }
 }
 
 struct PommeBuddyPreferencesStatus: Codable, Sendable, Equatable {
@@ -192,7 +215,7 @@ actor PommeBuddyPreferencesMaintenance {
         let owner: PommeBuddyPreferencesOwner?
         do { owner = try dependencies.owner() }
         catch {
-            let code = (error as? PommeBuddyPreferencesFailure)?.code ?? ""
+            let code = (error as? PommeBuddyPreferencesFailure)?.failureCode ?? ""
             emit(["invalid-owner", "invalid-owner-attribute", "invalid-owner-uid", "ambiguous-owner"].contains(code) ? "owner-invalid" : "owner-query-failed", ["numeric": String((error as? PommeBuddyPreferencesFailure)?.numericCode ?? (error as NSError).code)], error: true)
             throw error
         }
@@ -293,7 +316,7 @@ actor PommeBuddyPreferencesMaintenance {
             receipt?.outcome = "failed"
             receipt?.error = issue
             try? saveReceipt()
-            emit("maintenance-failed", ["numeric": String(issue.numericCode ?? 0), "failure": Self.failureCodes.contains(issue.code) ? issue.code : "unknown-redacted"], error: true)
+            emit("maintenance-failed", ["numeric": String(issue.numericCode ?? 0), "failure": Self.failureCodes.contains(issue.failureCode) ? issue.failureCode : "unknown-redacted"], error: true)
         }
         emit("maintenance-finished", ["outcome": receipt?.outcome == "succeeded" ? "succeeded" : "failed", "duration": String(describing: start.duration(to: .now))])
     }
@@ -343,7 +366,7 @@ actor PommeBuddyPreferencesMaintenance {
             return result
         } catch {
             let failure = error as? PommeBuddyPreferencesFailure
-            commandSink(.init(event: "command-failed", fields: ["failure": Self.commandFailureLabel(failure?.code), "numeric": String(failure?.numericCode ?? (error as NSError).code), "duration": String(describing: start.duration(to: .now))], isError: true))
+            commandSink(.init(event: "command-failed", fields: ["failure": Self.commandFailureLabel(failure?.failureCode), "numeric": String(failure?.numericCode ?? (error as NSError).code), "duration": String(describing: start.duration(to: .now))], isError: true))
             throw error
         }
     }
@@ -357,7 +380,7 @@ actor PommeBuddyPreferencesMaintenance {
         let waitingStages = ["detectingOS", "waitingForOwner"]
         let runningStages = ["maintainingBuild", "maintainingMiniBuddy"]
         guard value.error == nil || value.outcome == "failed",
-              value.error.map({ !$0.code.isEmpty && $0.code.utf8.count <= 128 }) ?? true else { throw failure("invalid-receipt") }
+              value.error.map({ !$0.failureCode.isEmpty && $0.failureCode.utf8.count <= 128 }) ?? true else { throw failure("invalid-receipt") }
         switch value.outcome {
         case "waiting":
             guard waitingStages.contains(value.stage), value.owner == nil else { throw failure("invalid-receipt") }
@@ -400,7 +423,7 @@ actor PommeBuddyPreferencesMaintenance {
 
     private func preferenceFailure(_ error: any Error, fallback: String) -> PommeBuddyPreferencesFailure {
         let issue = (error as? PommeBuddyPreferencesFailure) ?? failure(fallback, (error as NSError).code)
-        emit("preference-file-failed", ["failure": Self.failureCodes.contains(issue.code) ? issue.code : "unknown-redacted",
+        emit("preference-file-failed", ["failure": Self.failureCodes.contains(issue.failureCode) ? issue.failureCode : "unknown-redacted",
                                         "numeric": String(issue.numericCode ?? 0)], error: true)
         return issue
     }
@@ -576,7 +599,7 @@ private enum PommeBuddyPreferencesSystem {
                     usleep(10_000)
                 }
             }
-            diagnostic(.init(event: "command-aborted", fields: ["launcher_pid": String(pid), "timed_out": String((error as? PommeBuddyPreferencesFailure)?.code == "command-timeout"), "stdout_bytes": String(buffers[0].count), "stderr_bytes": String(buffers[1].count)], isError: true))
+            diagnostic(.init(event: "command-aborted", fields: ["launcher_pid": String(pid), "timed_out": String((error as? PommeBuddyPreferencesFailure)?.failureCode == "command-timeout"), "stdout_bytes": String(buffers[0].count), "stderr_bytes": String(buffers[1].count)], isError: true))
             throw error
         }
         var completion = ["launcher_pid": String(pid), "signal": String(status & 0x7f),

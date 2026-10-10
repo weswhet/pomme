@@ -181,11 +181,17 @@ struct PommeMDMTemporaryHelperRequest: Codable, Equatable, Sendable {
 }
 
 /// A validated, completed helper failure. Legacy responses never prove a safe retry.
-struct PommeMDMHelperFailure: Error, LocalizedError, Sendable {
+struct PommeMDMHelperFailure: PommeDescribedError, Sendable {
     let error: PommeMDMEnrollmentError
     let failureStage: GuestMDMDiagnostics.Stage?
     let beforeIdentityImport: Bool
-    var errorDescription: String? { error.localizedDescription }
+    var code: PommeErrorCode { error.code }
+    var errorDescription: String? {
+        guard let failureStage, let message = error.errorDescription else { return error.errorDescription }
+        return "\(message) The guest's enrollment helper stopped at its \(failureStage.rawValue) stage."
+    }
+    var recoverySuggestion: String? { error.recoverySuggestion }
+    var underlying: (any Error)? { error.underlying }
 }
 
 struct PommeMDMTemporaryHelperResult: Equatable, Sendable {
@@ -454,7 +460,7 @@ struct PommeMDMTemporaryHelperHost: PommeMDMTemporaryHelperTransport {
         if let primaryError { throw primaryError }
         if prepared {
             do { try await dependencies.cleanup(workspace) }
-            catch { throw PommeMDMEnrollmentError.cleanupFailed }
+            catch { throw PommeMDMEnrollmentError.wrapping(.cleanupFailed, error) }
         }
         guard let result else { throw PommeMDMEnrollmentError.enrollmentFailed }
         return result
@@ -528,14 +534,18 @@ enum PommeMDMTemporaryHelperSecurityGate {
 
 
 /// Closed cleanup stages keep errors useful without including guest output or paths.
-struct PommeMDMCleanupFailure: LocalizedError {
+struct PommeMDMCleanupFailure: PommeDescribedError {
     enum Stage: String {
         case authenticate, inspectArtifacts, verifyBootstrap, setBootstrapMode
         case prepareBootstrap, setHelperMode, removeArtifact, removeBootstrap, verifyAbsence
     }
     let stage: Stage
+    var code: PommeErrorCode { .mdmCleanupFailed }
     var errorDescription: String? {
-        "MDM staging cleanup failed at \(stage.rawValue). The VM and remaining artifacts were preserved."
+        "Pomme couldn't clean up MDM staging in the VM at the \(stage.rawValue) step. Pomme kept the VM's state and the remaining staged files."
+    }
+    var recoverySuggestion: String? {
+        "Repeat the same `pomme mdm` command to retry cleanup."
     }
 
     static func verificationArguments(path: String, requirement: String = PommeAgentArtifactStore.signingRequirement) -> [String] {

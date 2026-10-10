@@ -43,10 +43,36 @@ struct PommeAgentVSOCKBinding: Equatable, Sendable {
     }
 }
 
-enum PommeAgentVSOCKError: Error, Equatable, Sendable {
+enum PommeAgentVSOCKError: Error, Equatable, Sendable, PommeDescribedError {
     case invalidBinding
     case missingBinding
     case sessionReplaced
+
+    var code: PommeErrorCode {
+        switch self {
+        case .invalidBinding: .agentBindingInvalid
+        case .missingBinding: .agentBindingMissing
+        case .sessionReplaced: .agentSessionReplaced
+        }
+    }
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidBinding:
+            "The guest agent connection isn't bound to this VM's session, so Pomme refused it."
+        case .missingBinding:
+            "No session is ready for the guest agent's Recovery connection, so Pomme refused it."
+        case .sessionReplaced:
+            "A newer guest agent connection replaced the one that this operation used."
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .invalidBinding: nil
+        case .missingBinding, .sessionReplaced: "Retry the command."
+        }
+    }
 }
 
 protocol PommeAgentVSOCKConnection: AnyObject, Sendable {

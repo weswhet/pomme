@@ -98,9 +98,10 @@ receive it. For details, see
 Test the exit status of every command. Pomme uses the following conventions:
 
 - `0` means success.
-- `1` means the command failed. Pomme prints `Error:` and a message to
-  standard error. In this case, standard output doesn't contain a JSON result,
-  even with `--format json`.
+- `1` means the command failed. Pomme prints `Error:`, a message, and an
+  error code to standard error. With `--format json` or `--format jsonl`,
+  standard output also contains a failed result with the same code in its
+  `errorCode` field.
 - `64` means the arguments were invalid, for example a missing VM name.
 - For `pomme exec`, a guest program's exit code passes through. A program
   ended by a signal returns `128` plus the signal number, a foreground timeout
@@ -116,6 +117,27 @@ if ! pomme status "$VM" --json > status.json; then
   exit 1
 fi
 ```
+
+## Match on error codes
+
+Every failed result carries an `errorCode`, such as `vm-not-found` or
+`guest-agent-unavailable`, that doesn't change between releases. Match on the
+code rather than on the message text, which can change. The following example
+waits and retries while the guest agent connects:
+
+```sh
+until pomme exec "$VM" --json -- /usr/bin/true > result.json; do
+  code=$(jq -r '.errorCode' result.json)
+  case "$code" in
+    guest-agent-unavailable|guest-agent-connecting) sleep 5 ;;
+    *) echo "pomme failed with $code" >&2; exit 1 ;;
+  esac
+done
+```
+
+For every code, see [Errors](/reference/errors/). The `hint` field holds the
+next step, and `causes` holds the underlying operating-system or framework
+reasons.
 
 ## Set a default VM
 

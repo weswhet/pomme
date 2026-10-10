@@ -29,11 +29,14 @@ struct PommeSecurityWorkflowResumeGuidanceTests {
     )
 
     let description = try #require(diagnostic.errorDescription)
-    #expect(description.hasPrefix("Another unfinished Pomme security operation owns this VM."))
-    #expect(description.contains("pomme amfi disable 'security-vm' --final-state normal"))
-    #expect(description.contains("resolving any reported cleanup or restoration failure"))
+    let suggestion = try #require(diagnostic.recoverySuggestion)
+    #expect(description == "Another unfinished Pomme security operation owns this VM.")
+    #expect(diagnostic.code == .securityOperationPending)
+    #expect(suggestion.contains("pomme amfi disable 'security-vm' --final-state normal"))
+    #expect(suggestion.contains("resolve any cleanup or restoration failure"))
     #expect(!description.contains("password"))
-    #expect(!description.contains("SecurityWorkflowJournal.json"))
+    #expect(!suggestion.contains("password"))
+    #expect(!suggestion.contains("SecurityWorkflowJournal.json"))
   }
 
   @Test("Restoration barriers keep their warning without a retry command")
@@ -41,9 +44,9 @@ struct PommeSecurityWorkflowResumeGuidanceTests {
     let journal = try makeJournal(
       operation: .sipDisable, finalState: .stopped)
     let errors: [any Error] = [
-      PommeSecurityWorkflowError.restorationIncomplete,
-      PommeRecoverySessionError.cleanupFailed,
-      PommeLiveRecoveryIntegration.Error.cleanupFailed,
+      PommeSecurityWorkflowError.restorationIncomplete(),
+      PommeRecoverySessionError.cleanupFailed(),
+      PommeLiveRecoveryIntegration.Error.cleanupFailed(),
     ]
 
     for error in errors {

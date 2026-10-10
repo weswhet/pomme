@@ -1631,17 +1631,16 @@ struct PommeCore {
                         throw outputFailure
                     }
                     guard response.ok, let result = response.result else {
-                        let failure = response.error
-                        throw RunnerError.controlCommandFailed(
-                            failure.map { "\($0.code): \($0.message)" }
-                                ?? "Missing Pomme log completion response."
-                        )
+                        throw PommeControlError.clientError(response.error, missing: "Missing Pomme log completion response.")
                     }
                     let normalized = normalizedControlObject(result)
                     if !cancellationSent,
                        normalized["ok"] as? Bool == false,
                        let message = normalized["error"] as? String,
                        !message.isEmpty {
+                        if let report = PommeErrorReport(payload: normalized[PommeErrorReport.payloadKey]) {
+                            throw RemotePommeError(report)
+                        }
                         throw RunnerError.controlCommandFailed(message)
                     }
                     return normalized
@@ -1777,8 +1776,7 @@ struct PommeCore {
                 }
             case .response(let response):
                 guard response.ok, let object = response.result?.objectValue else {
-                    let failure = response.error
-                    throw RunnerError.controlCommandFailed(failure.map { "\($0.code): \($0.message)" } ?? "Missing foreground completion response.")
+                    throw PommeControlError.clientError(response.error, missing: "Missing foreground completion response.")
                 }
                 var output = object.mapValues(\.publicValue)
                 output["streamFrames"] = frames
@@ -1794,16 +1792,12 @@ struct PommeCore {
         var body = payload.filter { key, _ in
             !["type", "command", "operation", "id", "streaming"].contains(key)
         }
-        if command == "agent.perform" || command == "guest-ui" {
+        if command == "agent.perform" || command == "guest-ui" || command == "terminal.session" {
             guard let operation = payload["operation"] as? String,
-                  operation != command
-            else { throw RunnerError.invalidControlCommand(command) }
-            body["operation"] = operation
-        }
-        if command == "terminal.session" {
-            guard let operation = payload["operation"] as? String,
-                  operation != command
-            else { throw RunnerError.invalidControlCommand(command) }
+                  !operation.isEmpty, operation != command
+            else {
+                throw RunnerError.invalidRequest(field: "operation", reason: "must name the \(command) operation to run.")
+            }
             body["operation"] = operation
         }
         if command == "guest-ui", let path = body["hostOutputPath"] as? String {
@@ -1977,10 +1971,7 @@ struct PommeCore {
             throw RunnerError.namedVMNotFound(name)
         }
         if (try? runtimeRecord(for: reference.bundle)) != nil {
-            throw RunnerError.virtualMachineState(
-                "Cannot delete VM '\(name)' while its helper is running. " +
-                "Run 'pomme stop \(name)' first, then retry deletion."
-            )
+            throw RunnerError.vmHelperRunning(name: name)
         }
         let schema = try provisioningSchemaIfPresent(bundle: reference.bundle)
         let ownedPlan = try schema.map { _ in try loadOwnedProvisioningPlan(reference: reference) }
@@ -2283,6 +2274,42 @@ struct PommeCore {
         )
     }
 
+    /// The first line that a helper writes to its log, so a bug report shows
+    /// which build ran on which host.
+    static func helperLogHeader(bootMode: BootMode, processID: Int32 = getpid()) -> String {
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        let build = PommeBuildInfo.current
+        return "helper started: pomme \(build.version) (\(build.commit)), "
+            + "host macOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) (\(hostOSBuild() ?? "unknown")), "
+            + "boot mode \(bootMode.rawValue), pid \(processID)"
+    }
+
+    static func hostOSBuild() -> String? {
+        var size = 0
+        guard sysctlbyname("kern.osversion", nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("kern.osversion", &buffer, &size, nil, 0) == 0 else { return nil }
+        return String(cString: buffer)
+    }
+
+    /// Keeps the previous helper's log as `pomme-helper.previous.log` and
+    /// opens a new, empty log for the next helper.
+    static func rotateHelperLog(bundle: BundleLayout) throws -> FileHandle {
+        let fileManager = FileManager.default
+        let current = bundle.helperLogURL
+        let previous = bundle.previousHelperLogURL
+        if let size = (try? fileManager.attributesOfItem(atPath: current.path))?[.size] as? NSNumber, size.intValue > 0 {
+            try? fileManager.removeItem(at: previous)
+            try? fileManager.moveItem(at: current, to: previous)
+        }
+        if !fileManager.fileExists(atPath: current.path) {
+            fileManager.createFile(atPath: current.path, contents: nil)
+        }
+        let handle = try FileHandle(forWritingTo: current)
+        try handle.truncate(atOffset: 0)
+        return handle
+    }
+
     /// Entry point used by the private runtime process.  The argument grammar
     /// is intentionally closed and has no public aliases.
     static func runInternalHelper(arguments: [String]) async -> Int32 {
@@ -2291,6 +2318,7 @@ struct PommeCore {
             let values = try parseRuntimeArguments(arguments)
             vmName = values.name
                 ?? URL(fileURLWithPath: values.bundlePath).deletingPathExtension().lastPathComponent
+            log(helperLogHeader(bootMode: values.bootMode), vmName: vmName ?? "")
             try await runInternalHelper(
                 bundlePath: values.bundlePath,
                 name: values.name,
@@ -2299,7 +2327,11 @@ struct PommeCore {
             return 0
         } catch {
             if let vmName {
-                log("runtime failed: \(error.localizedDescription)", vmName: vmName)
+                let report = PommeErrorReport(error)
+                log("runtime failed [code=\(report.code.rawValue)]: \(error.localizedDescription)", vmName: vmName)
+                for cause in report.causes {
+                    log("  caused by \(cause.domain) \(cause.code): \(cause.description)", vmName: vmName)
+                }
             } else {
                 log("Runtime arguments rejected: \(error.localizedDescription)")
             }
@@ -4835,8 +4867,8 @@ struct PommeCore {
         let currentMode = stringValue(status["bootMode"])
         let paused = stringValue(status["vmState"]) == "paused"
         guard currentMode == bootMode.rawValue else {
-            throw RunnerError.virtualMachineState(
-                "\(displayName) is already \(paused ? "paused" : "running") in \(currentMode) boot mode. Stop it before starting \(bootMode.rawValue) boot mode."
+            throw RunnerError.vmBootModeConflict(
+                name: displayName, paused: paused, current: currentMode, requested: bootMode.rawValue
             )
         }
         return paused
@@ -4877,12 +4909,7 @@ struct PommeCore {
         }
         try bundle.validateForRun()
         let executable = try runningExecutableIdentity().url
-        let logHandle: FileHandle
-        if !FileManager.default.fileExists(atPath: bundle.helperLogURL.path) {
-            FileManager.default.createFile(atPath: bundle.helperLogURL.path, contents: nil)
-        }
-        logHandle = try FileHandle(forWritingTo: bundle.helperLogURL)
-        try logHandle.truncate(atOffset: 0)
+        let logHandle = try rotateHelperLog(bundle: bundle)
         let process = Process()
         process.executableURL = executable
         process.arguments = [
@@ -5096,11 +5123,14 @@ struct PommeCore {
                 }
                 let result = try await runtime.performGuestOperationCorrelated(request.operation, payload: request.payload)
                 return try correlatedResultJSON(result)
-            case .logsShow, .logsStream:
-                throw RunnerError.invalidControlCommand("Pomme log requires a streaming control request.")
+            case .logsShow:
+                // Log commands are streaming-only.
+                throw RunnerError.invalidControlCommand("logs.show")
+            case .logsStream:
+                throw RunnerError.invalidControlCommand("logs.stream")
             }
         } catch {
-            var payload: [String: Any] = ["ok": false, "error": error.localizedDescription, "hostExitCode": 1]
+            var payload = controlFailurePayload(error, context: request.logName)
             if let diagnosticFailure = error as? PommeRecoveryTerminalAdmissionControlFailure {
                 payload.merge(diagnosticFailure.debugMetadata.controlPayload, uniquingKeysWith: { _, new in new })
             }
@@ -5120,7 +5150,9 @@ struct PommeCore {
         case "terminal.list":
             let pageToken: String?
             if let value = request.payload["pageToken"] {
-                guard let token = value.stringValue else { throw RunnerError.invalidControlCommand("terminal.session") }
+                guard let token = value.stringValue else {
+                    throw RunnerError.invalidRequest(field: "pageToken", reason: "must be a string.")
+                }
                 pageToken = token
             } else {
                 pageToken = nil
@@ -5128,7 +5160,7 @@ struct PommeCore {
             let pageSize: Int
             if let value = request.payload["pageSize"] {
                 guard case .integer(let raw) = value, raw > 0, let parsed = Int(exactly: raw) else {
-                    throw RunnerError.invalidControlCommand("terminal.session")
+                    throw RunnerError.invalidRequest(field: "pageSize", reason: "must be a whole number greater than 0.")
                 }
                 pageSize = parsed
             } else {
@@ -5145,17 +5177,17 @@ struct PommeCore {
             } catch PommeDurableTerminalError.offsetBeyondEnd(let offset, let length) {
                 // Carry both numbers so the CLI can name the valid range
                 // without a second inspect round trip.
-                return try jsonLine([
-                    "ok": false,
-                    "error": PommeDurableTerminalError.offsetBeyondEnd(offset: offset, length: length).localizedDescription,
-                    "hostExitCode": 1,
-                    "fromOffset": offset,
-                    "transcriptOffset": length
-                ])
+                var failure = controlFailurePayload(
+                    PommeDurableTerminalError.offsetBeyondEnd(offset: offset, length: length),
+                    context: request.operation
+                )
+                failure["fromOffset"] = offset
+                failure["transcriptOffset"] = length
+                return try jsonLine(failure)
             }
         case "terminal.terminate":
             let id = try terminalSessionID(from: request.payload)
-            let force = try strictBoolean(request.payload["force"], default: false)
+            let force = try strictBoolean(request.payload["force"], field: "force", default: false)
             payload = try await runtime.terminalSessionTerminate(id: id, force: force)
         case "terminal.delete":
             payload = try await runtime.terminalSessionDelete(id: terminalSessionID(from: request.payload))
@@ -5171,7 +5203,9 @@ struct PommeCore {
         guard let raw = payload["sessionID"]?.stringValue,
               let id = UUID(uuidString: raw),
               id.uuidString.lowercased() == raw.lowercased()
-        else { throw RunnerError.invalidControlCommand("terminal.session") }
+        else {
+            throw RunnerError.invalidRequest(field: "sessionID", reason: "must be a terminal session ID in UUID form.")
+        }
         return id
     }
 
@@ -5179,14 +5213,16 @@ struct PommeCore {
         guard let value else { return nil }
         guard case .integer(let raw) = value, raw >= 0,
               let offset = UInt64(exactly: raw)
-        else { throw RunnerError.invalidControlCommand("terminal.session") }
+        else {
+            throw RunnerError.invalidRequest(field: "--from-offset", reason: "must be a byte offset of zero or more.")
+        }
         return offset
     }
 
-    private static func strictBoolean(_ value: JSONValue?, default defaultValue: Bool) throws -> Bool {
+    private static func strictBoolean(_ value: JSONValue?, field: String, default defaultValue: Bool) throws -> Bool {
         guard let value else { return defaultValue }
         guard case .bool(let result) = value else {
-            throw RunnerError.invalidControlCommand("terminal.session")
+            throw RunnerError.invalidRequest(field: field, reason: "must be true or false.")
         }
         return result
     }
@@ -5203,7 +5239,7 @@ struct PommeCore {
             }
             do {
                 let sessionID = try Self.terminalSessionID(from: operation.payload)
-                let takeover = try Self.strictBoolean(operation.payload["takeover"], default: false)
+                let takeover = try Self.strictBoolean(operation.payload["takeover"], field: "takeover", default: false)
                 let offset = try Self.optionalOffset(operation.payload["offset"])
                 let result = try await runtime.terminalSessionAttach(
                     id: sessionID,
@@ -5218,7 +5254,7 @@ struct PommeCore {
                 // make ControlServer wrap it in a successful response, so a
                 // takeover/reconnect failure would look like a clean detach
                 // to the CLI bridge.
-                return "ERROR \(error.localizedDescription)"
+                return controlErrorLine(error, context: "terminal.attach")
             }
         }
         do {
@@ -5245,9 +5281,34 @@ struct PommeCore {
                 return "ERROR Pomme control streaming is limited to agent.perform, Pomme log, or terminal.attach."
             }
         } catch {
-            return (try? jsonLine(["ok": false, "error": error.localizedDescription, "hostExitCode": 1]))
+            return (try? jsonLine(controlFailurePayload(error, context: request.logName)))
                 ?? "{\"ok\":false,\"hostExitCode\":1}"
         }
+    }
+
+    /// The failure payload that the helper returns for `error`: the existing
+    /// `error` text, plus the redacted report that keeps its code and causes.
+    /// Every failure is also written to the helper log with its code.
+    static func controlFailurePayload(_ error: Error, hostExitCode: Int = 1, context: String) -> [String: Any] {
+        let report = PommeErrorReport(error)
+        log("control \(context) failed [code=\(report.code.rawValue)]: \(report.message)")
+        return [
+            "ok": false,
+            "error": error.localizedDescription,
+            "hostExitCode": hostExitCode,
+            PommeErrorReport.payloadKey: report.payloadObject
+        ]
+    }
+
+    /// A stream handler's terminal failure line, which `ControlServer` turns
+    /// into a failed response that keeps the report.
+    static func controlErrorLine(_ error: Error, context: String) -> String {
+        let report = PommeErrorReport(error)
+        log("control \(context) failed [code=\(report.code.rawValue)]: \(report.message)")
+        guard let data = try? JSONEncoder().encode(report), let json = String(data: data, encoding: .utf8) else {
+            return "ERROR \(error.localizedDescription)"
+        }
+        return PommeControlServer.reportLinePrefix + json
     }
 
     private static func agentPerformStreamResponse(
@@ -5401,19 +5462,13 @@ struct PommeCore {
                 switch logError {
                 case .interrupted(let reason):
                     let code = reason == .timedOut ? 124 : 130
-                    return try jsonLine([
-                        "ok": false,
-                        "error": logError.localizedDescription,
-                        "hostExitCode": code,
-                        "cleanupConfirmed": true,
-                    ])
+                    var failure = controlFailurePayload(logError, hostExitCode: code, context: "logs")
+                    failure["cleanupConfirmed"] = true
+                    return try jsonLine(failure)
                 case .cleanupUnconfirmed:
-                    return try jsonLine([
-                        "ok": false,
-                        "error": logError.localizedDescription,
-                        "hostExitCode": 1,
-                        "cleanupConfirmed": false,
-                    ])
+                    var failure = controlFailurePayload(logError, context: "logs")
+                    failure["cleanupConfirmed"] = false
+                    return try jsonLine(failure)
                 default:
                     break
                 }
@@ -5604,21 +5659,24 @@ struct PommeCore {
                 code = "normal-amfi-unverified"
             }
         } else if let error = error as? PommeAgentSessionError {
-            if error.code == "unsupported-operation" || error.code == "invalid-operation" {
-                code = error.code
-            } else if PommeRecoveryGuestFailureCode(rawValue: error.code) != nil {
-                code = error.code
+            if error.wireCode == "unsupported-operation" || error.wireCode == "invalid-operation" {
+                code = error.wireCode
+            } else if PommeRecoveryGuestFailureCode(rawValue: error.wireCode) != nil {
+                code = error.wireCode
             } else {
                 code = "normal-amfi-failed"
             }
         } else {
             code = "normal-amfi-failed"
         }
+        let report = PommeErrorReport(error)
+        log("control normal AMFI failed [code=\(report.code.rawValue), failureCode=\(code)]: \(report.message)")
         return (try? jsonLine([
             "ok": false,
-            "error": "Normal AMFI operation failed.",
+            "error": "Normal AMFI operation failed: \(PommeErrorDescriber.clause(for: report)).",
             "failureCode": code,
             "hostExitCode": 1,
+            PommeErrorReport.payloadKey: report.payloadObject,
         ])) ?? "{\"ok\":false,\"error\":\"Normal AMFI operation failed.\",\"failureCode\":\"normal-amfi-failed\",\"hostExitCode\":1}"
     }
 
@@ -5705,12 +5763,17 @@ struct PommeCore {
             )
             return try correlatedResultJSON(terminal)
         } catch {
-            // Keep command output and credentials out of the host response.
+            // Keep command output and credentials out of the host response:
+            // the report carries only codes, domains, and numbers.
+            let diagnostic = PommeSecurityPrivatePTYDiagnostic(error)
+            let report = PommeErrorReport(codesOnly: error)
+            log("control private PTY failed [code=\(report.code.rawValue), failureCode=\(diagnostic.rawValue)].")
             return (try? jsonLine([
                 "ok": false,
-                "error": "Private PTY request failed.",
-                "failureCode": PommeSecurityPrivatePTYDiagnostic(error).rawValue,
-                "hostExitCode": 1
+                "error": "Private PTY request failed: \(diagnostic.errorDescription ?? diagnostic.rawValue)",
+                "failureCode": diagnostic.rawValue,
+                "hostExitCode": 1,
+                PommeErrorReport.payloadKey: report.payloadObject,
             ])) ?? "{\"ok\":false,\"hostExitCode\":1}"
         }
     }
@@ -6121,7 +6184,11 @@ struct PommeCore {
                 signer: signer
             )
             try repository.commit(failed, replacing: intent.generation)
-            throw PommeProvisioningError.phaseFailed(next.phase, vmName: intent.plan.vm.name)
+            throw PommeProvisioningError.phaseFailed(
+                next.phase,
+                vmName: intent.plan.vm.name,
+                cause: PommeProvisioningError.phaseCause(of: error)
+            )
         }
         let payload: [String: Any] = [
             "ok": true,
@@ -6256,19 +6323,35 @@ struct PommeCore {
         }
     }
 
-    enum RequiredSnapshotRestoreStartupError: Error, Equatable, LocalizedError {
+    enum RequiredSnapshotRestoreStartupError: Error, Equatable, PommeDescribedError {
         case invalidPollingConfiguration
         case helperExited(pid: Int32, lastObservation: String)
         case timedOut(pid: Int32, lastObservation: String)
+
+        var code: PommeErrorCode {
+            switch self {
+            case .invalidPollingConfiguration: .internalError
+            case .helperExited: .snapshotRestoreFailed
+            case .timedOut: .snapshotRestoreTimedOut
+            }
+        }
 
         var errorDescription: String? {
             switch self {
             case .invalidPollingConfiguration:
                 "Snapshot restore polling requires a nonnegative timeout and positive interval."
             case let .helperExited(pid, lastObservation):
-                "Snapshot restore helper pid \(pid) exited before reaching paused normal state. Last observation: \(lastObservation)"
+                "The VM helper (pid \(pid)) exited before it restored the snapshot and paused the VM. Last observation: \(lastObservation)"
             case let .timedOut(pid, lastObservation):
-                "Timed out waiting for snapshot restore helper pid \(pid) to reach paused normal state. Last observation: \(lastObservation)"
+                "Timed out waiting for the VM helper (pid \(pid)) to restore the snapshot and pause the VM. Last observation: \(lastObservation)"
+            }
+        }
+
+        var recoverySuggestion: String? {
+            switch self {
+            case .invalidPollingConfiguration: nil
+            case .helperExited, .timedOut:
+                "Run `pomme stop NAME`, then run `pomme snapshot restore NAME --snapshot SNAPSHOT` again. If it fails again, run `pomme bug-report NAME`."
             }
         }
     }
@@ -6360,7 +6443,7 @@ struct PommeCore {
         case append
     }
 
-    enum IPSWDownloadResponseError: Error, Equatable, LocalizedError, Sendable {
+    enum IPSWDownloadResponseError: Error, Equatable, PommeDescribedError, Sendable {
         case unsupportedStatus(Int)
         case unexpectedPartialResponse
         case missingContentRange
@@ -6383,6 +6466,12 @@ struct PommeCore {
             case let .contentRangeSizeMismatch(expected, actual):
                 "The restore-image server advertised \(actual) bytes, expected \(expected)."
             }
+        }
+
+        var code: PommeErrorCode { .restoreImageDownloadFailed }
+
+        var recoverySuggestion: String? {
+            "Retry the command. Pomme resumes the download from the partial file when the server allows it."
         }
     }
 
@@ -6592,7 +6681,7 @@ struct PommeCore {
             if case let .unsupportedStatus(status) = error {
                 throw RunnerError.downloadFailed(statusCode: status)
             }
-            throw RunnerError.hostCommandFailed(error.localizedDescription)
+            throw error
         }
 
         guard fileManager.fileExists(atPath: partial.path) || fileManager.createFile(

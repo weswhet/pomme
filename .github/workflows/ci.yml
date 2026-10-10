@@ -59,6 +59,9 @@ jobs:
       - name: Audit product identity
         run: Tests/PommeIdentifierAudit.sh
 
+      - name: Check that errors describe themselves
+        run: Tests/ErrorConformance.sh
+
       - name: Verify package identity
         run: Tests/PackagingIdentity.sh
 

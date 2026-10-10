@@ -54,8 +54,9 @@ final class PommeMacGuestProvisioningIntent: @unchecked Sendable, CustomStringCo
                 try setOptions()
                 try markDispatched()
             } catch {
-                // Framework and callback errors can contain credential values.
-                throw RunnerError.virtualMachineState("Guest provisioning dispatch preparation failed.")
+                // Framework and callback errors can contain credential values,
+                // so keep only their codes, domains, and numbers.
+                throw PommeProvisioningV2Error.dispatchPreparationFailed(cause: PommeErrorReport(keepingSystemCause: error, codesOnly: true))
             }
         }
     }
@@ -154,7 +155,7 @@ struct PommeTerminalSessionCreateControlInput: Sendable {
     init(payload: [String: JSONValue]) throws {
         if let value = payload["recoveryDebugScreenshots"] {
             guard case .bool(let enabled) = value else {
-                throw RunnerError.invalidControlCommand("terminal.session")
+                throw RunnerError.invalidRequest(field: "recoveryDebugScreenshots", reason: "must be true or false.")
             }
             recoveryDebugScreenshots = enabled
         } else {

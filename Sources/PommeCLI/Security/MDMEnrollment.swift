@@ -11,14 +11,17 @@ enum MDMProfileStaging {
     static func destination(requestedPath: String?) throws -> String {
         let candidate = requestedPath ?? "\(guestDirectory)/\(UUID().uuidString).mobileconfig"
         guard candidate.hasPrefix("/") else {
-            throw RunnerError.hostCommandFailed("MDM profile staging requires an absolute guest destination.")
+            throw RunnerError.invalidRequest(field: "--guest-path", reason: "must be an absolute guest path.")
         }
 
         let components = candidate.split(separator: "/", omittingEmptySubsequences: false)
         guard !candidate.contains("\0"),
               !components.dropFirst().contains(""),
               !components.contains("."), !components.contains("..") else {
-            throw RunnerError.hostCommandFailed("MDM profile staging requires a canonical guest destination.")
+            throw RunnerError.invalidRequest(
+                field: "--guest-path",
+                reason: "must be a canonical guest path without empty, `.`, or `..` components."
+            )
         }
         // Guest paths are protocol values, not host filesystem URLs. On
         // macOS 15 standardizedFileURL aliases /private/var to /var.
@@ -30,8 +33,9 @@ enum MDMProfileStaging {
               resolvedURL.lastPathComponent != "..",
               !resolvedURL.lastPathComponent.hasPrefix(PommeMDMTemporaryHelperWorkspace.helperPrefix),
               !resolvedURL.lastPathComponent.hasPrefix(".pomme-stage-") else {
-            throw RunnerError.hostCommandFailed(
-                "mdm --guest-path must name a new direct child of \(guestDirectory)."
+            throw RunnerError.invalidRequest(
+                field: "--guest-path",
+                reason: "must name a new file directly inside \(guestDirectory)."
             )
         }
         return resolved
@@ -71,17 +75,11 @@ enum MDMEnrollmentAgentGate {
         case .ready:
             break
         case .unattested:
-            throw RunnerError.hostCommandFailed(
-                "MDM enrollment requires an authenticated, attested persistent PommeAgent using protocol v1."
-            )
+            throw PommeMDMEnrollmentError.agentNotAttested
         case .digestMismatch:
-            throw RunnerError.hostCommandFailed(
-                "MDM enrollment requires the expected signed PommeAgent executable."
-            )
+            throw PommeMDMEnrollmentError.agentExecutableMismatch
         case .missingCapabilities:
-            throw RunnerError.hostCommandFailed(
-                "MDM enrollment requires verified PommeAgent enrollment and maintenance capabilities."
-            )
+            throw PommeMDMEnrollmentError.agentCapabilitiesMissing
         }
 
         return [
@@ -170,7 +168,7 @@ struct PommeMDMEnrollmentTransaction: Sendable {
         do {
             description = try await agent.authenticatedAgentDescription()
         } catch {
-            throw PommeMDMEnrollmentError.agentUnavailable
+            throw PommeMDMEnrollmentError.wrapping(.agentUnavailable, error)
         }
         do {
             _ = try MDMEnrollmentAgentGate.verify(
@@ -178,14 +176,14 @@ struct PommeMDMEnrollmentTransaction: Sendable {
                 expectedExecutableDigest: expectedExecutableDigest
             )
         } catch {
-            throw PommeMDMEnrollmentError.agentUnverified
+            throw PommeMDMEnrollmentError.wrapping(.agentUnverified, error)
         }
 
         let destination: String
         do {
             destination = try MDMProfileStaging.destination(requestedPath: guestPath)
         } catch {
-            throw PommeMDMEnrollmentError.invalidRequest
+            throw PommeMDMEnrollmentError.wrapping(.invalidRequest, error)
         }
 
         let baseline: PommeMDMEnrollmentStateBaseline
@@ -197,7 +195,7 @@ struct PommeMDMEnrollmentTransaction: Sendable {
         } catch let error as PommeMDMEnrollmentError {
             throw error
         } catch {
-            throw PommeMDMEnrollmentError.baselineCaptureFailed
+            throw PommeMDMEnrollmentError.wrapping(.baselineCaptureFailed, error)
         }
 
         // Failed enrollment retains guest artifacts and the current VM state.
@@ -209,9 +207,9 @@ struct PommeMDMEnrollmentTransaction: Sendable {
         do {
             receipt = try await agent.transferProfile(from: profileURL, to: destination)
         } catch let error as PommeMDMEnrollmentError {
-            throw error == .invalidTransfer ? error : .transferFailed
+            throw error == .invalidTransfer ? error : .wrapping(.transferFailed, error)
         } catch {
-            throw PommeMDMEnrollmentError.transferFailed
+            throw PommeMDMEnrollmentError.wrapping(.transferFailed, error)
         }
         guard receipt.destination == destination else {
             throw PommeMDMEnrollmentError.invalidTransfer
@@ -237,7 +235,7 @@ struct PommeMDMEnrollmentTransaction: Sendable {
                     .enroll(profilePath: destination, timeout: timeout)
                 )
             } catch {
-                throw PommeMDMEnrollmentError.enrollmentFailed
+                throw PommeMDMEnrollmentError.wrapping(.enrollmentFailed, error)
             }
             let response = try PommeMDMEnrollmentAgentResponse.enrollment(enrollment)
             transactionResult = .init(
@@ -262,13 +260,13 @@ struct PommeMDMEnrollmentTransaction: Sendable {
         do {
             let cleaned = try await agent.perform(.cleanup(profilePath: destination))
             try PommeMDMEnrollmentAgentResponse.requireCleanup(cleaned)
-        } catch { throw PommeMDMEnrollmentError.cleanupFailed }
+        } catch { throw PommeMDMEnrollmentError.wrapping(.cleanupFailed, error) }
         do {
             try await state.restoreBaseline(baseline)
             guard try await state.verifyBaseline(baseline) else {
                 throw PommeMDMEnrollmentError.restorationFailed
             }
-        } catch { throw PommeMDMEnrollmentError.restorationFailed }
+        } catch { throw PommeMDMEnrollmentError.wrapping(.restorationFailed, error) }
         guard let transactionResult else {
             throw PommeMDMEnrollmentError.enrollmentFailed
         }

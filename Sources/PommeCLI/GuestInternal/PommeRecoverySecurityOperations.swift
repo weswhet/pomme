@@ -5,7 +5,7 @@ import Foundation
 /// The guest-side Recovery security surface is deliberately smaller than the
 /// normal agent command surface.  It is called only after PommeAgent has
 /// authenticated a bounded Recovery session.
-enum PommeGuestRecoverySecurityError: Error, LocalizedError, Equatable, Sendable {
+enum PommeGuestRecoverySecurityError: Error, PommeDescribedError, Equatable, Sendable {
     case recoveryRoleRequired
     case rootRequired
     case invalidOperation
@@ -66,6 +66,41 @@ enum PommeGuestRecoverySecurityError: Error, LocalizedError, Equatable, Sendable
             "The Recovery security command timed out."
         case .outputTooLarge:
             "The Recovery security command returned too much output."
+        }
+    }
+
+    var code: PommeErrorCode {
+        switch self {
+        case .recoveryRoleRequired: .guestRecoveryAgentRequired
+        case .rootRequired: .guestAgentRootRequired
+        case .invalidOperation, .invalidPayload: .guestInvalidRequest
+        case .credentialRequired: .credentialUnavailable
+        case .timedOut: .guestRecoveryTimedOut
+        case .nvramWriteDenied, .nvramMutationUnqualified: .guestRecoveryNVRAMUnavailable
+        case .recoveryEnvironmentUnverified, .startupVolumeMismatch: .guestRecoveryEnvironmentUnverified
+        case .snapshotPending: .guestRecoveryTransitionPending
+        case .verificationFailed, .rollbackFailed: .guestRecoveryVerificationFailed
+        case .commandFailed, .invalidSnapshot, .invalidPolicy, .invalidNVRAM, .promptRejected, .outputTooLarge:
+            .guestRecoveryOperationFailed
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .recoveryRoleRequired, .rootRequired, .invalidOperation, .invalidPayload:
+            "Run `pomme bug-report NAME` and attach the file to a new issue."
+        case .credentialRequired:
+            "Run the command in an interactive terminal so that Pomme can prompt for the owner's credential."
+        case .timedOut, .commandFailed, .promptRejected, .outputTooLarge:
+            "Run `pomme sip status NAME` to check the VM's security state, then retry."
+        case .nvramWriteDenied, .nvramMutationUnqualified:
+            "Run `pomme amfi status NAME` to check the current state."
+        case .recoveryEnvironmentUnverified, .startupVolumeMismatch:
+            "Stop the VM with `pomme stop NAME`, then retry the command."
+        case .snapshotPending:
+            "Repeat the earlier `pomme sip` or `pomme amfi` command in the same direction so that Pomme can finish it."
+        case .verificationFailed, .rollbackFailed, .invalidSnapshot, .invalidPolicy, .invalidNVRAM:
+            "Run `pomme sip status NAME` and `pomme amfi status NAME` to see the current state."
         }
     }
 }
@@ -332,9 +367,13 @@ struct PommeGuestAMFINVRAMFailureDiagnostic: Codable, Equatable, Sendable {
     }
 }
 
-private struct PommeGuestAMFINVRAMApplyFailure: Error {
+private struct PommeGuestAMFINVRAMApplyFailure: PommeDescribedError {
     let diagnostic: PommeGuestAMFINVRAMFailureDiagnostic
     let recoveryError: PommeGuestRecoverySecurityError
+
+    var code: PommeErrorCode { recoveryError.code }
+    var errorDescription: String? { recoveryError.errorDescription }
+    var recoverySuggestion: String? { recoveryError.recoverySuggestion }
 }
 
 struct PommeGuestAMFISnapshotRecord: Codable, Equatable, Sendable {

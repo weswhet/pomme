@@ -50,7 +50,8 @@ Each `VMs/NAME.bundle` directory contains the following files:
 | `MDMEnrollmentJournal.json` | The journal for MDM enrollment. |
 | `SaveFile.vzvmsave` | The saved machine state, when present. |
 | `Snapshots/` | Named saved-state snapshots. |
-| `pomme-helper.log` | The log of the VM's background helper process. |
+| `pomme-helper.log` | The log of the VM's background helper process. It starts with the Pomme version, the host's macOS version, and the boot mode, and it records each failed request with its error code. |
+| `pomme-helper.previous.log` | The log of the previous helper process. Pomme moves `pomme-helper.log` here when it starts a new helper. |
 | `.pomme/` | The VM's creation journal and its signing key. After `pomme agent update`, it also holds the signed record of the updated agent's digest. |
 
 Treat these files as internal. Their formats can change between Pomme
@@ -64,6 +65,7 @@ versions.
 | `$TMPDIR/pomme-*.sock` | The Unix socket for each VM's background helper. |
 | `$TMPDIR/pomme-recovery-debug-*` | Screenshots that `--debug` keeps for each automatic Recovery navigation. Pomme doesn't delete them. |
 | `~/Library/Caches/com.github.weswhet.pomme/update-check.json` | The result of the most recent [update check](/get-started/install/#update-notices). Deleting it only causes another check. |
+| `~/Library/Caches/com.github.weswhet.pomme/last-error.json` | The most recent error that `pomme` reported, with its code, causes, and the command's arguments with private values removed. `pomme bug-report` reads it. Deleting it is safe. |
 
 ## Guest paths
 

@@ -48,7 +48,7 @@ struct PommeRecoveryIntegrationTests {
 
         // A typed AMFI call cannot repurpose a SIP-bound request, and the
         // rejected call cannot reach the guest or alter final-state history.
-        await #expect(throws: PommeRecoverySecurityError.operationRejected) {
+        await #expect(throws: PommeRecoverySecurityError.operationRejected()) {
             try await recovery.amfi(action: .status, finalState: .normal)
         }
         #expect(await guest.operations == ["sip.status"])

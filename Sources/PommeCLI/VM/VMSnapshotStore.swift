@@ -108,18 +108,24 @@ enum VMSnapshotStore {
               stageName == URL(fileURLWithPath: stageName).lastPathComponent,
               stageName.hasPrefix(stagePrefix) || stageName.hasPrefix(rollbackPrefix)
         else {
-            throw RunnerError.invalidControlCommand("snapshot-save")
+            throw RunnerError.invalidRequest(
+                field: "stageName",
+                reason: "must be a Pomme snapshot stage folder name of at most 256 characters.")
         }
         try requireDirectory(bundle.snapshotsURL)
         let stage = bundle.snapshotsURL.appendingPathComponent(stageName, isDirectory: true)
         try requireDirectory(stage)
         guard stage.deletingLastPathComponent().standardizedFileURL == bundle.snapshotsURL.standardizedFileURL else {
-            throw RunnerError.invalidControlCommand("snapshot-save")
+            throw RunnerError.invalidRequest(
+                field: "stageName",
+                reason: "must name a folder directly inside the VM's snapshots folder.")
         }
         let target = machineStateURL(in: stage)
         var value = stat()
         guard lstat(target.path, &value) != 0, errno == ENOENT else {
-            throw RunnerError.invalidControlCommand("snapshot-save")
+            throw RunnerError.invalidRequest(
+                field: "stageName",
+                reason: "must name a stage that doesn't already contain saved machine state.")
         }
         return target
     }

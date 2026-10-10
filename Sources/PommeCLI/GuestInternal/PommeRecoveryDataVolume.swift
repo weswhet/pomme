@@ -11,8 +11,23 @@ struct PommeRecoveryDataVolumeResolver: Sendable {
         let dataDevice: String
     }
 
-    enum Error: Swift.Error, Equatable, Sendable {
+    enum Error: Swift.Error, Equatable, Sendable, PommeDescribedError {
         case malformed, ambiguous, noMatch, unsafeDevice, unsafeMount, diskutilFailed(String, Int32)
+
+        var code: PommeErrorCode { .guestRecoveryDataVolumeUnavailable }
+
+        var errorDescription: String? {
+            switch self {
+            case .malformed: "The guest's `diskutil` reported volume groups in an unexpected format."
+            case .ambiguous: "The guest has more than one matching System and Data volume pair."
+            case .noMatch: "The guest has no System and Data volume pair in the expected volume group."
+            case .unsafeDevice: "The guest's Data volume has an unexpected device identifier."
+            case .unsafeMount: "The guest's Data volume is mounted at an unexpected or unsafe path."
+            case .diskutilFailed(let verb, let status): "The guest's `diskutil \(verb)` exited with status \(status)."
+            }
+        }
+
+        var recoverySuggestion: String? { "Stop the VM with `pomme stop NAME`, then retry." }
     }
 
     typealias ProcessRunner = @Sendable (String, [String]) throws -> (status: Int32, stdout: Data)

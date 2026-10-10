@@ -15,6 +15,37 @@ pomme --version
 
 For more detail about any failing command, run it again with `--debug`.
 
+## Read an error
+
+When a command fails, Pomme prints what happened, the next step when there is
+one, and an error code with a link to its entry in [Errors](/reference/errors/):
+
+```text
+Error: No Pomme-owned VM named NAME exists. Create it with `pomme create NAME` or run `pomme list`.
+Error code: vm-not-found. For help, see https://pommevm.dev/reference/errors/#vm-not-found
+```
+
+The sections on this page name the error code for each symptom. With
+`--format json`, the same code is in the result's `errorCode` field.
+
+## Report a problem
+
+If an error doesn't explain itself, or the error code's entry says that Pomme
+hit a failure that it doesn't expect, collect a bug report:
+
+```sh
+pomme bug-report NAME
+```
+
+The command writes one Markdown file in the current directory with the Pomme
+version, this Mac's macOS version, model, memory, and free disk space, the last
+error, and, for the VM that you name, its `pomme inspect` output, the end of
+its current and previous helper logs, and recent guest logs. Omit `NAME` to
+use the VM from the last error. Pomme replaces your home directory with `~` and
+withholds lines that mention a token, password, or secret. Review the file,
+then attach it to a [new issue](https://github.com/weswhet/pomme/issues/new?template=bug_report.yml).
+Pomme never uploads it for you.
+
 ## Installing and updating Pomme
 
 ### The install script won't replace the installed executable
@@ -69,6 +100,8 @@ running.
 Error: No Pomme-owned VM named NAME exists. Create it with `pomme create NAME` or run `pomme list`.
 ```
 
+**Error code:** [`vm-not-found`](/reference/errors/#vm-not-found)
+
 **Cause:** No VM with that name exists in Pomme's storage. Pomme manages only
 VMs that it created; it doesn't discover VMs that other tools created.
 
@@ -83,6 +116,8 @@ spelling.
 Invalid VM name NAME. Use 1-64 ASCII letters, numbers, dots, underscores, or hyphens, starting with a letter or number.
 ```
 
+**Error code:** [`invalid-request`](/reference/errors/#invalid-request)
+
 **Resolution:** Choose a name that follows the rule in the message.
 
 ## Creating VMs
@@ -90,11 +125,15 @@ Invalid VM name NAME. Use 1-64 ASCII letters, numbers, dots, underscores, or hyp
 ### Creation stopped partway
 
 **Symptom:** `pomme create` fails after it starts installing, and reports that
-a phase failed:
+a step failed, with its reason:
 
 ```text
-NAME provisioning phase PHASE failed; the VM and journal were retained.
+Error: Installing macOS failed for NAME: the disk is out of space (VZErrorDomain 8). The VM and journal were retained.
 ```
+
+**Error code:** [`provisioning-phase-failed`](/reference/errors/#provisioning-phase-failed).
+The result's `causes` give the underlying error, such as
+[`host-disk-full`](/reference/errors/#host-disk-full).
 
 **Cause:** Creation is a journaled workflow. When a phase fails after an
 external effect, Pomme keeps the VM and its journal exactly as they were so
@@ -278,8 +317,30 @@ The VM helper exited during startup with status STATUS. See LOG_PATH.
 Timed out waiting for VM helper pid PID to open its control socket. See LOG_PATH.
 ```
 
+**Error code:** [`helper-start-failed`](/reference/errors/#helper-start-failed)
+or [`helper-start-timed-out`](/reference/errors/#helper-start-timed-out)
+
 **Resolution:** Read the log file that the message names. It contains the
-helper's own error.
+helper's own error. When a helper starts, Pomme keeps the previous helper's
+log as `pomme-helper.previous.log` in the same directory. To collect both logs
+for a bug report, run `pomme bug-report NAME`.
+
+### `pomme start` refuses a VM in the other boot mode
+
+**Symptom:** `pomme start` fails with an error like the following:
+
+```text
+Error: NAME is already paused in recovery boot mode. Stop it before starting normal boot mode.
+```
+
+**Error code:** [`vm-paused-other-mode`](/reference/errors/#vm-paused-other-mode)
+or [`vm-running-other-mode`](/reference/errors/#vm-running-other-mode)
+
+**Cause:** The VM is running or paused in the other boot mode. `pomme start`
+resumes a paused VM only in the boot mode that it was paused in.
+
+**Resolution:** Run `pomme stop NAME`, then start the VM in the boot mode that
+you want.
 
 ### `pomme delete` keeps the VM
 
@@ -323,6 +384,8 @@ instead. For details, see
 PommeAgent is not connected on port 505051. A guest that is still booting connects on its own; `pomme status` reports when it does.
 ```
 
+**Error code:** [`guest-agent-unavailable`](/reference/errors/#guest-agent-unavailable)
+
 **Cause:** The VM is still booting, the VM is in Recovery, or the agent isn't
 running in the guest.
 
@@ -333,6 +396,21 @@ running in the guest.
 3. If the agent is missing or broken, run `pomme agent repair NAME`.
 
 For details, see [Check, update, and repair the guest agent](/guides/repair-the-agent/).
+
+### A guest command doesn't exist
+
+**Symptom:** `pomme exec` fails with an error like the following:
+
+```text
+Error: The command doesn't exist in the guest. No such executable: /usr/local/bin/tool.
+```
+
+**Error code:** [`guest-command-not-found`](/reference/errors/#guest-command-not-found)
+
+**Cause:** No executable exists at that path in the guest.
+
+**Resolution:** Give the full path of an executable that exists in the guest.
+To check a path, run `pomme exec NAME -- /bin/ls -l PATH`.
 
 ### The agent update doesn't finish
 
@@ -392,9 +470,11 @@ then run `pomme agent update NAME`.
 **Symptom:** A command fails with one of the following errors:
 
 ```text
-Pomme agent credential Keychain is locked (Security status STATUS).
-Pomme owner credential Keychain is locked.
+Your login Keychain is locked, so Pomme can't use the VM's agent credential: REASON (OSStatus STATUS).
+Your login Keychain is locked: REASON (OSStatus STATUS).
 ```
+
+**Error code:** [`keychain-error`](/reference/errors/#keychain-error)
 
 **Cause:** Pomme keeps the guest agent credential and owner credentials in your
 login Keychain, and it never unlocks the Keychain for you.
@@ -421,8 +501,10 @@ Owner credentials are required. Set both POMME_AUTHORIZED_USER and POMME_AUTHORI
 
 ```text
 Another unfinished Pomme security operation owns this VM.
-A security transaction remains unresolved; repeat its original command before starting another operation.
+An earlier SIP or AMFI operation on this VM is unfinished. Repeat its original command before you start another operation.
 ```
+
+**Error code:** [`security-operation-pending`](/reference/errors/#security-operation-pending)
 
 **Cause:** An earlier SIP or AMFI operation on this VM didn't finish. Pomme
 keeps its journal and won't start a different operation until it finishes.
@@ -438,6 +520,8 @@ keeps its journal and won't start a different operation until it finishes.
 VM state restoration is incomplete. The account, credentials, and security journal were retained; repeat the same command after inspecting the VM.
 ```
 
+**Error code:** [`security-restoration-incomplete`](/reference/errors/#security-restoration-incomplete)
+
 **Cause:** Pomme couldn't prove that cleanup finished, so it didn't boot or
 restore the VM.
 
@@ -449,8 +533,10 @@ the VM's state, and then repeat the same command.
 **Symptom:** An AMFI command fails with the following error:
 
 ```text
-AMFI changes require SIP disabled while boot arguments are written and verified. Run pomme sip disable <vm> first; restore AMFI before re-enabling SIP.
+Changing AMFI requires SIP to be off while Pomme writes and verifies boot arguments. Run `pomme sip disable NAME` first, and restore AMFI before you turn SIP on again.
 ```
+
+**Error code:** [`amfi-requires-sip-disabled`](/reference/errors/#amfi-requires-sip-disabled)
 
 **Resolution:** Run `pomme sip disable NAME` before `pomme amfi disable NAME`.
 To restore, run `pomme amfi enable NAME` before `pomme sip enable NAME`.
@@ -462,6 +548,8 @@ To restore, run `pomme amfi enable NAME` before `pomme sip enable NAME`.
 ```text
 Recovery security workflows are unavailable while a terminal session is active. Terminate it first.
 ```
+
+**Error code:** [`vm-state-invalid`](/reference/errors/#vm-state-invalid)
 
 **Resolution:** List the sessions with `pomme sessions list NAME`, end each
 active one with `pomme sessions terminate NAME --session SESSION_ID`, and run the
@@ -528,6 +616,7 @@ details, see
 
 ## What's next
 
+- [Errors](/reference/errors/)
 - [Exit codes](/reference/exit-codes/)
 - [Command-line reference](/reference/cli/)
 - [Glossary](/resources/glossary/)

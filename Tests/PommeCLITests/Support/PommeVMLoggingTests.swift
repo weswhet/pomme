@@ -9,7 +9,20 @@ struct PommeVMLoggingTests {
         let error = PommeProvisioningError.phaseFailed(.installRecoveryAgent, vmName: "dev")
 
         #expect(error.localizedDescription ==
-            "dev provisioning phase installRecoveryAgent failed; the VM and journal were retained.")
+            "Installing the Pomme agent failed for dev. The VM and journal were retained.")
+        #expect(error.recoverySuggestion?.contains("`pomme create dev --resume`") == true)
+    }
+
+    @Test("provisioning failure text keeps the cause's reason and code")
+    func provisioningFailureKeepsCause() {
+        let cause = PommeErrorReport(NSError(domain: "VZErrorDomain", code: 8))
+        let error = PommeProvisioningError.phaseFailed(.install, vmName: "dev", cause: cause)
+
+        #expect(error.code == .provisioningPhaseFailed)
+        #expect(error.localizedDescription.hasPrefix("Installing macOS failed for dev: "))
+        #expect(error.localizedDescription.contains("(VZErrorDomain 8)"))
+        #expect(error.localizedDescription.hasSuffix(". The VM and journal were retained."))
+        #expect(PommeErrorReport(error).causes.first?.code == cause.code.rawValue)
     }
 
     @Test("installer progress identifies the VM", arguments: [0.0, 0.5, 1.0])

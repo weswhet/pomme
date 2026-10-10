@@ -91,7 +91,7 @@ struct PommeRecoverySecurityTests {
             localPolicy: Data("after".utf8),
             nvram: try PommeNVRAMDelta.bootArguments(present: true, value: "keep=1 (PommeBootArguments.amfiOverride)")
         )
-        await #expect(throws: PommeRecoverySecurityError.operationRejected) {
+        await #expect(throws: PommeRecoverySecurityError.operationRejected()) {
             try await transaction.execute(mutation)
         }
         #expect(await store.snapshot() == original)
@@ -174,7 +174,7 @@ struct PommeRecoverySecurityTests {
         )
         _ = try await session.prepare()
         let router = PommeRecoverySecurityRouter(session: session)
-        await #expect(throws: PommeRecoverySecurityError.operationRejected) {
+        await #expect(throws: PommeRecoverySecurityError.operationRejected()) {
             try await router.execute(action: SIPAction.disable)
         }
         #expect(await guest.operations.isEmpty)
@@ -200,7 +200,7 @@ private actor AMFIStore {
     func setNVRAMOrFail(_ delta: PommeNVRAMDelta) throws {
         if failNextNVRAMWrite {
             failNextNVRAMWrite = false
-            throw PommeRecoverySecurityError.operationRejected
+            throw PommeRecoverySecurityError.operationRejected()
         }
         setNVRAM(delta)
     }

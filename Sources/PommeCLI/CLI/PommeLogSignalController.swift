@@ -101,7 +101,10 @@ final class PommeLogOutputSink: @unchecked Sendable {
     }
 
     /// Distinguishes a signal interrupting backpressure from a broken output pipe.
-    struct Cancelled: Error {}
+    struct Cancelled: PommeDescribedError {
+        var code: PommeErrorCode { .operationCancelled }
+        var errorDescription: String? { "Writing guest log output was cancelled." }
+    }
 
     func write(
         _ data: Data,
@@ -168,7 +171,7 @@ final class PommeLogOutputSink: @unchecked Sendable {
                         try throwPOSIX("wait for guest log output")
                     }
                 } else if count == 0 {
-                    throw POSIXError(.EIO)
+                    throw RunnerError.posix(function: "guest log output", code: EIO)
                 } else {
                     try throwPOSIX("guest log output")
                 }

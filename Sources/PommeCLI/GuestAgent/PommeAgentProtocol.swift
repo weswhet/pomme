@@ -146,9 +146,15 @@ enum PommeAgentProtocol {
         }
     }
 
-    enum Error: Swift.Error, Equatable, LocalizedError, Sendable {
+    enum Error: Swift.Error, Equatable, PommeDescribedError, Sendable {
         case frameTooLarge, malformedFrame, duplicateKey, incompatibleVersion
         case invalidEnvelope, invalidRequest, invalidResponse, invalidStream, invalidOperation
+
+        var code: PommeErrorCode { .guestAgentProtocolError }
+
+        var recoverySuggestion: String? {
+            "Run `pomme agent update NAME` so that the agent matches this version of `pomme`."
+        }
 
         var errorDescription: String? {
             switch self {

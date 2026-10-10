@@ -57,7 +57,7 @@ struct PommeSecurityRecoveryAdapter: Sendable {
       execution.evidence.credentialConsumed, execution.evidence.lifecycle == .finalized,
       execution.cleanup.isComplete, execution.finalState == .stopped
     else {
-      throw PommeSecurityWorkflowError.restorationIncomplete
+      throw PommeSecurityWorkflowError.restorationIncomplete()
     }
     let value = try JSONDecoder().decode(JSONValue.self, from: execution.output)
     guard value.objectValue?["verified"] == .bool(true),

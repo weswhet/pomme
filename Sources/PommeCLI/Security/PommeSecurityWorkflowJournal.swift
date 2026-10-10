@@ -354,7 +354,7 @@ extension VMFinalState: Codable {
     }
 }
 
-enum PommeSecurityWorkflowJournalError: Error, Equatable, LocalizedError, Sendable {
+enum PommeSecurityWorkflowJournalError: PommeDescribedError, Equatable, Sendable {
     case invalidIdentity
     case leaseRequired
     case leaseMismatch
@@ -374,28 +374,78 @@ enum PommeSecurityWorkflowJournalError: Error, Equatable, LocalizedError, Sendab
     case staleGeneration
     case durabilityFailure(operation: String, code: Int32)
 
+    var code: PommeErrorCode {
+        switch self {
+        case .invalidIdentity: .vmBundleDamaged
+        case .leaseRequired, .leaseMismatch, .invalidPhaseTransition, .invalidPreflightOperation: .internalError
+        case .unsafeBundle, .unsafeJournal, .journalMissing, .journalTooLarge, .malformed, .identityMismatch,
+             .ownerRequired, .volumeVUIDRequired:
+            .securityJournalDamaged
+        case .conflictingOperation: .securityOperationPending
+        case .immutableRequestMismatch: .securityRequestMismatch
+        case .credentialRequired: .credentialUnavailable
+        case .staleGeneration: .vmMutationInProgress
+        case .durabilityFailure(_, let code): code == ENOSPC ? .hostDiskFull : .securityJournalWriteFailed
+        }
+    }
+
     var errorDescription: String? {
         switch self {
-        case .invalidIdentity: "Pomme security workflow identity is invalid."
-        case .leaseRequired: "Pomme security workflow requires the VM mutation lease."
-        case .leaseMismatch: "Pomme security workflow mutation lease does not own this VM."
-        case .unsafeBundle: "Pomme security workflow bundle is unsafe."
-        case .unsafeJournal: "Pomme security workflow journal is unsafe."
-        case .journalMissing: "Pomme security workflow journal is missing."
-        case .journalTooLarge: "Pomme security workflow journal is too large."
-        case .malformed: "Pomme security workflow journal is malformed."
-        case .identityMismatch: "Pomme security workflow belongs to a different VM identity."
+        case .invalidIdentity: "Pomme couldn't read the VM's identity files, so it can't bind a security journal to the VM."
+        case .leaseRequired: "Pomme tried to change the security journal without holding the VM's lock. This is a bug in Pomme."
+        case .leaseMismatch: "Pomme tried to change the security journal with another VM's lock. This is a bug in Pomme."
+        case .unsafeBundle: "The VM bundle isn't a directory that only your account can write."
+        case .unsafeJournal: "The security journal isn't a regular file that only your account can read and write."
+        case .journalMissing: "The VM has no security journal to resume."
+        case .journalTooLarge: "The security journal is larger than Pomme allows, so Pomme didn't read it."
+        case .malformed: "The security journal is damaged or uses an unsupported format."
+        case .identityMismatch: "The security journal belongs to a different VM."
         case .conflictingOperation: "Another unfinished Pomme security operation owns this VM."
-        case .immutableRequestMismatch: "Pomme security workflow request does not match the retained transaction."
-        case .invalidPhaseTransition: "Pomme security workflow phase transition is invalid."
+        case .immutableRequestMismatch:
+            "The command's action or final state doesn't match the VM's unfinished security operation."
+        case .invalidPhaseTransition(let current, let next):
+            "The security journal can't move from \(current.rawValue) to \(next.rawValue). This is a bug in Pomme."
         case .invalidPreflightOperation:
-            "Only an AMFI operation may begin a security preflight journal."
-        case .credentialRequired: "Pomme security workflow requires a stored owner credential."
-        case .ownerRequired: "Pomme security workflow requires a verified owner account identity."
-        case .volumeVUIDRequired: "Pomme security workflow requires a verified startup volume identity."
-        case .staleGeneration: "Pomme security workflow journal generation is stale."
+            "Pomme tried to start an AMFI preflight journal for a SIP operation. This is a bug in Pomme."
+        case .credentialRequired: "The security journal has no reference to a stored owner credential."
+        case .ownerRequired: "The security journal has no verified owner account."
+        case .volumeVUIDRequired: "The security journal has no verified startup volume identifier."
+        case .staleGeneration: "Another Pomme command changed the security journal while this one was running."
         case .durabilityFailure(let operation, let code):
-            "Pomme security workflow journal \(operation) could not be durably synchronized (errno \(code))."
+            "Pomme couldn't save the security journal because it couldn't \(Self.describe(operation: operation)): "
+                + "\(String(cString: strerror(code))) (errno \(code))."
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .conflictingOperation:
+            "Repeat the unfinished operation's command with the same `--final-state` value to finish it."
+        case .immutableRequestMismatch:
+            "Repeat the original command exactly, with the same action and `--final-state` value."
+        case .staleGeneration:
+            "Make sure that no other `pomme` command is running for the VM, then repeat the same command."
+        case .unsafeBundle, .unsafeJournal:
+            "Check the VM bundle's ownership and permissions, then repeat the same command."
+        case .durabilityFailure(_, let code):
+            code == ENOSPC
+                ? "Free space on the volume that holds your VMs, then repeat the same command."
+                : "Check the VM bundle's ownership and permissions, then repeat the same command."
+        default:
+            nil
+        }
+    }
+
+    private static func describe(operation: String) -> String {
+        switch operation {
+        case "write": "write the journal file"
+        case "stage": "create a temporary journal file"
+        case "permissions": "make the temporary journal file private"
+        case "file": "save the temporary journal file to disk"
+        case "close": "close the temporary journal file"
+        case "publish": "move the journal file into place"
+        case "directory": "save the VM bundle directory to disk"
+        default: "complete the \(operation) step"
         }
     }
 }
@@ -1213,9 +1263,22 @@ struct PommeSecurityWorkflowJournalStore: Sendable {
         } catch {
             throw PommeSecurityWorkflowJournalError.durabilityFailure(
                 operation: "write",
-                code: (error as NSError).code > 0 ? Int32((error as NSError).code) : EIO
+                code: Self.errnoValue(of: error)
             )
         }
+    }
+
+    /// The errno that best describes a write failure: the POSIX code itself,
+    /// ENOSPC for an out-of-space Cocoa error, or EIO.
+    private static func errnoValue(of error: any Error) -> Int32 {
+        let bridged = error as NSError
+        if bridged.domain == NSPOSIXErrorDomain, bridged.code > 0 { return Int32(truncatingIfNeeded: bridged.code) }
+        if let underlying = bridged.userInfo[NSUnderlyingErrorKey] as? NSError,
+           underlying.domain == NSPOSIXErrorDomain, underlying.code > 0 {
+            return Int32(truncatingIfNeeded: underlying.code)
+        }
+        if bridged.domain == NSCocoaErrorDomain, bridged.code == CocoaError.fileWriteOutOfSpace.rawValue { return ENOSPC }
+        return EIO
     }
 
     private func verifyPublishedJournalFile() throws {

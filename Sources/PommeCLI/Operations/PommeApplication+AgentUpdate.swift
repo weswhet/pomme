@@ -1,12 +1,13 @@
 import Darwin
 import Foundation
 
-enum PommeAgentUpdateError: Error, LocalizedError, Equatable {
+enum PommeAgentUpdateError: Error, PommeDescribedError, Equatable {
     case notRunningNormal(vmName: String)
     case unprovisioned(vmName: String)
     case retainedWorkflow(vmName: String, workflow: String)
     case activeWork(vmName: String, jobs: [String], sessions: [String])
-    case agentUnavailable(vmName: String)
+    /// `cause` keeps why the agent didn't answer, when there was an error.
+    case agentUnavailable(vmName: String, cause: PommeErrorReport? = nil)
     case unsupportedAgent(vmName: String)
     case transferMismatch
     case applyFailed(detail: String)
@@ -25,8 +26,10 @@ enum PommeAgentUpdateError: Error, LocalizedError, Equatable {
                 + "Let them finish or stop them, then rerun `pomme agent update \(name)`."
                 + jobs.map { "\n  job \($0): pomme jobs kill \(name) --job \($0)" }.joined()
                 + sessions.map { "\n  session \($0): pomme sessions terminate \(name) --session \($0)" }.joined()
-        case .agentUnavailable(let name):
-            "The Pomme agent in \(name) did not answer. Check it with `pomme agent status \(name)`."
+        case .agentUnavailable(let name, let cause):
+            "The Pomme agent in \(name) did not answer"
+                + (cause.map { ": \(PommeErrorDescriber.clause(for: $0))" } ?? "")
+                + ". Check it with `pomme agent status \(name)`."
         case .unsupportedAgent(let name):
             "The Pomme agent in \(name) cannot receive files or run processes, so it cannot be updated in place. Use `pomme agent repair \(name)`."
         case .transferMismatch:
@@ -36,6 +39,38 @@ enum PommeAgentUpdateError: Error, LocalizedError, Equatable {
         case .activationTimedOut(let name, let expected, let observed):
             "The updated Pomme agent in \(name) did not connect with digest \(expected) (observed \(observed ?? "none")). "
                 + "It is installed and takes effect on the next restart: `pomme restart \(name)`, then rerun `pomme agent update \(name)`."
+        }
+    }
+
+    var code: PommeErrorCode {
+        switch self {
+        case .notRunningNormal: .vmStateInvalid
+        case .unprovisioned: .agentUpdateUnprovisioned
+        case .retainedWorkflow: .agentUpdateBlocked
+        case .activeWork: .agentUpdateActiveWork
+        case .agentUnavailable: .guestAgentUnavailable
+        case .unsupportedAgent: .agentUpdateUnsupported
+        case .transferMismatch: .agentUpdateTransferMismatch
+        case .applyFailed: .agentUpdateApplyFailed
+        case .activationTimedOut: .agentUpdateActivationTimedOut
+        }
+    }
+
+    var underlying: (any Error)? {
+        if case .agentUnavailable(_, let cause?) = self { return cause }
+        return nil
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .unprovisioned(let name):
+            "Run `pomme agent status \(name)` to see the VM's agent workflow."
+        case .transferMismatch:
+            "Run the command again. If it fails again, run `pomme bug-report` and attach the file to a new issue."
+        case .applyFailed:
+            "Run the command again. If it fails again, run `pomme agent repair NAME` to reinstall the agent that the VM was created with."
+        default:
+            nil
         }
     }
 }
@@ -186,7 +221,7 @@ extension PommeApplication {
     private static func describeAgent(reference: VMReference, name: String) throws -> (digest: String, capabilities: [String]) {
         let value: JSONValue
         do { value = try performAuthenticatedAgentOperation(reference: reference, operation: "agent.describe") }
-        catch { throw PommeAgentUpdateError.agentUnavailable(vmName: name) }
+        catch { throw PommeAgentUpdateError.agentUnavailable(vmName: name, cause: PommeErrorReport(keepingSystemCause: error)) }
         guard let object = value.objectValue,
               object["role"]?.stringValue == PommeAgentRole.persistent.rawValue,
               let digest = object["executableSHA256"]?.stringValue,

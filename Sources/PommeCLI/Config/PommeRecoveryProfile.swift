@@ -42,17 +42,28 @@ struct PommeCreateAgentPlanRequest: Codable, Equatable, Sendable {
     }
 }
 
-enum PommeRecoveryProfileSelectionError: Error, Equatable, LocalizedError, Sendable {
+enum PommeRecoveryProfileSelectionError: PommeDescribedError, Equatable, Sendable {
     case unsupportedRestoreIdentity(version: String, build: String)
     case externallyPending(profileID: String)
+
+    var code: PommeErrorCode {
+        switch self {
+        case .unsupportedRestoreIdentity: .uiRecoveryUnsupportedBuild
+        case .externallyPending: .uiRecoveryReviewPending
+        }
+    }
 
     var errorDescription: String? {
         switch self {
         case .unsupportedRestoreIdentity(let version, let build):
-            "Pomme does not accept Recovery automation for macOS \(version) (\(build))."
+            "Pomme can't automate Recovery for macOS \(version) (\(build))."
         case .externallyPending(let profileID):
-            "Recovery profile \(profileID) is pending external release acceptance."
+            "Recovery automation for profile \(profileID) isn't available yet because its review isn't finished."
         }
+    }
+
+    var recoverySuggestion: String? {
+        "Create the VM from a supported macOS version, or update Pomme with `pomme update` to get newly supported builds."
     }
 }
 

@@ -3,13 +3,29 @@ import Foundation
 
 /// Errors from the guest-side native profile observation boundary. Native
 /// output is never included in these errors.
-enum GuestMDMObservationError: Error, Equatable, LocalizedError {
+enum GuestMDMObservationError: Error, Equatable, PommeDescribedError {
     case invalidTimeout
     case invalidOutputLimit
     case commandFailed
     case timedOut
     case outputTooLarge
     case terminationUnproven
+
+    var code: PommeErrorCode {
+        switch self {
+        case .invalidTimeout, .invalidOutputLimit: .guestInvalidRequest
+        case .timedOut: .guestMDMTimedOut
+        case .commandFailed, .outputTooLarge, .terminationUnproven: .guestMDMObservationFailed
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .invalidTimeout, .invalidOutputLimit: nil
+        case .timedOut, .commandFailed, .outputTooLarge, .terminationUnproven:
+            "Retry the command. If it fails again, run `pomme log NAME --last 5m` to see the guest's log."
+        }
+    }
 
     var errorDescription: String? {
         switch self {

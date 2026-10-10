@@ -14,7 +14,7 @@ The following table describes the exit codes that Pomme itself returns.
 | Code | Meaning |
 | --- | --- |
 | `0` | The command succeeded. |
-| `1` | The command failed. The error message or the structured result describes the failure. |
+| `1` | The command failed. The error message or the structured result describes the failure, and its error code identifies the kind of failure. For every code, see [Errors](/reference/errors/). |
 | `64` | The command line is invalid. For example, a flag is unknown, a required argument is missing, or you omitted the VM name and `POMME_VM_NAME` isn't set. |
 | `124` | A guest program or wait didn't finish before its `--timeout`. |
 | `130` | You interrupted a foreground operation, for example by pressing Control+C. |
@@ -39,12 +39,13 @@ successful launch, even though the guest program might have started.
 ## Structured results
 
 In JSON and JSONL output, most results carry their exit code in the
-`hostExitCode` field. When a command acts on several VMs, `pomme` exits with the
-code of the first failed result. For details, see
+`hostExitCode` field. When a command acts on several VMs, it finishes every VM
+and then exits with the code of the first failed result. For details, see
 [Structured output](/reference/structured-output/).
 
 ## What's next
 
 - [Run commands in a VM](/guides/run-guest-commands/)
 - [Use Pomme in scripts and coding agents](/guides/script-pomme/)
+- [Errors](/reference/errors/)
 - [Troubleshooting](/resources/troubleshooting/)

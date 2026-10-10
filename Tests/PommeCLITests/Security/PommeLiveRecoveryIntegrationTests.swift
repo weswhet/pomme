@@ -50,7 +50,7 @@ struct PommeLiveRecoveryIntegrationTests {
             try await effects.startRecovery()
             #expect(await probe.operations == ["start"])
 
-            await #expect(throws: PommeLiveRecoveryIntegration.Error.launcherRejected) {
+            await #expect(throws: PommeLiveRecoveryIntegration.Error.launcherRejected()) {
                 try await effects.launchRecoveryAgent()
             }
         }

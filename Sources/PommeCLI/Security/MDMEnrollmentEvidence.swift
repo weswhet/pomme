@@ -100,25 +100,43 @@ struct MDMDeviceSupervision: Codable, Equatable, Sendable {
 
 /// Errors are deliberately closed and contain no native output, paths, URLs,
 /// profile data, or diagnostics.
-enum MDMEnrollmentEvidenceError: Error, Equatable, LocalizedError, Sendable {
+enum MDMEnrollmentEvidenceError: PommeDescribedError, Equatable, Sendable {
     case missingEvidence
     case malformedEvidence
     case conflictingEvidence
     case profileIdentityMismatch
     case enrollmentModeMismatch
 
+    var code: PommeErrorCode {
+        switch self {
+        case .missingEvidence, .malformedEvidence, .conflictingEvidence, .enrollmentModeMismatch:
+            .mdmEvidenceUnavailable
+        case .profileIdentityMismatch:
+            .mdmEnrollmentConflict
+        }
+    }
+
     var errorDescription: String? {
         switch self {
         case .missingEvidence:
-            "Required MDM enrollment evidence is missing."
+            "The VM didn't report the MDM profile or enrollment state that Pomme needs to verify enrollment."
         case .malformedEvidence:
-            "MDM enrollment evidence is malformed."
+            "The VM's report of its MDM profiles or enrollment state isn't in the expected format."
         case .conflictingEvidence:
-            "MDM enrollment evidence conflicts."
+            "The VM's reports of its MDM profiles and enrollment state contradict each other."
         case .profileIdentityMismatch:
-            "The installed MDM profile identity does not match the requested profile."
+            "The MDM profile installed in the VM doesn't match the profile that you supplied."
         case .enrollmentModeMismatch:
-            "The observed MDM enrollment mode does not match the requested mode."
+            "The VM's MDM user approval and supervision don't match the requested `--enrollment-mode`."
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .profileIdentityMismatch:
+            "Supply the profile that the VM is enrolled with, or enroll a different VM."
+        case .missingEvidence, .malformedEvidence, .conflictingEvidence, .enrollmentModeMismatch:
+            "Repeat the same `pomme mdm` command to check the enrollment again."
         }
     }
 }

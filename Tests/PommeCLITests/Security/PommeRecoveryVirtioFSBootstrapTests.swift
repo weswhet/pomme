@@ -348,11 +348,11 @@ struct PommeRecoveryVirtioFSBootstrapTests {
         let rejecting = PommeRecoveryVirtioFSBootstrapBuilder(dependencies: .init(
             verifyCodeSignature: { _ in
                 signatureChecks.increment()
-                throw PommeRecoveryVirtioFSBootstrapError.signatureRejected
+                throw PommeRecoveryVirtioFSBootstrapError.signatureRejected()
             },
             rootName: { "pomme-recovery-vfs-signature" }
         ))
-        #expect(throws: PommeRecoveryVirtioFSBootstrapError.signatureRejected) {
+        #expect(throws: PommeRecoveryVirtioFSBootstrapError.signatureRejected()) {
             _ = try rejecting.build(.init(
                 request: fixture.request,
                 signedExecutableURL: fixture.executableURL,
@@ -396,7 +396,7 @@ struct PommeRecoveryVirtioFSBootstrapTests {
             verifyCodeSignature: { _ in checks.increment() },
             rootName: { "pomme-recovery-vfs-symlink" }
         ))
-        #expect(throws: PommeRecoveryVirtioFSBootstrapError.sourceRejected) {
+        #expect(throws: PommeRecoveryVirtioFSBootstrapError.sourceRejected()) {
             _ = try builder.build(.init(
                 request: fixture.request,
                 signedExecutableURL: link,
@@ -410,7 +410,7 @@ struct PommeRecoveryVirtioFSBootstrapTests {
             verifyCodeSignature: { _ in },
             rootName: { "unexpected-root" }
         ))
-        #expect(throws: PommeRecoveryVirtioFSBootstrapError.invalidInput) {
+        #expect(throws: PommeRecoveryVirtioFSBootstrapError.invalidInput()) {
             _ = try badNameBuilder.build(.init(
                 request: fixture.request,
                 signedExecutableURL: fixture.executableURL,

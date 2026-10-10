@@ -30,6 +30,7 @@ enum PommeForegroundExecution {
         if let error = error as? RunnerError {
             switch error {
             case .posix(_, let code): return code == ETIMEDOUT ? "posixDeadline" : "posix"
+            case .controlSocketTimedOut: return "posixDeadline"
             case .controlCommandFailed: return "controlCommandFailed"
             case .noRunningVM: return "noHelper"
             case .invalidControlResponse, .incompatibleHelperProtocol: return "controlProtocol"
@@ -81,19 +82,37 @@ enum PommeForegroundExecution {
             && payload["arguments"] == .array(["-axo", "uid=,comm="].map(JSONValue.string)))
     }
 
-    enum Error: Swift.Error, Equatable, LocalizedError {
+    enum Error: Swift.Error, Equatable, PommeDescribedError {
         case detachedPayload, unsupportedPTY, invalidPayload, invalidTimeout
         case unrelatedJobFrame, invalidCompletion, deadlineReached
 
+        var code: PommeErrorCode {
+            switch self {
+            case .detachedPayload, .unsupportedPTY, .invalidPayload, .invalidTimeout: .invalidRequest
+            case .unrelatedJobFrame, .invalidCompletion: .guestAgentProtocolError
+            case .deadlineReached: .timedOut
+            }
+        }
+
         var errorDescription: String? {
             switch self {
-            case .detachedPayload: "Detached jobs cannot use foreground execution."
-            case .unsupportedPTY: "Interactive PTY execution requires the terminal stream workflow."
-            case .invalidPayload: "Invalid foreground process payload."
-            case .invalidTimeout: "Foreground timeout must be finite and between zero and 300 seconds."
-            case .unrelatedJobFrame: "Foreground output belongs to another job."
-            case .invalidCompletion: "Foreground process completion is invalid."
-            case .deadlineReached: "Foreground command deadline was reached."
+            case .detachedPayload: "A detached job can't run as a foreground command."
+            case .unsupportedPTY: "A command that uses a terminal can't run as a plain foreground command."
+            case .invalidPayload: "The foreground command request is invalid."
+            case .invalidTimeout: "The foreground command timeout must be greater than zero and at most 300 seconds."
+            case .unrelatedJobFrame: "The guest agent sent output from another job."
+            case .invalidCompletion: "The guest agent reported an invalid completion for the foreground command."
+            case .deadlineReached: "The foreground command didn't finish before its timeout."
+            }
+        }
+
+        var recoverySuggestion: String? {
+            switch self {
+            case .detachedPayload, .invalidPayload: nil
+            case .unsupportedPTY: "Run the command with `pomme exec --pty` or `pomme shell`."
+            case .invalidTimeout: "Pass a `--timeout` value between 1 and 300."
+            case .unrelatedJobFrame, .invalidCompletion: "Run `pomme agent update NAME` to update the guest agent."
+            case .deadlineReached: "Retry with a larger `--timeout` value."
             }
         }
     }
@@ -347,16 +366,41 @@ enum PommeLogStreamExecution {
         case interrupted(reason: CancellationReason)
         case cleanupUnconfirmed(reason: CancellationReason)
 
+        var code: PommeErrorCode {
+            switch self {
+            case .detachedPayload, .unsupportedPTY, .invalidPayload, .invalidTimeout: .invalidRequest
+            case .unrelatedJobFrame, .invalidCompletion: .guestAgentProtocolError
+            case .interrupted(.cancelled): .operationCancelled
+            case .interrupted(.disconnected): .guestAgentDisconnected
+            case .interrupted(.timedOut): .timedOut
+            case .cleanupUnconfirmed: .guestProcessCleanupUnverified
+            }
+        }
+
         var errorDescription: String? {
             switch self {
-            case .detachedPayload: "Detached jobs cannot use log streaming."
-            case .unsupportedPTY: "Log streaming does not support PTY execution."
-            case .invalidPayload: "Invalid log stream process payload."
-            case .invalidTimeout: "Log stream timeout must be finite and greater than zero."
-            case .unrelatedJobFrame: "Log stream output belongs to another job."
-            case .invalidCompletion: "Log stream process completion is invalid."
-            case .interrupted(let reason): "Log stream interrupted (\(reason.text))."
-            case .cleanupUnconfirmed(let reason): "Log stream cleanup could not be confirmed (\(reason.text))."
+            case .detachedPayload: "A detached job can't stream the guest log."
+            case .unsupportedPTY: "The guest log stream can't use a terminal."
+            case .invalidPayload: "The guest log stream request is invalid."
+            case .invalidTimeout: "The guest log stream timeout must be greater than zero."
+            case .unrelatedJobFrame: "The guest agent sent output from another job during the log stream."
+            case .invalidCompletion: "The guest agent reported an invalid completion for the log stream."
+            case .interrupted(.cancelled): "The guest log stream was cancelled."
+            case .interrupted(.disconnected): "The guest log stream stopped because the guest agent disconnected."
+            case .interrupted(.timedOut): "The guest log stream reached its timeout."
+            case .cleanupUnconfirmed(let reason):
+                "The guest log stream stopped (\(reason.text)), but Pomme couldn't confirm that the guest's `log stream` process exited."
+            }
+        }
+
+        var recoverySuggestion: String? {
+            switch self {
+            case .detachedPayload, .unsupportedPTY, .invalidPayload, .interrupted(.cancelled): nil
+            case .invalidTimeout: "Pass a `--timeout` value greater than zero."
+            case .unrelatedJobFrame, .invalidCompletion: "Run `pomme agent update NAME` to update the guest agent."
+            case .interrupted(.disconnected): "Run `pomme status NAME`, then retry `pomme log` when the agent is connected."
+            case .interrupted(.timedOut): "Retry with a larger `--timeout` value."
+            case .cleanupUnconfirmed: "Run `pomme jobs list NAME` and stop any leftover job with `pomme jobs kill NAME --job ID`."
             }
         }
     }

@@ -30,11 +30,14 @@ private enum PommeAgentCLIModelSupport {
     static func operation(from object: [String: Any], expected: String) throws -> [String: Any] {
         let command = object["command"] as? String
         let operation = object["operation"] as? String
-        guard Set(object.keys).isSubset(of: ["command", "operation", "payload"]),
-              command == agentCommand, operation == expected,
-              let payload = object["payload"] as? [String: Any]
-        else {
-            throw RunnerError.invalidControlCommand(String(describing: command ?? operation ?? ""))
+        guard command == agentCommand, operation == expected else {
+            throw RunnerError.invalidControlCommand(operation ?? command ?? "")
+        }
+        if let unexpected = Set(object.keys).subtracting(["command", "operation", "payload"]).sorted().first {
+            throw RunnerError.invalidRequest(field: unexpected, reason: "isn't accepted by \(expected).")
+        }
+        guard let payload = object["payload"] as? [String: Any] else {
+            throw RunnerError.invalidRequest(field: "payload", reason: "must be a JSON object.")
         }
         return payload
     }

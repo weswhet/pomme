@@ -6,11 +6,17 @@ import Foundation
 /// fails the locale, geometry, host ABI, manifest, or ownership checks, are
 /// still rejected.
 enum PommeRecoverySecurityQualification {
-    enum Error: Swift.Error, LocalizedError, Equatable, Sendable {
+    enum Error: PommeDescribedError, Equatable, Sendable {
         case unqualifiedRestoreProfile
 
+        var code: PommeErrorCode { .uiRecoveryUnqualified }
+
         var errorDescription: String? {
-            "SIP and AMFI Recovery operations require a restore profile the Recovery planner qualifies; this VM's profile is pending review or unsupported."
+            "Pomme can't change SIP or AMFI on this VM because its macOS build isn't supported for Recovery automation or its review isn't finished."
+        }
+
+        var recoverySuggestion: String? {
+            "Run `pomme inspect NAME` to check the VM's macOS version, and create the VM from a supported version."
         }
     }
 

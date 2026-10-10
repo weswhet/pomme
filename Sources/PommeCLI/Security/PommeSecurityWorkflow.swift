@@ -196,19 +196,19 @@ enum PommeSecurityWorkflow {
       if let preparation = error as? OwnerPreparationFailure {
         PommeProgressContext.sink?.warning("Owner preparation failed; VM state and journal retained without failure restoration or retry.")
         dependencies.log("Owner preparation failed at \(progress.journal.phase.rawValue); VM state and journal retained without failure restoration or retry.")
-        throw preparation.underlying
+        throw preparation.failure
       }
       // A failed Recovery cleanup barrier is not permission to boot.
-      if (error as? PommeRecoverySessionError) == .cleanupFailed
-        || (error as? PommeLiveRecoveryIntegration.Error) == .cleanupFailed
-        || (error as? PommeSecurityWorkflowError) == .restorationIncomplete
+      if (error as? PommeRecoverySessionError) == .cleanupFailed()
+        || (error as? PommeLiveRecoveryIntegration.Error) == .cleanupFailed()
+        || (error as? PommeSecurityWorkflowError) == .restorationIncomplete()
       {
-        throw PommeSecurityWorkflowError.restorationIncomplete
+        throw PommeSecurityWorkflowError.restorationIncomplete(after: error)
       }
       PommeProgressContext.sink?.warning("Security progress was retained; restoring the VM run state after failure.")
       dependencies.log("Security progress was retained; restoring the VM run state after failure.")
       do { try await dependencies.restore(progress.journal.originalRunState) } catch {
-        throw PommeSecurityWorkflowError.restorationIncomplete
+        throw PommeSecurityWorkflowError.restorationIncomplete(after: error)
       }
       throw primary
     }
@@ -239,26 +239,33 @@ enum PommeSecurityWorkflow {
       if let preparation = error as? OwnerPreparationFailure {
         PommeProgressContext.sink?.warning("Owner preparation failed; VM state and journal retained without failure restoration or retry.")
         dependencies.log("Owner preparation failed at \(progress.journal.phase.rawValue); VM state and journal retained without failure restoration or retry.")
-        throw preparation.underlying
+        throw preparation.failure
       }
       // A failed Recovery cleanup barrier is not permission to boot.
-      if (error as? PommeRecoverySessionError) == .cleanupFailed
-        || (error as? PommeLiveRecoveryIntegration.Error) == .cleanupFailed
-        || (error as? PommeSecurityWorkflowError) == .restorationIncomplete
+      if (error as? PommeRecoverySessionError) == .cleanupFailed()
+        || (error as? PommeLiveRecoveryIntegration.Error) == .cleanupFailed()
+        || (error as? PommeSecurityWorkflowError) == .restorationIncomplete()
       {
-        throw PommeSecurityWorkflowError.restorationIncomplete
+        throw PommeSecurityWorkflowError.restorationIncomplete(after: error)
       }
       PommeProgressContext.sink?.warning("Security progress was retained; restoring the VM run state after failure.")
       dependencies.log("Security progress was retained; restoring the VM run state after failure.")
       do { try await dependencies.restore(progress.journal.originalRunState) } catch {
-        throw PommeSecurityWorkflowError.restorationIncomplete
+        throw PommeSecurityWorkflowError.restorationIncomplete(after: error)
       }
       throw primary
     }
   }
 
-  private struct OwnerPreparationFailure: Error {
-    let underlying: any Error
+  /// Marks a failure from owner preparation so the caller rethrows the
+  /// original error without restoring the VM. It reads as that error.
+  private struct OwnerPreparationFailure: PommeDescribedError {
+    let failure: any Error
+
+    var code: PommeErrorCode { PommeErrorDescriber.describe(failure).code }
+    var errorDescription: String? { PommeErrorDescriber.describe(failure).message }
+    var recoverySuggestion: String? { PommeErrorDescriber.describe(failure).hint }
+    var underlying: (any Error)? { PommeErrorDescriber.underlying(of: failure) }
   }
 
   private static func prepareOwnerPreservingFailure(
@@ -266,7 +273,7 @@ enum PommeSecurityWorkflow {
   ) async throws -> PommeGuestSecurityCredentials {
     PommeProgressContext.sink?.step(vm: progress.journal.identity.vmName, "Preparing volume owner")
     do { return try await dependencies.prepareOwner(progress) }
-    catch { throw OwnerPreparationFailure(underlying: error) }
+    catch { throw OwnerPreparationFailure(failure: error) }
   }
 
   private static func recoverConfiguredAMFIDisable(

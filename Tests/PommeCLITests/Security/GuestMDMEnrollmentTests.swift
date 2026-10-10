@@ -39,7 +39,7 @@ struct GuestMDMEnrollmentTests {
             }
             #expect(collector.failureStage == "privateKeychainCredential")
             let data = try JSONEncoder().encode(collector.value)
-            #expect(String(decoding: data, as: UTF8.self).contains(failure.code))
+            #expect(String(decoding: data, as: UTF8.self).contains(failure.wireCode))
             #expect(try GuestMDMDiagnostics.validated(from: .object(["diagnostics": collector.value])) != nil)
         }
         #expect(throws: PommeMDMEnrollmentError.self) {

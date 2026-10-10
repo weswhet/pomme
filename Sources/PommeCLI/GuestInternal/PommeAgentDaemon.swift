@@ -643,7 +643,9 @@ enum PommeAgentDaemon {
                         : allowedOperation == nil || request.operation == allowedOperation
                     guard permitted, !operationConsumed
                     else {
-                        let response = await connection.receive(line) { _ in throw PommeAgentOperationError.unsupported }
+                        let response = await connection.receive(line) { _ in
+                            throw PommeAgentOperationError.unsupported("This connection doesn't permit \(request.operation)")
+                        }
                         guard !response.isEmpty, writeFrame(response) else { return }
                         return
                     }
@@ -888,4 +890,21 @@ enum PommeAgentDaemon {
     }
 }
 
-private struct PommeAgentDaemonError: Error { let exit: PommeAgentDaemon.Exit; init(_ exit: PommeAgentDaemon.Exit) { self.exit = exit } }
+private struct PommeAgentDaemonError: PommeDescribedError {
+    let exit: PommeAgentDaemon.Exit
+    init(_ exit: PommeAgentDaemon.Exit) { self.exit = exit }
+
+    var code: PommeErrorCode { .guestAgentLaunchFailed }
+
+    var errorDescription: String? {
+        switch exit {
+        case .success: "The guest agent exited."
+        case .invalidArguments: "The guest agent rejected its launch arguments or request file."
+        case .integrity: "The guest agent couldn't verify its own code signature or digest."
+        case .credential: "The guest agent couldn't read a valid host credential."
+        case .transport: "The guest agent couldn't open its connection to the host."
+        }
+    }
+
+    var recoverySuggestion: String? { "Run `pomme agent repair NAME` to reinstall the agent." }
+}

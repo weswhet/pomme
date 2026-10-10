@@ -46,10 +46,58 @@ enum PommeRecoveryReviewedDescriptor: Equatable, Sendable {
     }
 }
 
-enum PommeRecoveryInputQualificationError: Error, Equatable, Sendable {
+enum PommeRecoveryInputQualificationError: PommeDescribedError, Equatable, Sendable {
     case unsupportedBuild, unsupportedLocale, unsupportedGeometry
     case unqualifiedPrivateHostABI, manifestHashMismatch, ownershipUnverified
     case externallyPendingReview(String)
+
+    var code: PommeErrorCode {
+        switch self {
+        case .unsupportedBuild: .uiRecoveryUnsupportedBuild
+        case .unsupportedLocale: .uiRecoveryUnsupportedLocale
+        case .unsupportedGeometry: .displayGeometryUnsupported
+        case .unqualifiedPrivateHostABI: .displayInterfaceMismatch
+        case .manifestHashMismatch: .uiRecoveryProfileMismatch
+        case .ownershipUnverified: .uiRecoveryOwnershipUnverified
+        case .externallyPendingReview: .uiRecoveryReviewPending
+        }
+    }
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedBuild:
+            "Pomme can't navigate Recovery for this VM's macOS build."
+        case .unsupportedLocale:
+            "Pomme can navigate Recovery only when the VM's language is English."
+        case .unsupportedGeometry:
+            "Pomme can navigate Recovery only when the VM display is 1280 by 800 pixels."
+        case .unqualifiedPrivateHostABI:
+            "Pomme can't send Recovery input through this Mac's VM display interface."
+        case .manifestHashMismatch:
+            "The Recovery navigation profile doesn't match its reviewed record. This is a bug in Pomme."
+        case .ownershipUnverified:
+            "Pomme couldn't confirm that the running VM is the one it created, so it sent no Recovery input."
+        case .externallyPendingReview:
+            "Recovery navigation for this macOS build isn't available yet because the review of its Recovery screens isn't finished."
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .unsupportedBuild, .externallyPendingReview:
+            "Create the VM from a supported macOS version, or update Pomme with `pomme update` to get newly supported builds."
+        case .unsupportedLocale:
+            "Create the VM with English as its language."
+        case .unsupportedGeometry:
+            "Run `pomme inspect NAME` to check the VM's display configuration."
+        case .unqualifiedPrivateHostABI:
+            "Update Pomme with `pomme update`, then retry."
+        case .manifestHashMismatch:
+            "Run `pomme bug-report` and attach the file to a new issue."
+        case .ownershipUnverified:
+            "Stop the VM with `pomme stop NAME`, then retry."
+        }
+    }
 }
 
 /// This evidence gate extends the repository's sole selector namespace; no
@@ -331,9 +379,49 @@ struct PommeRecoveryDurableInputReceipt: Equatable, Sendable {
     }
 }
 
-enum PommeTahoeReviewedInputError: Error, Equatable, Sendable {
+enum PommeTahoeReviewedInputError: PommeDescribedError, Equatable, Sendable {
     case unstablePreEventFrames, unexpectedPreEventFrame, inputOutstanding
     case invalidReceipt, unstablePostEventFrames, unexpectedPostEventFrame, cancelled
+
+    var code: PommeErrorCode {
+        switch self {
+        case .unstablePreEventFrames, .unstablePostEventFrames: .uiRecoveryScreenUnstable
+        case .unexpectedPreEventFrame, .unexpectedPostEventFrame: .uiRecoveryScreenUnrecognized
+        case .inputOutstanding: .uiRecoverySequenceInvalid
+        case .invalidReceipt: .uiRecoveryInputUnconfirmed
+        case .cancelled: .operationCancelled
+        }
+    }
+
+    var errorDescription: String? {
+        switch self {
+        case .unstablePreEventFrames:
+            "The Recovery screen kept changing before Pomme sent the next key, so Pomme didn't send it."
+        case .unexpectedPreEventFrame:
+            "Pomme didn't recognize the Recovery screen before the next key, so it didn't send it."
+        case .inputOutstanding:
+            "Recovery navigation tried to send a key before the previous key was confirmed. This is a bug in Pomme."
+        case .invalidReceipt:
+            "The VM didn't confirm the Recovery key that Pomme sent, so Pomme stopped instead of sending it again."
+        case .unstablePostEventFrames:
+            "The Recovery screen kept changing after Pomme sent a key, so Pomme couldn't confirm the result."
+        case .unexpectedPostEventFrame:
+            "Recovery showed an unexpected screen after Pomme sent a key."
+        case .cancelled:
+            "Recovery navigation was cancelled."
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .unstablePreEventFrames, .unexpectedPreEventFrame:
+            "Run the same command again with `--debug` to save a screenshot before each Recovery action."
+        case .inputOutstanding, .invalidReceipt, .unstablePostEventFrames, .unexpectedPostEventFrame:
+            "Stop the VM with `pomme stop NAME`, then run the same command again."
+        case .cancelled:
+            nil
+        }
+    }
 }
 
 /// Tahoe's sole production input contract: two equal pre-event observations,

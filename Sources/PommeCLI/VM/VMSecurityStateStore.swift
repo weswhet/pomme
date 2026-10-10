@@ -420,7 +420,7 @@ enum VMSecurityStatePreflight {
     }
 }
 
-enum VMSecurityStateStoreError: LocalizedError, Equatable {
+enum VMSecurityStateStoreError: PommeDescribedError, Equatable {
     case malformed
     case insecurePermissions
     case identityMismatch
@@ -428,27 +428,58 @@ enum VMSecurityStateStoreError: LocalizedError, Equatable {
     case notVerifiedComplete
     case invalidPhaseTransition(current: VMSecurityStatePhase, next: VMSecurityStatePhase)
     case alreadyExists
-    case writeFailed(String)
+    /// `message` is a full sentence; `cause` holds the error or errno.
+    case writeFailed(String, PommeRetainedCause = .init())
+
+    /// A write failure for the system call that just failed, with its errno.
+    static func systemCallFailed(_ message: String) -> Self {
+        .writeFailed(message, PommeRetainedCause(NSError(domain: NSPOSIXErrorDomain, code: Int(errno))))
+    }
+
+    var code: PommeErrorCode {
+        switch self {
+        case .malformed, .insecurePermissions, .identityMismatch: .securityStateDamaged
+        case .stale: .securityStateStale
+        case .notVerifiedComplete, .invalidPhaseTransition, .alreadyExists: .securityStateConflict
+        case .writeFailed: .securityStateWriteFailed
+        }
+    }
 
     var errorDescription: String? {
         switch self {
         case .malformed:
-            "Security state is malformed or uses an unsupported schema."
+            "The VM's security state file is damaged, isn't a regular file, or uses an unsupported format."
         case .insecurePermissions:
-            "Security state permissions are not owner-only."
+            "The VM's security state file can be read or written by accounts other than yours."
         case .identityMismatch:
-            "Security state belongs to a different VM identity."
+            "The VM's security state file belongs to a different VM."
         case .stale:
-            "Security state is older than the permitted recovery window."
+            "The VM's security state is more than 24 hours old, so Pomme won't resume from it."
         case .notVerifiedComplete:
-            "Security state cannot be cleared before restoration is verified complete."
-        case .invalidPhaseTransition:
-            "Security state phase transition is invalid."
+            "Pomme can't remove the VM's security state before it verifies the restoration."
+        case .invalidPhaseTransition(let current, let next):
+            "The VM's security state can't move from \(current.rawValue) to \(next.rawValue)."
         case .alreadyExists:
-            "Security state already exists and cannot be replaced."
-        case .writeFailed(let detail):
-            "Could not persist security state: \(detail)"
+            "The VM already has a security state file, and Pomme doesn't replace it."
+        case .writeFailed(let message, let cause):
+            cause.describing(message)
         }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .insecurePermissions:
+            "Make the VM bundle's files private to your account with `chmod`, then retry."
+        case .writeFailed:
+            "Check that the volume that holds the VM has free space and is writable, then retry."
+        default:
+            nil
+        }
+    }
+
+    var underlying: (any Error)? {
+        if case .writeFailed(_, let cause) = self { return cause.underlying }
+        return nil
     }
 }
 
@@ -495,7 +526,7 @@ struct VMSecurityStateStore {
         } catch let error as VMSecurityStateStoreError {
             throw error
         } catch {
-            throw VMSecurityStateStoreError.writeFailed(error.localizedDescription)
+            throw VMSecurityStateStoreError.writeFailed("Pomme couldn't save the VM's security state.", PommeRetainedCause(error))
         }
     }
 
@@ -516,7 +547,7 @@ struct VMSecurityStateStore {
         } catch let error as VMSecurityStateStoreError {
             throw error
         } catch {
-            throw VMSecurityStateStoreError.writeFailed(error.localizedDescription)
+            throw VMSecurityStateStoreError.writeFailed("Pomme couldn't save the VM's security state.", PommeRetainedCause(error))
         }
     }
 
@@ -600,7 +631,7 @@ struct VMSecurityStateStore {
         do {
             try fileManager.removeItem(at: destination)
         } catch {
-            throw VMSecurityStateStoreError.writeFailed(error.localizedDescription)
+            throw VMSecurityStateStoreError.writeFailed("Pomme couldn't remove the VM's security state file.", PommeRetainedCause(error))
         }
     }
 
@@ -631,7 +662,7 @@ struct VMSecurityStateStore {
         let parent = destination.deletingLastPathComponent()
         var parentIsDirectory = ObjCBool(false)
         guard fileManager.fileExists(atPath: parent.path, isDirectory: &parentIsDirectory), parentIsDirectory.boolValue else {
-            throw VMSecurityStateStoreError.writeFailed("bundle directory is unavailable")
+            throw VMSecurityStateStoreError.writeFailed("Pomme couldn't save the VM's security state because the VM bundle directory is missing.")
         }
         let temporary = parent.appendingPathComponent(".SecurityState-\(UUID().uuidString)")
         do {
@@ -660,7 +691,7 @@ struct VMSecurityStateStore {
         let parent = destination.deletingLastPathComponent()
         var parentIsDirectory = ObjCBool(false)
         guard fileManager.fileExists(atPath: parent.path, isDirectory: &parentIsDirectory), parentIsDirectory.boolValue else {
-            throw VMSecurityStateStoreError.writeFailed("bundle directory is unavailable")
+            throw VMSecurityStateStoreError.writeFailed("Pomme couldn't save the VM's security state because the VM bundle directory is missing.")
         }
         let temporary = parent.appendingPathComponent(".SecurityState-create-\(UUID().uuidString)")
         var descriptor: Int32 = -1
@@ -668,14 +699,14 @@ struct VMSecurityStateStore {
         do {
             descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
             guard descriptor >= 0 else {
-                throw VMSecurityStateStoreError.writeFailed("could not create initial security state staging file")
+                throw VMSecurityStateStoreError.systemCallFailed("Pomme couldn't create a temporary security state file.")
             }
             // `open` is filtered through the process umask. Set and prove
             // the exact mode on the opened inode before writing or naming it.
             guard fchmod(descriptor, 0o600) == 0 else {
-                throw VMSecurityStateStoreError.writeFailed("could not set initial security state permissions")
+                throw VMSecurityStateStoreError.systemCallFailed("Pomme couldn't make the temporary security state file private.")
             }
-            try requireSingleOwnerRegularFile(descriptor, context: "initial security state staging file")
+            try requireSingleOwnerRegularFile(descriptor, context: "temporary security state file")
             try data.withUnsafeBytes { bytes in
                 var offset = 0
                 while offset < bytes.count {
@@ -685,7 +716,7 @@ struct VMSecurityStateStore {
                         bytes.count - offset
                     )
                     guard written > 0 else {
-                        throw VMSecurityStateStoreError.writeFailed("could not write initial security state staging file")
+                        throw VMSecurityStateStoreError.systemCallFailed("Pomme couldn't write the temporary security state file.")
                     }
                     offset += written
                 }
@@ -694,7 +725,7 @@ struct VMSecurityStateStore {
             let closed = close(descriptor) == 0
             descriptor = -1
             guard synchronized, closed else {
-                throw VMSecurityStateStoreError.writeFailed("could not synchronize initial security state staging file")
+                throw VMSecurityStateStoreError.systemCallFailed("Pomme couldn't save the temporary security state file to disk.")
             }
             // `link` would temporarily create two names for the mutable
             // inode. Rename-with-exclusive-create publishes the already
@@ -708,16 +739,16 @@ struct VMSecurityStateStore {
                 UInt32(RENAME_EXCL)
             ) == 0 else {
                 if errno == EEXIST { throw VMSecurityStateStoreError.alreadyExists }
-                throw VMSecurityStateStoreError.writeFailed("could not publish initial security state")
+                throw VMSecurityStateStoreError.systemCallFailed("Pomme couldn't move the security state file into place.")
             }
             published = true
             let parentDescriptor = open(parent.path, O_RDONLY | O_DIRECTORY)
             guard parentDescriptor >= 0 else {
-                throw VMSecurityStateStoreError.writeFailed("could not synchronize security state directory")
+                throw VMSecurityStateStoreError.systemCallFailed("Pomme couldn't open the VM bundle to save the security state.")
             }
             defer { close(parentDescriptor) }
             guard fsync(parentDescriptor) == 0 else {
-                throw VMSecurityStateStoreError.writeFailed("could not synchronize published security state")
+                throw VMSecurityStateStoreError.systemCallFailed("Pomme couldn't save the VM bundle directory to disk after it wrote the security state.")
             }
             try requirePublishedSingleOwnerRegularFile(destination)
         } catch {
@@ -742,7 +773,7 @@ struct VMSecurityStateStore {
               value.st_mode & 0o777 == 0o600,
               value.st_nlink == 1
         else {
-            throw VMSecurityStateStoreError.writeFailed("\(context) is not an owner-only unlinked regular file")
+            throw VMSecurityStateStoreError.writeFailed("The \(context) isn't a regular file that only your account can read and write.")
         }
     }
 
@@ -756,11 +787,11 @@ struct VMSecurityStateStore {
               named.st_mode & 0o777 == 0o600,
               named.st_nlink == 1
         else {
-            throw VMSecurityStateStoreError.writeFailed("published initial security state is not owner-only")
+            throw VMSecurityStateStoreError.writeFailed("The new security state file isn't a regular file that only your account can read and write.")
         }
         let descriptor = open(destination.path, O_RDONLY | O_NOFOLLOW)
         guard descriptor >= 0 else {
-            throw VMSecurityStateStoreError.writeFailed("could not reopen published initial security state")
+            throw VMSecurityStateStoreError.systemCallFailed("Pomme couldn't reopen the new security state file to check it.")
         }
         defer { _ = close(descriptor) }
         var opened = stat()
@@ -768,8 +799,8 @@ struct VMSecurityStateStore {
               opened.st_dev == named.st_dev,
               opened.st_ino == named.st_ino
         else {
-            throw VMSecurityStateStoreError.writeFailed("published initial security state changed during validation")
+            throw VMSecurityStateStoreError.writeFailed("The new security state file changed while Pomme checked it.")
         }
-        try requireSingleOwnerRegularFile(descriptor, context: "published initial security state")
+        try requireSingleOwnerRegularFile(descriptor, context: "new security state file")
     }
 }

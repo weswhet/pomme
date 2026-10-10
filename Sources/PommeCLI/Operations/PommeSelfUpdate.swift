@@ -216,11 +216,14 @@ enum PommeReleaseFeed: String, Codable, Sendable {
     }
 }
 
-enum PommeSelfUpdateError: Error, LocalizedError, Equatable {
+enum PommeSelfUpdateError: Error, PommeDescribedError, Equatable {
     case sourceBuild
     case unknownVersion(String)
     case noRelease(PommeReleaseFeed)
     case lookupFailed(String)
+    /// The release lookup request failed. `cause` keeps the network or
+    /// decoding reason.
+    case lookupRequestFailed(cause: PommeErrorReport)
     case updateFailed(command: String, status: Int32)
     case versionMismatch(path: String, expected: String, observed: String?)
 
@@ -242,8 +245,39 @@ enum PommeSelfUpdateError: Error, LocalizedError, Equatable {
             "Couldn't find the newest Pomme release. \(detail)"
         case .updateFailed(let command, let status):
             "Pomme wasn't updated: `\(command)` exited with status \(status)."
+        case .lookupRequestFailed(let cause):
+            "Couldn't find the newest Pomme release: \(PommeErrorDescriber.clause(for: cause))."
         case .versionMismatch(let path, let expected, let observed):
             "The update finished, but \(path) reports version \(observed ?? "nothing") instead of \(expected)."
+        }
+    }
+
+    var code: PommeErrorCode {
+        switch self {
+        case .sourceBuild: .updateSourceBuild
+        case .unknownVersion: .updateUnknownVersion
+        case .noRelease: .updateNoRelease
+        case .lookupFailed, .lookupRequestFailed: .updateLookupFailed
+        case .updateFailed: .updateFailed
+        case .versionMismatch: .updateVersionMismatch
+        }
+    }
+
+    var underlying: (any Error)? {
+        if case .lookupRequestFailed(let cause) = self { return cause }
+        return nil
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .lookupFailed, .lookupRequestFailed:
+            "Check the network connection, then run `pomme update` again."
+        case .updateFailed:
+            "Read the command's output above for the reason, correct it, then run `pomme update` again."
+        case .versionMismatch(let path, _, _):
+            "Run `\(path) --version` to check the installed version, then run `pomme update` again."
+        default:
+            nil
         }
     }
 }
@@ -318,7 +352,7 @@ enum PommeSelfUpdate {
         } catch let error as PommeSelfUpdateError {
             throw error
         } catch {
-            throw PommeSelfUpdateError.lookupFailed(error.localizedDescription)
+            throw PommeSelfUpdateError.lookupRequestFailed(cause: PommeErrorReport(keepingSystemCause: error))
         }
         if let cacheURL = dependencies.cacheURL {
             var cache = PommeUpdateCheckCache.read(from: cacheURL) ?? .init()

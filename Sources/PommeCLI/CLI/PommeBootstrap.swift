@@ -48,13 +48,31 @@ enum PommeBootstrap {
             PommeCore.makeLiveRecoveryIntegrationFactory()
         )
 
+        if arguments == [errorCatalogFlag] {
+            Foundation.exit(printErrorCatalog())
+        }
+
         if arguments == ["--version"] {
             print(PommeBuildInfo.current.versionLine)
             Foundation.exit(0)
         }
 
         let publicArguments = PommeCore.normalizedPublicArguments(arguments)
+        PommeErrorOutput.setInvocation(publicArguments)
         await run(publicArguments)
+    }
+
+    /// Prints the error catalog as JSON for the documentation generator.
+    /// It isn't part of the public command tree.
+    static let errorCatalogFlag = "--pomme-error-catalog"
+
+    static func printErrorCatalog() -> Int32 {
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: PommeErrorCatalog.jsonObject(),
+            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        ) else { return 1 }
+        FileHandle.standardOutput.write(data + Data("\n".utf8))
+        return 0
     }
 
     /// Parses and runs the public command tree. ArgumentParser's `main`
@@ -97,7 +115,16 @@ enum PommeBootstrap {
             Foundation.exit(ExitCode.validationFailure.rawValue)
         } catch {
             session.finish()
-            PommeCLI.exit(withError: error)
+            // An exit code means the command already printed its result, and
+            // a clean exit prints help. ArgumentParser handles both, and its
+            // own errors too, such as the internal one that `help` throws.
+            if error is ExitCode || error is CleanExit
+                || String(reflecting: type(of: error)).hasPrefix("ArgumentParser.") {
+                PommeCLI.exit(withError: error)
+            }
+            let structured: CLIOutputFormat? = options.flatMap { try? $0.resolvedFormat() }
+            PommeErrorOutput.reportThrown(error, structuredFormat: structured)
+            Foundation.exit(ExitCode.failure.rawValue)
         }
     }
 

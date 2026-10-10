@@ -1,13 +1,15 @@
 import Darwin
 import Foundation
 
-struct PommeAgentSessionError: Error, Equatable, LocalizedError, Sendable {
-    let code: String
+/// A failure that the guest agent reported. `wireCode` is the agent's
+/// protocol code; `code` is the Pomme code that output and docs use.
+struct PommeAgentSessionError: Error, Equatable, PommeDescribedError, Sendable {
+    let wireCode: String
     let message: String
 
     init(code: String, message: String) {
         let failure = PommeAgentProtocol.Failure(code: Self.safeCode(code), message: message)
-        self.code = failure.code
+        self.wireCode = failure.code
         self.message = failure.message
     }
 
@@ -15,7 +17,46 @@ struct PommeAgentSessionError: Error, Equatable, LocalizedError, Sendable {
         self.init(code: failure.code, message: failure.message)
     }
 
-    var errorDescription: String? { "Pomme agent request failed (\(code)): \(message)" }
+    var errorDescription: String? {
+        let detail = SystemErrorDescription.sentence(message)
+        return switch code {
+        case .guestCommandNotFound: "The command doesn't exist in the guest. \(detail)"
+        case .guestRecoveryOperationFailed: "The guest agent couldn't complete the Recovery operation. \(detail)"
+        default: "The guest agent couldn't complete the request. \(detail)"
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch code {
+        case .guestCommandNotFound: "Give the full path of an executable that exists in the guest."
+        case .guestOperationUnsupported, .guestAgentUpdatePending: "Update the agent with `pomme agent update NAME`."
+        case .guestAuthenticationFailed: "Run `pomme agent status NAME`, and see `pomme agent repair --help`."
+        default: nil
+        }
+    }
+
+    var code: PommeErrorCode {
+        if PommeRecoveryGuestFailureCode(rawValue: wireCode) != nil { return .guestRecoveryOperationFailed }
+        return switch wireCode {
+        case "command-not-found": .guestCommandNotFound
+        case "not-found": .guestNotFound
+        case "invalid-operation": .guestInvalidRequest
+        case "unsupported-operation": .guestOperationUnsupported
+        case "activation-pending": .guestAgentUpdatePending
+        case "permission-denied": .guestPermissionDenied
+        case "replayed-request", "authentication-required", "authentication-rejected",
+             "authentication-replayed", "credential-expired":
+            .guestAuthenticationFailed
+        case "remote-login-full-disk-access-required": .guestRemoteLoginFullDiskAccessRequired
+        case "remote-login-verification-failed": .guestRemoteLoginVerificationFailed
+        default: .guestOperationFailed
+        }
+    }
+
+    /// The agent's own code and message, so reports keep both.
+    var underlying: (any Error)? {
+        PommeExternalCause(domain: "PommeAgentProtocol", code: wireCode, description: message)
+    }
 
     private static func safeCode(_ code: String) -> String {
         if PommeRecoveryGuestFailureCode(rawValue: code) != nil { return code }
@@ -23,6 +64,7 @@ struct PommeAgentSessionError: Error, Equatable, LocalizedError, Sendable {
         case "replayed-request", "authentication-required", "authentication-rejected",
              "authentication-replayed", "credential-expired", "unsupported-operation",
              "activation-pending", "invalid-operation", "not-found", "operation-failed",
+             "command-not-found", "permission-denied",
              "remote-login-full-disk-access-required", "remote-login-verification-failed":
             return code
         default:

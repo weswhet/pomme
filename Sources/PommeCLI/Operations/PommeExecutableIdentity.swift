@@ -1,11 +1,17 @@
 import CryptoKit
 import Foundation
 
-enum PommeExecutableIdentityError: Error, Equatable, LocalizedError, Sendable {
+enum PommeExecutableIdentityError: Error, Equatable, PommeDescribedError, Sendable {
     case identityRejected
 
+    var code: PommeErrorCode { .executableIdentityRejected }
+
     var errorDescription: String? {
-        "Pomme rejected the running executable's identity evidence."
+        "Pomme couldn't read or verify its own executable file, so it can't pin the agent that it installs."
+    }
+
+    var recoverySuggestion: String? {
+        "Make sure that the `pomme` executable exists and is readable, or reinstall it with `pomme update`, then retry."
     }
 }
 

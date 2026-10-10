@@ -1734,7 +1734,7 @@ enum PommeApplication {
         force: Bool = false, lease inherited: VMBundleMutationLease? = nil
     ) async throws -> PommeOperationResult {
         guard timeout.isFinite, timeout >= 1, timeout <= 300 else {
-            throw RunnerError.invalidControlCommand("mdm timeout must be between 1 and 300 seconds")
+            throw RunnerError.invalidRequest(field: "--timeout", reason: "must be between 1 and 300 seconds.")
         }
         return try await VMBundleMutationLease.withLease(name: name, inherited: inherited) { lease in
             let reference = try namedReference(name)
@@ -1985,7 +1985,8 @@ enum PommeApplication {
                 }
                 details.merge(await helperDiagnostics.snapshot().mapValues(\.publicValue)) { _, new in new }
                 return mdmResult(title: "MDM enrollment", operation: "mdm", reference: reference, ok: false,
-                    agent: [:], steps: [], result: details, error: error.localizedDescription)
+                    agent: [:], steps: [], result: details, error: error.localizedDescription,
+                    errorReport: PommeErrorReport(error))
             }
             let finished = progress.journal
             if finished.finalSecurity == .disabled {
@@ -2224,7 +2225,7 @@ enum PommeApplication {
         onHelperResult: @escaping @Sendable (JSONValue) async throws -> Void
     ) async throws -> PommeOperationResult {
         guard timeout.isFinite, timeout >= 1, timeout <= 300 else {
-            throw RunnerError.invalidControlCommand("mdm.enroll timeout")
+            throw RunnerError.invalidRequest(field: "--timeout", reason: "must be between 1 and 300 seconds.")
         }
         return try await VMBundleMutationLease.withLease(name: name, inherited: lease) { _ in
             let reference = try namedReference(name)
@@ -3305,7 +3306,8 @@ enum PommeApplication {
         agent: [String: Any],
         steps: [[String: Any]],
         result: Any? = nil,
-        error: String? = nil
+        error: String? = nil,
+        errorReport: PommeErrorReport? = nil
     ) -> PommeOperationResult {
         var payload: [String: Any] = [
             "ok": ok,
@@ -3317,6 +3319,7 @@ enum PommeApplication {
         ]
         if let result { payload["result"] = result }
         if let error { payload["error"] = error }
+        if let errorReport { payload[PommeErrorReport.payloadKey] = errorReport.payloadObject }
         return Self.result(
             title: title,
             reference: reference,

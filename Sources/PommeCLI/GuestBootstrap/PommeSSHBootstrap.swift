@@ -2,9 +2,18 @@ import CryptoKit
 import Darwin
 import Foundation
 
-enum PommeSSHBootstrapError: Error, LocalizedError {
+enum PommeSSHBootstrapError: Error, PommeDescribedError {
     case invalid
     case processLaunchFailed, processTimedOut, processExited(Int32)
+
+    var code: PommeErrorCode {
+        switch self {
+        case .invalid: .sshBootstrapInvalid
+        case .processLaunchFailed, .processExited: .sshBootstrapFailed
+        case .processTimedOut: .sshBootstrapTimedOut
+        }
+    }
+
     var errorDescription: String? {
         switch self {
         case .invalid: "The guest bootstrap identity or private artifacts could not be verified."
