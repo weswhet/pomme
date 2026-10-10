@@ -1,0 +1,95 @@
+---
+title: Files and paths
+description: Where Pomme stores its executable, VMs, templates, credentials, and guest components. A map of the dungeon's storage closets.
+---
+
+This page lists the files and directories that Pomme creates on the host and
+in each guest. Consider it the floor plan, Crawler. Look, but don't rearrange
+the furniture.
+
+## Host executable
+
+| Path | Description |
+| --- | --- |
+| `~/.local/bin/pomme` | The executable installed by the install script or a local source build. |
+| `/opt/homebrew/bin/pomme` | The executable installed by Homebrew. |
+| `/usr/local/bin/pomme` | The executable installed by the Pomme package. |
+
+## Host data directory
+
+Pomme stores its data in `~/Library/Application Support/pomme`. To use a
+different directory, set [`POMME_APP_SUPPORT_DIR`](/crawler/reference/environment-variables/#pomme_app_support_dir).
+
+| Path | Description |
+| --- | --- |
+| `VMs/NAME.bundle` | One bundle for each VM. |
+| `Templates/NAME.bundle` | One bundle for each template. |
+| `RestoreImages/` | Downloaded restore images (IPSW files). |
+| `AgentArtifacts/sha256/` | An append-only store of signed Pomme executables, keyed by SHA-256 digest. VM creation adds the executable that it pins, and the local build script adds each build. Recovery installation uses the store to find the exact agent that a VM's journal pins. |
+| `TerminalSessions/` | Transcripts and metadata for durable terminal sessions in normal macOS. |
+| `Runtime/` | Runtime state for running VM helpers. |
+| `RecoveryStaging/`, `RecoveryTerminalBootstrap/` | Temporary, request-bound files that Pomme shares with a VM in Recovery. |
+
+:::danger[Death Notice]
+Deleting a VM bundle or the data directory deletes those VMs permanently.
+Use `pomme delete` and `pomme template delete` instead of removing files. Pomme
+manages only bundles that it created in this directory, and it doesn't adopt
+bundles that you copy in from elsewhere. Crawlers who drag bundles to the Trash
+"to tidy up" provide the System with its favorite kind of silence.
+:::
+
+### VM bundle contents
+
+Each `VMs/NAME.bundle` directory contains the following files:
+
+| File | Description |
+| --- | --- |
+| `Disk.img` | The VM's disk image. |
+| `AuxiliaryStorage` | The VM's auxiliary storage, which holds its NVRAM. |
+| `HardwareModel`, `MachineIdentifier` | The VM's hardware identity. |
+| `Metadata.json` | Pomme's record of the VM: macOS version and build, sizes, agent identity, provisioning route, and template. |
+| `SecurityWorkflowJournal.json` | The journal for SIP and AMFI workflows. It never contains the owner password. |
+| `MDMEnrollmentJournal.json` | The journal for MDM enrollment. |
+| `SaveFile.vzvmsave` | The saved machine state, when present. |
+| `Snapshots/` | Named saved-state snapshots. |
+| `pomme-helper.log` | The log of the VM's background helper process. It starts with the Pomme version, the host's macOS version, and the boot mode, and it records each failed request with its error code. |
+| `pomme-helper.previous.log` | The log of the previous helper process. Pomme moves `pomme-helper.log` here when it starts a new helper. |
+| `.pomme/` | The VM's creation journal and its signing key. After `pomme agent update`, it also holds the signed record of the updated agent's digest. |
+
+Treat these files as internal. Their formats can change between Pomme
+versions. Reading them is fine. Editing them is a plot twist.
+
+## Other host locations
+
+| Location | Description |
+| --- | --- |
+| Login Keychain | Each VM's guest agent credential and owner password, stored under a service name that starts with `com.github.weswhet.pomme.vm` and is scoped to the VM's UUID. The Keychain must be unlocked. |
+| `$TMPDIR/pomme-*.sock` | The Unix socket for each VM's background helper. |
+| `$TMPDIR/pomme-recovery-debug-*` | Screenshots that `--debug` keeps for each automatic Recovery navigation. Pomme doesn't delete them. |
+| `~/Library/Caches/com.github.weswhet.pomme/update-check.json` | The result of the most recent [update check](/crawler/get-started/install/#update-notices). Deleting it only causes another check. |
+| `~/Library/Caches/com.github.weswhet.pomme/last-error.json` | The most recent error that `pomme` reported, with its code, causes, and the command's arguments with private values removed. `pomme bug-report` reads it. Deleting it is safe. |
+
+:::note[System Notice: Souvenirs]
+Pomme doesn't clean up the `--debug` Recovery screenshots for you. Collect
+them, admire them, and delete them yourself when you're done.
+:::
+
+## Guest paths
+
+Pomme installs the following files in each guest's normal macOS:
+
+| Path | Description |
+| --- | --- |
+| `/usr/local/libexec/pomme` | The guest agent executable. |
+| `/Library/LaunchDaemons/com.github.weswhet.pomme.agent.plist` | The launchd job for the guest agent, with the label `com.github.weswhet.pomme.agent`. |
+| `/private/var/db/pomme/agent.token` | The guest agent's private credential. |
+
+The guest agent writes to the unified log under the subsystem
+`com.github.weswhet.pomme`. To read those logs from the host, see
+[View guest agent logs](/crawler/guides/view-guest-logs/).
+
+## What's next
+
+- [Architecture](/crawler/concepts/architecture/)
+- [Guest agent](/crawler/concepts/guest-agent/)
+- [Environment variables](/crawler/reference/environment-variables/)

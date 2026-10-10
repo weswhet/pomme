@@ -1,0 +1,19 @@
+---
+// Adds the Crawler mode switch next to Starlight's light and dark selector.
+// Starlight renders ThemeSelect in the header and in the mobile menu, so the
+// switch appears in both places.
+import Default from '@astrojs/starlight/components/ThemeSelect.astro';
+import CrawlerToggle from './CrawlerToggle.astro';
+---
+
+<div class="theme-and-crawler sl-flex">
+	<Default />
+	<CrawlerToggle />
+</div>
+
+<style>
+	.theme-and-crawler {
+		gap: 1rem;
+		align-items: center;
+	}
+</style>

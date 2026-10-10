@@ -23,6 +23,10 @@ run `curl -fsSL https://pommevm.dev/install.pl | POMME_CHANNEL=alpha perl`.
 - In JSON and JSONL output, every failed result has `errorCode`, `hint`, and
   `causes` fields. For details, see
   [Structured output](/reference/structured-output/#errors).
+- The documentation site has a Crawler mode: the switch next to the theme
+  selector retells the guides in the voice of a sarcastic game-show System.
+  Its facts, commands, and examples match the normal pages, and pages that it
+  doesn't retell show their normal text.
 
 ### Changes
 

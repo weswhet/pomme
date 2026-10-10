@@ -27,6 +27,16 @@ pages use most, including page structure, voice, formatting, and a word list.
 The site checks prose with [Vale](https://vale.sh/) and the Google style
 package.
 
+## Crawler mode
+
+The switch next to the theme selector turns on Crawler mode, which retells
+the guides in the voice of a sarcastic game-show System at
+[`/crawler/`](/crawler/). Crawler mode changes the narration only. Its
+commands, flags, examples, and tables match the normal pages. Pages that it
+doesn't retell, such as the command-line reference, show their normal text
+under a notice. The repository file `Website/CRAWLER_VOICE.md` describes how
+to write and maintain these pages.
+
 ## Command-line reference
 
 The [command-line reference](/reference/cli/) is generated from the help text
@@ -74,4 +84,5 @@ The following commands check and regenerate site content:
 | --- | --- |
 | `npm run lint:style` | Checks every page against the Google style rules. |
 | `npm run reference` | Regenerates the command-line reference from `~/.local/bin/pomme`. To use a different executable, set `POMME_RUNNER` to its absolute path. |
+| `npm run check:crawler` | Checks that each Crawler mode page keeps the code blocks and tables of its normal page, and that its links stay in Crawler mode. |
 | `npm run build` | Builds the static site into `Website/dist` and checks that every page compiles. |

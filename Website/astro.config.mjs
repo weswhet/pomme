@@ -13,14 +13,27 @@ export default defineConfig({
 			description:
 				'Documentation for Pomme, a command-line tool for creating and controlling macOS virtual machines on Apple silicon.',
 			favicon: '/favicon.svg',
+			// Crawler mode is a playful retelling of the docs at /crawler/. It's a
+			// Starlight locale, so pages without a crawler version fall back to
+			// the normal text. See CRAWLER_VOICE.md.
+			defaultLocale: 'root',
+			locales: {
+				root: { label: 'English', lang: 'en' },
+				crawler: { label: 'Crawler', lang: 'en-x-crawler' },
+			},
+			components: {
+				ThemeSelect: './src/components/ThemeSelect.astro',
+				LanguageSelect: './src/components/LanguageSelect.astro',
+			},
 			customCss: ['./src/styles/pomme.css'],
 			lastUpdated: false,
 			pagination: true,
 			tableOfContents: { minHeadingLevel: 2, maxHeadingLevel: 3 },
 			sidebar: [
-				{ label: 'Overview', link: '/' },
+				{ label: 'Overview', translations: { 'en-x-crawler': 'The Lobby' }, link: '/' },
 				{
 					label: 'Get started',
+					translations: { 'en-x-crawler': 'Floor 1: Orientation' },
 					items: [
 						'get-started/requirements',
 						'get-started/install',
@@ -29,6 +42,7 @@ export default defineConfig({
 				},
 				{
 					label: 'Concepts',
+					translations: { 'en-x-crawler': 'Floor 2: Lore' },
 					items: [
 						'concepts/architecture',
 						'concepts/vm-lifecycle',
@@ -40,6 +54,7 @@ export default defineConfig({
 				},
 				{
 					label: 'Create and manage VMs',
+					translations: { 'en-x-crawler': 'Floor 3: Spawning Things' },
 					items: [
 						'guides/create-vms',
 						'guides/use-templates',
@@ -52,6 +67,7 @@ export default defineConfig({
 				},
 				{
 					label: 'Work inside a VM',
+					translations: { 'en-x-crawler': 'Floor 4: Inside the Box' },
 					items: [
 						'guides/run-guest-commands',
 						'guides/use-terminal-sessions',
@@ -61,6 +77,7 @@ export default defineConfig({
 				},
 				{
 					label: 'Security and management',
+					translations: { 'en-x-crawler': 'Floor 5: Boss Mechanics' },
 					items: [
 						'guides/change-sip-and-amfi',
 						'guides/enroll-in-mdm',
@@ -70,19 +87,23 @@ export default defineConfig({
 				},
 				{
 					label: 'Automation',
+					translations: { 'en-x-crawler': 'Floor 6: Bots and Macros' },
 					items: ['guides/automate-the-display', 'guides/script-pomme'],
 				},
 				{
 					label: 'Reference',
+					translations: { 'en-x-crawler': 'The Library of Stats' },
 					items: [
 						{
 							label: 'Command-line reference',
+							translations: { 'en-x-crawler': 'The Spellbook' },
 							collapsed: true,
 							items: [{ autogenerate: { directory: 'reference/cli' } }],
 						},
 						'reference/config-file',
 						'reference/structured-output',
 						'reference/exit-codes',
+						'reference/errors',
 						'reference/environment-variables',
 						'reference/files-and-paths',
 						'reference/key-names',
@@ -90,6 +111,7 @@ export default defineConfig({
 				},
 				{
 					label: 'Resources',
+					translations: { 'en-x-crawler': 'Safe Room' },
 					items: [
 						'resources/troubleshooting',
 						'resources/glossary',

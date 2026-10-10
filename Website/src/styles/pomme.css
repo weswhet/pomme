@@ -15,3 +15,28 @@
 .sl-markdown-content table code {
 	white-space: nowrap;
 }
+
+/*
+ * Crawler mode (lang en-x-crawler): asides read as System notifications.
+ * See CRAWLER_VOICE.md.
+ */
+:root[lang='en-x-crawler'] {
+	--crawler-glow: color-mix(in srgb, var(--sl-color-accent) 45%, transparent);
+}
+
+:root[lang='en-x-crawler'] .starlight-aside {
+	border-inline-start-width: 0.25rem;
+	border-radius: 0.375rem;
+	box-shadow: 0 0 0.75rem var(--crawler-glow);
+}
+
+:root[lang='en-x-crawler'] .starlight-aside__title {
+	font-family: var(--sl-font-mono, var(--sl-font-system-mono));
+	font-size: var(--sl-text-sm);
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+:root[lang='en-x-crawler'] h1#_top {
+	text-shadow: 0 0 1rem var(--crawler-glow);
+}

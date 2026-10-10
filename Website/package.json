@@ -12,7 +12,8 @@
     "lint:style": "vale sync && vale src/content/docs",
     "tailnet": "bash scripts/serve-tailnet.sh start",
     "tailnet:stop": "bash scripts/serve-tailnet.sh stop",
-    "tailnet:status": "bash scripts/serve-tailnet.sh status"
+    "tailnet:status": "bash scripts/serve-tailnet.sh status",
+    "check:crawler": "node scripts/check-crawler-pages.mjs"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.42.4",
@@ -27,5 +28,8 @@
     "sharp@0.35.5": true,
     "sharp@0.34.5": true,
     "@vvago/vale@3.23.0": true
+  },
+  "devDependencies": {
+    "github-slugger": "^2.0.0"
   }
 }
