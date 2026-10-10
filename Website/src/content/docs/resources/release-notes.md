@@ -5,6 +5,12 @@ description: Changes in each version of Pomme.
 
 This page lists changes in each version of Pomme, newest first.
 
+## Pomme 0.2.1 (pre-release)
+
+Pomme 0.2.1 isn't released yet. Each change to the `main` branch that passes
+CI publishes an alpha, such as `0.2.1-alpha.1`. To install the newest alpha,
+run `curl -fsSL https://pommevm.dev/install.pl | POMME_CHANNEL=alpha perl`.
+
 ## Pomme 0.2.0
 
 Pomme 0.2.0 fixes `pomme start` on a paused VM and redraws the progress
