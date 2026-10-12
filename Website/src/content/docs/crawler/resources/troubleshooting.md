@@ -213,6 +213,37 @@ of your source repository, and delete them when you're done. Crawlers who
 commit their debug screenshots get a very public kind of fame.
 :::
 
+### There isn't enough free space to create a VM
+
+**Symptom:** `pomme create`, `pomme create --dry-run`, or
+`pomme template create` stops before it downloads or writes anything:
+
+```text
+Error: There isn't enough free space to create NAME. It needs SIZE on the volume that holds `~/Library/Application Support/pomme/VMs/NAME.bundle`: SIZE to download the restore image and about 35 GB for the installed macOS system. Only SIZE is available. Pomme didn't download or create anything.
+Free at least SIZE on that volume, then retry. Run `pomme list` to find VMs that you no longer need, and delete them with `pomme delete NAME`.
+Error code: host-disk-space-insufficient. For help, see https://pommevm.dev/reference/errors/#host-disk-space-insufficient
+```
+
+**Error code:** [`host-disk-space-insufficient`](/crawler/reference/errors/#host-disk-space-insufficient)
+
+**Cause:** Before it starts, Pomme compares the free space on each volume that
+creation uses, including space that macOS can reclaim, with what the creation
+needs:
+
+- The part of the restore image that isn't downloaded yet. A cached image
+  needs nothing.
+- About 35 GB for the installed macOS system, or the disk size if it's
+  smaller.
+- For a VM cloned from a template, about 5 GB for the clone's own changes, and
+  the template's full size if its volume can't clone files.
+
+For `pomme create --config`, Pomme adds up every VM in the batch.
+
+**Resolution:** Free at least the amount that the message names, then run the
+command again. To see the check without creating anything, run
+`pomme create NAME --dry-run --format json` and read its `diskSpace` field.
+Your inventory is full, Crawler. Drop some loot.
+
 ### The requested memory is too small
 
 **Symptom:** `pomme create` or `pomme create --dry-run` fails with a message

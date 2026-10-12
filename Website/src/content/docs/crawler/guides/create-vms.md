@@ -106,6 +106,15 @@ Keep the following in mind:
   on the host, Pomme also applies the image's own minimum.
 - A VM cloned from a template inherits the template's disk size.
 - A 25 GB disk is too small to install macOS Tahoe.
+- The disk image grows as the guest writes to it, so creation doesn't reserve
+  the whole disk size. Before it downloads or writes anything, Pomme checks
+  that the volume that holds your VMs has room for the rest of the restore
+  image download and about 35 GB for the installed system, or the disk size
+  if it's smaller. A clone of a template needs about 5 GB. If there isn't
+  enough space, creation stops with the
+  [`host-disk-space-insufficient`](/crawler/reference/errors/#host-disk-space-insufficient)
+  error and changes nothing. The System checks your pockets before the ride,
+  not halfway down the drop.
 
 :::caution[Hazard Detected: Undersized Disk]
 Crawlers who give macOS Tahoe a 25 GB disk get a failed install and a very
@@ -140,7 +149,9 @@ pomme create VM_NAME --latest --memory 4GB --dry-run
 ```
 
 Pomme resolves the restore image, applies the same checks as a real creation,
-and prints the plan. A dry run still rejects a memory size below 4 GiB. The
+and prints the plan. A dry run still rejects a memory size below 4 GiB, and
+it rejects a creation that wouldn't fit on the volume. With `--format json`,
+the `diskSpace` field shows the space that each volume needs and has. The
 rehearsal has standards too, Crawler.
 
 ## What happens during creation

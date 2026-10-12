@@ -2473,20 +2473,27 @@ struct PommeCore {
         let firstBootEligible: Bool
     }
 
+    /// - Parameters:
+    ///   - destination: the bundle that the installed system goes into.
+    ///   - subject: how the space check names what's being created.
     private static func restoreImageSource(
         arguments: CLIOptions,
-        vmName: String
+        vmName: String,
+        destination: URL,
+        subject: String
     ) async throws -> ProvisioningSource {
-        PommeProgressContext.sink?.step(vm: vmName, "Resolving restore image")
-        let restoreImageURL = try await resolveCreateRestoreImageURL(arguments, vmName: vmName)
-        PommeProgressContext.sink?.step(vm: vmName, "Verifying restore image")
-        let restoreQualification = try await qualifyRestoreImage(at: restoreImageURL)
-        let canonicalRestoreImage = URL(fileURLWithPath: restoreQualification.identity.canonicalPath)
-        let requirements = restoreQualification.requirements
         let disk = arguments.sizeOptions.diskSizeBytes
         guard disk > 0 else {
             throw RunnerError.invalidSize(flag: "--disk-size", value: String(disk))
         }
+        PommeProgressContext.sink?.step(vm: vmName, "Resolving restore image")
+        let restoreImageURL = try await resolveCreateRestoreImageURL(
+            arguments, vmName: vmName, destination: destination, subject: subject
+        )
+        PommeProgressContext.sink?.step(vm: vmName, "Verifying restore image")
+        let restoreQualification = try await qualifyRestoreImage(at: restoreImageURL)
+        let canonicalRestoreImage = URL(fileURLWithPath: restoreQualification.identity.canonicalPath)
+        let requirements = restoreQualification.requirements
         return .init(
             version: restoreQualification.identity.version,
             build: restoreQualification.identity.build,
@@ -2503,7 +2510,9 @@ struct PommeCore {
 
     private static func templateSource(
         templateName: String,
-        arguments: CLIOptions
+        arguments: CLIOptions,
+        destination: URL,
+        vmName: String
     ) throws -> ProvisioningSource {
         let manifest = try PommeTemplateStore.manifest(for: templateName)
         let bundle = try PommeTemplateStore.bundle(for: templateName)
@@ -2511,6 +2520,7 @@ struct PommeCore {
         guard requested == manifest.diskSizeBytes else {
             throw PommeTemplateError.diskSizeMismatch(template: manifest.diskSizeBytes, requested: requested)
         }
+        try PommeCreationSpace.enforce(templateSpaceNeeds(bundle: bundle, destination: destination), subject: vmName)
         let hardwareModelData = try Data(contentsOf: bundle.hardwareModelURL)
         guard let hardwareModel = VZMacHardwareModel(dataRepresentation: hardwareModelData),
               hardwareModel.isSupported
@@ -2558,9 +2568,15 @@ struct PommeCore {
         let vmName = reference.name ?? reference.bundle.rootURL.deletingPathExtension().lastPathComponent
         let source: ProvisioningSource
         if let templateName = arguments.templateName {
-            source = try templateSource(templateName: templateName, arguments: arguments)
+            source = try templateSource(
+                templateName: templateName, arguments: arguments,
+                destination: reference.bundle.rootURL, vmName: vmName
+            )
         } else {
-            source = try await restoreImageSource(arguments: arguments, vmName: vmName)
+            source = try await restoreImageSource(
+                arguments: arguments, vmName: vmName,
+                destination: reference.bundle.rootURL, subject: vmName
+            )
         }
         let version = source.version
         let build = source.build
@@ -3291,20 +3307,71 @@ struct PommeCore {
         guard fsync(fd) == 0 else { throw PommeSSHBootstrapError.invalid }
     }
 
-    private static func resolveCreateRestoreImageURL(_ arguments: CLIOptions, vmName: String) async throws -> URL {
+    /// Finds the restore image, downloading it when needed. The space check
+    /// runs first, so a volume that's too full costs nothing.
+    private static func resolveCreateRestoreImageURL(
+        _ arguments: CLIOptions,
+        vmName: String,
+        destination: URL,
+        subject: String
+    ) async throws -> URL {
+        let disk = arguments.sizeOptions.diskSizeBytes
         if let path = arguments.restoreImagePath {
             let url = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
             guard isRegularFile(url) else {
                 throw RunnerError.hostCommandFailed("The restore image does not exist: \(url.path)")
             }
+            try PommeCreationSpace.enforce(
+                restoreSpaceNeeds(firmware: nil, diskSizeBytes: disk, destination: destination), subject: subject
+            )
             return url
         }
         let selection = arguments.restoreImageVersionSelection ?? "latest"
-        return try await downloadIPSWFirmware(
-            selection: selection,
-            deviceIdentifier: arguments.ipswDeviceIdentifier,
-            vmName: vmName
-        ).url
+        let firmware = try await resolveIPSWFirmware(selection: selection, deviceIdentifier: arguments.ipswDeviceIdentifier)
+        try PommeCreationSpace.enforce(
+            restoreSpaceNeeds(firmware: firmware, diskSizeBytes: disk, destination: destination), subject: subject
+        )
+        return try await downloadFirmware(firmware, resume: true, vmName: vmName)
+    }
+
+    /// What creating from a restore image needs: the part of `firmware`
+    /// that isn't downloaded yet, and the installed system. A nil firmware
+    /// means a local image, which needs no download.
+    static func restoreSpaceNeeds(
+        firmware: IPSWMEFirmware?,
+        diskSizeBytes: UInt64,
+        destination: URL
+    ) throws -> [PommeCreationSpace.Need] {
+        let directory = try applicationSupportRoot().appendingPathComponent(Constants.restoreImageDirectoryName, isDirectory: true)
+        return PommeCreationSpace.restoreNeeds(
+            downloadBytes: firmware.map { restoreImageBytesToDownload($0, in: directory) } ?? 0,
+            downloadDirectory: directory,
+            diskSizeBytes: diskSizeBytes,
+            destination: destination
+        )
+    }
+
+    /// What creating from the template in `bundle` needs.
+    static func templateSpaceNeeds(bundle: BundleLayout, destination: URL) -> [PommeCreationSpace.Need] {
+        let bytes = [bundle.diskImageURL, bundle.auxiliaryStorageURL, bundle.hardwareModelURL]
+            .compactMap(fileSize)
+            .reduce(UInt64(0)) { $0 + UInt64(max($1, 0)) }
+        return PommeCreationSpace.templateNeeds(template: bundle.diskImageURL, templateBytes: bytes, destination: destination)
+    }
+
+    /// The bytes of `firmware` that a download would still write: none for
+    /// a cached image, and the rest of the file after an interrupted one.
+    static func restoreImageBytesToDownload(_ firmware: IPSWMEFirmware, in directory: URL) -> UInt64 {
+        guard let expected = firmware.filesize, expected > 0,
+              cachedRestoreImageURL(for: firmware, in: directory) == nil
+        else { return 0 }
+        let fileName = URL(string: firmware.url).map(\.lastPathComponent).flatMap { $0.isEmpty ? nil : $0 }
+            ?? "macOS-\(firmware.version)-\(firmware.buildid).ipsw"
+        let partial = fileSize(directory.appendingPathComponent(".\(fileName).part"))
+            ?? fileSize(directory.appendingPathComponent(fileName))
+            ?? 0
+        let done = partial > 0 && partial <= expected ? partial : 0
+        return UInt64(expected - done)
     }
 
     /// Reads a local restore image without starting creation. This is used only
@@ -3397,6 +3464,26 @@ struct PommeCore {
         let identity = try await inspectLocalRestoreImage(path: localPath)
         try validateMemorySize(memoryBytes, minimumGuestMemory: identity.minimumMemoryBytes)
         return DryRunMemoryCheck(minimumBytes: identity.minimumMemoryBytes, provisional: false, restoreImagePath: identity.canonicalPath)
+    }
+
+    /// Applies the space check a real create would apply, without the
+    /// download, and returns the dry run's `diskSpace` field. It throws when
+    /// the real create would stop.
+    static func dryRunSpaceCheck(
+        source: DryRunRestoreSource,
+        diskSizeBytes: UInt64,
+        vmName: String
+    ) throws -> [String: Any] {
+        let destination = try namedBundleURL(for: vmName)
+        let needs: [PommeCreationSpace.Need] = switch source {
+        case .localImage:
+            try restoreSpaceNeeds(firmware: nil, diskSizeBytes: diskSizeBytes, destination: destination)
+        case .firmware(let firmware):
+            try restoreSpaceNeeds(firmware: firmware, diskSizeBytes: diskSizeBytes, destination: destination)
+        case .template(let manifest):
+            templateSpaceNeeds(bundle: try PommeTemplateStore.bundle(for: manifest.name), destination: destination)
+        }
+        return PommeCreationSpace.payload(try PommeCreationSpace.enforce(needs, subject: vmName))
     }
 
     /// The completed cache file for a catalog entry, if one exists. This is
@@ -4000,7 +4087,10 @@ struct PommeCore {
         guard !FileManager.default.fileExists(atPath: bundle.rootURL.path) else {
             throw PommeTemplateError.alreadyExists(validName)
         }
-        let source = try await restoreImageSource(arguments: arguments, vmName: validName)
+        let source = try await restoreImageSource(
+            arguments: arguments, vmName: validName,
+            destination: bundle.rootURL, subject: "template \(validName)"
+        )
         guard let requirements = source.requirements else { throw RunnerError.noSupportedConfiguration }
         let memory = arguments.sizeOptions.memorySizeBytes
         try validateMemorySize(memory, requirements: requirements)

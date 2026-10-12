@@ -26,6 +26,8 @@ depends on:
 - The identity of the signed guest agent, pinned by its SHA-256 digest.
 - At least 4 GiB of guest memory, and the restore image's own minimum when the
   image is already on disk.
+- Enough free space for the rest of the restore image download and the
+  installed system, checked before anything is downloaded or written.
 
 Pomme records these choices as an immutable plan. Every later step, including a
 resume, is checked against the plan. If you run `pomme create --dry-run`, Pomme
