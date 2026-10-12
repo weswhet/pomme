@@ -47,6 +47,12 @@ run `curl -fsSL https://pommevm.dev/install.pl | POMME_CHANNEL=alpha perl`.
   every failed request with its error code.
 - `pomme log --last` and other flags report the flag and the rule that a value
   broke, instead of an unknown control command.
+- `pomme create` and `pomme template create` check free space before they
+  download or write anything, and stop with the `host-disk-space-insufficient`
+  error when a volume doesn't have room for the rest of the restore image and
+  the installed system. A config batch is checked as a whole. Before, creation
+  could download and install for a long time before it ran out of space. A
+  dry run reports the check in its `diskSpace` field.
 
 ## Pomme 0.2.0
 

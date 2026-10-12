@@ -97,6 +97,7 @@ extension PommeErrorCode {
     static let fileError: Self = "file-error"
     static let hostFileUnavailable: Self = "host-file-unavailable"
     static let hostDiskFull: Self = "host-disk-full"
+    static let hostDiskSpaceInsufficient: Self = "host-disk-space-insufficient"
     static let hostUnsupported: Self = "host-unsupported"
     static let hostUpdateRequired: Self = "host-update-required"
     static let hostCommandFailed: Self = "host-command-failed"
@@ -177,6 +178,11 @@ extension PommeErrorCatalog {
               cause: "The volume that holds your VMs, or the volume that Pomme was writing to, has no free space.",
               resolution: ["Free space on the volume. Each macOS VM needs as much free space as its disk size, which is at least 40 GB.", "Run `pomme list` and delete VMs that you no longer need with `pomme delete NAME`."],
               hint: "Free space on the volume that holds your VMs, then retry."),
+        .init(.hostDiskSpaceInsufficient, area: "General",
+              title: "There isn't enough free space to create the VM.",
+              cause: "Before it downloads or writes anything, `pomme create` and `pomme template create` compare the free space on each volume they use with what the creation needs: the rest of the restore image download, about 35 GB for an installed macOS system (or the disk size, if it's smaller), and, for a VM cloned from a template, about 5 GB for the clone's own changes. The message lists each part.",
+              resolution: ["Free at least the amount that the hint names on that volume.", "Run `pomme list` and delete VMs that you no longer need with `pomme delete NAME`.", "Run `pomme create --dry-run` to see the space check without creating anything."],
+              hint: "Free space on the volume that the message names, then retry."),
         .init(.hostUnsupported, area: "General",
               title: "This Mac can't run Pomme VMs.",
               cause: "Virtualization.framework isn't available. Pomme needs a Mac with Apple silicon.",
