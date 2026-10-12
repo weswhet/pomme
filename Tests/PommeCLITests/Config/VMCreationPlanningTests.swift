@@ -197,15 +197,42 @@ struct VMCreationPlanningTests {
         #expect(await installs.value == 0)
     }
 
+    @Test("A batch that doesn't fit stops before any member installs, in a dry run too")
+    func batchSpacePreflight() async throws {
+        let installs = InstallCounter()
+        let plans = ["a", "b"].map { name in
+            VMCreationPlan(
+                name: "lab-\(name)", selector: name,
+                firmware: firmware(version: name, build: "B-\(name)"),
+                config: sampleConfig(),
+                recoveryProfile: PommeRecoveryProfileSelector.tahoe2660Build25G72
+            )
+        }
+        let executor = VMCreationExecutor(dependencies: .init(
+            install: { plan in
+                await installs.increment()
+                return operationResult(name: plan.name, ok: true)
+            },
+            batchPreflight: { _ in throw TestFailure.failed }
+        ))
+        for dryRun in [false, true] {
+            await #expect(throws: TestFailure.self) {
+                _ = try await executor.execute(plans, dryRun: dryRun, parallelism: 2)
+            }
+        }
+        #expect(await installs.value == 0)
+    }
+
     @Test("Live config dry-run discloses provisioning without credentials", arguments: ["27.0", "26.6.0"])
     func liveDryRunProvisioningDisclosure(version: String) async throws {
         // The live preflight checks memory against this host's Virtualization
         // limit, which is its physical memory: 7 GiB on GitHub's runners. Use
-        // the 4 GB floor so the result doesn't depend on the host.
+        // the 4 GB floor so the result doesn't depend on the host. A 1 GB
+        // disk keeps the space check within any runner's free space.
         let plan = VMCreationPlan(
             name: "lab-\(version)", selector: version,
             firmware: firmware(version: version, build: "dry-run-\(UUID().uuidString)"),
-            config: sampleConfig(memory: "4GB"),
+            config: sampleConfig(memory: "4GB", diskSize: "1GB"),
             recoveryProfile: PommeRecoveryProfileSelector.tahoe2660Build25G72
         )
         let executor = VMCreationExecutor(dependencies: .init(
@@ -224,19 +251,23 @@ struct VMCreationPlanningTests {
         #expect(result.payload["automaticLogin"] as? String == (virtualization ? "enabled" : "legacy"))
         #expect(result.payload["remoteLogin"] as? String == (virtualization ? "off" : "legacy"))
         #expect(result.payload["account"] as? String == (virtualization ? "pomme" : nil))
+        let diskSpace = try #require(result.payload["diskSpace"] as? [String: Any])
+        // One byte left to download, plus the installed system capped at the 1 GB disk.
+        let required = try #require((diskSpace["requiredBytes"] as? NSNumber)?.uint64Value)
+        #expect(required == UInt64(1 + 1_073_741_824))
         let rendered = String(decoding: try JSONSerialization.data(withJSONObject: result.payload), as: UTF8.self)
         for secretField in ["password", "agentToken", "ownerCredential", "keychain", "bootstrapRequest"] {
             #expect(!rendered.localizedCaseInsensitiveContains(secretField))
         }
     }
 
-    private func sampleConfig(memory: String = "12GB") -> VMCreationConfigV1 {
+    private func sampleConfig(memory: String = "12GB", diskSize: String = "64GB") -> VMCreationConfigV1 {
         VMCreationConfigV1(
             schemaVersion: 1,
             name: "lab",
             versions: ["latest", "26.6.0"],
             ipswDevice: "VirtualMac2,1",
-            hardware: .init(diskSize: "64GB", memory: memory),
+            hardware: .init(diskSize: diskSize, memory: memory),
             credentials: nil,
             workflow: nil,
             mdm: nil,

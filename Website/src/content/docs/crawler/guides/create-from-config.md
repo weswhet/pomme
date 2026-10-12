@@ -166,6 +166,11 @@ every negotiation tactic.
 
 ### Preview the batch
 
+Before it creates any VM, Pomme checks that the volume has free space for
+every VM in the batch together, so that VMs that each fit alone can't run out
+of space partway through. If they don't fit, no VM is created. The System
+doesn't sell tickets for seats it doesn't have.
+
 To run the preflight checks and print the plan without creating any VMs, add
 `--dry-run`:
 

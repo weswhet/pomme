@@ -455,13 +455,19 @@ struct VMCreationExecutionDependencies: Sendable {
     /// Checks a plan without installing it and returns payload fields for the
     /// dry-run result. It throws for a plan the real create would refuse.
     let dryRunPreflight: @Sendable (VMCreationPlan) async throws -> [String: Any]
+    /// Checks the whole batch before any member starts, so that members
+    /// which each fit alone can't run out of space together. It throws for
+    /// a batch the real create would refuse.
+    let batchPreflight: @Sendable ([VMCreationPlan]) throws -> Void
 
     init(
         install: @escaping @Sendable (VMCreationPlan) async throws -> PommeOperationResult,
-        dryRunPreflight: @escaping @Sendable (VMCreationPlan) async throws -> [String: Any] = { _ in [:] }
+        dryRunPreflight: @escaping @Sendable (VMCreationPlan) async throws -> [String: Any] = { _ in [:] },
+        batchPreflight: @escaping @Sendable ([VMCreationPlan]) throws -> Void = { _ in }
     ) {
         self.install = install
         self.dryRunPreflight = dryRunPreflight
+        self.batchPreflight = batchPreflight
     }
 
     static let live = VMCreationExecutionDependencies(
@@ -473,14 +479,40 @@ struct VMCreationExecutionDependencies: Sendable {
                 source: .firmware(plan.firmware),
                 vmName: plan.name
             )
-            var payload: [String: Any] = ["memoryMinimum": check.payload]
+            let diskSpace = try PommeCore.dryRunSpaceCheck(
+                source: .firmware(plan.firmware),
+                diskSizeBytes: plan.diskSizeBytes,
+                vmName: plan.name
+            )
+            var payload: [String: Any] = ["memoryMinimum": check.payload, "diskSpace": diskSpace]
             payload.merge(PommeCore.provisioningDisclosure(
                 virtualization: PommeCore.usesVirtualizationProvisioning(
                     guestVersion: plan.firmware.version, firstBootEligible: true)
             )) { _, new in new }
             return payload
+        },
+        batchPreflight: { plans in
+            guard plans.count > 1 else { return }
+            var needs: [PommeCreationSpace.Need] = []
+            var downloads = Set<String>()
+            for plan in plans {
+                let firmware = downloads.insert(plan.firmware.url).inserted ? plan.firmware : nil
+                needs += try PommeCore.restoreSpaceNeeds(
+                    firmware: firmware,
+                    diskSizeBytes: plan.diskSizeBytes,
+                    destination: try namedBundleURL(for: plan.name)
+                )
+            }
+            try PommeCreationSpace.enforce(needs, subject: "the \(plans.count) VMs in this config")
         }
     )
+}
+
+extension VMCreationPlan {
+    /// The member's disk size, as `configuredCreate` applies it.
+    var diskSizeBytes: UInt64 {
+        config.hardware?.diskSize.flatMap(ByteSizeParser.parse) ?? Constants.defaultDiskSizeBytes
+    }
 }
 
 struct VMCreationExecutor: Sendable {
@@ -498,6 +530,7 @@ struct VMCreationExecutor: Sendable {
         guard (1...Self.maximumParallelism).contains(parallelism) else {
             throw RunnerError.hostCommandFailed("Parallel creation runs at most \(Self.maximumParallelism) VMs at once.")
         }
+        try dependencies.batchPreflight(plans)
         if dryRun {
             var results: [PommeOperationResult] = []
             for plan in plans { results.append(await dryRunResult(plan)) }

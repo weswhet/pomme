@@ -236,6 +236,11 @@ struct CreateCommand: AsyncParsableCommand {
             source: memorySource,
             vmName: vmName
         )
+        let diskSpace = try PommeCore.dryRunSpaceCheck(
+            source: memorySource,
+            diskSizeBytes: ByteSizeParser.parse(diskSize) ?? 0,
+            vmName: vmName
+        )
         var payload: [String: Any] = [
             "ok": true,
             "dryRun": true,
@@ -246,6 +251,7 @@ struct CreateCommand: AsyncParsableCommand {
             "diskSize": diskSize,
             "memory": memory,
             "memoryMinimum": memoryCheck.payload,
+            "diskSpace": diskSpace,
             "boot": boot.rawValue,
             "recoveryProfile": [
                 "id": selectedProfile.id,
@@ -276,6 +282,11 @@ struct CreateCommand: AsyncParsableCommand {
             source: .template(manifest),
             vmName: vmName
         )
+        let diskSpace = try PommeCore.dryRunSpaceCheck(
+            source: .template(manifest),
+            diskSizeBytes: manifest.diskSizeBytes,
+            vmName: vmName
+        )
         var payload: [String: Any] = [
             "ok": true,
             "dryRun": true,
@@ -286,6 +297,7 @@ struct CreateCommand: AsyncParsableCommand {
             "diskSize": manifest.diskSizeBytes,
             "memory": memory,
             "memoryMinimum": memoryCheck.payload,
+            "diskSpace": diskSpace,
             "boot": boot.rawValue,
             "recoveryProfile": [
                 "id": descriptor.id,
