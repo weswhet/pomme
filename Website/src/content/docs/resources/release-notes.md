@@ -5,11 +5,14 @@ description: Changes in each version of Pomme.
 
 This page lists changes in each version of Pomme, newest first.
 
-## Pomme 0.2.2 (pre-release)
+## Pomme 0.2.2
 
-Pomme 0.2.2 isn't released yet. Each change to the `main` branch that passes
-CI publishes an alpha, such as `0.2.2-alpha.1`. To install the newest alpha,
-run `curl -fsSL https://pommevm.dev/install.pl | POMME_CHANNEL=alpha perl`.
+Pomme 0.2.2 lets an MDM-enrolled VM on macOS 27 receive push commands.
+Like 0.2.1, it's beta software, and it was released before the release
+qualification matrices for Tahoe and Sequoia ran. For what qualification
+covers, see
+[Supported macOS versions](/concepts/os-qualification/#release-qualification).
+To update, run `pomme update`.
 
 ### Fixes
 
