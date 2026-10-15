@@ -5,6 +5,12 @@ description: Changes in each version of Pomme.
 
 This page lists changes in each version of Pomme, newest first.
 
+## Pomme 0.2.3 (pre-release)
+
+Pomme 0.2.3 isn't released yet. Each change to the `main` branch that passes
+CI publishes an alpha, such as `0.2.3-alpha.1`. To install the newest alpha,
+run `curl -fsSL https://pommevm.dev/install.pl | POMME_CHANNEL=alpha perl`.
+
 ## Pomme 0.2.2
 
 Pomme 0.2.2 lets an MDM-enrolled VM on macOS 27 receive push commands.
