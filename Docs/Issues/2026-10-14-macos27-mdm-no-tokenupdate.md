@@ -349,7 +349,7 @@ the RackNerd VPS, Let's Encrypt cert) → Tailscale → `tailscale serve` on cww
 - **Command used:** `pomme mdm <name> --profile <file> --from-template
   <template> --memory 4GB --force`, defaults otherwise (supervised enrollment,
   `--final-security restore`).
-- **Profiles:** made by `scripts/create-tiddly-profile.sh`. Each has a software
+- **Profiles:** made by the lab's profile script in `nanohub-acme-docker`. Each has a software
   PKCS#12 identity from the lab step-ca, the lab root CA, and an MDM payload
   with `SignMessage=true` and APNs topic
   `com.apple.mgmt.External.80fac23a-bb6d-48e0-b107-a7eb58cd1e95`. There's no
@@ -556,5 +556,5 @@ curl -u nanohub:$KEY -X PUT --data-binary @DeviceInformation.plist http://127.0.
 
 **Profiles:** one per VM; never reuse. On the Mac, open a tunnel to step-ca
 first: `ssh -f -N -L 9443:127.0.0.1:9443 plex`. Then run
-`~/dev/nanohub-acme-docker/scripts/create-tiddly-profile.sh <vm-name>`.
+the lab's profile script in `~/dev/nanohub-acme-docker/scripts/` with the VM name.
 `MDM_SERVER_URL` in `.env` already points profiles at the public URL.
