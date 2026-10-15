@@ -193,10 +193,15 @@ extension PommeApplication {
     ) async -> PommeMDMReadiness.Facts {
         guard let reference = try? namedReference(request.name, requireExists: false),
               FileManager.default.fileExists(atPath: reference.bundle.rootURL.path) else {
-            return .init(vmExists: false, provisioning: nil, runState: .unknown)
+            var facts = PommeMDMReadiness.Facts(vmExists: false, provisioning: nil, runState: .unknown)
+            if case .template(let template) = request.creation?.source {
+                facts.guestVersion = (try? PommeTemplateStore.manifest(for: template))?.version
+            }
+            return facts
         }
         var facts = PommeMDMReadiness.Facts()
         facts.provisioning = PommeCore.provisioningReadiness(reference: reference)
+        facts.guestVersion = (try? PommeCore.loadOwnedProvisioningPlan(reference: reference))?.restore.version
         facts.runState = (try? PommeCore.stableVMRunState(reference: reference)).map(PommeMDMReadiness.RunState.init)
             ?? .unknown
         facts.pendingSnapshotRestore = facts.runState == .stopped

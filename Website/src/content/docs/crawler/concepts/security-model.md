@@ -161,7 +161,10 @@ configuration profile that you provide. It works from any VM state: it creates
 the VM if it doesn't exist, finishes an incomplete creation or a retained SIP
 or AMFI operation, turns off only the security settings that enrollment needs,
 and enrolls. After enrollment, it restores the original SIP and AMFI settings,
-unless you ask it to leave them off with `--final-security disabled`.
+unless you ask it to leave them off with `--final-security disabled`. On
+macOS 27, it restores AMFI but leaves SIP off, because the guest needs SIP off
+to receive MDM push commands. For details, see
+[Receive push commands on macOS 27](/crawler/guides/enroll-in-mdm/#receive-push-commands-on-macos-27).
 
 Enrollment is supervised and user approved by default. The
 `--enrollment-mode unapproved` flag selects enrollment without approval or

@@ -1384,6 +1384,13 @@ enum PommeApplication {
             let reference = try namedReference(name)
             try requireMDMWorkflowAvailable(reference: reference, lease: acquiredLease)
             if action != .status {
+                if action == .enable, PommeMDMChildScope.vmName == nil,
+                   let version = try? PommeCore.loadOwnedProvisioningPlan(reference: reference).restore.version,
+                   PommeMDMWorkflowSecurityBaseline.requiresKeystoreInitializer(guestVersion: version),
+                   (try? PommeMDMEnrollmentJournalStore(bundleURL: reference.bundle.rootURL)
+                       .loadIfPresent(lease: acquiredLease))??.enrollmentVerified == true {
+                    progressWarning("This macOS 27 VM is enrolled in MDM. With SIP enabled, the Pomme agent can't run the keystore initializer, so the guest stops receiving MDM push commands after its next restart.", vmName: name)
+                }
                 PommeProgressContext.sink?.step(vm: name, action == .enable ? "Enabling SIP" : "Disabling SIP")
                 let operation: PommeSecurityWorkflowOperation = action == .enable ? .sipEnable : .sipDisable
                 let payload = try await PommeSecurityWorkflow.runLive(
@@ -1777,6 +1784,8 @@ enum PommeApplication {
             let journal = try store.begin(
                 identity: identity, profile: profile, agentSHA256: try PommeCore.currentNormalAgentDigest(plan: plan),
                 enrollmentMode: enrollmentMode, finalSecurity: finalSecurity,
+                sipRetainedForPushIdentity: PommeMDMWorkflowSecurityBaseline.retainsSIPForPushIdentity(
+                    guestVersion: plan.restore.version, finalSecurity: finalSecurity),
                 originalRunState: PommeCore.stableVMRunState(reference: reference),
                 ownedArtifacts: [workspace.helperPath, workspace.requestPath, workspace.entitlementsPath,
                     "/private/var/db/pomme-mdm-bootstrap-\(requestID.uuidString.lowercased()).bin", profileDestination],
@@ -1785,6 +1794,9 @@ enum PommeApplication {
             let progress = PommeMDMWorkflowProgress(journal, store: store, lease: lease)
             let lastObservation = PommeMDMLastObservation()
             let helperDiagnostics = PommeMDMHelperDiagnostics()
+            let pushIdentityBox = PommeKeystoreInitReportBox()
+            let requiresKeystoreInitializer = PommeMDMWorkflowSecurityBaseline.requiresKeystoreInitializer(
+                guestVersion: plan.restore.version)
             let artifacts = try mdmArtifacts(journal)
             if let guestPath, guestPath != artifacts.profile {
                 throw PommeMDMEnrollmentWorkflowError.journalIdentityMismatch
@@ -1894,6 +1906,11 @@ enum PommeApplication {
                     }
                 },
                 restoreRunState: { state in
+                    // Security restoration ended in normal macOS, so the agent
+                    // can report this boot's initializer before a stop or pause.
+                    if requiresKeystoreInitializer {
+                        await pushIdentityBox.record(await mdmPushIdentityPreparation(reference: reference, timeout: timeout))
+                    }
                     try await PommeCore.restoreStableVMRunState(state, reference: reference)
                     guard try PommeCore.provesStableVMRunState(state, reference: reference) else {
                         throw PommeMDMWorkflowFailure.restorationIncomplete
@@ -1992,11 +2009,22 @@ enum PommeApplication {
             if finished.finalSecurity == .disabled {
                 progressWarning("MDM final security: disabled. SIP/AMFI settings this enrollment turned off remain off; re-enable with `pomme amfi enable` and then `pomme sip enable`.", vmName: name)
             }
+            let sipRetained = finished.sipRetainedForPushIdentity && finished.sipChangeRequested
+            if sipRetained {
+                progressWarning("SIP stays disabled on macOS 27 so that the guest can receive MDM push commands. The Pomme agent runs the keystore initializer that macOS skips in a VM, and it can't run with SIP enabled. `pomme sip enable` stops push delivery after the next restart.", vmName: name)
+            }
+            let pushIdentity = requiresKeystoreInitializer
+                ? await pushIdentityBox.report ?? .init(state: "unavailable", reason: nil) : nil
+            if let pushIdentity, pushIdentity.state != "prepared" {
+                progressWarning("The guest may not receive MDM push commands: the keystore initializer \(pushIdentity.summary). See `pomme mdm --help` and the macOS 27 section of the MDM guide.", vmName: name)
+            }
             var details: [String: Any] = [
                 "enrollmentMode": enrollmentMode.rawValue, "profileIdentifier": profile.identifier,
                 "enrolled": observed.status.enrolled, "userApproved": observed.status.userApproved,
                 "supervised": observed.supervised, "finalSecurity": finished.finalSecurity.rawValue,
-                "securityFinalized": true, "securityRestored": finished.finalSecurity == .restore,
+                "securityFinalized": true, "securityRestored": finished.finalSecurity == .restore && !sipRetained,
+                "sipRetainedForPushIdentity": sipRetained,
+                "pushIdentity": pushIdentity?.state ?? "notRequired",
                 "sipDisabled": PommeMDMWorkflowSecurityBaseline.expectedFinalSIPDisabled(finished) as Any? ?? NSNull(),
                 "amfiDisabled": PommeMDMWorkflowSecurityBaseline.expectedFinalAMFIDisabled(finished) as Any? ?? NSNull(),
                 "runStateRestored": true, "artifactsCleaned": true
@@ -2378,6 +2406,31 @@ enum PommeApplication {
     static func authenticatedOperationFailure(response: [String: Any]) -> RunnerError {
         let message = (response["error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         return .hostCommandFailed(message ?? "The authenticated PommeAgent operation did not complete.")
+    }
+
+    /// Reads the guest agent's keystore-initializer receipt for this boot.
+    /// The result is reported, never enforced: enrollment itself has already
+    /// been verified when this runs.
+    static func mdmPushIdentityPreparation(
+        reference: VMReference, timeout: TimeInterval
+    ) async -> PommeKeystoreInitReport {
+        do {
+            let description = try await authenticatedMDMAgentDescription(reference: reference, timeout: timeout)
+            guard description.capabilities.contains(PommeAgent.keystoreInitStatusOperation) else {
+                return .init(state: "agentUpdateRequired", reason: nil)
+            }
+            let deadline = Date().addingTimeInterval(min(max(timeout, 1), 60))
+            while true {
+                let value = try performAuthenticatedAgentOperation(
+                    reference: reference, operation: PommeAgent.keystoreInitStatusOperation)
+                let report = PommeKeystoreInitReport(value)
+                // A receipt still being written settles within seconds of boot.
+                guard report.state == "pending", Date() < deadline else { return report }
+                try await Task.sleep(nanoseconds: 500_000_000)
+            }
+        } catch {
+            return .init(state: "unavailable", reason: nil)
+        }
     }
 
     static func authenticatedMDMAgentDescription(

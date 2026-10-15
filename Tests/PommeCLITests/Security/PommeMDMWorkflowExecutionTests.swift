@@ -527,6 +527,48 @@ struct PommeMDMWorkflowExecutionTests {
         #expect(await restoredStates.values() == [scenario.runState])
     }
 
+    @Test("A run that retains SIP for push identity restores only AMFI", arguments: OriginalWorkflowScenario.allCases)
+    fileprivate func retainedSIPRestoresOnlyAMFI(scenario: OriginalWorkflowScenario) async throws {
+        let fixture = try WorkflowFixture.make()
+        defer { fixture.remove() }
+        let progress = try fixture.progress(
+            mode: .supervised, sipRetainedForPushIdentity: true, originalRunState: scenario.runState,
+            sipWasDisabled: scenario.sipWasDisabled, amfiWasDisabled: scenario.amfiWasDisabled
+        )
+        let events = EventRecorder()
+        let restoredStates = RunStateRecorder()
+        let final = fixture.observed(enrolled: true, userApproved: true, supervised: true)
+        let execution = makeExecution(
+            fixture: fixture, progress: progress, events: events, restoredStates: restoredStates,
+            observations: [fixture.observed(enrolled: false, userApproved: false, supervised: false, installed: false),
+                           fixture.observed(enrolled: false, userApproved: false, supervised: false, installed: false)],
+            awaited: [final, final],
+            baseline: makeBaseline(sipDisabled: scenario.sipWasDisabled,
+                                   amfiDisabled: scenario.amfiWasDisabled, activeByte: 15)
+        )
+
+        _ = try await execution.run()
+
+        var expected: [PommeSecurityWorkflowOperation] = []
+        if !scenario.sipWasDisabled { expected.append(.sipDisable) }
+        if !scenario.amfiWasDisabled { expected.append(contentsOf: [.amfiDisable, .amfiEnable]) }
+        #expect(securityOperations(await events.values()) == expected)
+        #expect(await restoredStates.values() == [scenario.runState])
+        #expect(PommeMDMWorkflowSecurityBaseline.expectedFinalSIPDisabled(progress.journal) == true)
+        #expect(PommeMDMWorkflowSecurityBaseline.expectedFinalAMFIDisabled(progress.journal) == scenario.amfiWasDisabled)
+    }
+
+    @Test("Only a restore on macOS 27 or later retains SIP for push identity")
+    func retainsSIPForPushIdentityTable() {
+        for (version, expected) in [("27.0", true), ("27.2", true), ("28.1.1", true), ("26.6.2", false),
+                                    ("15.7.9", false), ("", false), ("latest", false)] {
+            #expect(PommeMDMWorkflowSecurityBaseline.retainsSIPForPushIdentity(
+                guestVersion: version, finalSecurity: .restore) == expected)
+            #expect(!PommeMDMWorkflowSecurityBaseline.retainsSIPForPushIdentity(
+                guestVersion: version, finalSecurity: .disabled))
+        }
+    }
+
     @Test("Disabled final security runs no restoration children for any original combination",
           arguments: OriginalWorkflowScenario.allCases)
     fileprivate func disabledFinalSecurityKeepsPreparation(scenario: OriginalWorkflowScenario) async throws {
@@ -629,6 +671,23 @@ struct PommeMDMWorkflowExecutionTests {
         #expect(PommeMDMWorkflowSecurityBaseline.finalSecurityMatches(sipOnly, sipDisabled: true,
             activeBootArguments: original, configuredBootArguments: originalConfigured))
         #expect(!PommeMDMWorkflowSecurityBaseline.finalSecurityMatches(sipOnly, sipDisabled: true,
+            activeBootArguments: overridden, configuredBootArguments: overriddenConfigured))
+
+        // A retained-SIP restore keeps the prepared SIP change and restores AMFI exactly.
+        let retained = try PommeMDMEnrollmentJournal(
+            generation: 1, identity: fixture.identity, profile: fixture.profile,
+            agentSHA256: fixture.agentDigest, enrollmentMode: .supervised, finalSecurity: .restore,
+            sipRetainedForPushIdentity: true,
+            originalRunState: .stopped, sipWasDisabled: false, amfiWasDisabled: false,
+            sipChangeRequested: true, amfiChangeRequested: true,
+            normalBootArguments: original, configuredBootArguments: originalConfigured,
+            ownedArtifacts: [], phase: .securityRestorationIntent,
+            createdAt: fixture.date, updatedAt: fixture.date)
+        #expect(PommeMDMWorkflowSecurityBaseline.finalSecurityMatches(retained, sipDisabled: true,
+            activeBootArguments: original, configuredBootArguments: originalConfigured))
+        #expect(!PommeMDMWorkflowSecurityBaseline.finalSecurityMatches(retained, sipDisabled: false,
+            activeBootArguments: original, configuredBootArguments: originalConfigured))
+        #expect(!PommeMDMWorkflowSecurityBaseline.finalSecurityMatches(retained, sipDisabled: true,
             activeBootArguments: overridden, configuredBootArguments: overriddenConfigured))
 
         // Nothing was prepared: disabled final security leaves the found state.
@@ -815,6 +874,7 @@ private struct WorkflowFixture {
     func progress(
         mode: MDMEnrollmentMode,
         finalSecurity: MDMFinalSecurity = .restore,
+        sipRetainedForPushIdentity: Bool = false,
         originalRunState: VMRunStateSnapshot,
         sipWasDisabled: Bool?,
         amfiWasDisabled: Bool?,
@@ -826,7 +886,8 @@ private struct WorkflowFixture {
     ) throws -> PommeMDMWorkflowProgress {
         var journal = try store.begin(
             identity: identity, profile: profile, agentSHA256: agentDigest,
-            enrollmentMode: mode, finalSecurity: finalSecurity, originalRunState: originalRunState,
+            enrollmentMode: mode, finalSecurity: finalSecurity,
+            sipRetainedForPushIdentity: sipRetainedForPushIdentity, originalRunState: originalRunState,
             sipWasDisabled: sipWasDisabled, amfiWasDisabled: amfiWasDisabled,
             ownedArtifacts: [], lease: lease, now: date
         )

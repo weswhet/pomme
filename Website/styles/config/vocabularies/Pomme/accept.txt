@@ -56,3 +56,5 @@ jq
 loadouts?
 respawns?
 rulebooks?
+[Ii]nitializers?
+[Kk]eystore

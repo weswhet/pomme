@@ -274,14 +274,19 @@ enum PommeAgentDaemon {
             }
             var terminalAdmissionAuthenticated = false
             let buddyPreferences = options.role == .persistent ? PommeBuddyPreferencesMaintenance() : nil
+            let keystoreInit = options.role == .persistent ? PommeKeystoreInitMaintenance() : nil
             let agent = try PommeAgent(
                 role: options.role,
                 executableSHA256: executableSHA256,
                 buddyPreferences: buddyPreferences,
+                keystoreInit: keystoreInit,
                 authority: options.terminalAuthority ? .recoveryTerminal : .standard
             )
+            // The keystore initializer starts first: apsd retries its push
+            // identity shortly after the system keybag is mapped.
+            let keystoreTask = startKeystoreInit(role: options.role, maintenance: keystoreInit)
             let maintenanceTask = startBuddyMaintenance(role: options.role, maintenance: buddyPreferences)
-            defer { maintenanceTask?.cancel() }
+            defer { maintenanceTask?.cancel(); keystoreTask?.cancel() }
             while true {
                 let descriptor = try connectForRole(role: options.role, port: options.port)
                 let lifetime: PommeAgentConnection.CredentialLifetime = options.terminalAuthority
@@ -361,6 +366,15 @@ enum PommeAgentDaemon {
     static func startBuddyMaintenance(
         role: PommeAgentRole,
         maintenance: PommeBuddyPreferencesMaintenance?
+    ) -> Task<Void, Never>? {
+        guard role == .persistent, let maintenance else { return nil }
+        return Task.detached { await maintenance.run() }
+    }
+
+    /// Runs at most once per boot and never in Recovery.
+    static func startKeystoreInit(
+        role: PommeAgentRole,
+        maintenance: PommeKeystoreInitMaintenance?
     ) -> Task<Void, Never>? {
         guard role == .persistent, let maintenance else { return nil }
         return Task.detached { await maintenance.run() }

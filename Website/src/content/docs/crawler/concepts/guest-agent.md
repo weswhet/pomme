@@ -160,6 +160,18 @@ Assistant preferences for it so that Setup Assistant doesn't reappear for
 that account after a macOS update. The agent records its progress in the unified log under
 the `buddy-preferences` category. Recovery sessions never run this task.
 
+## Keystore initialization on macOS 27
+
+On macOS 27, `launchd` skips the `keystore-init` boot task when macOS starts
+from a VM disk, and without it the guest can't receive MDM push commands. On
+every normal boot of a macOS 27 or later guest that starts from a VM disk, the
+agent runs `/usr/libexec/applekeystored --init` once. It runs the initializer
+only while SIP is off, because macOS stops it otherwise. The agent records
+the result for the current boot in `/private/var/db/pomme/keystore-init.json`
+and in the unified log under the `keystore-init` category. Recovery sessions
+never run this task. For details, see
+[Receive push commands on macOS 27](/crawler/guides/enroll-in-mdm/#receive-push-commands-on-macos-27).
+
 ## Logging
 
 The agent writes unified log records under the subsystem

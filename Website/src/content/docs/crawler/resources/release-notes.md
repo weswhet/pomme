@@ -34,6 +34,12 @@ To update, run `pomme update`.
   selector retells the guides in the voice of a sarcastic game-show System.
   Its facts, commands, and examples match the normal pages, and pages that it
   doesn't retell show their normal text.
+- On macOS 27, an MDM-enrolled VM can receive push commands. macOS 27 skips
+  a boot task in a VM, so the guest couldn't create its push identity and never
+  sent `TokenUpdate`. The Pomme agent now runs that task at every startup, and
+  `pomme mdm` leaves SIP off on macOS 27, which the task needs. The result
+  reports `pushIdentity`. For details, see
+  [Receive push commands on macOS 27](/crawler/guides/enroll-in-mdm/#receive-push-commands-on-macos-27).
 
 ### Changes
 

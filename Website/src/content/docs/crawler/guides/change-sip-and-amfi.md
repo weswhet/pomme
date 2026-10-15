@@ -137,6 +137,11 @@ and checks `csrutil status` on the new boot. A VM created with an earlier Pomme
 release, whose guest agent can't run `csrutil clear`, turns SIP on in Recovery
 instead.
 
+On a macOS 27 VM that's enrolled in MDM, turning SIP on stops the guest from
+receiving MDM push commands after its next restart, and `pomme sip enable`
+prints a warning. For details, see
+[Receive push commands on macOS 27](/crawler/guides/enroll-in-mdm/#receive-push-commands-on-macos-27).
+
 `pomme amfi enable` restores the exact AMFI configuration that Pomme saved when
 it turned AMFI off. If AMFI is off but Pomme has no saved configuration, for
 example because AMFI was turned off outside Pomme, the command stops before it

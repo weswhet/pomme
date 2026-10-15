@@ -197,6 +197,9 @@ enum PommeMDMReadiness {
         var serverTrust: MDMServerTrustDecision?
         /// Why the requested creation source cannot be used, when known.
         var creationProblem: String?
+        /// The installed macOS version from the VM's provisioning plan or the
+        /// creation template, when known.
+        var guestVersion: String?
     }
 
     enum Step: Equatable, Sendable {
@@ -309,6 +312,7 @@ enum PommeMDMReadiness {
         case finalSecurityDisabled
         case enrollmentOutcomeUnknown
         case ownerConsentMayBeRequired
+        case sipKeptForPushIdentity
 
         var message: String {
             switch self {
@@ -318,6 +322,7 @@ enum PommeMDMReadiness {
             case .finalSecurityDisabled: "SIP/AMFI settings this enrollment disables will stay disabled."
             case .enrollmentOutcomeUnknown: "A retained enrollment has an unknown outcome; installation will not be repeated without evidence."
             case .ownerConsentMayBeRequired: "If this VM has no owner account, creating one needs --force or an interactive confirmation."
+            case .sipKeptForPushIdentity: "On macOS 27, SIP stays disabled after enrollment so that the guest can receive MDM push commands."
             }
         }
     }
@@ -399,6 +404,11 @@ enum PommeMDMReadiness {
             warnings.append(.serverUnreachableFromHost)
         default:
             break
+        }
+        if let version = facts.guestVersion, facts.sipDisabled != true,
+           PommeMDMWorkflowSecurityBaseline.retainsSIPForPushIdentity(guestVersion: version,
+                                                                      finalSecurity: request.finalSecurity) {
+            warnings.append(.sipKeptForPushIdentity)
         }
         steps.append(.enroll)
         return .init(steps: steps, blockers: blockers, warnings: warnings)

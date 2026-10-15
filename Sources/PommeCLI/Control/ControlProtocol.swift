@@ -515,9 +515,9 @@ struct PommeAgentPerformRequest: Sendable {
         if let payload, payload.objectValue == nil {
             throw RunnerError.invalidRequest(field: "payload", reason: "must be a JSON object.")
         }
-        if operation == "buddy.preferences.status" {
+        if operation == "buddy.preferences.status" || operation == "keystore.init.status" {
             guard Set(object.keys) == ["operation", "payload"], payload == .object([:]) else {
-                throw RunnerError.invalidRequest(field: "payload", reason: "must be an empty JSON object for buddy.preferences.status.")
+                throw RunnerError.invalidRequest(field: "payload", reason: "must be an empty JSON object for \(operation).")
             }
         }
         return .init(operation: operation, payload: payload)
@@ -527,6 +527,8 @@ struct PommeAgentPerformRequest: Sendable {
         let exact: Set<String> = [
             "agent.describe", "agent.health", "system.info", "network.interfaces",
             "buddy.preferences.status",
+            // Read-only boot receipt of the macOS 27 keystore initializer.
+            "keystore.init.status",
             "amfi.normal.disable", "amfi.normal.enable",
             "amfi.normal.verifyDisabled", "amfi.normal.verifyEnabled",
             // Read-only AMFI inspection from a normal boot, so a caller does

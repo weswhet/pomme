@@ -429,7 +429,7 @@ actor PommeBuddyPreferencesMaintenance {
     }
 }
 
-private enum PommeBuddyPreferencesSystem {
+enum PommeBuddyPreferencesSystem {
     static let receiptPath = "/private/var/db/pomme/buddy-preferences.json"
 
     static func bootSessionUUID() throws -> String {
@@ -488,6 +488,11 @@ private enum PommeBuddyPreferencesSystem {
     }
 
     static func load() throws -> PommeBuddyPreferencesStatus? {
+        try loadReceipt(PommeBuddyPreferencesStatus.self, at: receiptPath)
+    }
+
+    /// Reads a root-only boot receipt from Pomme's guest state directory.
+    static func loadReceipt<Receipt: Decodable>(_ type: Receipt.Type, at receiptPath: String) throws -> Receipt? {
         try validateDirectory()
         let fd = open(receiptPath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else {
@@ -501,10 +506,15 @@ private enum PommeBuddyPreferencesSystem {
               info.st_size > 0, info.st_size <= 16_384 else { throw issue("unsafe-receipt") }
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
         let data = try handle.read(upToCount: 16_385) ?? Data()
-        return try JSONDecoder().decode(PommeBuddyPreferencesStatus.self, from: data)
+        return try JSONDecoder().decode(Receipt.self, from: data)
     }
 
     static func save(_ receipt: PommeBuddyPreferencesStatus) throws {
+        try saveReceipt(receipt, at: receiptPath)
+    }
+
+    /// Atomically replaces a root-only (0600) boot receipt.
+    static func saveReceipt<Receipt: Encodable>(_ receipt: Receipt, at receiptPath: String) throws {
         try validateDirectory()
         let data = try JSONEncoder().encode(receipt)
         let temporary = receiptPath + "." + UUID().uuidString
