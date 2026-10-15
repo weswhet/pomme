@@ -144,13 +144,48 @@ switched off, add `--final-security disabled`:
 pomme mdm VM_NAME --profile PROFILE_PATH --final-security disabled
 ```
 
-Settings that enrollment didn't change stay as they were. To turn the settings
-back on later, restore AMFI first and then SIP:
+Settings that enrollment didn't change stay as they were. On macOS 27, `restore`
+leaves SIP off; see
+[Receive push commands on macOS 27](#receive-push-commands-on-macos-27). To
+turn the settings back on later, restore AMFI first and then SIP:
 
 ```sh
 pomme amfi enable VM_NAME
 pomme sip enable VM_NAME
 ```
+
+## Receive push commands on macOS 27
+
+On macOS 27, `launchd` skips the `keystore-init` boot task when macOS starts
+from a VM disk. Without it, the guest can't create the identity that Apple's
+push service needs. The enrollment succeeds, but the guest never sends
+`TokenUpdate`, so the MDM server can't push commands to it.
+
+Pomme works around this in two ways:
+
+- At every startup, the Pomme agent runs the same initializer,
+  `/usr/libexec/applekeystored --init`, once. It runs only on macOS 27 or
+  later, only when macOS starts from a VM disk, and only while SIP is off.
+  The initializer can't run while SIP is enabled.
+- On a macOS 27 VM, `--final-security restore` turns AMFI back on but leaves SIP
+  off. `pomme mdm` prints a warning when it does this. In JSON output,
+  `result.sipRetainedForPushIdentity` is `true`.
+
+After enrollment, `result.pushIdentity` reports what the agent found in the
+current startup:
+
+| Value | Meaning |
+| --- | --- |
+| `prepared` | The initializer ran in this startup. |
+| `notRequired` | The VM runs macOS 26 or earlier. |
+| `skipped` | The initializer didn't run, for example because SIP is enabled. |
+| `failed` | The initializer ran and failed. |
+| `pending` | The initializer hasn't finished in this startup. |
+| `agentUpdateRequired` | The guest agent predates the initializer. Run `pomme agent update VM_NAME`. |
+| `unavailable` | Pomme couldn't read the agent's status. |
+
+If you turn SIP back on with `pomme sip enable`, the guest stops receiving push
+commands after its next restart.
 
 ## Understand the server trust check
 
@@ -242,6 +277,8 @@ With `--format json`, the result includes the following fields:
 | `result.diagnostics` | Elapsed times, numeric status codes, and Keychain status flags from the helper. Diagnostics never include profile contents or credentials. |
 | `result.failureStatePreserved` | On failure, whether Pomme kept the failure state for inspection. |
 | `result.retryAllowed` | On failure, whether repeating the command can continue the work. |
+| `result.sipRetainedForPushIdentity` | Whether Pomme left SIP off on macOS 27 so that the guest can receive push commands. |
+| `result.pushIdentity` | Whether the guest agent prepared push delivery in the current startup. See [Receive push commands on macOS 27](#receive-push-commands-on-macos-27). |
 
 To include more detailed enrollment diagnostics, add `--debug`:
 
@@ -254,10 +291,11 @@ For the general output format, see
 
 ## Downgrade considerations
 
-Pomme records MDM enrollment in a schema 6 journal. Pomme reads older schema 3
-through 5 journals with `--final-security restore` and rewrites them as schema
-6 on their next update. An older Pomme build can't read a schema 6 journal, so
-finish retained MDM work before you downgrade Pomme.
+Pomme records MDM enrollment in a schema 7 journal. Pomme reads older schema 3
+through 6 journals with `--final-security restore`, without keeping SIP
+off for push delivery, and rewrites them as schema 7 on their next update.
+An older Pomme build can't read a schema 7 journal, so finish retained MDM work
+before you downgrade Pomme.
 
 ## What's next
 

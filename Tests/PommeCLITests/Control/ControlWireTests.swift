@@ -95,6 +95,30 @@ struct ControlWireTests {
         #expect(!PommeAgent.recoveryTerminalCapabilities.contains(agent.operation))
     }
 
+    @Test("Keystore status forwards only as an exact, empty, read-only request")
+    func keystoreStatusRouting() throws {
+        let request = PommeControlRequest(command: "agent.perform", payload: .object([
+            "operation": .string("keystore.init.status"), "payload": .object([:])
+        ]))
+        let decoded = try ControlWireCodec.decodeRequest(ControlWireCodec.encodeLine(request))
+        guard case .agentPerform(let agent, streaming: false) = try PommeVMControlRouter.route(decoded) else {
+            Issue.record("Keystore status was not routed")
+            return
+        }
+        #expect(agent.operation == PommeAgent.keystoreInitStatusOperation)
+        #expect(PommeAgent.persistentCapabilities.contains(agent.operation))
+        let rejected: [[String: JSONValue]] = [
+            ["operation": .string("keystore.init.run"), "payload": .object([:])],
+            ["operation": .string("keystore.init.status")],
+            ["operation": .string("keystore.init.status"), "payload": .object(["run": .bool(true)])],
+        ]
+        for value in rejected {
+            let request = PommeControlRequest(command: "agent.perform", payload: .object(value))
+            let decoded = try ControlWireCodec.decodeRequest(ControlWireCodec.encodeLine(request))
+            #expect(throws: RunnerError.self) { try PommeVMControlRouter.route(decoded) }
+        }
+    }
+
     @Test("Buddy forwarding rejects unknown operations and malformed status payloads")
     func buddyStatusRoutingRejectsInvalidRequests() throws {
         let values: [[String: JSONValue]] = [

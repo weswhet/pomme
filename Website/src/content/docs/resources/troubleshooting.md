@@ -614,6 +614,28 @@ An unfinished MDM enrollment uses a different profile, --enrollment-mode, or --f
 **Resolution:** Repeat the earlier command with its original profile,
 `--enrollment-mode`, and `--final-security` values to finish it.
 
+### macOS 27 enrolls but never receives push commands
+
+**Symptom:** `pomme mdm` succeeds on a macOS 27 VM, but the MDM server never
+receives `TokenUpdate`, and commands that it pushes never arrive. The result's
+`pushIdentity` field isn't `prepared`.
+
+**Cause:** macOS 27 skips its `keystore-init` boot task when it starts from a VM
+disk, so the guest can't create the identity that Apple's push service needs.
+The Pomme agent runs the task itself, but only while SIP is off.
+
+**Resolution:** `pushIdentity` in the `pomme mdm` result shows what to do:
+
+- If it's `skipped`, SIP is on. Turn it off with `pomme sip disable VM_NAME`.
+- If it's `agentUpdateRequired`, update the agent with
+  `pomme agent update VM_NAME`.
+- If it's `pending`, `failed`, or `unavailable`, restart the VM with
+  `pomme restart VM_NAME`, and then repeat the `pomme mdm` command. It reports
+  the agent's status again without reinstalling the profile.
+
+For details, see
+[Receive push commands on macOS 27](/guides/enroll-in-mdm/#receive-push-commands-on-macos-27).
+
 ### Enrollment mode can't be downgraded
 
 **Symptom:** `pomme mdm` fails with the following error:

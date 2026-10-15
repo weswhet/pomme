@@ -166,6 +166,19 @@ struct PommeMDMReadinessTests {
             .warnings.isEmpty)
     }
 
+    @Test("A macOS 27 restore warns that SIP stays disabled for push identity")
+    func sipKeptForPushIdentity() {
+        #expect(plan(ready { $0.guestVersion = "27.0" }).warnings == [.sipKeptForPushIdentity])
+        #expect(plan(ready { $0.guestVersion = "27.2"; $0.sipDisabled = false }).warnings == [.sipKeptForPushIdentity])
+        let created = ready { $0.vmExists = false; $0.provisioning = nil; $0.runState = .unknown; $0.guestVersion = "27.0" }
+        #expect(plan(created) { $0.creationSourceSupplied = true }.warnings == [.sipKeptForPushIdentity])
+        #expect(plan(ready { $0.guestVersion = "27.0"; $0.sipDisabled = true }).warnings.isEmpty)
+        #expect(plan(ready { $0.guestVersion = "26.6.2" }).warnings.isEmpty)
+        #expect(plan(ready()).warnings.isEmpty)
+        #expect(plan(ready { $0.guestVersion = "27.0" }) { $0.finalSecurity = .disabled }.warnings
+            == [.finalSecurityDisabled])
+    }
+
     @Test("Mutation in progress blocks every plan")
     func mutationInProgress() {
         #expect(plan(ready { $0.mutationInProgress = true }).blockers == [.mutationInProgress])

@@ -103,7 +103,8 @@ actor PommeAgent {
         "amfi.status", "amfi.disable", "amfi.enable"
     ]
     static let buddyPreferencesStatusOperation = "buddy.preferences.status"
-    static let persistentCapabilities = [buddyPreferencesStatusOperation, "agent.describe", "agent.health", "process.start", "process.status", "process.signal", "process.list", "process.output", "process.wait", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize", PommeGuestOwnerCredentialReader.operation, PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation, PommeGuestRecoverySecurityOperations.normalSIPClearOperation] + PommeGuestDirectory.operations + terminalCapabilities + normalAMFIOperations
+    static let keystoreInitStatusOperation = "keystore.init.status"
+    static let persistentCapabilities = [buddyPreferencesStatusOperation, keystoreInitStatusOperation, "agent.describe", "agent.health", "process.start", "process.status", "process.signal", "process.list", "process.output", "process.wait", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize", PommeGuestOwnerCredentialReader.operation, PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation, PommeGuestRecoverySecurityOperations.normalSIPClearOperation] + PommeGuestDirectory.operations + terminalCapabilities + normalAMFIOperations
     /// Detached-job logs retain their trailing bytes so an already streamed
     /// status response never makes `process.output` destructive. The agent
     /// keeps this bounded per channel and tells callers when earlier bytes
@@ -172,6 +173,7 @@ actor PommeAgent {
     private let recoveryInstaller: PommeAgentRecoveryInstaller?
     private let recoverySecurity: PommeGuestRecoverySecurityOperations
     private let buddyPreferences: PommeBuddyPreferencesMaintenance?
+    private let keystoreInit: PommeKeystoreInitMaintenance?
     private let ownerCredential: PommeGuestOwnerCredentialReader
     private let directory: PommeGuestDirectory
     private let terminalService: PommeTerminalService
@@ -187,6 +189,7 @@ actor PommeAgent {
          ownerCredential: PommeGuestOwnerCredentialReader = .init(),
          directory: PommeGuestDirectory = .init(),
          buddyPreferences: PommeBuddyPreferencesMaintenance? = nil,
+         keystoreInit: PommeKeystoreInitMaintenance? = nil,
          recoveredJournal: PommeAgentUpdateJournal? = nil,
          authority: PommeAgentAuthority = .standard,
          statusTraceSink: @escaping PommeAgentStatusTrace.Sink = { _, _ in },
@@ -200,6 +203,7 @@ actor PommeAgent {
         self.ownerCredential = ownerCredential
         self.directory = directory
         self.buddyPreferences = role == .persistent ? buddyPreferences : nil
+        self.keystoreInit = role == .persistent ? keystoreInit : nil
         self.statusTraceSink = statusTraceSink
         self.startTraceSink = startTraceSink
         let terminalSpoolRoot = URL(fileURLWithPath: journalPath)
@@ -378,6 +382,12 @@ actor PommeAgent {
                 return .object(["initializing": .bool(true)])
             }
             return try await buddyPreferences.statusPayload()
+        }
+        if request.operation == Self.keystoreInitStatusOperation {
+            guard role == .persistent else { throw PommeAgentOperationError.unsupported("\(request.operation) requires the persistent agent") }
+            guard request.payload.objectValue?.isEmpty == true else { throw PommeAgentOperationError.invalid("\(request.operation) accepts no fields") }
+            guard let keystoreInit else { return .object(["initializing": .bool(true)]) }
+            return try await keystoreInit.statusPayload()
         }
         if Self.terminalCapabilities.contains(request.operation) {
             guard role == .persistent || role == .recovery else { throw PommeAgentOperationError.unsupported("Terminal sessions require the persistent agent") }

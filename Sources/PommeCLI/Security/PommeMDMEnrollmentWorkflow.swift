@@ -33,7 +33,7 @@ enum PommeMDMEnrollmentFailure: String, Codable, Sendable {
 }
 
 struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
-    static let schemaVersion = 6
+    static let schemaVersion = 7
 
     let schema: Int
     let generation: UInt64
@@ -45,6 +45,12 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
     let enrollmentMode: MDMEnrollmentMode
     /// Schema 5 and earlier journals decode as `.restore`, their only behavior.
     let finalSecurity: MDMFinalSecurity
+    /// Set when the run begins on a macOS 27 or later guest under `.restore`.
+    /// Restoration then re-enables AMFI but leaves SIP as enrollment left it,
+    /// because the guest agent's keystore initializer, which push delivery
+    /// needs on these guests, can't run with SIP enabled. Schema 6 and
+    /// earlier journals decode as false, their only behavior.
+    let sipRetainedForPushIdentity: Bool
     let originalRunState: VMRunStateSnapshot
     /// Captured only after the intent journal is durable. A stopped, paused,
     /// or Recovery VM must never be booted merely to populate these fields
@@ -82,6 +88,7 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         agentSHA256: String,
         enrollmentMode: MDMEnrollmentMode,
         finalSecurity: MDMFinalSecurity = .restore,
+        sipRetainedForPushIdentity: Bool = false,
         originalRunState: VMRunStateSnapshot,
         sipWasDisabled: Bool? = nil,
         amfiWasDisabled: Bool? = nil,
@@ -127,6 +134,7 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         self.agentSHA256 = agentSHA256.lowercased()
         self.enrollmentMode = enrollmentMode
         self.finalSecurity = finalSecurity
+        self.sipRetainedForPushIdentity = sipRetainedForPushIdentity
         self.originalRunState = originalRunState
         self.sipWasDisabled = sipWasDisabled
         self.amfiWasDisabled = amfiWasDisabled
@@ -148,7 +156,7 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
-        case schema, generation, identity, profile, agentSHA256, enrollmentMode, finalSecurity
+        case schema, generation, identity, profile, agentSHA256, enrollmentMode, finalSecurity, sipRetainedForPushIdentity
         case originalRunState, sipWasDisabled, amfiWasDisabled, pendingChild, sipChangeRequested, amfiChangeRequested
         case enrollmentDispatched, enrollmentVerified, normalBootArguments, configuredBootArguments
         case helperTerminationUnproven, stagedProfileOwned, ownedArtifacts, phase, failure
@@ -160,10 +168,12 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         let keys = Set(raw.allKeys.map(\.stringValue))
         let version = try raw.decode(Int.self, forKey: MDMJournalCodingKey(stringValue: "schema")!)
         let currentKeys = Set(CodingKeys.allCases.map(\.stringValue))
-        let schema5Keys = currentKeys.subtracting([CodingKeys.finalSecurity.stringValue])
+        let schema6Keys = currentKeys.subtracting([CodingKeys.sipRetainedForPushIdentity.stringValue])
+        let schema5Keys = schema6Keys.subtracting([CodingKeys.finalSecurity.stringValue])
         let schema4Keys = schema5Keys.subtracting([CodingKeys.failure.stringValue])
         let schema3Keys = schema4Keys.subtracting([CodingKeys.stagedProfileOwned.stringValue])
         guard (version == Self.schemaVersion && keys == currentKeys)
+                || (version == 6 && keys == schema6Keys)
                 || (version == 5 && keys == schema5Keys)
                 || (version == 4 && keys == schema4Keys)
                 || (version == 3 && keys == schema3Keys) else {
@@ -191,6 +201,8 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
             enrollmentMode: values.decode(MDMEnrollmentMode.self, forKey: .enrollmentMode),
             finalSecurity: version >= 6
                 ? values.decode(MDMFinalSecurity.self, forKey: .finalSecurity) : .restore,
+            sipRetainedForPushIdentity: version >= 7
+                ? values.decode(Bool.self, forKey: .sipRetainedForPushIdentity) : false,
             originalRunState: values.decode(VMRunStateSnapshot.self, forKey: .originalRunState),
             sipWasDisabled: values.decodeIfPresent(Bool.self, forKey: .sipWasDisabled),
             amfiWasDisabled: values.decodeIfPresent(Bool.self, forKey: .amfiWasDisabled),
@@ -263,6 +275,7 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         return try Self.init(
             generation: generation + 1, identity: identity, profile: profile,
             agentSHA256: agentSHA256, enrollmentMode: enrollmentMode, finalSecurity: finalSecurity,
+            sipRetainedForPushIdentity: sipRetainedForPushIdentity,
             originalRunState: originalRunState, sipWasDisabled: sipWasDisabled ?? self.sipWasDisabled,
             amfiWasDisabled: amfiWasDisabled ?? self.amfiWasDisabled,
             pendingChild: nextPending, sipChangeRequested: nextSIPChange,
@@ -396,6 +409,7 @@ struct PommeMDMEnrollmentJournal: Codable, Equatable, Sendable {
         try values.encode(agentSHA256, forKey: .agentSHA256)
         try values.encode(enrollmentMode, forKey: .enrollmentMode)
         try values.encode(finalSecurity, forKey: .finalSecurity)
+        try values.encode(sipRetainedForPushIdentity, forKey: .sipRetainedForPushIdentity)
         try values.encode(originalRunState, forKey: .originalRunState)
         try values.encode(sipWasDisabled, forKey: .sipWasDisabled)
         try values.encode(amfiWasDisabled, forKey: .amfiWasDisabled)
@@ -557,6 +571,7 @@ struct PommeMDMEnrollmentJournalStore: Sendable {
         agentSHA256: String,
         enrollmentMode: MDMEnrollmentMode,
         finalSecurity: MDMFinalSecurity = .restore,
+        sipRetainedForPushIdentity: Bool = false,
         originalRunState: VMRunStateSnapshot,
         sipWasDisabled: Bool? = nil,
         amfiWasDisabled: Bool? = nil,
@@ -589,7 +604,8 @@ struct PommeMDMEnrollmentJournalStore: Sendable {
         let journal = try PommeMDMEnrollmentJournal(
             generation: ((try loadIfPresent(lease: lease))?.generation ?? 0) + 1,
             identity: identity, profile: profile, agentSHA256: agentSHA256,
-            enrollmentMode: enrollmentMode, finalSecurity: finalSecurity, originalRunState: originalRunState,
+            enrollmentMode: enrollmentMode, finalSecurity: finalSecurity,
+            sipRetainedForPushIdentity: sipRetainedForPushIdentity, originalRunState: originalRunState,
             sipWasDisabled: sipWasDisabled, amfiWasDisabled: amfiWasDisabled,
             ownedArtifacts: ownedArtifacts, phase: .captured, createdAt: now, updatedAt: now
         )

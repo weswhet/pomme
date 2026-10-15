@@ -145,7 +145,7 @@ struct MDMCommand: AsyncParsableCommand {
     var guestPath: String?
     @Option(name: .customLong("enrollment-mode"), help: "Enrollment mode: supervised (user approved, default) or unapproved.")
     var enrollmentMode: MDMEnrollmentMode = .supervised
-    @Option(name: .customLong("final-security"), help: "SIP/AMFI after enrollment: restore (default) re-enables what enrollment disabled; disabled leaves it off.")
+    @Option(name: .customLong("final-security"), help: "SIP/AMFI after enrollment: restore (default) re-enables what enrollment disabled, except SIP on macOS 27, which push delivery needs off; disabled leaves both off.")
     var finalSecurity: MDMFinalSecurity = .restore
     @Flag(name: [.customShort("f"), .customLong("force")], help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
     var force = false

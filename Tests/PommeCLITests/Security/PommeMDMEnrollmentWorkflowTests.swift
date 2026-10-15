@@ -38,6 +38,7 @@ struct PommeMDMEnrollmentWorkflowTests {
         object["schema"] = 4
         object.removeValue(forKey: "failure")
         object.removeValue(forKey: "finalSecurity")
+        object.removeValue(forKey: "sipRetainedForPushIdentity")
         try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
             .write(to: fixture.store.journalURL)
         let loaded = try #require(try fixture.store.loadIfPresent(lease: fixture.lease))
@@ -51,7 +52,7 @@ struct PommeMDMEnrollmentWorkflowTests {
         #expect(failed.failure == .beforeDispatch)
     }
 
-    @Test("Schema 5 decodes as restore and the next write upgrades it to schema 6")
+    @Test("Schema 5 decodes as restore and the next write upgrades it to the current schema")
     func schema5DecodesAsRestore() throws {
         let fixture = try Fixture.make()
         defer { fixture.remove() }
@@ -61,11 +62,13 @@ struct PommeMDMEnrollmentWorkflowTests {
         var object = try fixture.onDiskObject()
         object["schema"] = 5
         object.removeValue(forKey: "finalSecurity")
+        object.removeValue(forKey: "sipRetainedForPushIdentity")
         try fixture.writeOnDisk(object)
         let loaded = try #require(try fixture.store.loadIfPresent(lease: fixture.lease))
         #expect(loaded.finalSecurity == .restore)
+        #expect(!loaded.sipRetainedForPushIdentity)
         _ = try fixture.store.update(loaded, phase: .existingEnrollmentChecked, lease: fixture.lease)
-        #expect(try fixture.onDiskSchema() == 6)
+        #expect(try fixture.onDiskSchema() == PommeMDMEnrollmentJournal.schemaVersion)
         #expect(try fixture.onDiskObject()["finalSecurity"] as? String == "restore")
     }
 
@@ -83,6 +86,57 @@ struct PommeMDMEnrollmentWorkflowTests {
         #expect(advanced.finalSecurity == .disabled)
     }
 
+    @Test("Schema 6 decodes without retained SIP and the next write records it")
+    func schema6DecodesWithoutRetainedSIP() throws {
+        let fixture = try Fixture.make()
+        defer { fixture.remove() }
+        _ = try fixture.store.begin(identity: fixture.identity, profile: fixture.profile,
+            agentSHA256: fixture.digest, enrollmentMode: .supervised, sipRetainedForPushIdentity: true,
+            originalRunState: .stopped, ownedArtifacts: [], lease: fixture.lease)
+        var object = try fixture.onDiskObject()
+        object["schema"] = 6
+        object.removeValue(forKey: "sipRetainedForPushIdentity")
+        try fixture.writeOnDisk(object)
+        let loaded = try #require(try fixture.store.loadIfPresent(lease: fixture.lease))
+        #expect(!loaded.sipRetainedForPushIdentity)
+        _ = try fixture.store.update(loaded, phase: .existingEnrollmentChecked, lease: fixture.lease)
+        #expect(try fixture.onDiskSchema() == 7)
+        #expect(try fixture.onDiskObject()["sipRetainedForPushIdentity"] as? Bool == false)
+    }
+
+    @Test("Schema 7 round-trips retained SIP, and a resume keeps the recorded decision")
+    func schema7RoundTripsRetainedSIP() throws {
+        let fixture = try Fixture.make()
+        defer { fixture.remove() }
+        let initial = try fixture.store.begin(identity: fixture.identity, profile: fixture.profile,
+            agentSHA256: fixture.digest, enrollmentMode: .supervised, sipRetainedForPushIdentity: true,
+            originalRunState: .stopped, ownedArtifacts: [], lease: fixture.lease)
+        #expect(initial.sipRetainedForPushIdentity)
+        let loaded = try #require(try fixture.store.loadIfPresent(lease: fixture.lease))
+        #expect(loaded == initial)
+        let advanced = try fixture.store.update(loaded, phase: .existingEnrollmentChecked, lease: fixture.lease)
+        #expect(advanced.sipRetainedForPushIdentity)
+        let resumed = try fixture.store.begin(identity: fixture.identity, profile: fixture.profile,
+            agentSHA256: fixture.digest, enrollmentMode: .supervised, sipRetainedForPushIdentity: false,
+            originalRunState: .stopped, ownedArtifacts: [], lease: fixture.lease)
+        #expect(resumed.sipRetainedForPushIdentity)
+    }
+
+    @Test("A schema 7 journal without retained SIP is malformed")
+    func schema7RequiresRetainedSIPKey() throws {
+        let fixture = try Fixture.make()
+        defer { fixture.remove() }
+        _ = try fixture.store.begin(identity: fixture.identity, profile: fixture.profile,
+            agentSHA256: fixture.digest, enrollmentMode: .supervised, originalRunState: .stopped,
+            ownedArtifacts: [], lease: fixture.lease)
+        var object = try fixture.onDiskObject()
+        object.removeValue(forKey: "sipRetainedForPushIdentity")
+        try fixture.writeOnDisk(object)
+        #expect(throws: PommeMDMEnrollmentWorkflowError.malformedJournal) {
+            _ = try fixture.store.loadIfPresent(lease: fixture.lease)
+        }
+    }
+
     @Test("A schema and key set that disagree about final security are malformed",
           arguments: [(6, false), (5, true)])
     func finalSecurityKeyMustMatchSchema(schema: Int, includeFinalSecurity: Bool) throws {
@@ -93,6 +147,7 @@ struct PommeMDMEnrollmentWorkflowTests {
             ownedArtifacts: [], lease: fixture.lease)
         var object = try fixture.onDiskObject()
         object["schema"] = schema
+        object.removeValue(forKey: "sipRetainedForPushIdentity")
         if !includeFinalSecurity { object.removeValue(forKey: "finalSecurity") }
         try fixture.writeOnDisk(object)
         #expect(throws: PommeMDMEnrollmentWorkflowError.malformedJournal) {
@@ -390,6 +445,7 @@ struct PommeMDMEnrollmentWorkflowTests {
             object.removeValue(forKey: "stagedProfileOwned")
             object.removeValue(forKey: "failure")
             object.removeValue(forKey: "finalSecurity")
+            object.removeValue(forKey: "sipRetainedForPushIdentity")
             let legacy = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
             try legacy.write(to: store.journalURL, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: store.journalURL.path)

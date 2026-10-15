@@ -82,10 +82,24 @@ struct PommeMDMWorkflowSecurityBaseline: Sendable {
 
     /// The SIP state a finished enrollment must prove. `disabled` keeps only
     /// what this workflow disabled switched off; untouched settings, including
-    /// every setting of an already-satisfied enrollment, stay as found.
+    /// every setting of an already-satisfied enrollment, stay as found. A run
+    /// that retains SIP for push identity keeps SIP off the same way.
     static func expectedFinalSIPDisabled(_ journal: PommeMDMEnrollmentJournal) -> Bool? {
         guard let original = journal.sipWasDisabled else { return nil }
-        return journal.finalSecurity == .disabled && journal.sipChangeRequested ? true : original
+        let keepsChange = journal.finalSecurity == .disabled || journal.sipRetainedForPushIdentity
+        return keepsChange && journal.sipChangeRequested ? true : original
+    }
+
+    /// Whether a run that starts now keeps SIP disabled for push delivery.
+    /// macOS 27 guests need the agent's keystore initializer at every boot,
+    /// and it can't run with SIP enabled.
+    static func retainsSIPForPushIdentity(guestVersion: String, finalSecurity: MDMFinalSecurity) -> Bool {
+        finalSecurity == .restore && requiresKeystoreInitializer(guestVersion: guestVersion)
+    }
+
+    static func requiresKeystoreInitializer(guestVersion: String) -> Bool {
+        guard let major = guestVersion.split(separator: ".").first.flatMap({ Int($0) }) else { return false }
+        return major >= PommeKeystoreInitMaintenance.firstAffectedMajorVersion
     }
 
     static func expectedFinalAMFIDisabled(_ journal: PommeMDMEnrollmentJournal) -> Bool? {
@@ -334,7 +348,9 @@ struct PommeMDMWorkflowExecution: Sendable {
             if progress.journal.finalSecurity == .restore {
                 if progress.journal.amfiChangeRequested { try await child(.amfiEnable) }
                 // An AMFI failure throws above and is a barrier to re-enabling SIP.
-                if progress.journal.sipChangeRequested { try await child(.sipEnable) }
+                if progress.journal.sipChangeRequested, !progress.journal.sipRetainedForPushIdentity {
+                    try await child(.sipEnable)
+                }
             }
         }
         try await dependencies.ensureNormal()
