@@ -139,6 +139,21 @@ struct PommeAgentVSOCKCoordinatorTests {
             for: .normal, operation: "process.start", defaultTimeout: 120) == 120)
     }
 
+    @Test("Normal-role directory operations get the longer directory budget")
+    func directoryBudget() {
+        let ordinary: TimeInterval = 5
+        let directory = PommeAgentVSOCKCoordinator.directoryExchangeTimeout
+        #expect(directory == 30)
+        for operation in ["directory.password.verify", "directory.localUsers.read"] {
+            #expect(PommeAgentVSOCKCoordinator.exchangeTimeout(
+                for: .normal, operation: operation, defaultTimeout: ordinary) == directory)
+            #expect(PommeAgentVSOCKCoordinator.exchangeTimeout(
+                for: .recoveryRuntime, operation: operation, defaultTimeout: ordinary) == ordinary)
+            #expect(PommeAgentVSOCKCoordinator.exchangeTimeout(
+                for: .normal, operation: operation, defaultTimeout: 120) == 120)
+        }
+    }
+
     @Test("Recovery security error envelopes survive the extended exchange budget")
     func recoverySecurityErrorEnvelopeUsesExtendedTimeout() async throws {
         let transport = FakeTransport()
