@@ -1962,7 +1962,17 @@ struct PommeCore {
 
     // MARK: Destructive lifecycle and creation integration
 
-    static func destroyVMPayload(reference: VMReference, confirmation: String?) throws -> [String: Any] {
+    /// Deletes a stopped VM and the Keychain items that its provisioning
+    /// records prove it owns. When those records can't prove that the bundle
+    /// is the VM Pomme created, deletion stops unless
+    /// `retainingUnprovenCredentials` is set: then only the bundle is
+    /// removed, and every Keychain item is kept, because Pomme can't tell
+    /// which items belong to it.
+    static func destroyVMPayload(
+        reference: VMReference,
+        confirmation: String?,
+        retainingUnprovenCredentials: Bool = false
+    ) throws -> [String: Any] {
         guard let name = reference.name else { throw RunnerError.vmDestroyRequiresNamedVM }
         guard confirmation == nil || confirmation == name else {
             throw RunnerError.vmDestroyConfirmationMismatch(name)
@@ -1973,19 +1983,26 @@ struct PommeCore {
         if (try? runtimeRecord(for: reference.bundle)) != nil {
             throw RunnerError.vmHelperRunning(name: name)
         }
-        let schema = try provisioningSchemaIfPresent(bundle: reference.bundle)
-        let ownedPlan = try schema.map { _ in try loadOwnedProvisioningPlan(reference: reference) }
-        let credentialUUID = try deletionCredentialUUID(plan: ownedPlan, bundle: reference.bundle)
+        let credentialUUID: UUID?
         // Resolve and authenticate the reference while its owning bundle is
         // still present. A failed credential cleanup must retain the journal.
         var ownerReference: PommeOwnerCredentialReference?
-        if schema == 2 {
-            let journal = try loadProvisioningV2(reference: reference)
-            guard journal.plan == ownedPlan else { throw PommeProvisioningError.ownershipMismatch }
-            if let owner = journal.ownerReference {
-                try validateProvisioningOwnerReference(owner, plan: journal.plan)
-                ownerReference = owner
+        do {
+            let schema = try provisioningSchemaIfPresent(bundle: reference.bundle)
+            let ownedPlan = try schema.map { _ in try loadOwnedProvisioningPlan(reference: reference) }
+            credentialUUID = try deletionCredentialUUID(plan: ownedPlan, bundle: reference.bundle)
+            if schema == 2 {
+                let journal = try loadProvisioningV2(reference: reference)
+                guard journal.plan == ownedPlan else { throw PommeProvisioningError.ownershipMismatch }
+                if let owner = journal.ownerReference {
+                    try validateProvisioningOwnerReference(owner, plan: journal.plan)
+                    ownerReference = owner
+                }
             }
+        } catch where retainingUnprovenCredentials && isUnprovenOwnership(error) {
+            try FileManager.default.removeItem(at: reference.bundle.rootURL)
+            return ["ok": true, "operation": "delete", "name": name, "bundlePath": reference.bundle.rootURL.path,
+                    "credentialsRetained": true, "hostExitCode": 0]
         }
         let ownerStore = PommeOwnerCredentialStore()
         let agentStore = PommeAgentCredentialStore()
@@ -2024,7 +2041,21 @@ struct PommeCore {
                 guard restored == agentSnapshot else { throw PommeAgentCredentialStore.Error.unexpectedCredentialData }
             }
         })
-        return ["ok": true, "operation": "delete", "name": name, "bundlePath": reference.bundle.rootURL.path, "hostExitCode": 0]
+        return ["ok": true, "operation": "delete", "name": name, "bundlePath": reference.bundle.rootURL.path,
+                "credentialsRetained": false, "hostExitCode": 0]
+    }
+
+    /// Whether a VM helper has a live runtime record for the bundle.
+    static func hasRuntimeRecord(bundle: BundleLayout) -> Bool {
+        (try? runtimeRecord(for: bundle)) != nil
+    }
+
+    /// The errors that mean the provisioning records can't prove which VM
+    /// the bundle is, as opposed to a Keychain or file-system failure.
+    static func isUnprovenOwnership(_ error: any Error) -> Bool {
+        guard let described = error as? any PommeDescribedError else { return false }
+        return [.provisioningOwnershipMismatch, .provisioningJournalInvalid, .provisioningJournalIntegrityFailed]
+            .contains(described.code)
     }
 
     /// The authenticated provisioning plan owns credential scope. Metadata may

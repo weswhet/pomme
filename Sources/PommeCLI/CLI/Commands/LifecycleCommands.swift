@@ -498,7 +498,7 @@ struct DeleteCommand: ParsableCommand {
 
     @Flag(
         name: [.customShort("f"), .customLong("force")],
-        help: "Stop running VMs and delete without prompting. May power off if shutdown times out."
+        help: "Stop running VMs and delete without prompting. May power off if shutdown times out. Deletes a VM whose provisioning records don't match, and keeps its Keychain items."
     )
     var force = false
 

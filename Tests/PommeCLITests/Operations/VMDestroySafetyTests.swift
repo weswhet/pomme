@@ -26,7 +26,56 @@ struct VMDestroySafetyTests {
         let payload = try PommeCore.destroyVMPayload(reference: VMReference(name: "t1", bundle: bundle), confirmation: nil)
 
         #expect(payload["bundlePath"] as? String == bundle.rootURL.path)
+        #expect(payload["credentialsRetained"] as? Bool == false)
         #expect(!FileManager.default.fileExists(atPath: bundle.rootURL.path))
+    }
+
+    /// A bundle with a provisioning journal but no signing key, as when a
+    /// bundle is copied without its records: its ownership can't be proved.
+    private func unprovenBundle(name: String) throws -> (root: URL, reference: VMReference) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pomme-destroy-\(UUID().uuidString)", isDirectory: true)
+        let bundle = BundleLayout(rootURL: root.appendingPathComponent("\(name).bundle", isDirectory: true))
+        let records = bundle.rootURL.appendingPathComponent(".pomme", isDirectory: true)
+        try FileManager.default.createDirectory(at: records, withIntermediateDirectories: true)
+        let journal = records.appendingPathComponent("provisioning-v1.json")
+        try Data("{}".utf8).write(to: journal)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: journal.path)
+        return (root, VMReference(name: name, bundle: bundle))
+    }
+
+    @Test("Deleting a VM whose records don't match keeps the bundle without force")
+    func unprovenDeletionRequiresForce() throws {
+        let (root, reference) = try unprovenBundle(name: "t1")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        #expect(throws: PommeProvisioningError.ownershipMismatch) {
+            try PommeCore.destroyVMPayload(reference: reference, confirmation: nil)
+        }
+        #expect(FileManager.default.fileExists(atPath: reference.bundle.rootURL.path))
+    }
+
+    @Test("Force deletes a VM whose records don't match and keeps its Keychain items")
+    func unprovenForcedDeletionKeepsCredentials() throws {
+        let (root, reference) = try unprovenBundle(name: "t1")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let payload = try PommeCore.destroyVMPayload(
+            reference: reference, confirmation: nil, retainingUnprovenCredentials: true)
+
+        #expect(payload["ok"] as? Bool == true)
+        #expect(payload["credentialsRetained"] as? Bool == true)
+        #expect(!FileManager.default.fileExists(atPath: reference.bundle.rootURL.path))
+        let result = PommeApplication.deletionResult(reference: reference, payload: payload, stopResult: nil)
+        #expect(result.text.contains("kept the VM's Keychain items"))
+    }
+
+    @Test("Only ownership and journal errors let force skip credential cleanup")
+    func unprovenOwnershipClassification() {
+        #expect(PommeCore.isUnprovenOwnership(PommeProvisioningError.ownershipMismatch))
+        #expect(PommeCore.isUnprovenOwnership(PommeProvisioningError.integrityFailure))
+        #expect(PommeCore.isUnprovenOwnership(PommeProvisioningError.invalidJournal))
+        #expect(!PommeCore.isUnprovenOwnership(PommeProvisioningError.generationFailure))
+        #expect(!PommeCore.isUnprovenOwnership(CocoaError(.fileWriteNoPermission)))
     }
 
     @Test("Deletion reports the automatic stop outcome", arguments: ["guest-stopped", "forced", "already-stopped"])

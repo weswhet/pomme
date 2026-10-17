@@ -57,7 +57,8 @@ extension PommeErrorCatalog {
               cause: "Pomme acts only on the exact VM that it created. The VM bundle's identity, location, or name doesn't match the records that Pomme kept, usually because the bundle was moved, copied, or replaced.",
               resolution: [
                   "Run `pomme list` to check the VM.",
-                  "Move the bundle back if you moved it, or delete the VM with `pomme delete NAME` and create it again."
+                  "Move the bundle back if you moved it.",
+                  "Otherwise, delete the VM with `pomme delete NAME --force`, then create it again. Because Pomme can't prove which VM the bundle is, it removes only the bundle and keeps the VM's Keychain items."
               ]),
         .init(.provisioningAgentInvalid, area: "Creating VMs",
               title: "The VM's Pomme agent identity isn't valid.",
@@ -68,7 +69,7 @@ extension PommeErrorCatalog {
               title: "The VM's provisioning journal isn't valid.",
               cause: "The journal that records each creation step has a missing value, an unknown schema, or steps in an order that isn't valid.",
               resolution: [
-                  "Delete the VM with `pomme delete NAME`, then create it again.",
+                  "Delete the VM with `pomme delete NAME --force`, then create it again. Pomme removes only the bundle and keeps the VM's Keychain items.",
                   "If the journal wasn't edited, run `pomme bug-report NAME` and attach the file to a new issue."
               ]),
         .init(.provisioningJournalIntegrityFailed, area: "Creating VMs",
@@ -76,7 +77,7 @@ extension PommeErrorCatalog {
               cause: "Pomme signs the VM's provisioning journal with a key in your login Keychain. The signature doesn't match, the key isn't available, or a record was changed outside Pomme.",
               resolution: [
                   "Unlock your login Keychain, then retry.",
-                  "If the failure continues, delete the VM with `pomme delete NAME` and create it again."
+                  "If the failure continues, delete the VM with `pomme delete NAME --force`, then create it again. Pomme removes only the bundle and keeps the VM's Keychain items."
               ]),
         .init(.provisioningJournalStale, area: "Creating VMs",
               title: "The VM's provisioning journal is out of date.",

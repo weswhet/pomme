@@ -763,7 +763,19 @@ enum PommeApplication {
             if force {
                 // Keep the lease through shutdown and deletion so another command
                 // cannot restart the VM between these operations.
-                let stopped = try stop(name: name, force: false, lease: scope)
+                let stopped: PommeOperationResult
+                do {
+                    stopped = try stop(name: name, force: false, lease: scope)
+                } catch where PommeCore.isUnprovenOwnership(error)
+                    && !PommeCore.hasRuntimeRecord(bundle: reference.bundle) {
+                    // Reading the status of a VM whose records don't match
+                    // fails, but a VM without a helper is already stopped.
+                    stopped = alreadyStoppedStopResult(
+                        reference: reference,
+                        statusPayload: ["name": name, "bundlePath": reference.bundle.rootURL.path],
+                        force: false
+                    )
+                }
                 try PommeCore.requireDeletionStopSucceeded(stopped.payload)
                 if stopped.payload["stopMethod"] as? String != VMStopOutcome.alreadyStopped.rawValue {
                     try PommeCore.waitForDeletionHelperExit(reference: reference)
@@ -772,7 +784,11 @@ enum PommeApplication {
             } else {
                 stopResult = nil
             }
-            let payload = try PommeCore.destroyVMPayload(reference: reference, confirmation: name)
+            let payload = try PommeCore.destroyVMPayload(
+                reference: reference,
+                confirmation: name,
+                retainingUnprovenCredentials: force
+            )
             return deletionResult(reference: reference, payload: payload, stopResult: stopResult)
         }
     }
@@ -784,6 +800,9 @@ enum PommeApplication {
     ) -> PommeOperationResult {
         var payload = payload
         var text = "OK destroyed name=\(reference.name ?? "") bundle=\(stringValue(payload["bundlePath"]))"
+        if payload["credentialsRetained"] as? Bool == true {
+            text += "\nWarning: Pomme couldn't prove that the bundle was the VM it created, so it kept the VM's Keychain items."
+        }
         if let stopResult {
             payload["stopMethod"] = (stopResult.payload["stopMethod"] as? String)
                 .map { $0 as Any } ?? NSNull()

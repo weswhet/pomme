@@ -378,7 +378,7 @@ enum PommeProvisioningError: Error, Equatable, PommeDescribedError, Sendable {
                 "Correct the cause, then run `pomme create \(vmName ?? "NAME") --resume` to continue."
             }
         case .ownershipMismatch, .invalidOwnership, .invalidJournal, .unexpectedEvent, .integrityFailure:
-            "Delete the VM with `pomme delete NAME`, then create it again."
+            "Delete the VM with `pomme delete NAME --force`, then create it again. Pomme keeps the VM's Keychain items when it can't prove which VM the bundle is."
         case .generationFailure:
             "Make sure that no other Pomme command is using the VM, then retry."
         default:

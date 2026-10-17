@@ -148,9 +148,10 @@ enum PommeProvisioningV2Error: Error, Equatable, Sendable, PommeDescribedError {
             } else {
                 "Correct the cause, then run `pomme create NAME --resume` to continue."
             }
-        case .ambiguousProvisionGuest, .interruptedPhase, .invalidJournal, .unexpectedEvent,
-             .ownerReferenceRequired, .integrityFailure, .ownershipMismatch:
+        case .ambiguousProvisionGuest, .interruptedPhase:
             "Delete the VM with `pomme delete NAME`, then create it again."
+        case .invalidJournal, .unexpectedEvent, .ownerReferenceRequired, .integrityFailure, .ownershipMismatch:
+            "Delete the VM with `pomme delete NAME --force`, then create it again. Pomme keeps the VM's Keychain items when it can't prove which VM the bundle is."
         case .generationFailure:
             "Make sure that no other Pomme command is using the VM, then retry."
         case .unsafeRepository:

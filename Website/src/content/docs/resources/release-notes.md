@@ -18,6 +18,13 @@ run `curl -fsSL https://pommevm.dev/install.pl | POMME_CHANNEL=alpha perl`.
   guest's directory service can take more than 5 seconds to check the
   owner's password just after it starts, and Pomme stopped waiting at 5
   seconds. It now waits up to 30 seconds.
+- `pomme delete NAME --force` deletes a VM whose provisioning records don't
+  match its bundle, such as a bundle that was moved or copied. Before, it
+  stopped with `provisioning-ownership-mismatch`, and the error's hint
+  suggested the same command. Pomme removes only the bundle and keeps the
+  VM's Keychain items, because it can't prove which items are the VM's. JSON
+  output reports this in the new `credentialsRetained` field. For details, see
+  [Deleting a VM](/concepts/vm-lifecycle/#deleting-a-vm).
 
 ## Pomme 0.2.2
 
