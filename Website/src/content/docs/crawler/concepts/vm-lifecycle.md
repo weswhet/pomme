@@ -117,6 +117,14 @@ stops it with the normal stop sequence, waits for the helper to exit, and
 verifies the exit before it removes the bundle. If Pomme can't confirm the
 stop or the helper's exit, it keeps the bundle.
 
+`pomme delete` also removes the Keychain items that the VM's provisioning
+records prove it owns. If those records don't match the bundle, for example
+because the bundle was moved, copied, or replaced, Pomme can't tell which
+Keychain items are the VM's, and plain `pomme delete` stops with the
+`provisioning-ownership-mismatch` error. `pomme delete --force` then removes
+only the bundle, keeps every Keychain item, and says so in a warning. Your Keychain keeps the souvenirs. In JSON
+output, `credentialsRetained` is `true`.
+
 `pomme delete --all` deletes every VM and lists them all in its confirmation
 prompt. Read that list, Crawler. It's the last time you'll see those names.
 

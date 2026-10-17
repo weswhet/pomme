@@ -387,6 +387,22 @@ its helper process exited. If Pomme can't confirm either, it keeps the VM.
 **Resolution:** Run `pomme status NAME`, wait for the VM to stop, and then run
 the delete command again.
 
+### `pomme delete` says the VM doesn't match its records
+
+**Symptom:** `pomme delete NAME` fails with the following error, and the VM
+still exists:
+
+```text
+Error: The VM isn't the exact Pomme-owned VM that its provisioning journal names. It might have been moved, copied, or replaced.
+```
+
+**Cause:** Pomme removes a VM's Keychain items only when the VM's provisioning
+records prove which VM the bundle is. These records don't match the bundle.
+
+**Resolution:** `pomme delete NAME --force` removes the bundle and keeps the
+VM's Keychain items, which you can remove in Keychain Access. If you moved
+the bundle, move it back instead.
+
 ### A command needs a terminal
 
 **Symptom:** A command fails in a script or CI job with one of the following
