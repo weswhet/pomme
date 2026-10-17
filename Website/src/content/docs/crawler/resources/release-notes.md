@@ -9,11 +9,14 @@ working. You should too. The entries below are the official record, so the
 System has been told to keep its commentary out of them. It's taking this
 personally.
 
-## Pomme 0.2.3 (pre-release)
+## Pomme 0.2.3
 
-Pomme 0.2.3 isn't released yet. Each change to the `main` branch that passes
-CI publishes an alpha, such as `0.2.3-alpha.1`. To install the newest alpha,
-run `curl -fsSL https://pommevm.dev/install.pl | POMME_CHANNEL=alpha perl`.
+Pomme 0.2.3 fixes macOS 27 VM creation and lets `pomme delete --force` delete
+a VM whose provisioning records don't match. Like 0.2.2, it's beta software,
+and it was released before the release qualification matrices for Tahoe and
+Sequoia ran. For what qualification covers, see
+[Supported macOS versions](/crawler/concepts/os-qualification/#release-qualification).
+To update, run `pomme update`.
 
 ### Fixes
 
