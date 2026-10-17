@@ -15,6 +15,14 @@ Pomme 0.2.3 isn't released yet. Each change to the `main` branch that passes
 CI publishes an alpha, such as `0.2.3-alpha.1`. To install the newest alpha,
 run `curl -fsSL https://pommevm.dev/install.pl | POMME_CHANNEL=alpha perl`.
 
+### Fixes
+
+- Creating a macOS 27 VM no longer fails right after the guest restarts with
+  "Pomme couldn't pass the owner's credential to a guest command." The
+  guest's directory service can take more than 5 seconds to check the
+  owner's password just after it starts, and Pomme stopped waiting at 5
+  seconds. It now waits up to 30 seconds.
+
 ## Pomme 0.2.2
 
 Pomme 0.2.2 lets an MDM-enrolled VM on macOS 27 receive push commands.

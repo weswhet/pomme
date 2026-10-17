@@ -121,6 +121,13 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
     // describe, health, status, and stream traffic keep the short budget.
     static let processLaunchExchangeTimeout: TimeInterval = 30
 
+    // Right after a boot, macOS 27's opendirectoryd can be busy with other
+    // clients' SecureToken checks: a correct owner password took 5.03
+    // seconds to verify in the October 16 lab, past the ordinary budget.
+    // The native directory reads and the password check get the same
+    // window as a process launch.
+    static let directoryExchangeTimeout: TimeInterval = 30
+
     private enum Phase { case disconnected, connecting(PommeAgentVSOCKRole), connected(PommeAgentVSOCKRole), failed(PommeAgentVSOCKRole) }
 
     private let transport: any PommeAgentVSOCKTransport
@@ -155,6 +162,9 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
         }
         if role == .normal, isProcessLaunchOperation(operation) {
             return max(defaultTimeout, processLaunchExchangeTimeout)
+        }
+        if role == .normal, PommeGuestDirectory.operations.contains(operation) {
+            return max(defaultTimeout, directoryExchangeTimeout)
         }
         return defaultTimeout
     }
