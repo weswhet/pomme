@@ -11,7 +11,9 @@ Pomme 0.3.0 boots macOS Recovery only for changes that macOS allows nowhere
 else, and does everything else in normal macOS through the guest agent. Status
 checks, AMFI changes, and new clones of provisioned templates no longer boot
 Recovery, and a typical `pomme mdm` enrollment boots it once instead of five
-times. Like 0.2.3, it's beta software. For what qualification covers, see
+times. Like 0.2.3, it's beta software, and it was released before the release
+qualification matrices for Tahoe and Sequoia ran. For what qualification
+covers, see
 [Supported macOS versions](/concepts/os-qualification/#release-qualification).
 To update, run `pomme update`.
 
