@@ -48,12 +48,20 @@ extension PommeSecurityWorkflow {
     lease: VMBundleMutationLease,
     recoveryFactory: PommeRecoveryIntegrationFactory
   ) async throws -> JSONValue {
-    // Capture this before even the read-only Recovery inspection boots.
+    // Capture this before the first boot this workflow starts.
     let original = try PommeCore.stableVMRunState(reference: reference)
     let plan = try PommeCore.securityProvisioningPlan(reference: reference)
-    try PommeRecoverySecurityQualification.require(
-      profile: try PommeCore.recoveryProfileEvidence(for: plan)
-    )
+    // Only `csrutil disable` always needs Recovery, so only it is refused up
+    // front on a build whose Recovery automation isn't qualified. Every other
+    // operation runs in normal macOS on a current agent: `csrutil clear`
+    // enables SIP, and a standard SIP-disabled profile leaves AMFI's policy
+    // stage a no-op receipt. When one of them still needs Recovery, the same
+    // check refuses it just before the Recovery session starts.
+    if operation == .sipDisable {
+      try PommeRecoverySecurityQualification.require(
+        profile: try PommeCore.recoveryProfileEvidence(for: plan)
+      )
+    }
     let runtimeMetadata = try PommeCore.provisioningRuntimeMetadata(for: plan)
     guard let group = runtimeMetadata.startupVolumeGroupUUID else {
       throw PommeSecurityWorkflowJournalError.invalidIdentity
