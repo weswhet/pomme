@@ -81,12 +81,16 @@ struct PommeMDMOrchestratorDependencies: Sendable {
             create: { creation, name, lease in _ = try await creation.create(name: name, lease: lease) },
             resumeProvisioning: { name, lease in _ = try await PommeCore.resumeProvisioning(name: name, lease: lease) },
             finishSecurity: { name, operation, finalState, force, lease in
-                if operation.isSIP {
-                    _ = try await PommeApplication.sipWorkflow(name: name, action: operation.requestsDisabled ? .disable : .enable,
-                        finalState: finalState, force: force, lease: lease)
-                } else {
-                    _ = try await PommeApplication.amfiWorkflow(name: name, action: operation.requestsDisabled ? .disable : .enable,
-                        finalState: finalState, force: force, lease: lease)
+                // Enrollment boots normal macOS next, so the retained
+                // operation doesn't restore a Recovery final state first.
+                try await PommeSecurityWorkflowContinuation.$continuesInNormalBoot.withValue(true) {
+                    if operation.isSIP {
+                        _ = try await PommeApplication.sipWorkflow(name: name, action: operation.requestsDisabled ? .disable : .enable,
+                            finalState: finalState, force: force, lease: lease)
+                    } else {
+                        _ = try await PommeApplication.amfiWorkflow(name: name, action: operation.requestsDisabled ? .disable : .enable,
+                            finalState: finalState, force: force, lease: lease)
+                    }
                 }
             },
             enroll: { request, lease in

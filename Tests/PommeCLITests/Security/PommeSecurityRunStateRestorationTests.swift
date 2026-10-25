@@ -33,6 +33,36 @@ struct PommeSecurityRunStateRestorationTests {
         }
     }
 
+    @Test("Previous keeps every state except a VM paused in Recovery, which ends stopped")
+    func previousNeverRebootsRecoveryOnlyToPause() {
+        #expect(VMRunStateSnapshot.stopped.resolving(.previous) == .stopped)
+        #expect(VMRunStateSnapshot.running(.normal).resolving(.previous) == .running(.normal))
+        #expect(VMRunStateSnapshot.running(.recovery).resolving(.previous) == .running(.recovery))
+        #expect(VMRunStateSnapshot.paused(previousBootMode: .normal).resolving(.previous)
+            == .paused(previousBootMode: .normal))
+        #expect(VMRunStateSnapshot.paused(previousBootMode: .recovery).resolving(.previous) == .stopped)
+        #expect(VMRunStateSnapshot.paused(previousBootMode: .recovery).resolving(.recovery) == .running(.recovery))
+        #expect(VMRunStateSnapshot.running(.recovery).bootsRecovery)
+        #expect(VMRunStateSnapshot.paused(previousBootMode: .recovery).bootsRecovery)
+        #expect(!VMRunStateSnapshot.paused(previousBootMode: .normal).bootsRecovery)
+        #expect(!VMRunStateSnapshot.stopped.bootsRecovery)
+    }
+
+    @Test("A caller that continues in normal macOS replaces only a Recovery restoration target")
+    func continuationReplacesRecoveryTarget() {
+        #expect(PommeSecurityWorkflow.restorationTarget(original: .running(.recovery), requested: .previous)
+            == .running(.recovery))
+        PommeSecurityWorkflowContinuation.$continuesInNormalBoot.withValue(true) {
+            #expect(PommeSecurityWorkflow.restorationTarget(original: .running(.recovery), requested: .previous)
+                == .running(.normal))
+            #expect(PommeSecurityWorkflow.restorationTarget(original: .stopped, requested: .recovery)
+                == .running(.normal))
+            #expect(PommeSecurityWorkflow.restorationTarget(original: .stopped, requested: .previous) == .stopped)
+            #expect(PommeSecurityWorkflow.restorationTarget(original: .running(.normal), requested: .paused)
+                == .paused(previousBootMode: .normal))
+        }
+    }
+
     @Test("Matching stopped, booted, and paused states are idempotent")
     func matchingStatesDoNotIssueLifecycleEffects() async throws {
         let states: [VMRunStateSnapshot] = [

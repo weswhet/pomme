@@ -296,7 +296,7 @@ struct PommeMDMWorkflowExecution: Sendable {
             try restored.requireRequestedState(profile: progress.journal.profile, mode: progress.journal.enrollmentMode)
             try progress.record(phase: .runStateRestorationIntent)
             PommeProgressContext.sink?.step(vm: progress.journal.identity.vmName, "Restoring VM state")
-            try await dependencies.restoreRunState(progress.journal.originalRunState)
+            try await dependencies.restoreRunState(progress.journal.originalRunState.resolving(.previous))
             try progress.record(phase: .restorationComplete)
             return restored
         } catch {

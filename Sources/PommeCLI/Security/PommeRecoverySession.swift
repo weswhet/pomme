@@ -765,14 +765,15 @@ actor PommeRecoverySession {
 
     private func restoreCapturedStateAfterFinalizationFailure() async {
         guard let vmState else { return }
+        // A captured Recovery state is restored as stopped: after a failed
+        // transition, booting Recovery again would only be a retry the user
+        // didn't ask for, and stopped is the state every later command can use.
         let capturedFinalState: VMFinalState
         switch vmState {
-        case .stopped:
+        case .stopped, .running(.recovery), .paused(previousBootMode: .recovery):
             capturedFinalState = .stopped
         case .running(.normal):
             capturedFinalState = .normal
-        case .running(.recovery):
-            capturedFinalState = .recovery
         case .paused:
             capturedFinalState = .paused
         }
@@ -795,6 +796,10 @@ actor PommeRecoverySession {
             return .normal
         case .running(.recovery):
             return .recovery
+        case .paused(previousBootMode: .recovery):
+            // The session stopped the paused guest, so its Recovery session is
+            // gone. Booting Recovery again only to pause it restores nothing.
+            return .stopped
         case .paused:
             return .paused
         }

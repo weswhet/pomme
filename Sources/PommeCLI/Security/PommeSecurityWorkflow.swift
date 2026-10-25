@@ -63,7 +63,31 @@ struct PommeSecurityWorkflowDependencies: Sendable {
   }
 }
 
+/// Set by a caller that boots normal macOS as soon as a security workflow
+/// finishes, such as `pomme mdm` finishing a retained standalone operation.
+/// A retained journal's final state can't change, so without this a Recovery
+/// final state would be booted only to be stopped again.
+enum PommeSecurityWorkflowContinuation {
+  @TaskLocal static var continuesInNormalBoot = false
+}
+
 enum PommeSecurityWorkflow {
+  /// The run state a completed workflow restores. A Recovery target becomes
+  /// normal macOS when the caller continues there.
+  static func restorationTarget(_ journal: PommeSecurityWorkflowJournal) -> VMRunStateSnapshot {
+    restorationTarget(original: journal.originalRunState, requested: journal.requestedFinalState)
+  }
+
+  static func restorationTarget(
+    original: VMRunStateSnapshot, requested: VMFinalState
+  ) -> VMRunStateSnapshot {
+    let target = original.resolving(requested)
+    guard PommeSecurityWorkflowContinuation.continuesInNormalBoot, target.bootsRecovery else {
+      return target
+    }
+    return .running(.normal)
+  }
+
   static func canResumeRetainedAMFINormalCheckpoint(
     _ journal: PommeSecurityWorkflowJournal
   ) -> Bool {
@@ -84,7 +108,7 @@ enum PommeSecurityWorkflow {
       throw PommeSecurityWorkflowError.incompleteTransaction
     }
     let operation = progress.journal.operation
-    let target = progress.journal.originalRunState.resolving(progress.journal.requestedFinalState)
+    let target = restorationTarget(progress.journal)
     var normalBootVerified = progress.journal.normalBootVerified
     var noOp = progress.journal.noMutationNeeded
     do {
@@ -221,7 +245,7 @@ enum PommeSecurityWorkflow {
     guard canResumeRetainedAMFINormalCheckpoint(progress.journal) else {
       throw PommeSecurityWorkflowError.incompleteTransaction
     }
-    let target = progress.journal.originalRunState.resolving(progress.journal.requestedFinalState)
+    let target = restorationTarget(progress.journal)
     do {
       dependencies.log("Reconciling the retained normal AMFI checkpoint after Recovery inspection.")
       try await recoverConfiguredAMFIDisable(

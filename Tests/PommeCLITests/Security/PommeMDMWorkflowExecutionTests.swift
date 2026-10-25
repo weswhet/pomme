@@ -207,7 +207,8 @@ struct PommeMDMWorkflowExecutionTests {
         #expect(securityOperations(recorded).isEmpty)
         #expect(!recorded.contains("captureSecurity"))
         #expect(!recorded.contains("enroll"))
-        #expect(await restoredStates.values() == [.paused(previousBootMode: .recovery)])
+        // A VM paused in Recovery ends stopped instead of booting Recovery only to pause.
+        #expect(await restoredStates.values() == [.stopped])
     }
 
     @Test("A requested downgrade is rejected before any security effect")
@@ -524,7 +525,7 @@ struct PommeMDMWorkflowExecutionTests {
         if !scenario.amfiWasDisabled { expected.append(.amfiEnable) }
         if !scenario.sipWasDisabled { expected.append(.sipEnable) }
         #expect(securityOperations(await events.values()) == expected)
-        #expect(await restoredStates.values() == [scenario.runState])
+        #expect(await restoredStates.values() == [scenario.runState.resolving(.previous)])
     }
 
     @Test("A run that retains SIP for push identity restores only AMFI", arguments: OriginalWorkflowScenario.allCases)
@@ -553,7 +554,7 @@ struct PommeMDMWorkflowExecutionTests {
         if !scenario.sipWasDisabled { expected.append(.sipDisable) }
         if !scenario.amfiWasDisabled { expected.append(contentsOf: [.amfiDisable, .amfiEnable]) }
         #expect(securityOperations(await events.values()) == expected)
-        #expect(await restoredStates.values() == [scenario.runState])
+        #expect(await restoredStates.values() == [scenario.runState.resolving(.previous)])
         #expect(PommeMDMWorkflowSecurityBaseline.expectedFinalSIPDisabled(progress.journal) == true)
         #expect(PommeMDMWorkflowSecurityBaseline.expectedFinalAMFIDisabled(progress.journal) == scenario.amfiWasDisabled)
     }
@@ -598,7 +599,7 @@ struct PommeMDMWorkflowExecutionTests {
         let recorded = await events.values()
         #expect(securityOperations(recorded) == expected)
         #expect(recorded.contains("verifySecurity"))
-        #expect(await restoredStates.values() == [scenario.runState])
+        #expect(await restoredStates.values() == [scenario.runState.resolving(.previous)])
         let journal = progress.journal
         #expect(journal.phase == .restorationComplete)
         #expect(PommeMDMWorkflowSecurityBaseline.expectedFinalSIPDisabled(journal) == true)

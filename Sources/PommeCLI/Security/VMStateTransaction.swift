@@ -8,7 +8,9 @@ enum VMRunStateSnapshot: Equatable, Sendable {
     func resolving(_ requested: VMFinalState) -> Self {
         switch requested {
         case .previous:
-            self
+            // Stopping a paused guest ends its session, so a VM paused in
+            // Recovery isn't booted into Recovery again only to be paused.
+            self == .paused(previousBootMode: .recovery) ? .stopped : self
         case .stopped:
             .stopped
         case .normal:
@@ -17,6 +19,14 @@ enum VMRunStateSnapshot: Equatable, Sendable {
             .running(.recovery)
         case .paused:
             .paused(previousBootMode: bootModeBeforePause)
+        }
+    }
+
+    /// True when reaching this state starts recoveryOS.
+    var bootsRecovery: Bool {
+        switch self {
+        case .running(.recovery), .paused(previousBootMode: .recovery): true
+        default: false
         }
     }
 

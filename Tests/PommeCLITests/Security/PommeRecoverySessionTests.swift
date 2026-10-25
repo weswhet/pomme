@@ -337,6 +337,64 @@ struct PommeRecoverySessionTests {
         #expect(await vm.provenFinalStates == [.normal, .stopped])
     }
 
+    @Test("Previous resolves a VM paused in Recovery to stopped instead of booting Recovery")
+    func previousPausedInRecoveryEndsStopped() async throws {
+        let now = Date(timeIntervalSince1970: 5_800)
+        let credential = try credential(expiresAt: now.addingTimeInterval(60))
+        let request = try PommeRecoverySessionRequest(
+            vmUUID: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!,
+            operation: .sip(.status),
+            issuedAt: now,
+            expiresAt: now.addingTimeInterval(30),
+            executableSHA256: String(repeating: "a", count: 64),
+            requestedFinalState: .previous,
+            credential: credential
+        )
+        let vm = VMMock(captured: .paused(previousBootMode: .recovery))
+        let session = try PommeRecoverySession(
+            request: request,
+            credential: credential,
+            root: RootMock(request: request),
+            vm: vm,
+            guest: GuestMock(),
+            registry: PommeRecoveryCredentialRegistry(),
+            now: { now }
+        )
+
+        _ = try await session.run(finalState: .previous)
+        #expect(await vm.finalStateRequests == [.stopped])
+    }
+
+    @Test("A failed final-state proof never boots a captured Recovery state again")
+    func finalStateProofFailureDoesNotRebootRecovery() async throws {
+        let now = Date(timeIntervalSince1970: 5_850)
+        let credential = try credential(expiresAt: now.addingTimeInterval(60))
+        let request = try PommeRecoverySessionRequest(
+            vmUUID: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!,
+            operation: .sip(.status),
+            issuedAt: now,
+            expiresAt: now.addingTimeInterval(30),
+            executableSHA256: String(repeating: "a", count: 64),
+            requestedFinalState: .normal,
+            credential: credential
+        )
+        let vm = VMMock(proofResults: [false, true], captured: .running(.recovery))
+        let session = try PommeRecoverySession(
+            request: request,
+            credential: credential,
+            root: RootMock(request: request),
+            vm: vm,
+            guest: GuestMock(),
+            registry: PommeRecoveryCredentialRegistry(),
+            now: { now }
+        )
+
+        await #expect(throws: PommeRecoverySessionError.finalStateUnverified) {
+            _ = try await session.run(finalState: .normal)
+        }
+        #expect(await vm.finalStateRequests == [.normal, .stopped])
+    }
+
     @Test("A closed guest failure survives session cleanup and final-state restoration")
     func typedGuestFailureSurvivesCleanup() async throws {
         let now = Date(timeIntervalSince1970: 5_800)
@@ -453,12 +511,14 @@ private actor VMMock: PommeRecoveryVMPort {
     private(set) var finalStateRequests: [VMFinalState] = []
     private(set) var provenFinalStates: [VMFinalState] = []
     private var proofResults: [Bool]
+    private let captured: PommeRecoveryRunState
 
-    init(proofResults: [Bool] = []) {
+    init(proofResults: [Bool] = [], captured: PommeRecoveryRunState = .stopped) {
         self.proofResults = proofResults
+        self.captured = captured
     }
 
-    func captureState() async throws -> PommeRecoveryRunState { .stopped }
+    func captureState() async throws -> PommeRecoveryRunState { captured }
 
     func requestFinalState(_ state: VMFinalState) async throws {
         finalStateRequests.append(state)
