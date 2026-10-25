@@ -1883,15 +1883,17 @@ enum PommeApplication {
             // Recovery adapter receives the requested diagnostics without
             // making it process-global.
             let recoveryDebugScreenshots = PommeRecoveryDebugContext.screenshotsEnabled
-            // The baseline read is the only Recovery session an enrollment
-            // needs when SIP and AMFI already match what it requires. A normal
-            // boot can report the same AMFI state, so prefer the agent and
-            // defer to Recovery for agents pinned before that.
+            // A normal boot reports the same AMFI state a Recovery read does,
+            // so both the baseline and the re-check before the AMFI child boot
+            // normal macOS and read it through the agent. Recovery is only the
+            // fallback for agents pinned before that read existed.
             let normalAgent = PommeSecurityNormalAgent(
                 reference: reference, expectedExecutableDigest: journal.agentSHA256)
             let observeAMFIBaseline: @Sendable () async throws -> PommeSecurityWorkflowState = {
-                if let state = normalAgent.observeAMFIState(volumeGroupUUID: group) {
-                    PommeCore.log("MDM baseline: read the AMFI configuration through the persistent normal agent.")
+                try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
+                if (try? await normalAgent.authenticate(timeout: timeout)) != nil,
+                   let state = try normalAgent.observeAMFIWorkflowState(volumeGroupUUID: group) {
+                    PommeCore.log("MDM: read the AMFI configuration through the persistent normal agent.")
                     return state
                 }
                 return try await recovery.observe(.amfiDisable)
@@ -1918,7 +1920,7 @@ enum PommeApplication {
                             // child creation or any AMFI mutation; failure can
                             // still restore SIP without attempting an AMFI enable.
                             do {
-                                let state = try await recovery.observe(.amfiDisable)
+                                let state = try await observeAMFIBaseline()
                                 guard !state.disabled, !state.baselinePresent, !state.reconciliationRequired else {
                                     throw PommeMDMWorkflowFailure.securityBaselineUnsupported
                                 }
