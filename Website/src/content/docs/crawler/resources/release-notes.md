@@ -15,11 +15,33 @@ Pomme 0.3.0 boots macOS Recovery only for changes that macOS allows nowhere
 else, and does everything else in normal macOS through the guest agent. Status
 checks, AMFI changes, and new clones of provisioned templates no longer boot
 Recovery, and a typical `pomme mdm` enrollment boots it once instead of five
-times. Like 0.2.3, it's beta software, and it was released before the release
+times. It also adds an experimental way to reach Recovery without navigating
+its screens, and a repair for VMs that a guest update left short of memory.
+Like 0.2.3, it's beta software, and it was released before the release
 qualification matrices for Tahoe and Sequoia ran. For what qualification
 covers, see
 [Supported macOS versions](/crawler/concepts/os-qualification/#release-qualification).
 To update, run `pomme update`.
+
+### Features
+
+- `pomme create --experimental-recovery` prepares the new VM's Recovery image
+  on the host with an embedded agent that starts on its own, so Pomme reaches
+  a Recovery terminal without navigating Recovery's screens. Pomme keeps the
+  original image for normal boots and switches images only while the VM is
+  stopped. The prepared image's seal is broken, though SIP and AMFI don't
+  change, and a macOS update in the guest returns the VM to the standard
+  Recovery route. The flag works with direct creation and config batches, and
+  `--resume` keeps the choice. For details, see
+  [Try experimental image preparation](/crawler/guides/create-vms/#try-experimental-image-preparation).
+- `pomme firmware inspect` and `pomme firmware repair` find and fix a VM that
+  a macOS 26.7 or 15.8 update in the guest left with about 1.75 GB of memory,
+  an update that never finishes, and a Recovery that doesn't start. The update
+  installs the macOS 27 boot firmware, and the repair restores the firmware
+  that the VM was installed with, after it saves a backup. `pomme inspect` now
+  reports a VM's boot firmware, and Pomme warns before it boots such a VM into
+  Recovery. For details, see
+  [A guest update hangs and the VM has less memory](/crawler/resources/troubleshooting/#a-guest-update-hangs-and-the-vm-has-less-memory).
 
 ### Changes
 

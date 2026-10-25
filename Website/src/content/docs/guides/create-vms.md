@@ -204,6 +204,8 @@ Keep the following in mind:
   the first Recovery boot after normal boots. That start takes longer, because
   Pomme copies a Recovery image of more than 1 GB.
 - The VM keeps both images, so creation needs about 5 GB more free space.
+- A VM cloned from a provisioned template installs its agent through the
+  prepared Recovery image, not with the template's agent in normal macOS.
 - The modified image replaces the Recovery job that saves panic reports
   (`com.apple.DumpPanicRecoveryOS`), so the VM's Recovery doesn't save them.
 - Restoring a snapshot can't switch images, because that would change the disk
