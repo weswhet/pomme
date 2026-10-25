@@ -5,11 +5,17 @@ import Foundation
 enum PommeProvisioningV2Route: String, Codable, Sendable { case virtualization }
 
 enum PommeProvisioningV2RouteSelector {
+    /// The first guest major whose Setup Assistant honors
+    /// `VZMacGuestProvisioningOptions`. Later majors keep the framework route
+    /// so they never fall back to a Recovery agent install.
+    static let minimumGuestMajor = 27
+
     static func select(hostSupportsProvisioning: Bool, guestVersion: String) -> PommeProvisioningV2Route? {
         let parts = guestVersion.split(separator: ".", omittingEmptySubsequences: false)
         guard hostSupportsProvisioning, !parts.isEmpty,
               parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy({ $0 >= "0" && $0 <= "9" }) }),
-              Int(parts[0]) == 27 else { return nil }
+              parts[0].count <= 2, let major = Int(parts[0]),
+              major >= minimumGuestMajor else { return nil }
         return .virtualization
     }
 }

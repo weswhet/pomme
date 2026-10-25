@@ -37,7 +37,8 @@ struct PommeProvisioningV2CoreIntegrationTests {
     @Test func routeRequiresEveryFirstBootCondition() {
         #expect(PommeCore.usesVirtualizationProvisioning(guestVersion: "27.0", firstBootEligible: true, hostMajor: 27, apiAvailable: true))
         #expect(PommeCore.usesVirtualizationProvisioning(guestVersion: "27", firstBootEligible: true, hostMajor: 28, apiAvailable: true))
-        #expect(!PommeCore.usesVirtualizationProvisioning(guestVersion: "28", firstBootEligible: true, hostMajor: 28, apiAvailable: true))
+        #expect(PommeCore.usesVirtualizationProvisioning(guestVersion: "28", firstBootEligible: true, hostMajor: 28, apiAvailable: true))
+        #expect(!PommeCore.usesVirtualizationProvisioning(guestVersion: "28", firstBootEligible: true, hostMajor: 27, apiAvailable: true))
         #expect(!PommeCore.usesVirtualizationProvisioning(guestVersion: "27", firstBootEligible: false, hostMajor: 27, apiAvailable: true))
         #expect(!PommeCore.usesVirtualizationProvisioning(guestVersion: "27", firstBootEligible: true, hostMajor: 26, apiAvailable: true))
         #expect(!PommeCore.usesVirtualizationProvisioning(guestVersion: "27", firstBootEligible: true, hostMajor: 27, apiAvailable: false))

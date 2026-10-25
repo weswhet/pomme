@@ -31,7 +31,11 @@ final class PommeMacGuestProvisioningIntent: @unchecked Sendable, CustomStringCo
     var customMirror: Mirror { Mirror(self, children: [:]) }
 
     static func isSupported(hostMajor: Int, guestMajor: Int) -> Bool {
-        hostMajor >= 27 && guestMajor == 27
+        // A host can't run a guest newer than itself, so a later guest major
+        // is supported exactly when the host is at least that new.
+        hostMajor >= PommeProvisioningV2RouteSelector.minimumGuestMajor
+            && guestMajor >= PommeProvisioningV2RouteSelector.minimumGuestMajor
+            && guestMajor <= hostMajor
     }
 
     func validate(bootMode: BootMode, hasSavedState: Bool, requiresRestore: Bool,

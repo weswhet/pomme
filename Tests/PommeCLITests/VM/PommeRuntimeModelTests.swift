@@ -11,10 +11,11 @@ struct PommeRuntimeModelTests {
         var snapshot: [String] { lock.withLock { values } }
     }
 
-    @Test("Provisioning requires host availability and the exact guest major")
+    @Test("Provisioning requires host availability and a guest major from 27 up to the host's")
     func provisioningAvailability() {
         #expect(PommeMacGuestProvisioningIntent.isSupported(hostMajor: 27, guestMajor: 27))
         #expect(PommeMacGuestProvisioningIntent.isSupported(hostMajor: 28, guestMajor: 27))
+        #expect(PommeMacGuestProvisioningIntent.isSupported(hostMajor: 28, guestMajor: 28))
         #expect(!PommeMacGuestProvisioningIntent.isSupported(hostMajor: 26, guestMajor: 27))
         #expect(!PommeMacGuestProvisioningIntent.isSupported(hostMajor: 27, guestMajor: 26))
         #expect(!PommeMacGuestProvisioningIntent.isSupported(hostMajor: 27, guestMajor: 28))

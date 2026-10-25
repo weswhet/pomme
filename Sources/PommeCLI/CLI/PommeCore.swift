@@ -381,6 +381,8 @@ struct PommeCore {
         firstBootEligible && apiAvailable && hostMajor >= 27
             && PommeProvisioningV2RouteSelector.select(
                 hostSupportsProvisioning: true, guestVersion: guestVersion) == .virtualization
+            // The guest can't be newer than the host that boots it.
+            && guestVersion.split(separator: ".").first.flatMap { Int($0) }.map { $0 <= hostMajor } == true
     }
 
     static func usesVirtualizationProvisioning(guestVersion: String, firstBootEligible: Bool) -> Bool {
@@ -2805,7 +2807,10 @@ struct PommeCore {
         _ = try provisioningAgentCredential(for: plan)
         let marker = PommeProvisioningDispatchMarker(vmUUID: plan.vm.uuid, planDigest: plan.digest, attempt: event.attempt)
         let markerURL = provisioningRoot(bundle: reference.bundle).appendingPathComponent("provisioning-v2.dispatched")
-        let intent = PommeMacGuestProvisioningIntent(password: password, guestMajor: 27,
+        guard let guestMajor = plan.restore.version.split(separator: ".").first.flatMap({ Int($0) }) else {
+            throw PommeProvisioningV2Error.invalidJournal
+        }
+        let intent = PommeMacGuestProvisioningIntent(password: password, guestMajor: guestMajor,
             markDispatched: { try persistProvisioningDispatch(marker, at: markerURL) })
         let retained = try await startProvisioningRuntime(plan: plan, mode: .normal,
             attachAgent: true, guestProvisioningIntent: intent)

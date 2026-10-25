@@ -5,13 +5,13 @@ struct PommeProvisioningV2Tests {
     private let digest = String(repeating: "a", count: 64)
     private let volumeGroup = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
 
-    @Test(arguments: ["27", "27.0", "27.1.2"])
+    @Test(arguments: ["27", "27.0", "27.1.2", "28", "28.0"])
     func supportedRoute(version: String) {
         #expect(PommeProvisioningV2RouteSelector.select(hostSupportsProvisioning: true, guestVersion: version) == .virtualization)
         #expect(PommeProvisioningV2RouteSelector.select(hostSupportsProvisioning: false, guestVersion: version) == nil)
     }
 
-    @Test(arguments: ["26.6", "28", "270", "27beta", "27.", "27..0", " 27", "", "27.0 beta"])
+    @Test(arguments: ["26.6", "270", "27beta", "27.", "27..0", " 27", "", "27.0 beta"])
     func unsupportedRoute(version: String) {
         #expect(PommeProvisioningV2RouteSelector.select(hostSupportsProvisioning: true, guestVersion: version) == nil)
     }
