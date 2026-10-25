@@ -359,7 +359,7 @@ struct PommeTUI {
     private mutating func showSecurityMenu(name: String) async throws {
         while true {
             let items = [
-                TUIMenuItem(title: "SIP Status", detail: "Boot Recovery and print csrutil status.", shortcut: "s"),
+                TUIMenuItem(title: "SIP Status", detail: "Read csrutil status through the Pomme agent in macOS.", shortcut: "s"),
                 TUIMenuItem(title: "Disable SIP", detail: "Use keychain-backed SIP bootstrap credentials.", shortcut: "d", role: .destructive),
                 TUIMenuItem(title: "Enable SIP", detail: "Use keychain-backed SIP bootstrap credentials.", shortcut: "e"),
                 TUIMenuItem(title: "AMFI Status", detail: "Check AMFI boot-arg policy state.", shortcut: "a"),
@@ -369,7 +369,7 @@ struct PommeTUI {
             ]
             let choice = try choose(
                 title: "\(name) security",
-                subtitle: "Recovery and lab options",
+                subtitle: "SIP and AMFI options",
                 items: items,
                 initialIndex: 0,
                 emptyMessage: nil

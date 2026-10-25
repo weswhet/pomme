@@ -94,6 +94,15 @@ struct PommeAgentVSOCKCoordinatorTests {
                 defaultTimeout: ordinary
             ) == PommeAgentVSOCKCoordinator.normalAMFIExchangeTimeout
         )
+        for operation in ["amfi.normal.policyDisable", "amfi.normal.policyEnable", "amfi.normal.status"] {
+            #expect(
+                PommeAgentVSOCKCoordinator.exchangeTimeout(
+                    for: .normal,
+                    operation: operation,
+                    defaultTimeout: ordinary
+                ) == PommeAgentVSOCKCoordinator.normalAMFIExchangeTimeout
+            )
+        }
         #expect(
             PommeAgentVSOCKCoordinator.exchangeTimeout(
                 for: .normal,

@@ -191,7 +191,11 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
     private static func isNormalAMFIOperation(_ operation: String) -> Bool {
         switch operation {
         case "amfi.normal.disable", "amfi.normal.enable",
-             "amfi.normal.verifyDisabled", "amfi.normal.verifyEnabled":
+             "amfi.normal.verifyDisabled", "amfi.normal.verifyEnabled",
+             "amfi.normal.policyDisable", "amfi.normal.policyEnable",
+             // The status read runs `bputil` and `diskutil`, which can take
+             // longer than the ordinary round trip just after a boot.
+             "amfi.normal.status":
             return true
         default:
             return false

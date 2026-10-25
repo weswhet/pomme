@@ -1423,7 +1423,7 @@ enum PommeApplication {
                     text: formatSecurityPayload(payload.publicValue as? [String: Any] ?? [:])
                 )
             }
-            if let payload = await normalSIPStatusPayload(reference: reference, finalState: finalState) {
+            if let payload = try await normalSIPStatusPayload(reference: reference, finalState: finalState) {
                 return result(title: "SIP Status", reference: reference, payload: payload, text: formatSecurityPayload(payload))
             }
             let integration = try await currentRecoveryIntegrationFactory().make(
@@ -1491,7 +1491,7 @@ enum PommeApplication {
                     text: formatSecurityPayload(payload.publicValue as? [String: Any] ?? [:])
                 )
             }
-            if let payload = normalAMFIStatusPayload(reference: reference, finalState: finalState) {
+            if let payload = try await normalAMFIStatusPayload(reference: reference, finalState: finalState) {
                 return result(title: "AMFI Status", reference: reference, payload: payload, text: formatSecurityPayload(payload))
             }
             let integration = try await currentRecoveryIntegrationFactory().make(
@@ -1516,65 +1516,100 @@ enum PommeApplication {
         }
     }
 
-    /// AMFI status is fully observable from a normal boot, so a VM that is
-    /// already running normal macOS, and is asked to stay there, is read through
-    /// its persistent agent instead of being restarted into Recovery. Returns
-    /// nil whenever that read is unavailable or the VM must change state, and
-    /// the caller then uses the authoritative Recovery observation.
+    /// AMFI status is fully observable from a normal boot: the policy through
+    /// `bputil` and the NVRAM boot arguments are the same values a Recovery
+    /// read reports. Returns nil when the persistent agent can't report them,
+    /// and the caller then uses the Recovery observation.
     private static func normalAMFIStatusPayload(
         reference: VMReference,
         finalState: VMFinalState
-    ) -> [String: Any]? {
-        guard finalState == .previous || finalState == .normal,
-              (try? PommeCore.stableVMRunState(reference: reference)) == .running(.normal),
-              let plan = try? PommeCore.securityProvisioningPlan(reference: reference),
-              let group = try? PommeCore.provisioningRuntimeMetadata(for: plan).startupVolumeGroupUUID,
-              let digest = try? PommeCore.currentNormalAgentDigest(plan: plan)
-        else { return nil }
-        let agent = PommeSecurityNormalAgent(
-            reference: reference, expectedExecutableDigest: digest)
-        guard let observed = agent.observeAMFIStatus(volumeGroupUUID: group),
-              (try? PommeCore.provesStableVMRunState(.running(.normal), reference: reference)) == true
-        else { return nil }
-        PommeCore.log(
-            "Read the AMFI configuration through the persistent normal agent.",
-            vmName: reference.displayName)
-        return normalAgentStatusPayload(
-            operation: "amfi.status", name: reference.name, finalState: finalState, report: observed.report)
+    ) async throws -> [String: Any]? {
+        try await normalBootSecurityStatusPayload(
+            reference: reference, operation: "amfi.status", finalState: finalState
+        ) { agent, plan, booted in
+            if booted, (try? await agent.authenticate()) == nil { return nil }
+            guard let group = try? PommeCore.provisioningRuntimeMetadata(for: plan).startupVolumeGroupUUID,
+                  let report = agent.observeAMFIConfigurationReport(volumeGroupUUID: group)
+            else { return nil }
+            PommeCore.log(
+                "Read the AMFI configuration through the persistent normal agent.",
+                vmName: reference.displayName)
+            return report
+        }
     }
 
     /// The SIP counterpart. `csrutil status` in a normal boot reports the
     /// configuration the running kernel booted with, the same read that proves
-    /// every SIP workflow after its final normal boot. The agent is given only
-    /// a short time to answer, so a VM without a working agent is not held up
-    /// before Recovery, and any output other than the two exact states (a
-    /// custom configuration, for example) is left to Recovery as well.
+    /// every SIP workflow after its final normal boot. A boot this read starts
+    /// itself is the stored configuration. An already running agent is given
+    /// only a short time to answer, and any output other than the two exact
+    /// states (a custom configuration, for example) is left to Recovery.
     private static func normalSIPStatusPayload(
         reference: VMReference,
         finalState: VMFinalState
-    ) async -> [String: Any]? {
-        guard finalState == .previous || finalState == .normal,
-              (try? PommeCore.stableVMRunState(reference: reference)) == .running(.normal),
-              let plan = try? PommeCore.securityProvisioningPlan(reference: reference),
-              let digest = try? PommeCore.currentNormalAgentDigest(plan: plan)
-        else { return nil }
-        let agent = PommeSecurityNormalAgent(
-            reference: reference, expectedExecutableDigest: digest)
-        guard (try? await agent.authenticate(timeout: 10)) != nil,
-              let disabled = try? agent.observeSIPDisabled(),
-              (try? PommeCore.provesStableVMRunState(.running(.normal), reference: reference)) == true
-        else { return nil }
-        PommeCore.log(
-            "Read the SIP configuration through the persistent normal agent.",
-            vmName: reference.displayName)
-        return normalAgentStatusPayload(
-            operation: "sip.status", name: reference.name, finalState: finalState,
-            report: .object([
+    ) async throws -> [String: Any]? {
+        try await normalBootSecurityStatusPayload(
+            reference: reference, operation: "sip.status", finalState: finalState
+        ) { agent, _, booted in
+            guard (try? await agent.authenticate(timeout: booted ? 120 : 10)) != nil,
+                  let disabled = try? agent.observeSIPDisabled()
+            else { return nil }
+            PommeCore.log(
+                "Read the SIP configuration through the persistent normal agent.",
+                vmName: reference.displayName)
+            return .object([
                 "operation": .string("sip.normal.status"),
                 "sipEnabled": .bool(!disabled),
                 "sipDisabled": .bool(disabled),
                 "verified": .bool(true),
-            ]))
+            ])
+        }
+    }
+
+    /// Neither status needs Recovery, so a VM that isn't running normal macOS
+    /// is booted into it, read through its persistent agent, and returned to
+    /// the requested final state. Returns nil when the VM has no agent this
+    /// host can use or the agent can't answer. The VM is then back in its
+    /// original state, so a Recovery observation that follows resolves
+    /// `--final-state previous` exactly as it would have without this attempt.
+    private static func normalBootSecurityStatusPayload(
+        reference: VMReference,
+        operation: String,
+        finalState: VMFinalState,
+        read: (PommeSecurityNormalAgent, PommeProvisioningPlan, _ booted: Bool) async -> JSONValue?
+    ) async throws -> [String: Any]? {
+        guard let plan = try? PommeCore.securityProvisioningPlan(reference: reference),
+              let digest = try? PommeCore.currentNormalAgentDigest(plan: plan)
+        else { return nil }
+        let original = try PommeCore.stableVMRunState(reference: reference)
+        let booted = original != .running(.normal)
+        var report: JSONValue?
+        do {
+            if booted {
+                PommeCore.log(
+                    "Booting normal macOS to read the configuration through the persistent agent.",
+                    vmName: reference.displayName)
+                try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
+            }
+            let agent = PommeSecurityNormalAgent(reference: reference, expectedExecutableDigest: digest)
+            report = await read(agent, plan, booted)
+            if report != nil,
+               (try? PommeCore.provesStableVMRunState(.running(.normal), reference: reference)) != true {
+                report = nil
+            }
+        } catch {
+            PommeCore.log(
+                "Normal macOS didn't start for the status read; observing through Recovery.",
+                vmName: reference.displayName)
+        }
+        let target = report == nil ? original : original.resolving(finalState)
+        try await PommeCore.restoreStableVMRunState(target, reference: reference)
+        guard try PommeCore.provesStableVMRunState(target, reference: reference) else {
+            throw PommeSecurityWorkflowError.restorationIncomplete()
+        }
+        guard let report else { return nil }
+        return normalAgentStatusPayload(
+            operation: operation, name: reference.name, finalState: finalState, report: report)
     }
 
     /// The public result of a normal-agent status read. It has no `recovery`

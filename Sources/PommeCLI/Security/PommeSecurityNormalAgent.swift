@@ -1501,20 +1501,73 @@ struct PommeSecurityNormalAgent: Sendable {
     observeAMFIStatus(volumeGroupUUID: volumeGroupUUID, timeout: timeout)?.state
   }
 
+  /// The workflow form of `observeAMFIState`. A retained transaction that the
+  /// guest can't yet project to a phase is the same typed `snapshotPending`
+  /// failure a Recovery observation raises, so it is thrown rather than
+  /// declined: a Recovery session would only report it again.
+  func observeAMFIWorkflowState(
+    volumeGroupUUID: UUID,
+    timeout: TimeInterval = Constants.defaultGuestCommandTimeout
+  ) throws -> PommeSecurityWorkflowState? {
+    switch readAMFIStatus(volumeGroupUUID: volumeGroupUUID, timeout: timeout) {
+    case .observed(_, let state): return state
+    case .transactionPending: throw PommeRecoveryGuestOperationFailure(code: .snapshotPending)
+    case .declined: return nil
+    }
+  }
+
   /// The same read as `observeAMFIState`, with the agent's verified report
   /// kept beside the decoded state for a caller that presents it.
   func observeAMFIStatus(
     volumeGroupUUID: UUID,
     timeout: TimeInterval = Constants.defaultGuestCommandTimeout
   ) -> (report: JSONValue, state: PommeSecurityWorkflowState)? {
+    switch readAMFIStatus(volumeGroupUUID: volumeGroupUUID, timeout: timeout) {
+    case .observed(let report, let state?): return (report, state)
+    case .observed(_, nil), .transactionPending, .declined: return nil
+    }
+  }
+
+  /// The configuration alone, for `pomme amfi status`. A retained
+  /// transaction the guest can't project to a phase still has a readable
+  /// policy and NVRAM value, so the command reports them through the
+  /// workflow-free form of the read instead of spending a Recovery session.
+  func observeAMFIConfigurationReport(
+    volumeGroupUUID: UUID,
+    timeout: TimeInterval = Constants.defaultGuestCommandTimeout
+  ) -> JSONValue? {
+    switch readAMFIStatus(volumeGroupUUID: volumeGroupUUID, timeout: timeout) {
+    case .observed(let report, _): return report
+    case .declined: return nil
+    case .transactionPending:
+      switch readAMFIStatus(
+        volumeGroupUUID: volumeGroupUUID, timeout: timeout, includeWorkflowState: false)
+      {
+      case .observed(let report, _): return report
+      case .transactionPending, .declined: return nil
+      }
+    }
+  }
+
+  private enum AMFIStatusRead {
+    case observed(JSONValue, PommeSecurityWorkflowState?)
+    case transactionPending
+    case declined
+  }
+
+  private func readAMFIStatus(
+    volumeGroupUUID: UUID,
+    timeout: TimeInterval,
+    includeWorkflowState: Bool = true
+  ) -> AMFIStatusRead {
     // Declining is ordinary, not a failure, but it costs the caller a whole
     // Recovery session, so say which check declined it. The reasons are a
     // closed vocabulary and carry no guest text.
-    func decline(_ reason: String) -> (report: JSONValue, state: PommeSecurityWorkflowState)? {
+    func decline(_ reason: String) -> AMFIStatusRead {
       PommeCore.log(
         "Normal-agent AMFI status unavailable (\(reason)); observing through Recovery.",
         vmName: reference.displayName)
-      return nil
+      return .declined
     }
     guard PommeProvisioningDigest.isSHA256(expectedExecutableDigest) else {
       return decline("pinned-digest-invalid")
@@ -1525,15 +1578,23 @@ struct PommeSecurityNormalAgent: Sendable {
     guard supportsNormalAMFIStatus(timeout: timeout) else {
       return decline("agent-contract-unavailable")
     }
+    // The workflow-free form is the historical closed request: no target
+    // volume and no retained transaction, only the policy and NVRAM value.
+    let payload: [String: Any] = includeWorkflowState
+      ? ["volumeGroupUUID": volumeGroupUUID.uuidString.lowercased(), "includeWorkflowState": true]
+      : [:]
     guard let response = try? PommeCore.sendControlObject([
       "command": "agent.perform",
       "operation": PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation,
-      "payload": [
-        "volumeGroupUUID": volumeGroupUUID.uuidString.lowercased(),
-        "includeWorkflowState": true,
-      ],
+      "payload": payload,
     ], bundle: reference.bundle, timeout: timeout) else {
       return decline("transport")
+    }
+    if includeWorkflowState, Self.guestFailureCode(response) == .snapshotPending {
+      PommeCore.log(
+        "The guest reports an AMFI transaction it can't yet resolve.",
+        vmName: reference.displayName)
+      return .transactionPending
     }
     guard response["ok"] as? Bool == true,
       let rawResult = response["result"],
@@ -1541,13 +1602,23 @@ struct PommeSecurityNormalAgent: Sendable {
       result.objectValue?["operation"]
         == .string(PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation)
     else { return decline("rejected") }
+    guard includeWorkflowState else {
+      // The same closed consistency the decoder applies to the configuration.
+      guard let object = result.objectValue, object["verified"] == .bool(true),
+        case .bool(let off)? = object["amfiDisabled"],
+        case .bool(let argument)? = object["amfiBootArgActive"],
+        case .bool(let policy)? = object["bootPolicyAllowsCustomBootArgs"],
+        off == (argument && policy)
+      else { return decline("report-not-verifiable") }
+      return .observed(result, nil)
+    }
     // The decoder enforces the same internal consistency it does for a
     // Recovery observation; an inconsistent report is not downgraded to a
     // guess, it simply is not used.
     guard let state = try? PommeSecurityWorkflowState.decode(result, sip: false) else {
       return decline("report-not-verifiable")
     }
-    return (result, state)
+    return .observed(result, state)
   }
 
   /// True when this VM's pinned agent advertises the normal-boot AMFI status
