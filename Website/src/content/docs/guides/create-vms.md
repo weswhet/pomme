@@ -155,7 +155,8 @@ Before Pomme changes anything, it resolves and verifies the following:
 Pomme then installs macOS and installs its guest agent. How the agent is
 installed depends on the host and guest:
 
-- **macOS 27 host with a fresh macOS 27 guest:** Pomme uses Apple's
+- **macOS 27 or later host and fresh guest, with the guest no newer than the
+  host:** Pomme uses Apple's
   first-boot provisioning to create the `pomme` account, turn on automatic
   login, and temporarily turn on Remote Login. Pomme finds the guest's address
   through its DHCP lease, pins the guest's SSH host key on first connection,

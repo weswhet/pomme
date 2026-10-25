@@ -17,15 +17,23 @@ provisioned template.
 ## Where each change happens
 
 macOS allows each setting to change only in a specific environment, so a
-workflow can involve more than one boot:
+workflow can involve more than one boot. Pomme boots Recovery only for the
+changes that macOS allows nowhere else, and does everything else in normal
+macOS through the guest agent:
 
 - **SIP** turns off in Recovery, through an authenticated, request-bound
   Recovery session. It turns back on in normal macOS: the guest agent runs
   `csrutil clear` as the volume owner, and Pomme reboots the guest to apply
   it. VMs whose guest agent predates this turn SIP on in Recovery instead.
-- **AMFI** has two parts. The LocalPolicy part changes in Recovery through an
-  authenticated Recovery session. The boot-argument part is written through
-  the authenticated normal agent in normal macOS, while SIP is off.
+- **AMFI** has two parts. The boot-argument part is written through the
+  authenticated normal agent in normal macOS, while SIP is off. The
+  LocalPolicy part must allow custom boot arguments. The boot policy that
+  `csrutil disable` leaves already does, so the guest agent only records it in
+  normal macOS. A VM with a different boot policy changes it in Recovery
+  through an authenticated Recovery session.
+- **Status checks** for SIP and AMFI read the configuration through the guest
+  agent in normal macOS. Pomme starts normal macOS for the check when the VM
+  isn't running it.
 
 Because of this split, the order of operations matters:
 
@@ -98,7 +106,7 @@ choose with `--final-state`:
 
 | Value | Final state |
 | --- | --- |
-| `previous` (default) | The run state that Pomme captured before the workflow began. |
+| `previous` (default) | The run state that Pomme captured before the workflow began. A VM that was paused in Recovery ends stopped instead of booting Recovery only to be paused again. |
 | `stopped` | Stopped. |
 | `normal` | Running in normal macOS. |
 | `recovery` | Running in Recovery. |
@@ -163,8 +171,13 @@ A template created with `pomme template create --provisioned` captures a
 prepared `pomme` owner with automatic login, with SIP turned off and the AMFI
 override turned on. Every VM cloned from it inherits that security posture, so
 it can run MDM enrollment as its first command without another security
-change. The owner's password isn't stored in the template. For details, see
-[Use templates](/guides/use-templates/).
+change. The owner's password isn't stored in the template.
+
+Pomme keeps the credential of the guest agent installed in the template in a
+login Keychain item that belongs to the template, and deletes it with the
+template. A clone's agent authenticates with that credential only until Pomme
+replaces the agent with the clone's pinned agent and a credential of the
+clone's own. For details, see [Use templates](/guides/use-templates/).
 
 ## What's next
 

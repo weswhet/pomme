@@ -60,13 +60,36 @@ doesn't qualify that macOS build for release, and it doesn't add the build to
 the reviewed profiles.
 :::
 
-## macOS 27 hosts and guests
+## macOS 27 and later hosts and guests
 
-When both the host and a fresh guest run macOS 27, Pomme installs its agent
-through Apple's first-boot provisioning instead of Recovery. Security
-workflows and agent repair still use Recovery navigation, so the same
-reviewed and experimental rules apply to them. For details, see
+When the host runs macOS 27 or later and a fresh guest runs macOS 27 or later,
+but no newer than the host, Pomme installs its agent through Apple's first-boot
+provisioning instead of Recovery. No map needed for that room, Crawler. For
+details, see
 [Durable creation and journals](/crawler/concepts/durable-creation/).
+
+## Commands that still descend into Recovery
+
+Pomme boots Recovery only for changes that macOS allows nowhere else, so the
+Recovery navigation rules on this page apply only to the following commands:
+
+- `pomme sip disable`, when SIP is on.
+- `pomme amfi disable` and `pomme amfi enable`, when the VM's boot policy
+  needs a LocalPolicy change. The boot policy that `pomme sip disable` leaves
+  doesn't need one.
+- Agent installation on VMs that don't use first-boot provisioning and aren't
+  cloned from a provisioned template that kept its agent credential.
+- `pomme agent repair`, when normal macOS can't prove the installed agent.
+- Any command that falls back to Recovery because the VM's guest agent
+  predates its normal-boot step.
+
+On a build that Recovery automation doesn't support, Pomme refuses
+`pomme sip disable` before it changes anything, and refuses the others only
+when they reach a step that needs Recovery. Status checks and the rest of each
+workflow run in normal macOS on any build.
+
+A short list, Crawler. The System lobbied for a longer one. Management said
+the viewers would survive.
 
 ## Release qualification
 

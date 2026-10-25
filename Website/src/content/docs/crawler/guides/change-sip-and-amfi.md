@@ -44,14 +44,19 @@ pomme amfi status VM_NAME
 
 Replace `VM_NAME` with the name of your VM.
 
-When the VM is already running normal macOS and the final state is `previous`
-(the default) or `normal`, status commands read the configuration through the
-guest agent and the VM doesn't restart. In every other case, or when the agent
-can't provide a verified answer, the status command observes the guest through
-Recovery, so the VM restarts during the check. When the check finishes, Pomme
-returns the VM to the state it was in before the command. Status commands never
-ask for or transmit an owner password. Not even to the System. The System
-asked.
+Status commands read the configuration through the guest agent in normal
+macOS. If the VM is already running normal macOS, it doesn't restart. If the VM
+is stopped, paused, or running Recovery, Pomme starts normal macOS for the
+check. A fresh boot reports the stored configuration, the same values that a
+check in Recovery would report. When the check finishes, Pomme puts the VM in
+the state that `--final-state` requests, which by default is the state it was
+in before the command. A quick peek, no dungeon detour. The viewers are
+already changing the channel.
+
+Pomme observes the guest through Recovery only when the guest agent can't give
+a verified answer, for example on a VM whose guest agent predates these checks.
+Status commands never ask for or transmit an owner password. Not even to the
+System. The System asked.
 
 ## Choose where you end up
 
@@ -61,7 +66,7 @@ supported:
 
 | Value | Final state |
 | --- | --- |
-| `previous` | The run state captured before the command started. This is the default. |
+| `previous` | The run state captured before the command started. This is the default. A VM that was paused in Recovery ends stopped, because Pomme had to stop it and booting Recovery again only to pause it restores nothing. |
 | `stopped` | The VM is stopped. |
 | `normal` | The VM runs normal macOS. |
 | `recovery` | The VM runs Recovery. |
@@ -97,10 +102,15 @@ To turn off SIP and then AMFI, follow these steps:
 
 Replace `VM_NAME` with the name of your VM.
 
-To turn off AMFI, Pomme changes the LocalPolicy in Recovery, boots normal
-macOS to write and read back the boot arguments, and then boots normally again
-to verify the effective arguments. If SIP is still on, the AMFI command stops
-with the following error:
+To turn off AMFI, Pomme boots normal macOS, writes and reads back the boot
+arguments, and then restarts the guest to verify the effective arguments. AMFI
+doesn't boot Recovery on a VM whose SIP you turned off with
+`pomme sip disable`: that boot policy already allows custom boot arguments, so
+the guest agent only records the policy that it found. One less trip to
+Recovery. The System has been told this counts as progress. Pomme changes the
+LocalPolicy in Recovery only when the VM has a different boot policy that
+doesn't allow custom boot arguments, or when its guest agent predates this
+step. If SIP is still on, the AMFI command stops with the following error:
 
 ```text
 Error: Changing AMFI requires SIP to be off while Pomme writes and verifies boot arguments. Run `pomme sip disable NAME` first, and restore AMFI before you turn SIP on again.
@@ -143,9 +153,11 @@ prints a warning. For details, see
 [Receive push commands on macOS 27](/crawler/guides/enroll-in-mdm/#receive-push-commands-on-macos-27).
 
 `pomme amfi enable` restores the exact AMFI configuration that Pomme saved when
-it turned AMFI off. If AMFI is off but Pomme has no saved configuration, for
-example because AMFI was turned off outside Pomme, the command stops before it
-changes anything and reports the `amfi-baseline-missing` error:
+it turned AMFI off. Like `pomme amfi disable`, it boots Recovery only when the
+saved boot policy needs a LocalPolicy change. If AMFI is off but Pomme has no
+saved configuration, for example because AMFI was turned off outside Pomme, the
+command stops before it changes anything and reports the
+`amfi-baseline-missing` error:
 
 ```text
 Error: Pomme has no recorded AMFI baseline for this VM, so it can't restore AMFI. Pomme didn't change the boot policy.
@@ -278,6 +290,8 @@ VM state restoration is incomplete. The account, credentials, and security journ
 
 ## Record the replay
 
+When `pomme sip disable` changes SIP, it boots Recovery, because macOS turns
+off SIP only there. That room can't be skipped, so you might as well film it.
 To keep screenshots of each automatic Recovery navigation step, add `--debug`:
 
 ```sh

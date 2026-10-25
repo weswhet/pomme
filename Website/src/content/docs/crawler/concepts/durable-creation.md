@@ -43,8 +43,8 @@ phases:
 1. **Install macOS.** Pomme restores the image to a new disk, or clones a
    template, and binds the VM to its restore image, build, locale, display,
    and agent identities.
-2. **Install the guest agent.** Pomme uses one of two routes, described in the
-   next section.
+2. **Install the guest agent.** Pomme uses one of three routes, described in
+   the next section.
 3. **Verify the agent.** Pomme boots normal macOS, authenticates to the agent,
    and checks that the agent's executable digest and capabilities match the
    plan.
@@ -61,23 +61,31 @@ separate, explicit workflows. For details, see
 
 ## Agent installation routes
 
-Pomme installs the guest agent through one of two routes:
+Pomme installs the guest agent through one of three routes:
 
-- **First-boot provisioning.** When both the host and a fresh guest run
-  macOS 27, Pomme uses Apple's first-boot provisioning in Virtualization.framework
+- **First-boot provisioning.** When the host and a fresh guest both run
+  macOS 27 or later, and the guest is no newer than the host, Pomme uses
+  Apple's first-boot provisioning in Virtualization.framework
   to create the `pomme` account, turn on automatic login, and temporarily turn
   on Remote Login. Pomme finds the guest through its DHCP lease, pins the
   guest's SSH host key on first connection, and installs the signed agent over
   SSH. After it verifies the agent and the owner account, Pomme turns Remote
   Login off. The generated account password stays in the host's login
   Keychain.
+- **Template agent.** VMs cloned from a provisioned template that kept its
+  agent credential use this route. The clone's disk already contains the
+  agent that Pomme installed when it captured the template. Pomme boots normal
+  macOS, authenticates that agent with the template's credential, replaces it
+  with the pinned agent, and gives it a credential of the clone's own, without
+  booting Recovery. Hand-me-down companion, fresh dog tags. For details, see
+  [Use templates](/crawler/guides/use-templates/#how-clones-get-their-agent).
 - **Recovery installation.** Older hosts, older guests, VMs cloned from a
-  provisioned template, and VMs with an existing journal from an earlier
-  release use this route. Pomme boots the new VM into Recovery and installs
-  the agent through a temporary, read-only VirtioFS share that's bound to one
-  request.
+  provisioned template that didn't keep its agent credential, and VMs with an
+  existing journal from an earlier release use this route. Pomme boots the new
+  VM into Recovery and installs the agent through a temporary, read-only
+  VirtioFS share that's bound to one request.
 
-Both routes end in the same verification and final-state phases.
+All three routes end in the same verification and final-state phases.
 
 ## Failure and resume
 
@@ -90,6 +98,17 @@ immutable plan, the VM's ownership, the recorded digests, and the pending
 intent, and then continues from the first phase without a verified receipt.
 Resume accepts only the VM name and the output and debug flags, because every
 other choice is already fixed in the plan. No changing your loadout mid-fight.
+
+An agent installation can fail after the guest already received its agent,
+for example when only Recovery's cleanup fails. When an earlier attempt sent
+the VM's credential to the guest, resume first boots normal macOS and waits up
+to 150 seconds for that agent. If the agent authenticates with the VM's own
+credential and reports the pinned digest, Pomme records the installation and
+doesn't boot Recovery. Otherwise, it stops the VM and installs the agent
+through Recovery, as before. Pomme makes this check once for each attempt that
+sent the credential. `pomme agent repair` makes the same check. Checking
+whether the job is already done: the System calls it cheating, the sponsors
+call it efficiency.
 
 :::tip[New Achievement! Back From the Brink]
 You resumed an interrupted creation instead of starting over. Reward: a Silver
@@ -116,8 +135,9 @@ manifest against it, so a template that was replaced after the plan was made
 can't satisfy an older journal. No body doubles allowed.
 
 A template created with `--provisioned` also captures a prepared `pomme` owner
-account and a security posture that's ready for MDM enrollment. For details,
-see [Use templates](/crawler/guides/use-templates/).
+account, a security posture that's ready for MDM enrollment, and the installed
+agent, whose credential Pomme keeps in a login Keychain item that belongs to
+the template. For details, see [Use templates](/crawler/guides/use-templates/).
 
 ## Pinned agent artifacts
 
@@ -127,8 +147,9 @@ Before Pomme creates a VM, it copies that executable into the append-only
 The local build script also stores each signed build there. If Pomme can't
 keep the copy, it warns you and creates the VM anyway.
 
-This store lets a resumed Recovery installation use the exact agent that the
-journal pinned, even after the host `pomme` command has changed. Pomme doesn't rewrite the
+This store lets a resumed installation, through Recovery or from a template,
+use the exact agent that the journal pinned, even after the host `pomme`
+command has changed. Pomme doesn't rewrite the
 plan or substitute the current build's digest. If the pinned artifact is
 missing or doesn't match its digest, the workflow stops instead of guessing.
 The System, for the record, would have guessed. This is why the System isn't

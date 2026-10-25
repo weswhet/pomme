@@ -1,10 +1,12 @@
 # Security workflows
 
-This document describes the SIP and AMFI workflows for Pomme-owned VMs. SIP
-disable and AMFI LocalPolicy changes use authenticated, request-bound Recovery
+This document describes the SIP and AMFI workflows for Pomme-owned VMs. Pomme
+boots Recovery only for changes that macOS allows nowhere else. SIP disable and
+native AMFI LocalPolicy changes use authenticated, request-bound Recovery
 transactions. SIP enable runs `csrutil clear` as the volume owner in normal
-macOS, and AMFI boot arguments are written through the authenticated persistent
-agent in normal macOS. The workflow captures the VM run state first, records a durable journal before
+macOS, AMFI boot arguments are written through the authenticated persistent
+agent in normal macOS, and the AMFI policy stage for the standard SIP-disabled
+profile, which needs no native policy write, records its receipt there too. The workflow captures the VM run state first, records a durable journal before
 owner or Recovery effects, and restores the requested final state only after
 verification.
 
@@ -18,6 +20,12 @@ exact version/build descriptor, locale, geometry, private host ABI, ownership,
 profile digest, and manifest checks. An unknown or mismatched identity is never
 treated as reviewed: it must satisfy the bounded experimental checks or the
 attempt fails closed.
+
+Only `sip disable` checks Recovery qualification before it starts. Every other
+operation runs in normal macOS on a current agent, and is refused by the same
+check only when it reaches a Recovery session, so `sip enable`, status, and
+standard-profile AMFI changes work on builds whose Recovery automation isn't
+qualified.
 
 Live qualification below applies to the tested build and pinned agent. It
 does not add an experimental identity to the reviewed profile registry or
@@ -41,12 +49,18 @@ pomme amfi disable NAME [--final-state ...] [--force]
 captured before the workflow began. `stopped`, `normal`, `recovery`, and
 `paused` resolve to a stopped VM, a normal boot, a Recovery boot, or a paused
 VM respectively. A paused target retains the boot mode that preceded the
-pause. A successful result includes the resolved `finalState` and
+pause. `previous` resolves a VM captured paused in Recovery to stopped: the
+workflow stops the paused guest, so booting Recovery only to pause it again
+restores nothing. A successful result includes the resolved `finalState` and
 `finalStateVerified`.
 
-Status observes security state through Recovery and uses the same final-state
-resolution. Enable and disable perform the durable mutation workflow described
-below.
+Status reads security state through the persistent agent in normal macOS,
+booting normal macOS first when the VM isn't running it, and then applies the
+same final-state resolution. A fresh boot reports the stored configuration,
+which is what a Recovery read reports. Status observes through Recovery only
+when the agent can't give a verified answer, after returning the VM to its
+captured state. Enable and disable perform the durable mutation workflow
+described below.
 
 AMFI changes require SIP disabled before LocalPolicy or NVRAM mutation. Use
 `pomme sip disable NAME` first, then `pomme amfi disable NAME`. Restore with
@@ -59,12 +73,18 @@ session: `csrutil clear` is the one SIP change macOS allows in a normal boot.
 It restores the default protection once a volume owner authenticates and takes
 effect on the next boot. See [SIP enable in normal macOS](#sip-enable-in-normal-macos).
 
-AMFI disable changes LocalPolicy in Recovery, boots normal macOS to write and read
-back the merged boot arguments, and performs another normal boot to verify the
+AMFI disable runs its policy stage, boots normal macOS to write and read back
+the merged boot arguments, and performs another normal boot to verify the
 effective arguments. Enable restores the exact saved boot arguments in normal
-macOS first, restores LocalPolicy in Recovery, then verifies a fresh normal
-boot. The original SIP state is an explicit prerequisite; AMFI does not
-silently change it.
+macOS first, runs its policy stage, then verifies a fresh normal boot. The
+policy stage runs in normal macOS (`amfi.normal.policyDisable` and
+`amfi.normal.policyEnable`) when the current policy, and any retained baseline,
+is the standard SIP-disabled profile: that profile already permits custom boot
+arguments, so the stage writes only the same no-op receipt a Recovery stage
+writes. The guest refuses any other profile with `recovery-required` before its
+first durable write, and the host then changes LocalPolicy in Recovery. The
+original SIP state is an explicit prerequisite; AMFI does not silently change
+it.
 
 ## State-first execution
 
@@ -73,9 +93,12 @@ run. A SIP workflow reads the effective state of the current normal boot
 through the authenticated persistent agent (`csrutil status`), booting normal
 macOS first if needed. This is the same read that proves every SIP workflow
 after its final normal boot, and it needs neither owner credentials nor a
-Recovery session. AMFI state is inspected through Recovery, where the retained
-transaction record is read, while the AMFI SIP prerequisite uses the same
-normal-boot read. The public `status` commands still observe through Recovery.
+Recovery session. AMFI state, including the retained transaction record, is
+read through the persistent agent's `amfi.normal.status` in normal macOS,
+booting normal macOS first; the AMFI SIP prerequisite uses the same normal-boot
+read. Recovery inspects AMFI only for an agent pinned before that operation. A
+retained transaction the guest can't yet project to a phase is reported as the
+typed `snapshotPending` failure in either environment.
 If the observed state already matches and there is no unresolved
 reconciliation, the workflow records a `noMutationVerified` receipt and
 restores the final state without asking for an owner or touching Recovery
@@ -87,7 +110,7 @@ match. Enabling AMFI requires that exact baseline. If AMFI is disabled and no
 baseline is retained, the workflow returns `missingBaseline` before owner
 preparation and never guesses at a LocalPolicy reset.
 
-Before AMFI inspection boots Recovery, the host records `preflightIntent` with
+Before AMFI inspection boots the VM, the host records `preflightIntent` with
 the original VM state. A rejected prerequisite becomes `preflightRejected`
 only after restoring and proving that state. This terminal record carries no
 requested-security success receipt and permits a later SIP command. A crash

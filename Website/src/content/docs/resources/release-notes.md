@@ -5,6 +5,61 @@ description: Changes in each version of Pomme.
 
 This page lists changes in each version of Pomme, newest first.
 
+## Pomme 0.3.0
+
+Pomme 0.3.0 boots macOS Recovery only for changes that macOS allows nowhere
+else, and does everything else in normal macOS through the guest agent. Status
+checks, AMFI changes, and new clones of provisioned templates no longer boot
+Recovery, and a typical `pomme mdm` enrollment boots it once instead of five
+times. Like 0.2.3, it's beta software. For what qualification covers, see
+[Supported macOS versions](/concepts/os-qualification/#release-qualification).
+To update, run `pomme update`.
+
+### Changes
+
+- `pomme sip status` and `pomme amfi status` read the configuration through the
+  guest agent in normal macOS from any starting state. A stopped, paused, or
+  Recovery VM starts normal macOS for the check instead of Recovery, and then
+  returns to the state that `--final-state` requests. JSON output reports
+  `"source": "normalAgent"`. For details, see
+  [Check the current status](/guides/change-sip-and-amfi/#check-the-current-status).
+- `pomme amfi disable` and `pomme amfi enable` don't boot Recovery on a VM
+  whose SIP you turned off with `pomme sip disable`, because that boot policy
+  already allows custom boot arguments. Pomme changes the LocalPolicy in
+  Recovery only for a different boot policy. This needs a guest agent from
+  this release; run `pomme agent update VM_NAME` to update an existing VM.
+- `pomme mdm` reads AMFI through the guest agent before and during
+  enrollment, so turning off SIP is the only step that boots Recovery.
+- A VM cloned from a template that you create with
+  `pomme template create --provisioned` gets its agent in normal macOS instead
+  of Recovery. The template keeps its agent's credential in your login
+  Keychain, and `pomme template list` reports it in `agentCredentialRetained`.
+  Clones of templates created with an earlier release still use Recovery. For
+  details, see [Use templates](/guides/use-templates/#how-clones-get-their-agent).
+- `pomme create --resume` and `pomme agent repair` first check whether normal
+  macOS can prove an agent that an interrupted installation already put in
+  place, and boot Recovery only when it can't.
+- Hosts and guests on macOS 27 or later use first-boot provisioning instead of
+  a Recovery agent installation, as long as the guest is no newer than the
+  host. Before, only macOS 27 guests did.
+- On a macOS build that Recovery automation doesn't support, only
+  `pomme sip disable` is refused up front. `pomme sip enable`, status checks,
+  and AMFI changes on the standard boot policy run there.
+- `--final-state previous` leaves a VM that was paused in Recovery stopped,
+  instead of booting Recovery only to pause it again. If Pomme can't reach a
+  requested final state after a Recovery session, it no longer boots Recovery
+  again on the way back.
+
+### Fixes
+
+- Creating a VM from a template no longer fails with "A host operation
+  failed" when the restore image that the template came from has since been
+  removed from the Mac. A clone copies the template's installed disk and
+  doesn't need the image.
+- The guest agent's AMFI status read in normal macOS could time out after
+  5 seconds just after the guest started, so Pomme used Recovery instead. It
+  now has the same time limit as the other AMFI operations.
+
 ## Pomme 0.2.3
 
 Pomme 0.2.3 fixes macOS 27 VM creation and lets `pomme delete --force` delete

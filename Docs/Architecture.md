@@ -112,9 +112,10 @@ journals intent before each phase:
    verified boot running, `none` shuts the guest down through the agent and
    stops the helper, `recovery` restarts the helper in Recovery.
 
-No normal boot precedes Recovery: a restored image boots into Recovery
-directly, and the agent verification boot in step 3 is the guest's first
-normal boot.
+No normal boot precedes Recovery during a first creation attempt: a restored
+image boots into Recovery directly, and the agent verification boot in step 3
+is the guest's first normal boot. A resumed or repaired attempt may first check
+normal macOS, as described below.
 
 ### Templates
 
@@ -129,6 +130,58 @@ the template's restore digest, and the install phase re-verifies the
 manifest against it, so a replaced template cannot satisfy an older journal.
 A cloned installation boots under a new machine identifier (verified live),
 so template-sourced VMs have distinct identities and may run concurrently.
+
+`pomme template create NAME --provisioned` captures a disposable VM after its
+owner, SIP, and AMFI workflows, so its disk also holds that VM's installed
+persistent agent. The capture copies the VM's agent credential into a login
+Keychain item scoped to a fresh template credential ID (account
+`template-agent-token`), and the manifest records that ID with the embedded
+agent's digest and the disk's startup volume group. `template delete` removes
+the item before the bundle. A capture that can't keep the credential warns and
+writes a manifest without one.
+
+A clone of such a template records the reference in its provisioning input
+and replaces step 2 with an adoption in normal macOS (`PommeCore.adoptTemplateAgent`),
+still journaled as the `installRecoveryAgent` phase:
+
+1. create the clone's own UUID-scoped credential, so it is durable before the
+   guest can receive it, and write a template adoption lease beside the
+   journal;
+2. boot normal through the background VM helper, which, while the lease
+   matches the plan and template, offers the clone's and the template's
+   credentials in turn (one per authentication attempt);
+3. require the authenticated agent to report the template's or the plan's
+   digest and file-transfer and process capabilities, then read the startup
+   volume group through it and require the one the template recorded;
+4. upload the plan's pinned, signed agent and run it in update mode with
+   `--replace-credential-from-stdin`, so one guest transaction installs the
+   executable, LaunchDaemon definition, and the clone's credential; the
+   credential travels only on the update process's standard input;
+5. remove the lease, so only the clone's credential is acceptable, and shut
+   the guest down.
+
+The verification phase then boots again from the persisted install and
+verifies the agent with the clone's credential alone. Each adoption step is idempotent: a resumed
+attempt authenticates whichever credential the guest holds and reinstalls the
+same bytes (`alreadyApplied`). Without the template's credential (an older
+template, or one deleted during creation) the clone uses the Recovery
+installation unchanged.
+
+### Normal-boot check before Recovery
+
+Every handoff of a VM's credential to the guest, through the Recovery agent or
+an adoption, writes `agent-install-v1.dispatched` with the pending attempt.
+When `create --resume` or `agent repair` would run a Recovery installation and
+that record shows an attempt that has not been checked, Pomme first withdraws
+any adoption lease, boots normal, and waits up to 150 seconds for the pinned
+agent authenticated with the VM's own credential. A proven agent also reports
+the startup volume group, which an installation that failed after its guest
+step never recorded, and the installation is recorded without Recovery;
+otherwise the attempt is marked checked, the
+helper is stopped with the framework stop that a following Recovery boot
+requires, and the Recovery installation runs as before. `agent repair`
+journals the installation receipt and the verification receipt in one commit,
+so a later resume continues with the final state.
 
 The development build wires steps 2–4 through the production request-bound
 Recovery adapter. It remains pre-release until the live creation and Recovery

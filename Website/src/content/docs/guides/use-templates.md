@@ -98,6 +98,11 @@ for a standard template. The `SECURITY` column shows `sip-off,amfi-off` for a
 template captured with System Integrity Protection (SIP) turned off and the
 AMFI override on, or `default` otherwise.
 
+In JSON output, `agentCredentialRetained` is `true` for a provisioned template
+that kept its guest agent's credential. VMs cloned from it get their agent
+without booting Recovery. For details, see
+[How clones get their agent](#how-clones-get-their-agent).
+
 ## Create a provisioned template
 
 Creating the owner account that an authenticated workflow such as mobile
@@ -122,7 +127,9 @@ You can use `--from-template` only with `--provisioned`.
 
 Pomme builds a temporary VM, prepares the `pomme` owner account with automatic
 login, turns off SIP, turns on the AMFI override, and captures the result as
-the template.
+the template. It also copies the temporary VM's guest agent credential into a
+login Keychain item that belongs to the template. If it can't, it warns you and
+creates the template without the credential.
 
 :::caution
 Every VM cloned from a provisioned template starts with SIP turned off and the
@@ -138,6 +145,30 @@ pomme mdm lab --profile enroll.mobileconfig
 ```
 
 For more information, see [Enroll a VM in MDM](/guides/enroll-in-mdm/).
+
+### How clones get their agent
+
+A VM cloned from a provisioned template already contains the guest agent that
+Pomme installed in the temporary VM. Pomme uses the credential that it kept
+for the template to install that agent in normal macOS, without booting
+Recovery:
+
+1. Pomme boots the clone in normal macOS and authenticates the agent with the
+   template's credential.
+2. Pomme replaces the agent with the signed agent that the VM's creation plan
+   pins, and gives it a new credential that belongs only to the clone. The
+   template's credential stops working in the clone.
+3. Pomme shuts the clone down, boots it again, and verifies the agent with the
+   clone's own credential, as it does for every VM.
+
+If creation stops during these steps, `pomme create VM_NAME --resume`
+continues them. JSON output from `pomme create` reports
+`"agentInstallMethod": "template"`.
+
+Clones of a provisioned template that didn't keep the credential, such as a
+template created by an earlier version of Pomme, install the agent through
+Recovery, as before. So do clones whose template you delete before their
+creation finishes.
 
 ### How clones get the owner password
 
@@ -158,6 +189,15 @@ pomme template delete TEMPLATE_NAME
 ```
 
 Pomme asks you to confirm. To skip the confirmation, add `--force`.
+
+Deleting a provisioned template also deletes the agent credential that Pomme
+kept for it from your login Keychain. Pomme needs the Keychain unlocked to do
+that, and it keeps the template otherwise. Unlock the Keychain, and then run
+the command again.
+
+If the template's manifest can't be read, Pomme refuses to delete the template,
+because it can't tell which Keychain item belongs to it. The command reports
+the `template-manifest-invalid` error.
 
 :::caution
 Deleting a template can't be undone. Finish any interrupted creation that

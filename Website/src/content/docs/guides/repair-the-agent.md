@@ -165,10 +165,34 @@ VM or its provisioning journal:
 Pomme agent is already healthy for VM_NAME.
 ```
 
-Otherwise, Pomme installs the agent through Recovery. It records the repair in
-the VM's provisioning journal before it starts, boots Recovery, installs the
-agent, and then returns the VM to the state it was in before the command.
-`--final-state` accepts only `previous`, which is the default.
+Otherwise, Pomme records the repair in the VM's provisioning journal before it
+starts, installs the agent, verifies it in normal macOS, and then returns the
+VM to the state it was in before the command. `--final-state` accepts only
+`previous`, which is the default.
+
+Pomme boots Recovery only when it has to:
+
+- For a VM cloned from a provisioned template that kept its agent credential,
+  Pomme installs the agent in normal macOS, as creation does. For details, see
+  [How clones get their agent](/guides/use-templates/#how-clones-get-their-agent).
+- When an earlier attempt already sent the VM's credential to the guest, Pomme
+  first stops the VM and boots normal macOS to check for that agent, even when
+  the VM was already running normal macOS. If the agent authenticates
+  with the VM's credential and reports the pinned digest, Pomme finishes the
+  repair there.
+- Otherwise, or when one of these fails, Pomme installs the agent through
+  Recovery.
+
+The repair also records the agent's verification in the journal, so a later
+`pomme create VM_NAME --resume` only restores the VM's final state. The output
+names the route that the repair took:
+
+```text
+OK repaired the Pomme agent in normal macOS for VM_NAME.
+```
+
+In JSON output, `role` is `normal` for a repair in normal macOS, or
+`recovery` for a repair through Recovery.
 
 If agent provisioning is complete but the agent isn't healthy for another
 reason, the repair reports that it has nothing to repair:
@@ -200,10 +224,9 @@ digest, that Pomme installed. When Pomme creates a VM, it keeps a copy of that
 executable in an append-only store under
 `~/Library/Application Support/pomme/AgentArtifacts/sha256`, and the local
 build script adds every signed build to the same store. When a repair or a
-resumed creation reinstalls the agent through Recovery after you update or
-rebuild Pomme, Pomme uses the original pinned artifact, not the new version. If
-the pinned artifact is missing or altered, the repair fails and changes
-nothing.
+resumed creation reinstalls the agent after you update or rebuild Pomme,
+Pomme uses the original pinned artifact, not the new version. If the pinned
+artifact is missing or altered, the repair fails and changes nothing.
 
 A repair that reinstalls the agent therefore undoes an earlier
 `pomme agent update`: the VM gets the agent that it was created with, and

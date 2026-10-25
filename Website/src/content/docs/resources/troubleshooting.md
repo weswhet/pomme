@@ -269,6 +269,32 @@ identity, locale, display, and ownership checks.
 doesn't expect, navigation stops and Pomme keeps the VM and journal. For
 details, see [Supported macOS versions](/concepts/os-qualification/).
 
+A VM cloned from a provisioned template that kept its agent credential doesn't
+boot Recovery, so its creation doesn't print the first warning.
+
+### A provisioned template's clone installs its agent through Recovery
+
+**Symptom:** `pomme template create --provisioned` or `pomme create` prints a
+warning like one of the following:
+
+```text
+Warning: Pomme couldn't keep the provisioning VM's agent credential for this template, so VMs cloned from it will install the Pomme agent through Recovery: REASON.
+```
+
+```text
+Warning: The template's agent credential is no longer in your login Keychain, so Pomme installs the agent through Recovery.
+```
+
+**Cause:** A VM cloned from a provisioned template gets its agent in normal
+macOS only when Pomme kept the template's agent credential in your login
+Keychain. Pomme couldn't keep it when it created the template, or the item no
+longer exists, for example because you deleted the template.
+
+**Resolution:** `pomme create` continues through Recovery, as it did before
+Pomme kept the credential, so you don't need to do anything. To create clones
+without Recovery again, unlock your login Keychain. Then create the template
+again with `pomme template create --provisioned`.
+
 ### A config file is rejected
 
 **Symptom:** `pomme create --config` or `pomme config validate` fails with an

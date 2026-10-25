@@ -64,14 +64,18 @@ those steps, in order, under one exclusive lease on the VM:
 2. Resumes an incomplete creation, which installs and verifies the guest
    agent.
 3. Finishes a retained `pomme sip` or `pomme amfi` operation, using that
-   operation's own action and final state.
+   operation's own action and final state. If that final state is Recovery,
+   the VM stays in normal macOS instead, because enrollment needs it there
+   next.
 4. Enrolls the VM: boots normal macOS, verifies the pinned guest agent, reads
    the System Integrity Protection (SIP) and Apple Mobile File Integrity (AMFI)
    settings, turns off only what enrollment needs, installs
-   the profile, and verifies the result.
+   the profile, and verifies the result. Only turning off SIP boots Recovery;
+   Pomme reads both settings, and changes AMFI, in normal macOS.
 
 By default, Pomme then restores the original SIP and AMFI settings and the VM's
-original run state.
+original run state. A VM that was paused in Recovery ends stopped. Nobody
+wants to come back to a frozen basement, Crawler.
 
 If the VM has no owner account, the SIP step creates the `pomme` owner. Pomme
 asks you to confirm first; to confirm without a prompt, add `--force`.
