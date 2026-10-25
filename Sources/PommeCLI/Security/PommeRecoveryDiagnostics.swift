@@ -20,6 +20,9 @@ enum PommeRecoveryGuestFailureCode: String, Codable, CaseIterable, Equatable, Se
     case recoveryEnvironmentUnverified = "recovery-environment-unverified"
     case startupVolumeMismatch = "recovery-startup-volume-mismatch"
     case snapshotPending = "recovery-snapshot-pending"
+    /// A normal-boot policy stage that only Recovery can complete. The host
+    /// falls back to Recovery; this code never reaches a user on its own.
+    case recoveryRequired = "recovery-required"
     case promptRejected = "recovery-prompt-rejected"
     case timedOut = "recovery-timed-out"
     case outputTooLarge = "recovery-output-too-large"
@@ -56,7 +59,7 @@ enum PommeRecoveryGuestFailureCode: String, Codable, CaseIterable, Equatable, Se
         case .timedOut: .recoveryTimedOut
         case .recoveryRoleRequired, .rootRequired, .invalidOperation, .invalidPayload,
              .credentialRequired, .nvramMutationUnqualified, .recoveryEnvironmentUnverified,
-             .startupVolumeMismatch, .outputTooLarge:
+             .startupVolumeMismatch, .outputTooLarge, .recoveryRequired:
             .recoveryOperationFailed
         }
     }
@@ -99,6 +102,8 @@ enum PommeRecoveryGuestFailureCode: String, Codable, CaseIterable, Equatable, Se
             "The Recovery agent refused the operation because the startup volume isn't the VM's macOS volume."
         case .outputTooLarge:
             "The Recovery agent refused the operation because a command's output exceeded its size limit."
+        case .recoveryRequired:
+            "The Pomme agent in macOS can't make this boot policy change; it needs Recovery."
         }
     }
 
@@ -112,7 +117,8 @@ enum PommeRecoveryGuestFailureCode: String, Codable, CaseIterable, Equatable, Se
         case .credentialRequired:
             "Provide the owner's credentials, then run the same command again."
         case .recoveryRoleRequired, .rootRequired, .invalidOperation, .invalidPayload,
-             .nvramMutationUnqualified, .recoveryEnvironmentUnverified, .startupVolumeMismatch, .outputTooLarge:
+             .nvramMutationUnqualified, .recoveryEnvironmentUnverified, .startupVolumeMismatch, .outputTooLarge,
+             .recoveryRequired:
             nil
         }
     }
@@ -139,6 +145,7 @@ extension PommeGuestRecoverySecurityError {
         case .recoveryEnvironmentUnverified: .recoveryEnvironmentUnverified
         case .startupVolumeMismatch: .startupVolumeMismatch
         case .snapshotPending: .snapshotPending
+        case .recoveryRequired: .recoveryRequired
         case .promptRejected: .promptRejected
         case .timedOut: .timedOut
         case .outputTooLarge: .outputTooLarge

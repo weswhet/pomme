@@ -105,6 +105,7 @@ actor PommeAgent {
     static let buddyPreferencesStatusOperation = "buddy.preferences.status"
     static let keystoreInitStatusOperation = "keystore.init.status"
     static let persistentCapabilities = [buddyPreferencesStatusOperation, keystoreInitStatusOperation, "agent.describe", "agent.health", "process.start", "process.status", "process.signal", "process.list", "process.output", "process.wait", "file.open", "file.read", "file.write", "file.seek", "file.flush", "file.close", "file.commit", "file.abort", "system.info", "network.interfaces", "remoteLogin.set", "mdm.staging.prepare", "mdm.enrollment", "mdm.staging.cleanup", "maintenance", "maintenance.update.begin", "maintenance.update.commit", "maintenance.update.finalize", PommeGuestOwnerCredentialReader.operation, PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation, PommeGuestRecoverySecurityOperations.normalSIPClearOperation] + PommeGuestDirectory.operations + terminalCapabilities + normalAMFIOperations
+        + PommeGuestRecoverySecurityOperations.normalAMFIPolicyOperations
     /// Detached-job logs retain their trailing bytes so an already streamed
     /// status response never makes `process.output` destructive. The agent
     /// keeps this bounded per channel and tells callers when earlier bytes
@@ -295,6 +296,8 @@ actor PommeAgent {
                 description["normalAMFIWorkflowVersion"] = .integer(Int64(Self.normalAMFIWorkflowVersion))
                 description["normalAMFIStatusVersion"] =
                     .integer(Int64(PommeGuestRecoverySecurityOperations.normalAMFIStatusVersion))
+                description["normalAMFIPolicyVersion"] =
+                    .integer(Int64(PommeGuestRecoverySecurityOperations.normalAMFIPolicyVersion))
             }
             if request.payload.objectValue?["includeOwnerCredentialCapabilities"] == .bool(true) {
                 description["ownerCredentialVersion"] = .integer(Int64(Self.ownerCredentialVersion))
@@ -303,6 +306,14 @@ actor PommeAgent {
         case "agent.health": return .object(["ok": .bool(true), "activationPending": .bool(activationPending)])
         case PommeGuestRecoverySecurityOperations.normalAMFIStatusOperation:
             return try recoverySecurity.executeNormalAMFIStatus(role: role, payload: request.payload)
+        // The AMFI policy stage for a standard SIP-disabled profile, which
+        // needs no native policy write and so no Recovery session.
+        case let operation where PommeGuestRecoverySecurityOperations.normalAMFIPolicyOperations.contains(operation):
+            return try recoverySecurity.executeNormalAMFIPolicy(
+                role: role,
+                operation: operation,
+                payload: request.payload
+            )
         case let operation where Self.normalAMFIOperations.contains(operation):
             return try recoverySecurity.executeNormalAMFI(
                 role: role,

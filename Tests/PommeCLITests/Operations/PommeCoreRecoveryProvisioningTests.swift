@@ -139,6 +139,69 @@ struct PommeCoreRecoveryProvisioningTests {
             .object(malformedCapabilities), expectedExecutableDigest: digest))
     }
 
+    @Test("The normal AMFI policy stage needs its own additive receipt")
+    func normalAMFIPolicyReceiptIsAdditive() throws {
+        let digest = String(repeating: "a", count: 64)
+        let staging = JSONValue.object([
+            "role": .string("persistent"),
+            "protocol": .string(PommeAgentProtocol.name),
+            "version": .integer(Int64(PommeAgentProtocol.version)),
+            "executableSHA256": .string(digest),
+            "normalAMFIWorkflowVersion": .integer(
+                Int64(PommeSecurityNormalAgent.normalAMFIWorkflowVersion)
+            ),
+            "capabilities": .array(
+                PommeSecurityNormalAgent.normalAMFIOperations.map(JSONValue.string)
+            ),
+        ])
+        // An agent pinned before the policy stage keeps its staging operations.
+        #expect(PommeCore.normalAMFICapabilityReceipt(
+            staging, expectedExecutableDigest: digest, operation: "amfi.normal.disable"))
+        #expect(!PommeCore.normalAMFICapabilityReceipt(
+            staging, expectedExecutableDigest: digest, operation: "amfi.normal.policyDisable"))
+
+        var current = staging.objectValue!
+        current["normalAMFIPolicyVersion"] = .integer(
+            Int64(PommeSecurityNormalAgent.normalAMFIPolicyVersion))
+        current["capabilities"] = .array(
+            (PommeSecurityNormalAgent.normalAMFIOperations
+                .union(PommeSecurityNormalAgent.normalAMFIPolicyOperations)).sorted().map(JSONValue.string))
+        for operation in ["amfi.normal.policyDisable", "amfi.normal.policyEnable"] {
+            #expect(PommeCore.normalAMFICapabilityReceipt(
+                .object(current), expectedExecutableDigest: digest, operation: operation))
+        }
+        var coerced = current
+        coerced["normalAMFIPolicyVersion"] = .string("1")
+        #expect(!PommeCore.normalAMFICapabilityReceipt(
+            .object(coerced), expectedExecutableDigest: digest, operation: "amfi.normal.policyEnable"))
+
+        let payload = JSONValue.object([
+            PommeSecurityNormalAgent.normalAMFIDigestMarker: .string(digest),
+            "volumeGroupUUID": .string("11111111-2222-3333-4444-555555555555"),
+        ])
+        #expect(try PommeCore.normalAMFIForwardPayload(
+            operation: "amfi.normal.policyDisable", payload: payload, expectedExecutableDigest: digest
+        ) == .object(["volumeGroupUUID": .string("11111111-2222-3333-4444-555555555555")]))
+    }
+
+    @Test("The normal AMFI policy requests pass the real control wire parser and router")
+    func normalAMFIPolicyRouting() throws {
+        for operation in ["amfi.normal.policyDisable", "amfi.normal.policyEnable"] {
+            let payload = JSONValue.object([
+                "volumeGroupUUID": .string("11111111-2222-3333-4444-555555555555"),
+            ])
+            let request = PommeControlRequest(command: "agent.perform", payload: .object([
+                "operation": .string(operation), "payload": payload,
+            ]))
+            let decoded = try ControlWireCodec.decodeRequest(ControlWireCodec.encodeLine(request))
+            guard case .agentPerform(let agent, streaming: false) = try PommeVMControlRouter.route(decoded) else {
+                Issue.record("The \(operation) request was not routed")
+                continue
+            }
+            #expect(agent.operation == operation)
+        }
+    }
+
     @Test("previous resolves the captured stopped state")
     func previousStoppedState() throws {
         let state = try PommeCore.capturedProvisioningFinalState(from: [

@@ -370,9 +370,11 @@ struct PommeAgentTests {
         ))
         #expect(normalAMFIDescribe.objectValue.map { Set($0.keys) } == Set([
             "role", "protocol", "version", "executableSHA256", "capabilities", "terminalSessionVersion",
-            "normalAMFIWorkflowVersion", "normalAMFIStatusVersion"
+            "normalAMFIWorkflowVersion", "normalAMFIStatusVersion", "normalAMFIPolicyVersion"
         ]))
         #expect(normalAMFIDescribe.objectValue?["normalAMFIWorkflowVersion"] == .integer(Int64(PommeAgent.normalAMFIWorkflowVersion)))
+        #expect(normalAMFIDescribe.objectValue?["normalAMFIPolicyVersion"]
+            == .integer(Int64(PommeGuestRecoverySecurityOperations.normalAMFIPolicyVersion)))
         #expect(normalAMFIDescribe.objectValue?["capabilities"]?.arrayValue?.compactMap(\.stringValue).contains("amfi.normal.disable") == true)
         let begin = try await agent.perform(.request(operation: "maintenance.update.begin", payload: .object(["targetSHA256": .string(newDigest), "targetBytes": .integer(9), "stagedExecutable": .string(staged.path)])))
         let transaction = try #require(begin.objectValue?["transactionID"]?.stringValue)

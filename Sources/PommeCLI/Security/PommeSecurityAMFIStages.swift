@@ -1,6 +1,8 @@
 import Foundation
 
-/// LocalPolicy can be changed only in authenticated Recovery. NVRAM changes
+/// LocalPolicy can be changed only in authenticated Recovery, but the standard
+/// SIP-disabled profile already allows custom boot arguments, so its policy
+/// stage is a no-op receipt that the normal agent records. NVRAM changes
 /// require a normal boot with SIP disabled. Each injected stage owns its
 /// durable intent and receipt, so repeating this order resumes partial work.
 struct PommeSecurityAMFIStages: Sendable {

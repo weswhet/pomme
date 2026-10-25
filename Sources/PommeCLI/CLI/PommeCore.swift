@@ -5658,6 +5658,7 @@ struct PommeCore {
 
     private static func isSecurityNormalAMFI(_ request: PommeAgentPerformRequest) -> Bool {
         PommeSecurityNormalAgent.normalAMFIOperations.contains(request.operation)
+            || PommeSecurityNormalAgent.normalAMFIPolicyOperations.contains(request.operation)
     }
 
     /// Verifies the exact normal-agent describe receipt. This is intentionally
@@ -5665,7 +5666,8 @@ struct PommeCore {
     /// accepted as capability/version integers through Foundation coercions.
     static func normalAMFICapabilityReceipt(
         _ description: JSONValue,
-        expectedExecutableDigest: String
+        expectedExecutableDigest: String,
+        operation: String? = nil
     ) -> Bool {
         guard PommeProvisioningDigest.isSHA256(expectedExecutableDigest),
               expectedExecutableDigest == expectedExecutableDigest.lowercased(),
@@ -5678,8 +5680,15 @@ struct PommeCore {
               case .array(let rawCapabilities)? = object["capabilities"],
               rawCapabilities.allSatisfy({ $0.stringValue != nil })
         else { return false }
-        return Set(rawCapabilities.compactMap(\.stringValue))
-            .isSuperset(of: PommeSecurityNormalAgent.normalAMFIOperations)
+        let capabilities = Set(rawCapabilities.compactMap(\.stringValue))
+        guard capabilities.isSuperset(of: PommeSecurityNormalAgent.normalAMFIOperations) else { return false }
+        // The policy stage has its own additive version, so an agent pinned
+        // before it keeps passing this receipt for the four staging operations.
+        guard let operation, PommeSecurityNormalAgent.normalAMFIPolicyOperations.contains(operation) else {
+            return true
+        }
+        return object["normalAMFIPolicyVersion"] == .integer(Int64(PommeSecurityNormalAgent.normalAMFIPolicyVersion))
+            && capabilities.isSuperset(of: PommeSecurityNormalAgent.normalAMFIPolicyOperations)
     }
 
     /// Validates and strips the host-only digest marker after the pinned
@@ -5690,7 +5699,8 @@ struct PommeCore {
         payload: JSONValue,
         expectedExecutableDigest: String
     ) throws -> JSONValue {
-        guard PommeSecurityNormalAgent.normalAMFIOperations.contains(operation),
+        guard PommeSecurityNormalAgent.normalAMFIOperations.contains(operation)
+                || PommeSecurityNormalAgent.normalAMFIPolicyOperations.contains(operation),
               PommeProvisioningDigest.isSHA256(expectedExecutableDigest),
               expectedExecutableDigest == expectedExecutableDigest.lowercased(),
               let object = payload.objectValue,
@@ -5733,7 +5743,7 @@ struct PommeCore {
                 payload: .object(["includeNormalAMFICapabilities": .bool(true)])
             )
             guard Self.normalAMFICapabilityReceipt(
-                description, expectedExecutableDigest: expectedDigest
+                description, expectedExecutableDigest: expectedDigest, operation: request.operation
             ) else {
                 throw PommeSecurityNormalAgentError.unsupportedAMFIWorkflow
             }
@@ -5772,6 +5782,8 @@ struct PommeCore {
                 code = "invalid-operation"
             case .unsupportedAMFIWorkflow:
                 code = "unsupported-operation"
+            case .amfiPolicyRequiresRecovery:
+                code = PommeRecoveryGuestFailureCode.recoveryRequired.rawValue
             case .unverifiedAMFIResponse:
                 code = "normal-amfi-unverified"
             case .invalidRebootTimeout, .bootIdentityUnavailable, .rebootRequestFailed,

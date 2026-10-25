@@ -94,10 +94,15 @@ enum PommeSecurityNormalAgentError: PommeDescribedError, Equatable, Sendable {
   case rebootBootIdentityUnchanged
   case rebootAgentUnverified(PommeRetainedCause = .init())
   case unverifiedSIPClear(PommeRetainedCause = .init())
+  /// The guest refused a normal-boot AMFI policy stage before any durable
+  /// write because the profile needs a native policy change. The workflow
+  /// falls back to Recovery; this never reaches a user on its own.
+  case amfiPolicyRequiresRecovery
 
   var code: PommeErrorCode {
     switch self {
     case .invalidAMFIOperation: .internalError
+    case .amfiPolicyRequiresRecovery: .securityAgentUnsupported
     case .unsupportedAMFIWorkflow: .securityAgentUnsupported
     case .unverifiedAMFIResponse, .unverifiedSIPClear: .securityChangeUnverified
     case .invalidRebootTimeout: .invalidRequest
@@ -131,12 +136,14 @@ enum PommeSecurityNormalAgentError: PommeDescribedError, Equatable, Sendable {
       cause.describing("The guest agent didn't authenticate after the restart. Pomme kept the operation's progress.")
     case .unverifiedSIPClear(let cause):
       cause.describing("Pomme couldn't verify that `csrutil clear` succeeded for the owner account, so it didn't report SIP as restored. Pomme kept the operation's progress.")
+    case .amfiPolicyRequiresRecovery:
+      "This VM's boot policy can be changed only in Recovery."
     }
   }
 
   var recoverySuggestion: String? {
     switch self {
-    case .invalidAMFIOperation, .invalidRebootTimeout:
+    case .invalidAMFIOperation, .invalidRebootTimeout, .amfiPolicyRequiresRecovery:
       nil
     case .unsupportedAMFIWorkflow:
       "Run `pomme agent update NAME` to install the current agent, then retry."
@@ -260,6 +267,10 @@ struct PommeSecurityNormalAgent: Sendable {
 
   static let normalAMFIWorkflowVersion = 1
 
+  static let normalAMFIPolicyOperations = Set(
+    PommeGuestRecoverySecurityOperations.normalAMFIPolicyOperations)
+  static let normalAMFIPolicyVersion = PommeGuestRecoverySecurityOperations.normalAMFIPolicyVersion
+
   /// Checks the opt-in `agent.describe` receipt without accepting host-side
   /// numeric coercions or guest-controlled text. This pure seam lets callers
   /// preflight before the Recovery policy effect while `performAMFI` repeats
@@ -324,7 +335,9 @@ struct PommeSecurityNormalAgent: Sendable {
     timeout: TimeInterval = Constants.defaultRecoveryAgentTimeout
       + 3 * Constants.agentRoundTripTimeout
   ) throws -> JSONValue {
-    guard Self.normalAMFIOperations.contains(operation) else {
+    guard Self.normalAMFIOperations.contains(operation)
+      || Self.normalAMFIPolicyOperations.contains(operation)
+    else {
       throw PommeSecurityNormalAgentError.invalidAMFIOperation
     }
     guard PommeProvisioningDigest.isSHA256(expectedExecutableDigest),
@@ -346,10 +359,15 @@ struct PommeSecurityNormalAgent: Sendable {
       throw PommeSecurityNormalAgentError.unverifiedAMFIResponse
     }
     if response["ok"] as? Bool != true {
-      if response["failureCode"] as? String == "unsupported-operation" {
+      switch response["failureCode"] as? String {
+      case "unsupported-operation":
         throw PommeSecurityNormalAgentError.unsupportedAMFIWorkflow
+      case PommeRecoveryGuestFailureCode.recoveryRequired.rawValue
+      where Self.normalAMFIPolicyOperations.contains(operation):
+        throw PommeSecurityNormalAgentError.amfiPolicyRequiresRecovery
+      default:
+        throw PommeSecurityNormalAgentError.unverifiedAMFIResponse
       }
-      throw PommeSecurityNormalAgentError.unverifiedAMFIResponse
     }
     guard let rawResult = response["result"],
       let result = try? JSONValue(any: rawResult),
@@ -358,6 +376,42 @@ struct PommeSecurityNormalAgent: Sendable {
       object["operation"] == .string(operation)
     else { throw PommeSecurityNormalAgentError.unverifiedAMFIResponse }
     return result
+  }
+
+  /// Runs AMFI's policy stage in the current normal boot. A standard
+  /// SIP-disabled profile already allows custom boot arguments, so the guest
+  /// records the same no-op policy receipt a Recovery stage would, with no
+  /// native policy write. Returns nil when the stage needs Recovery: the
+  /// pinned agent predates it, or the guest found a profile that needs a
+  /// native `bputil` change and refused before any durable write.
+  func changeAMFIPolicy(disable: Bool, volumeGroupUUID: UUID) throws -> JSONValue? {
+    guard try supportsNormalAMFIPolicy() else { return nil }
+    do {
+      return try performAMFI(
+        operation: disable
+          ? PommeGuestRecoverySecurityOperations.normalAMFIPolicyDisableOperation
+          : PommeGuestRecoverySecurityOperations.normalAMFIPolicyEnableOperation,
+        volumeGroupUUID: volumeGroupUUID)
+    } catch PommeSecurityNormalAgentError.amfiPolicyRequiresRecovery {
+      return nil
+    }
+  }
+
+  private func supportsNormalAMFIPolicy(
+    timeout: TimeInterval = Constants.defaultGuestCommandTimeout
+  ) throws -> Bool {
+    let response = try PommeCore.sendControlObject([
+      "command": "agent.perform",
+      "operation": "agent.describe",
+      "payload": ["includeNormalAMFICapabilities": true],
+    ], bundle: reference.bundle, timeout: timeout)
+    guard response["ok"] as? Bool == true,
+      let rawResult = response["result"],
+      let description = try? JSONValue(any: rawResult)
+    else { throw PommeSecurityWorkflowError.agentUnverified }
+    return PommeCore.normalAMFICapabilityReceipt(
+      description, expectedExecutableDigest: expectedExecutableDigest,
+      operation: PommeGuestRecoverySecurityOperations.normalAMFIPolicyDisableOperation)
   }
 
   func authenticate(timeout: TimeInterval = 120, requirePrivateInput: Bool = false) async throws {

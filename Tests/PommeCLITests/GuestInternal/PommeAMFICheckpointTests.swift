@@ -1382,6 +1382,151 @@ struct PommeAMFICheckpointTests {
         #expect(fixture.secretOperationCount == 0)
         #expect(fixture.nvramWriteCount == 0)
     }
+
+    @Test("A standard SIP-disabled profile runs both AMFI policy stages in normal boot")
+    func standardProfilePolicyStagesRunInNormalBoot() throws {
+        let fixture = try AMFICheckpointFixture(
+            initialSecurityMode: "permissive",
+            standardSIPDisabledProfile: true
+        )
+        defer { fixture.cleanup() }
+        let store = try fixture.store()
+        let operations = fixture.operations(store: store, normalEnvironmentVerifier: { _ in })
+        let baselinePolicy = fixture.policyCanonicalBytes
+
+        let disabled = try operations.executeNormalAMFIPolicy(
+            role: .persistent,
+            operation: "amfi.normal.policyDisable",
+            payload: fixture.normalPayload
+        )
+        #expect(disabled.objectValue?["operation"] == .string("amfi.normal.policyDisable"))
+        #expect(disabled.objectValue?["verified"] == .bool(true))
+        #expect(disabled.objectValue?["policyReceipt"] == .bool(true))
+        #expect(fixture.secretOperationCount == 0)
+        #expect(fixture.nvramWriteCount == 0)
+        let disabledReceipt = try store.loadRecord()
+        #expect(disabledReceipt.executionMode == .splitNormalNVRAM)
+        #expect(disabledReceipt.phase == .policyApplied)
+        #expect(disabledReceipt.policyCheckpoint?.action == .disable)
+        #expect(disabledReceipt.nativeTransition?.receipt == true)
+        #expect(disabledReceipt.nativeTransition?.beforePolicy == baselinePolicy)
+        #expect(disabledReceipt.nativeTransition?.afterPolicy == baselinePolicy)
+
+        _ = try operations.executeNormalAMFI(
+            role: .persistent, operation: "amfi.normal.disable", payload: fixture.normalPayload)
+        _ = try operations.executeNormalAMFI(
+            role: .persistent, operation: "amfi.normal.verifyDisabled", payload: fixture.normalPayload)
+        _ = try operations.executeNormalAMFI(
+            role: .persistent, operation: "amfi.normal.enable", payload: fixture.normalPayload)
+
+        let enabled = try operations.executeNormalAMFIPolicy(
+            role: .persistent,
+            operation: "amfi.normal.policyEnable",
+            payload: fixture.normalPayload
+        )
+        #expect(enabled.objectValue?["operation"] == .string("amfi.normal.policyEnable"))
+        #expect(enabled.objectValue?["amfiDisabled"] == .bool(false))
+        #expect(try store.loadRecord().policyCheckpoint?.action == .restore)
+
+        _ = try operations.executeNormalAMFI(
+            role: .persistent, operation: "amfi.normal.verifyEnabled", payload: fixture.normalPayload)
+        #expect(fixture.secretOperationCount == 0)
+        #expect(fixture.nvramWriteCount == 2)
+        #expect(fixture.bootArgumentBytes == fixture.initialBootArgumentBytes)
+    }
+
+    @Test("A profile that needs bputil is refused in normal boot before any durable write")
+    func nonStandardProfileNeedsRecovery() throws {
+        let fixture = try AMFICheckpointFixture(initialSecurityMode: "full")
+        defer { fixture.cleanup() }
+        let store = try fixture.store()
+        let operations = fixture.operations(store: store, normalEnvironmentVerifier: { _ in })
+
+        #expect(throws: PommeGuestRecoverySecurityError.recoveryRequired) {
+            _ = try operations.executeNormalAMFIPolicy(
+                role: .persistent,
+                operation: "amfi.normal.policyDisable",
+                payload: fixture.normalPayload
+            )
+        }
+        #expect(try store.loadRecordIfPresent() == nil)
+        #expect(fixture.secretOperationCount == 0)
+
+        // The Recovery stage the host falls back to starts from a clean store.
+        let recovery = try operations.execute(
+            role: .recovery, operation: "amfi.disable", payload: fixture.stagedCredentialsPayload)
+        #expect(recovery.objectValue?["policyReceipt"] == .bool(true))
+        #expect(fixture.secretOperationCount == 1)
+    }
+
+    @Test("A Recovery-written baseline that isn't the standard profile is refused in normal boot")
+    func nonStandardRetainedBaselineNeedsRecovery() throws {
+        let fixture = try AMFICheckpointFixture(initialSecurityMode: "full")
+        defer { fixture.cleanup() }
+        let store = try fixture.store()
+        let operations = fixture.operations(store: store, normalEnvironmentVerifier: { _ in })
+        _ = try operations.execute(
+            role: .recovery, operation: "amfi.disable", payload: fixture.stagedCredentialsPayload)
+        _ = try operations.executeNormalAMFI(
+            role: .persistent, operation: "amfi.normal.disable", payload: fixture.normalPayload)
+        _ = try operations.executeNormalAMFI(
+            role: .persistent, operation: "amfi.normal.verifyDisabled", payload: fixture.normalPayload)
+        _ = try operations.executeNormalAMFI(
+            role: .persistent, operation: "amfi.normal.enable", payload: fixture.normalPayload)
+        let before = try store.loadRecord()
+
+        #expect(throws: PommeGuestRecoverySecurityError.recoveryRequired) {
+            _ = try operations.executeNormalAMFIPolicy(
+                role: .persistent,
+                operation: "amfi.normal.policyEnable",
+                payload: fixture.normalPayload
+            )
+        }
+        #expect(try store.loadRecord() == before)
+        #expect(fixture.secretOperationCount == 1)
+    }
+
+    @Test("Only the root persistent agent runs the normal policy stage, after the environment proof")
+    func normalPolicyStageRequiresRootPersistentAgent() throws {
+        let fixture = try AMFICheckpointFixture(
+            initialSecurityMode: "permissive",
+            standardSIPDisabledProfile: true
+        )
+        defer { fixture.cleanup() }
+        let store = try fixture.store()
+        let operations = fixture.operations(store: store, normalEnvironmentVerifier: { _ in })
+        #expect(throws: PommeGuestRecoverySecurityError.invalidOperation) {
+            _ = try operations.executeNormalAMFIPolicy(
+                role: .recovery, operation: "amfi.normal.policyDisable", payload: fixture.normalPayload)
+        }
+        #expect(throws: PommeGuestRecoverySecurityError.invalidOperation) {
+            _ = try operations.executeNormalAMFIPolicy(
+                role: .persistent, operation: "amfi.normal.disable", payload: fixture.normalPayload)
+        }
+        #expect(throws: PommeGuestRecoverySecurityError.invalidPayload) {
+            _ = try operations.executeNormalAMFIPolicy(
+                role: .persistent, operation: "amfi.normal.policyDisable",
+                payload: fixture.stagedCredentialsPayload)
+        }
+        let unverified = fixture.operations(store: store, normalEnvironmentVerifier: { _ in
+            throw PommeGuestRecoverySecurityError.recoveryEnvironmentUnverified
+        })
+        #expect(throws: PommeGuestRecoverySecurityError.recoveryEnvironmentUnverified) {
+            _ = try unverified.executeNormalAMFIPolicy(
+                role: .persistent, operation: "amfi.normal.policyDisable", payload: fixture.normalPayload)
+        }
+        #expect(try store.loadRecordIfPresent() == nil)
+    }
+
+    @Test("The persistent agent advertises the normal policy stage")
+    func agentAdvertisesNormalPolicyStage() {
+        for operation in ["amfi.normal.policyDisable", "amfi.normal.policyEnable"] {
+            #expect(PommeAgent.persistentCapabilities.contains(operation))
+            #expect(!PommeAgent.recoveryCapabilities.contains(operation))
+        }
+        #expect(PommeRecoveryGuestFailureCode(rawValue: "recovery-required") == .recoveryRequired)
+        #expect(PommeGuestRecoverySecurityError.recoveryRequired.recoveryFailureCode == .recoveryRequired)
+    }
 }
 
 private final class AMFIPublicationFault: @unchecked Sendable {

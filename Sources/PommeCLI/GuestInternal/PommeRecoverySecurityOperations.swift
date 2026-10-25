@@ -22,6 +22,7 @@ enum PommeGuestRecoverySecurityError: Error, PommeDescribedError, Equatable, Sen
     case recoveryEnvironmentUnverified
     case startupVolumeMismatch
     case snapshotPending
+    case recoveryRequired
     case promptRejected
     case timedOut
     case outputTooLarge
@@ -60,6 +61,8 @@ enum PommeGuestRecoverySecurityError: Error, PommeDescribedError, Equatable, Sen
             "The selected startup volume group does not match the requested Recovery target."
         case .snapshotPending:
             "A previous Recovery security transition is unresolved."
+        case .recoveryRequired:
+            "This boot policy change can be made only in Recovery."
         case .promptRejected:
             "The Recovery security command presented an unsupported prompt."
         case .timedOut:
@@ -79,6 +82,7 @@ enum PommeGuestRecoverySecurityError: Error, PommeDescribedError, Equatable, Sen
         case .nvramWriteDenied, .nvramMutationUnqualified: .guestRecoveryNVRAMUnavailable
         case .recoveryEnvironmentUnverified, .startupVolumeMismatch: .guestRecoveryEnvironmentUnverified
         case .snapshotPending: .guestRecoveryTransitionPending
+        case .recoveryRequired: .guestRecoveryOperationFailed
         case .verificationFailed, .rollbackFailed: .guestRecoveryVerificationFailed
         case .commandFailed, .invalidSnapshot, .invalidPolicy, .invalidNVRAM, .promptRejected, .outputTooLarge:
             .guestRecoveryOperationFailed
@@ -97,6 +101,8 @@ enum PommeGuestRecoverySecurityError: Error, PommeDescribedError, Equatable, Sen
             "Run `pomme amfi status NAME` to check the current state."
         case .recoveryEnvironmentUnverified, .startupVolumeMismatch:
             "Stop the VM with `pomme stop NAME`, then retry the command."
+        case .recoveryRequired:
+            "Retry the command; Pomme makes this change in Recovery."
         case .snapshotPending:
             "Repeat the earlier `pomme sip` or `pomme amfi` command in the same direction so that Pomme can finish it."
         case .verificationFailed, .rollbackFailed, .invalidSnapshot, .invalidPolicy, .invalidNVRAM:
@@ -1086,7 +1092,8 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
                 if request.stage == .policy {
                     return try amfiDisablePolicyOnly(
                         expectedVolumeGroupUUID: request.volumeGroupUUID,
-                        credentials: request.credentials
+                        credentials: request.credentials,
+                        environment: recoveryPolicyEnvironment(operation: operation.rawValue)
                     )
                 }
                 return try amfiDisable(expectedVolumeGroupUUID: request.volumeGroupUUID, credentials: request.credentials)
@@ -1095,7 +1102,8 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
                 if request.stage == .policy {
                     return try amfiEnablePolicyOnly(
                         expectedVolumeGroupUUID: request.volumeGroupUUID,
-                        credentials: request.credentials
+                        credentials: request.credentials,
+                        environment: recoveryPolicyEnvironment(operation: operation.rawValue)
                     )
                 }
                 return try amfiEnable(expectedVolumeGroupUUID: request.volumeGroupUUID, credentials: request.credentials)
@@ -1211,6 +1219,102 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
     }
 
     static let normalSIPClearOperation = "sip.normal.clear"
+
+    /// The AMFI policy stage in normal macOS. A standard SIP-disabled profile
+    /// already allows custom boot arguments, so its policy stage writes only
+    /// the durable no-op receipt that Recovery would have written, and no
+    /// `bputil` change is needed. Any other profile is refused with
+    /// `recoveryRequired` before a durable write, so the host makes the
+    /// native policy change in Recovery instead.
+    static let normalAMFIPolicyDisableOperation = "amfi.normal.policyDisable"
+    static let normalAMFIPolicyEnableOperation = "amfi.normal.policyEnable"
+    static let normalAMFIPolicyOperations = [normalAMFIPolicyDisableOperation, normalAMFIPolicyEnableOperation]
+    static let normalAMFIPolicyVersion = 1
+
+    func executeNormalAMFIPolicy(
+        role: PommeAgentRole,
+        operation: String,
+        payload: JSONValue
+    ) throws -> JSONValue {
+        guard role == .persistent else {
+            throw PommeGuestRecoverySecurityError.invalidOperation
+        }
+        guard effectiveUserID() == 0 else {
+            throw PommeGuestRecoverySecurityError.rootRequired
+        }
+        guard Self.normalAMFIPolicyOperations.contains(operation) else {
+            throw PommeGuestRecoverySecurityError.invalidOperation
+        }
+        let volumeGroupUUID = try normalAMFIRequest(from: payload)
+        let environment = normalPolicyEnvironment(operation: operation)
+        do {
+            if operation == Self.normalAMFIPolicyDisableOperation {
+                return try amfiDisablePolicyOnly(
+                    expectedVolumeGroupUUID: volumeGroupUUID, credentials: nil, environment: environment)
+            }
+            return try amfiEnablePolicyOnly(
+                expectedVolumeGroupUUID: volumeGroupUUID, credentials: nil, environment: environment)
+        } catch let error as PommeGuestRecoverySecurityError {
+            throw error
+        } catch {
+            throw PommeGuestRecoverySecurityError.commandFailed
+        }
+    }
+
+    /// Where an AMFI policy stage runs. Both environments share one
+    /// transaction body and durable record; they differ in how the target
+    /// is proven, where its Data volume is, and which policies they admit.
+    private struct AMFIPolicyStageEnvironment {
+        let operation: String
+        let verify: (UUID) throws -> Void
+        let store: (UUID) throws -> PommeGuestAMFISnapshotStore
+        let admit: (PommeGuestAMFIState, PommeGuestAMFISnapshotRecord?, UUID) throws -> Void
+    }
+
+    private func recoveryPolicyEnvironment(operation: String) -> AMFIPolicyStageEnvironment {
+        .init(
+            operation: operation,
+            verify: { try verifyMutationEnvironment($0) },
+            store: { try snapshotStore(for: $0) },
+            admit: { _, _, _ in }
+        )
+    }
+
+    /// Admits only a stage that is certain to take the no-op path: the
+    /// current policy is the standard SIP-disabled profile and so is any
+    /// retained baseline it must match byte for byte. The check runs before
+    /// the stage's first durable write.
+    private func normalPolicyEnvironment(operation: String) -> AMFIPolicyStageEnvironment {
+        .init(
+            operation: operation,
+            verify: { try normalEnvironmentVerifier($0) },
+            store: { try normalSnapshotStore(for: $0) },
+            admit: { current, record, volumeGroupUUID in
+                guard current.policy.isSupportedStandardSIPDisabledProfile else {
+                    throw PommeGuestRecoverySecurityError.recoveryRequired
+                }
+                guard let record else { return }
+                // A completed tombstone is replaced by the current baseline
+                // only when it matches exactly. One written from a different
+                // environment's read is left to Recovery instead of failing.
+                if record.phase == .enabledVerified {
+                    guard (try? enabledTombstoneMatches(record, current: current)) == true else {
+                        throw PommeGuestRecoverySecurityError.recoveryRequired
+                    }
+                    return
+                }
+                let baseline = try parseSnapshotPolicy(
+                    record.snapshot.localPolicy,
+                    expectedVolumeGroupUUID: volumeGroupUUID,
+                    strict: true
+                )
+                guard baseline.isSupportedStandardSIPDisabledProfile,
+                      current.policy.matchesRetainedBaseline(of: baseline) else {
+                    throw PommeGuestRecoverySecurityError.recoveryRequired
+                }
+            }
+        )
+    }
 
     private func normalSIPClearRequest(from payload: JSONValue) throws -> (
         credentials: PommeGuestSecurityCredentials,
@@ -1789,7 +1893,7 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
         before: PommeGuestAMFIState,
         expectedVolumeGroupUUID: UUID,
         arguments: [String],
-        credentials: PommeGuestSecurityCredentials,
+        credentials: PommeGuestSecurityCredentials?,
         expected: (PommeGuestAMFIPolicy) -> Bool
     ) throws -> PommeGuestAMFIState {
         if before.policy.isSupportedStandardSIPDisabledProfile {
@@ -1802,6 +1906,9 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
                 expectedVolumeGroupUUID: expectedVolumeGroupUUID
             )
         }
+        // A native policy write needs the owner's credential, which only the
+        // Recovery stage receives. This is checked before the durable intent.
+        guard let credentials else { throw PommeGuestRecoverySecurityError.recoveryRequired }
         let currentRecord = try store.loadRecord()
         let intent = try nativePolicyIntent(for: before, action: action)
         try store.update(
@@ -2047,17 +2154,19 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
 
     // MARK: Split Recovery / normal AMFI transaction
 
-    /// Recovery owns LocalPolicy only in the staged contract.  The normal
-    /// agent later owns the exact boot-args write, so this path deliberately
-    /// never calls `applyNVRAMCheckpoint` or `applyNVRAM`.
+    /// The policy stage owns LocalPolicy only in the staged contract.  The
+    /// normal agent later owns the exact boot-args write, so this path
+    /// deliberately never calls `applyNVRAMCheckpoint` or `applyNVRAM`.
     private func amfiDisablePolicyOnly(
         expectedVolumeGroupUUID: UUID,
-        credentials: PommeGuestSecurityCredentials
+        credentials: PommeGuestSecurityCredentials?,
+        environment: AMFIPolicyStageEnvironment
     ) throws -> JSONValue {
-        try verifyMutationEnvironment(expectedVolumeGroupUUID)
+        try environment.verify(expectedVolumeGroupUUID)
         let current = try captureAMFIState(expectedVolumeGroupUUID: expectedVolumeGroupUUID)
-        let store = try snapshotStore(for: expectedVolumeGroupUUID)
+        let store = try environment.store(expectedVolumeGroupUUID)
         var record = try store.loadRecordIfPresent()
+        try environment.admit(current, record, expectedVolumeGroupUUID)
 
         if let existing = record {
             guard existing.isSplitNormalNVRAM else {
@@ -2149,7 +2258,7 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
             }
             let refreshed = try store.loadRecord()
             return stagedAMFIResponse(
-                operation: Operation.amfiDisable.rawValue,
+                operation: environment.operation,
                 state: current,
                 baselinePresent: true,
                 phase: refreshed.phase,
@@ -2186,7 +2295,7 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
         )
         let refreshed = try store.loadRecord()
         return stagedAMFIResponse(
-            operation: Operation.amfiDisable.rawValue,
+            operation: environment.operation,
             state: observed,
             baselinePresent: true,
             phase: refreshed.phase,
@@ -2198,18 +2307,20 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
         )
     }
 
-    /// Recovery-side enable is admitted only after normal boot has durably
+    /// The enable policy stage is admitted only after normal boot has durably
     /// restored the exact baseline NVRAM value.  This method never writes
     /// NVRAM and retains the baseline until normal verifyEnabled creates the
     /// completed tombstone.
     private func amfiEnablePolicyOnly(
         expectedVolumeGroupUUID: UUID,
-        credentials: PommeGuestSecurityCredentials
+        credentials: PommeGuestSecurityCredentials?,
+        environment: AMFIPolicyStageEnvironment
     ) throws -> JSONValue {
-        try verifyMutationEnvironment(expectedVolumeGroupUUID)
+        try environment.verify(expectedVolumeGroupUUID)
         let current = try captureAMFIState(expectedVolumeGroupUUID: expectedVolumeGroupUUID)
-        let store = try snapshotStore(for: expectedVolumeGroupUUID)
+        let store = try environment.store(expectedVolumeGroupUUID)
         let record = try store.loadRecord()
+        try environment.admit(current, record, expectedVolumeGroupUUID)
         guard record.isSplitNormalNVRAM else {
             throw PommeGuestRecoverySecurityError.snapshotPending
         }
@@ -2219,7 +2330,7 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
                 throw PommeGuestRecoverySecurityError.snapshotPending
             }
             return stagedAMFIResponse(
-                operation: Operation.amfiEnable.rawValue,
+                operation: environment.operation,
                 state: current,
                 baselinePresent: false,
                 phase: .enabledVerified,
@@ -2284,7 +2395,7 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
             }
             let refreshed = try store.loadRecord()
             return stagedAMFIResponse(
-                operation: Operation.amfiEnable.rawValue,
+                operation: environment.operation,
                 state: current,
                 baselinePresent: true,
                 phase: refreshed.phase,
@@ -2332,7 +2443,7 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
         try store.setPhase(.enabledConfigured)
         let refreshed = try store.loadRecord()
         return stagedAMFIResponse(
-            operation: Operation.amfiEnable.rawValue,
+            operation: environment.operation,
             state: observed,
             baselinePresent: true,
             phase: refreshed.phase,

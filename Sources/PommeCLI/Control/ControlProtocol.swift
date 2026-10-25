@@ -531,6 +531,8 @@ struct PommeAgentPerformRequest: Sendable {
             "keystore.init.status",
             "amfi.normal.disable", "amfi.normal.enable",
             "amfi.normal.verifyDisabled", "amfi.normal.verifyEnabled",
+            // The AMFI policy stage for a standard SIP-disabled profile.
+            "amfi.normal.policyDisable", "amfi.normal.policyEnable",
             // Read-only AMFI inspection from a normal boot, so a caller does
             // not spend a Recovery session to learn a state this reports.
             "amfi.normal.status",

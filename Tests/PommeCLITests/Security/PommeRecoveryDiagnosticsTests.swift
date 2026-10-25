@@ -49,6 +49,7 @@ struct PommeRecoveryDiagnosticsTests {
             (.verificationFailed, .verificationFailed),
             (.invalidSnapshot, .invalidSnapshot),
             (.snapshotPending, .snapshotPending),
+            (.recoveryRequired, .recoveryRequired),
             (.invalidPolicy, .invalidPolicy),
             (.invalidNVRAM, .invalidNVRAM),
             (.nvramWriteDenied, .nvramWriteDenied),

@@ -114,13 +114,16 @@ extension PommeSecurityWorkflow {
     }
     // AMFI state is fully observable from a normal boot: the policy, the
     // NVRAM projection, and the retained transaction all live where the
-    // persistent agent can read them. Prefer that over spending a Recovery
-    // session, and fall back to Recovery whenever the pinned agent predates
-    // the contract or the read cannot be completed there.
+    // persistent agent can read them. A VM that isn't running normal macOS is
+    // booted into it first; the SIP prerequisite and owner preparation that
+    // follow need that boot anyway. Recovery reads it only for a pinned
+    // agent that predates the contract or can't complete the read. A
+    // retained transaction the guest can't yet resolve is thrown as the same
+    // typed failure a Recovery read raises, so it isn't read a second time.
     let observeAMFI: @Sendable () async throws -> PommeSecurityWorkflowState = {
-        if try PommeCore.stableVMRunState(reference: reference) == .running(.normal),
-          (try? await normal.authenticate()) != nil,
-          let state = normal.observeAMFIState(volumeGroupUUID: group)
+        try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
+        if (try? await normal.authenticate()) != nil,
+          let state = try normal.observeAMFIWorkflowState(volumeGroupUUID: group)
         {
             PommeCore.log(
                 "Read the AMFI configuration through the persistent normal agent.",
@@ -135,7 +138,9 @@ extension PommeSecurityWorkflow {
       initialAMFIObservation = nil
     } else {
       do {
-        if retained?.phase == .preflightIntent {
+        // The inspection below boots normal macOS itself, so an original
+        // state in Recovery isn't restored here only to be stopped again.
+        if retained?.phase == .preflightIntent, !journal.originalRunState.bootsRecovery {
           try await PommeCore.restoreStableVMRunState(journal.originalRunState, reference: reference)
           guard try PommeCore.provesStableVMRunState(journal.originalRunState, reference: reference) else {
             throw PommeSecurityWorkflowError.restorationIncomplete()
@@ -193,6 +198,21 @@ extension PommeSecurityWorkflow {
       // The rebooted session is remembered so verification can run on it.
       await provenBoot.record(try await normal.rebootAndAuthenticate())
       return result
+    }
+    // `csrutil disable` leaves the standard SIP-disabled profile, which
+    // already allows custom boot arguments, so AMFI's policy stage changes
+    // nothing there and the agent records its receipt in normal macOS. Nil
+    // means the stage needs a native policy write, which only Recovery makes.
+    let changeAMFIPolicyInNormalBoot: @Sendable () async throws -> JSONValue? = {
+      try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
+      try await normal.authenticate()
+      guard let receipt = try normal.changeAMFIPolicy(
+        disable: operation.requestsDisabled, volumeGroupUUID: group)
+      else { return nil }
+      PommeCore.log(
+        "Recorded the AMFI policy stage in normal macOS; the boot policy already allows the boot argument.",
+        vmName: reference.displayName)
+      return receipt
     }
     // `csrutil clear` is the one SIP change macOS allows outside Recovery: it
     // restores the default protection once a volume owner authenticates, and
@@ -261,7 +281,13 @@ extension PommeSecurityWorkflow {
         _ = try normal.currentBootIdentity()
         return try await PommeSecurityAMFIStages(
           operation: operation,
-          changePolicy: { try await recovery.mutate(operation, credentials: $0) },
+          changePolicy: { credentials in
+            if let receipt = try await changeAMFIPolicyInNormalBoot() { return receipt }
+            PommeCore.log(
+              "Applying the AMFI boot policy change in authenticated Recovery.",
+              vmName: reference.displayName)
+            return try await recovery.mutate(operation, credentials: credentials)
+          },
           changeBootArguments: changeNormalBootArguments
         ).mutate(credentials: credentials)
       },
