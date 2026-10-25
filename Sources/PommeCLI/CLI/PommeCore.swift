@@ -3906,7 +3906,10 @@ struct PommeCore {
         let data = try Data(contentsOf: provisioningInputURL(bundle: bundle), options: .mappedIfSafe)
         let input = try JSONDecoder().decode(PommeProvisioningInput.self, from: data)
         try input.validate(for: plan)
-        guard isRegularFile(URL(fileURLWithPath: input.restoreImagePath)) else {
+        // A template clone copies the template's installed disk and only
+        // records the image the template came from, so that image may since
+        // have been removed from the host.
+        guard input.templateBundlePath != nil || isRegularFile(URL(fileURLWithPath: input.restoreImagePath)) else {
             throw RunnerError.hostCommandFailed("The restore image for the Pomme provisioning plan is unavailable.")
         }
         return input
