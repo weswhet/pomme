@@ -10,7 +10,7 @@ in the September 6, 2026 lab; do not reuse that size for Tahoe install tests.
 
 ## Protected base-OS templates
 
-Keep these two unprovisioned, internal-drive templates as permanent test bases:
+Keep these two unprovisioned templates as permanent test bases:
 
 | macOS | Pomme template name | Version/build | Disk |
 | --- | --- | --- | --- |
@@ -31,8 +31,18 @@ For disposable tests, create a separate VM clone with
 supplies the 40 GB disk. The clone may install its own agent and be deleted
 when the test is complete, but the source template must remain unchanged. Do
 not add `--provisioned` to these templates:
-that would create an owner and change the security posture. Keep both templates
-and all future clones on the internal drive, not an external volume.
+that would create an owner and change the security posture.
+
+Since October 24, 2026, the templates live on the external `external` volume at
+`/Volumes/External/pomme/Templates`. Each bundle in
+`~/Library/Application Support/pomme/Templates` is a symbolic link to its copy
+there. Don't replace the `Templates` folder itself with a link: Pomme can't list
+the contents of a linked folder. Pomme can't see the templates while `external` is
+unmounted, and `pomme template create` still writes new templates to the
+internal folder. Because
+`clonefile` can't cross volumes, `--from-template` makes a full copy of the
+template's disk on the internal drive, so clones take longer than they did. Keep
+the clones themselves on the internal drive.
 
 ## Build and sign consistently
 
