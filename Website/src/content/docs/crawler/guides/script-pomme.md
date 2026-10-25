@@ -239,7 +239,7 @@ pomme tools --format jsonl
 ```
 
 ```text
-{"name":"vm","commands":["create","list|ls","start","stop","restart","pause","resume","delete|rm","status","inspect","snapshot","template"]}
+{"name":"vm","commands":["create","list|ls","start","stop","restart","pause","resume","delete|rm","status","inspect","snapshot","template","firmware"]}
 {"name":"agent","commands":["agent status","agent repair","agent update"]}
 {"name":"guest","commands":["exec","shell","log","jobs","sessions","cp","cat"]}
 ...

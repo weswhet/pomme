@@ -66,8 +66,9 @@ To check one or more specific VMs, use the following commands:
 
 - `pomme status VM_NAME` shows the run state, the boot mode, and the guest
   agent connection.
-- `pomme inspect VM_NAME` shows the VM configuration and health. While the VM
-  is running, the output also includes the guest capabilities.
+- `pomme inspect VM_NAME` shows the VM configuration, health, and boot
+  firmware. While the VM is running, the output also includes the guest
+  capabilities.
 
 Replace `VM_NAME` with the name of the VM.
 

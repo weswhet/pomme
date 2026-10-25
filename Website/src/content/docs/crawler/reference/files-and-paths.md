@@ -45,13 +45,14 @@ Each `VMs/NAME.bundle` directory contains the following files:
 | File | Description |
 | --- | --- |
 | `Disk.img` | The VM's disk image. |
-| `AuxiliaryStorage` | The VM's auxiliary storage, which holds its NVRAM. |
+| `AuxiliaryStorage` | The VM's auxiliary storage, which holds its NVRAM and boot firmware. |
 | `HardwareModel`, `MachineIdentifier` | The VM's hardware identity. |
 | `Metadata.json` | Pomme's record of the VM: macOS version and build, sizes, agent identity, provisioning route, and template. |
 | `SecurityWorkflowJournal.json` | The journal for SIP and AMFI workflows. It never contains the owner password. |
 | `MDMEnrollmentJournal.json` | The journal for MDM enrollment. |
 | `SaveFile.vzvmsave` | The saved machine state, when present. |
 | `Snapshots/` | Named saved-state snapshots. |
+| `FirmwareBackups/` | A copy of `AuxiliaryStorage` from before each `pomme firmware repair` that changed it, named for the UTC time of the repair. |
 | `pomme-helper.log` | The log of the VM's background helper process. It starts with the Pomme version, the host's macOS version, and the boot mode, and it records each failed request with its error code. |
 | `pomme-helper.previous.log` | The log of the previous helper process. Pomme moves `pomme-helper.log` here when it starts a new helper. |
 | `.pomme/` | The VM's creation journal and its signing key. After `pomme agent update`, it also holds the signed record of the updated agent's digest. |

@@ -979,6 +979,7 @@ struct PommeCore {
         // VM's auxiliary storage. The session receives this immutable capture
         // and remains the sole owner of the requested final-state policy.
         let capturedState = try await captureAndStopForLiveRecovery(reference: reference)
+        warnIfBootFirmwareBlocksRecovery(reference: reference)
         do {
         try await waitForLiveRecoveryAuxiliaryStorageRelease(
             at: reference.bundle.auxiliaryStorageURL,
@@ -5505,6 +5506,7 @@ struct PommeCore {
             return status
         }
         try bundle.validateForRun()
+        if bootMode == .recovery { warnIfBootFirmwareBlocksRecovery(reference: reference) }
         let executable = try runningExecutableIdentity().url
         let logHandle = try rotateHelperLog(bundle: bundle)
         let process = Process()

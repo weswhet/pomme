@@ -246,7 +246,7 @@ enum CommandCatalog {
     }
 
     static let groups: [Group] = [
-        Group(name: "vm", commands: ["create", "list|ls", "start", "stop", "restart", "pause", "resume", "delete|rm", "status", "inspect", "snapshot", "template"]),
+        Group(name: "vm", commands: ["create", "list|ls", "start", "stop", "restart", "pause", "resume", "delete|rm", "status", "inspect", "snapshot", "template", "firmware"]),
         Group(name: "agent", commands: ["agent status", "agent repair", "agent update"]),
         Group(name: "guest", commands: ["exec", "shell", "log", "jobs", "sessions", "cp", "cat"]),
         Group(name: "security", commands: ["sip", "amfi", "mdm"]),
@@ -288,6 +288,7 @@ enum CommandCatalog {
     vm=\(compactGroup("vm")); agent=\(compactGroup("agent", removingPrefix: "agent "))
     snapshot=create|list|restore|delete
     template=create|list|delete
+    firmware=inspect|repair
     guest=\(compactGroup("guest")); security=\(compactGroup("security")); access=\(compactGroup("access", excluding: ["ui"]))
     sessions=list|ls|inspect|attach|logs|terminate|delete
     ui=\(compactUI)

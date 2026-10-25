@@ -237,6 +237,8 @@ extension PommeErrorCode {
     static let virtualizationError: Self = "virtualization-error"
     static let virtualizationUnsupported: Self = "virtualization-unsupported"
     static let snapshotNotFound: Self = "snapshot-not-found"
+    static let bootFirmwareUnrecognized: Self = "boot-firmware-unrecognized"
+    static let bootFirmwareRepairFailed: Self = "boot-firmware-repair-failed"
 }
 
 extension PommeErrorCatalog {
@@ -320,7 +322,17 @@ extension PommeErrorCatalog {
         .init(.snapshotNotFound, area: "VMs",
               title: "The snapshot doesn't exist.",
               cause: "The VM has no snapshot with the name that you gave.",
-              resolution: ["Run `pomme snapshot list NAME` to see the VM's snapshots."])
+              resolution: ["Run `pomme snapshot list NAME` to see the VM's snapshots."]),
+        .init(.bootFirmwareUnrecognized, area: "VMs",
+              title: "Pomme doesn't recognize the VM's boot firmware.",
+              cause: "`pomme firmware repair` changes the VM's auxiliary storage only when its firmware slots match the layout that Pomme has seen macOS write. This VM's file doesn't, so Pomme changed nothing.",
+              resolution: ["Run `pomme firmware inspect NAME` to see what Pomme found.", "Run `pomme bug-report NAME` and attach the file to a new issue."],
+              reportable: true),
+        .init(.bootFirmwareRepairFailed, area: "VMs",
+              title: "The boot firmware repair didn't complete.",
+              cause: "After it wrote the VM's auxiliary storage, Pomme read the file back and didn't find the firmware it wrote. The message names the backup of the original file.",
+              resolution: ["With the VM stopped, copy the backup that the message names over the `AuxiliaryStorage` file in the VM bundle.", "Run `pomme bug-report NAME` and attach the file to a new issue."],
+              reportable: true)
     ]
 }
 

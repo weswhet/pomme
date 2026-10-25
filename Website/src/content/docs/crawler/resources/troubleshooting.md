@@ -207,6 +207,10 @@ after a successful run. Capture stops before Pomme types a Terminal command, so
 the screenshots don't show command text or output. A failed capture prints a
 warning and doesn't stop navigation.
 
+If Recovery shows no screen at all after you installed a macOS update in the
+guest, see
+[A guest update hangs and the VM has less memory](#a-guest-update-hangs-and-the-vm-has-less-memory).
+
 :::caution[Hazard Detected: Evidence Left Behind]
 Full-resolution screenshots can show identifiers from the guest. Keep them out
 of your source repository, and delete them when you're done. Crawlers who
@@ -478,15 +482,114 @@ errors:
 
 ```text
 Deletion requires an interactive terminal. Pass -f/--force to delete without prompting.
+Repair requires an interactive terminal. Pass -f/--force to repair without prompting.
 tui requires an interactive terminal.
 --pty requires an interactive terminal for standard input and output.
 An attached shell requires an interactive terminal for standard input and output.
 ```
 
-**Resolution:** For deletion, add `--force`. For terminal programs, create a
+**Resolution:** For deletion and `pomme firmware repair`, add `--force`. For
+terminal programs, create a
 detached session with `pomme exec --pty --detach` or `pomme shell --detach`
 instead. For details, see
 [Use Pomme in scripts and coding agents](/crawler/guides/script-pomme/).
+
+## Updating macOS in a VM
+
+Deaths caused by a software update, which is the System's favorite kind of
+irony.
+
+### A guest update hangs and the VM has less memory
+
+**Symptom:** You install a macOS update in a VM that runs macOS 26 or earlier,
+such as macOS 26.7 or 15.8, and one or more of the following happens:
+
+- The guest restarts to install the update and then never shows its desktop
+  again. After you stop and start the VM, it still runs the earlier macOS
+  version.
+- The guest has about 1.75 GB of usable memory, whatever memory size the VM
+  has.
+- Recovery doesn't start, so a command that uses Recovery, such as
+  `pomme sip disable`, fails.
+
+Before each Recovery boot of such a VM, Pomme prints this warning. The System
+also prints it, mostly so that it can say it warned you:
+
+```text
+NAME has boot firmware mBoot-20457.1.29 from a guest update. If the VM runs macOS 26 or earlier, Recovery can't start with it. Stop the VM and run `pomme firmware repair NAME`. See https://pommevm.dev/resources/troubleshooting/#a-guest-update-hangs-and-the-vm-has-less-memory
+```
+
+**Cause:** The update installs the macOS 27 boot firmware in the VM's
+auxiliary storage. Under that firmware, macOS 26 and earlier can use only
+about 1.75 GB of memory, the first boot of the updated system doesn't finish,
+and Recovery, which runs from memory, doesn't start. The problem is in the
+macOS update, not in Pomme: other apps that run macOS VMs with
+Virtualization.framework report the same behavior. For once, the trap wasn't
+built by the System, and it's a little jealous.
+
+**Resolution:**
+
+1. If the VM stopped responding after the update restarted it, turn it off:
+
+   ```sh
+   pomme stop NAME --force
+   ```
+
+1. Start the VM in normal macOS. It starts the macOS version that it ran
+   before the update.
+
+   ```sh
+   pomme start NAME
+   ```
+
+1. Check the VM's boot firmware:
+
+   ```sh
+   pomme firmware inspect NAME
+   ```
+
+   For an affected VM, the output looks like the following:
+
+   ```text
+   status: incompatible-update
+   active: mBoot-20457.1.29 (slot B)
+   previous: mBoot-18000.161.10 (slot A)
+   guest: macOS 26.6.2, 1.75 GB of 4 GB memory usable
+   diagnosis: affected
+   This firmware leaves the guest about 1.75 GB of memory, so a macOS update can't finish and Recovery can't start. Stop the VM with `pomme stop NAME`, then run `pomme firmware repair NAME`. See https://pommevm.dev/resources/troubleshooting/#a-guest-update-hangs-and-the-vm-has-less-memory
+   ```
+
+   If the diagnosis is `not-affected`, the VM doesn't have this problem, and
+   the viewers go back to their snacks.
+
+1. If the diagnosis is `affected`, stop the VM and restore the firmware that
+   the VM was installed with. Pomme asks you to confirm; to skip the
+   question, add `--force`.
+
+   ```sh
+   pomme stop NAME
+   pomme firmware repair NAME
+   ```
+
+1. Start the VM. It has all of its memory, and Recovery starts again. To
+   install the macOS update, run Software Update in the guest again.
+
+Replace `NAME` with the name of the VM.
+
+`pomme firmware repair` changes only the active firmware slot of the
+`AuxiliaryStorage` file in the VM bundle. First, it saves a copy of the whole
+file in the bundle's `FirmwareBackups` folder. To undo the repair, stop the VM
+and copy that backup over `AuxiliaryStorage`. When the VM's firmware doesn't
+need a repair, the command changes nothing. `pomme inspect` also reports the
+VM's boot firmware, and it suggests `pomme firmware inspect` when the firmware
+looks affected.
+
+:::caution[Hazard Detected: Wrong Patient]
+Don't repair a VM that you upgraded to macOS 27 in the guest: macOS 27 needs
+the firmware that the upgrade installed. While such a VM runs,
+`pomme firmware inspect` reports `not-affected`. Crawlers who "repair" a
+healthy macOS 27 VM get to learn about backups the hard way.
+:::
 
 ## Guest agent
 

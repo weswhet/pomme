@@ -831,9 +831,12 @@ enum PommeApplication {
             ]
         }
 
+        let bootFirmwarePayload = bootFirmwareInspectPayload(reference: reference)
+
         var payload = inspectPayload
         payload["health"] = healthPayload
         payload["capabilities"] = capabilitiesPayload
+        payload["bootFirmware"] = bootFirmwarePayload
         // A stopped VM is still fully inspectable from its persisted bundle. Health and
         // guest capabilities remain diagnostics in that state rather than turning an
         // otherwise successful inspection into a failure.
@@ -841,6 +844,7 @@ enum PommeApplication {
 
         let text = [
             formatInspect(inspectPayload),
+            formatBootFirmwareInspect(bootFirmwarePayload),
             formatHealth(healthPayload, includeGuestAgent: false),
             formatCapabilities(capabilitiesPayload, includeGuestAgent: false)
         ].joined(separator: "\n")
