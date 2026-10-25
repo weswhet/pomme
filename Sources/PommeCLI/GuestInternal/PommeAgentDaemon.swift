@@ -209,6 +209,17 @@ enum PommeAgentDaemon {
         /// before first authentication, then the credential is retained only
         /// in memory for this boot and can authenticate reconnects.
         let terminalAuthority: Bool
+        /// The experimental Recovery resident that launchd starts from the
+        /// prepared image. It keeps its credential for restarts, and
+        /// authentication still requires the fixed VM and session binding.
+        var residentRecovery: Bool = false
+
+        var consumesToken: Bool { role == .recovery && !residentRecovery }
+        var retriesListener: Bool { role == .persistent || residentRecovery }
+        var credentialLifetime: PommeAgentConnection.CredentialLifetime {
+            if residentRecovery { return .persistent }
+            return terminalAuthority ? .bootSession : (role == .recovery ? .oneShot : .persistent)
+        }
     }
 
     enum Exit: Int32 { case success = 0, invalidArguments = 64, integrity = 65, credential = 66, transport = 69 }
@@ -232,7 +243,7 @@ enum PommeAgentDaemon {
         verifiedCodeURL: URL = URL(fileURLWithPath: PommeAgentVerifiedCodeRecord.path)
     ) -> Int32 {
         do {
-            let options = try parse(arguments: arguments)
+            let options = try parse(arguments: arguments, executablePath: executablePath)
             // Install the exact-workspace cleanup guard immediately after
             // parsing. Every subsequent validation can fail after a
             // launcher has already created guest artifacts, so the guard must
@@ -253,12 +264,12 @@ enum PommeAgentDaemon {
                 verifiedCodeURL: verifiedCodeURL,
                 verifiedCodeOwner: recoveryOwner
             ) else { return Exit.integrity.rawValue }
-            // Recovery credentials are descriptor-backed one-shot material.
-            // Consume the exact file before opening the host connection; a
-            // reconnect or process restart therefore cannot replay it.
+            // Ordinary Recovery consumes its request-bound credential. The
+            // resident keeps its image credential for restarts;
+            // authentication still requires the fixed VM/session binding.
             let token = try readToken(
                 at: options.tokenFile,
-                consume: options.role == .recovery,
+                consume: options.consumesToken,
                 expectedOwner: recoveryOwner,
                 expectedGroup: recoveryGroup
             )
@@ -288,10 +299,9 @@ enum PommeAgentDaemon {
             let maintenanceTask = startBuddyMaintenance(role: options.role, maintenance: buddyPreferences)
             defer { maintenanceTask?.cancel(); keystoreTask?.cancel() }
             while true {
-                let descriptor = try connectForRole(role: options.role, port: options.port)
-                let lifetime: PommeAgentConnection.CredentialLifetime = options.terminalAuthority
-                    ? .bootSession
-                    : (options.role == .recovery ? .oneShot : .persistent)
+                let descriptor = try connectForRole(role: options.role, port: options.port,
+                                                    residentRecovery: options.residentRecovery)
+                let lifetime = options.credentialLifetime
                 let connection = try PommeAgentConnection(token: token, lifetime: lifetime,
                                                           expiresAt: terminalAdmissionAuthenticated ? nil : options.oneShotExpiry,
                                                           vmBinding: options.vmBinding, sessionBinding: options.sessionBinding)
@@ -383,13 +393,14 @@ enum PommeAgentDaemon {
     static func connectForRole(
         role: PommeAgentRole,
         port: UInt32,
+        residentRecovery: Bool = false,
         connect: (UInt32) throws -> Int32 = connectToHost,
         pause: () throws -> Void = { Thread.sleep(forTimeInterval: 2) }
     ) throws -> Int32 {
         while true {
             do { return try connect(port) }
             catch {
-                guard role == .persistent else { throw error }
+                guard role == .persistent || (role == .recovery && residentRecovery) else { throw error }
                 // A missing host listener must not restart the daemon and
                 // interrupt an active preference attempt.
                 try pause()
@@ -397,13 +408,16 @@ enum PommeAgentDaemon {
         }
     }
 
-    static func parse(arguments: [String]) throws -> Options {
+    static func parse(
+        arguments: [String],
+        executablePath: String = CommandLine.arguments.first ?? PommeAgentInstall.executable
+    ) throws -> Options {
         guard arguments.first == "--pomme-agent" else { throw PommeAgentDaemonError(.invalidArguments) }
         guard arguments.count >= 2, let port = UInt32(arguments[1]) else { throw PommeAgentDaemonError(.invalidArguments) }
         var values: [String: String] = [:]; var index = 2
         while index < arguments.count {
             let flag = arguments[index]
-            guard ["--token-file", "--expected-sha256", "--role", "--one-shot-expiry", "--vm-id", "--session-id", "--operation", "--request-file"].contains(flag), index + 1 < arguments.count, values[flag] == nil else { throw PommeAgentDaemonError(.invalidArguments) }
+            guard ["--token-file", "--expected-sha256", "--role", "--one-shot-expiry", "--vm-id", "--session-id", "--operation", "--request-file", "--resident-recovery"].contains(flag), index + 1 < arguments.count, values[flag] == nil else { throw PommeAgentDaemonError(.invalidArguments) }
             values[flag] = arguments[index + 1]; index += 2
         }
         guard let token = values["--token-file"], token.hasPrefix("/"),
@@ -413,6 +427,23 @@ enum PommeAgentDaemon {
         let expiry = try values["--one-shot-expiry"].map { text -> Date in guard let seconds = TimeInterval(text), seconds > Date().timeIntervalSince1970 else { throw PommeAgentDaemonError(.invalidArguments) }; return Date(timeIntervalSince1970: seconds) }
         let vmBinding = try values["--vm-id"].map(Self.canonicalUUID)
         let sessionBinding = try values["--session-id"].map(Self.canonicalUUID)
+        if let residentSession = values["--resident-recovery"] {
+            guard residentSession == sessionBinding, UUID(uuidString: residentSession)?.uuidString.lowercased() == residentSession,
+                  role == .recovery, port == Constants.pommeRecoveryResidentPort,
+                  vmBinding != nil, expiry == nil,
+                  values["--operation"] == nil, values["--request-file"] == nil,
+                  executablePath == PommeExperimentalRecoveryPayload.runtimeExecutable,
+                  token == PommeExperimentalRecoveryPayload.runtimeTokenFile else {
+                throw PommeAgentDaemonError(.invalidArguments)
+            }
+            do {
+                return try .init(port: port, tokenFile: token,
+                    expectedSHA256: PommeAgentAuthentication.normalized(digest), role: role,
+                    oneShotExpiry: nil, vmBinding: vmBinding, sessionBinding: sessionBinding,
+                    requestFile: nil, allowedOperation: PommeRecoveryOperation.terminalSession.wireName,
+                    terminalAuthority: true, residentRecovery: true)
+            } catch { throw PommeAgentDaemonError(.invalidArguments) }
+        }
         let allowedOperation: String?
         let terminalAuthority: Bool
         switch (role, port) {
@@ -512,12 +543,27 @@ enum PommeAgentDaemon {
         }
     }
 
-    private static func recoveryWorkspaceCleanup(
+    static func recoveryWorkspaceCleanup(
         options: Options,
         executablePath: String,
         owner: uid_t,
         group: gid_t
     ) throws -> RecoveryCleanup {
+        if options.residentRecovery {
+            guard options.role == .recovery,
+                  options.port == Constants.pommeRecoveryResidentPort,
+                  executablePath == PommeExperimentalRecoveryPayload.runtimeExecutable,
+                  options.tokenFile == PommeExperimentalRecoveryPayload.runtimeTokenFile,
+                  options.oneShotExpiry == nil, options.requestFile == nil,
+                  options.terminalAuthority,
+                  options.allowedOperation == PommeRecoveryOperation.terminalSession.wireName,
+                  let vm = options.vmBinding, let session = options.sessionBinding,
+                  UUID(uuidString: vm)?.uuidString.lowercased() == vm,
+                  UUID(uuidString: session)?.uuidString.lowercased() == session else {
+                throw PommeAgentDaemonError(.invalidArguments)
+            }
+            return {}
+        }
         guard options.role == .recovery else { return {} }
         guard let sessionBinding = options.sessionBinding,
               let requestFile = options.requestFile,

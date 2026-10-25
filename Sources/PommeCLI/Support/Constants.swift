@@ -12,6 +12,7 @@ enum Constants {
     static let pommeAgentPort: UInt32 = 505_051
     static let pommeRecoverySessionPort: UInt32 = 505_052
     static let pommeRecoveryRuntimePort: UInt32 = 505_053
+    static let pommeRecoveryResidentPort: UInt32 = 505_054
     static let defaultRecoveryAgentTimeout: TimeInterval = 300
     static let defaultSIPBootstrapUser = "pommesip"
     static let defaultSIPBootstrapFullName = "Pomme SIP Admin"

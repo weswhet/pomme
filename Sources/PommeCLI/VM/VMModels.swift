@@ -35,6 +35,7 @@ enum PommeAgentPort {
     static let persistentNormal: UInt32 = 505_051
     static let recoveryBootstrap: UInt32 = 505_052
     static let recoveryRuntime: UInt32 = 505_053
+    static let recoveryResident: UInt32 = 505_054
 }
 
 /// A closed status payload reported beneath `guestAgent` for both status and

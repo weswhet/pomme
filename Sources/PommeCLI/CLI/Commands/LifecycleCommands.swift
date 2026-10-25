@@ -77,6 +77,12 @@ struct CreateCommand: AsyncParsableCommand {
     var dryRun = false
 
     @Flag(
+        name: .customLong("experimental-recovery"),
+        help: "Experimental: prepare the VM's Recovery image on the host so that Pomme reaches Recovery without navigating its screens. Modifies the Recovery image."
+    )
+    var experimentalRecovery = false
+
+    @Flag(
         name: .customLong("resume"),
         help: "Resume the durable Pomme agent workflow for this VM."
     )
@@ -118,7 +124,7 @@ struct CreateCommand: AsyncParsableCommand {
             _ = try validateVMName(name)
             let creationArgumentsSupplied = configPath != nil || version != nil || restoreImage != nil
                 || fromTemplate != nil || ipswDevice != nil || diskSize != "60GB" || memory != "8GB" || boot != .normal
-                || dryRun || parallel
+                || dryRun || parallel || experimentalRecovery
             guard !creationArgumentsSupplied else {
                 throw ValidationError("--resume accepts only a VM name and output or debug options.")
             }
@@ -165,7 +171,8 @@ struct CreateCommand: AsyncParsableCommand {
             let results = try await CreateConfigRunner.run(
                 path: configPath,
                 dryRun: dryRun,
-                parallelism: limit
+                parallelism: limit,
+                experimentalRecovery: experimentalRecovery
             )
             try CLIOutputWriter.write(results, options: output)
             return
@@ -183,7 +190,7 @@ struct CreateCommand: AsyncParsableCommand {
                 throw ValidationError("Direct creation requires --version or a verified --restore-image.")
             }
             let result = try await PommeCreationRequest(
-                source: source, diskSize: diskSize, memory: memory, boot: boot
+                source: source, diskSize: diskSize, memory: memory, boot: boot, experimentalRecovery: experimentalRecovery
             ).create(name: vmName)
             try CLIOutputWriter.write(result, options: output)
             return
@@ -204,13 +211,15 @@ struct CreateCommand: AsyncParsableCommand {
             let profile = try PommeRecoveryProfileSelector.select(for: firmware)
             selectedProfile = profile
             PommeCreationRequest.warnIfExperimental(profile, version: firmware.version,
-                                                    build: firmware.buildid, vmName: vmName)
+                                                    build: firmware.buildid, vmName: vmName,
+                                                    experimentalRecovery: experimentalRecovery)
         } else if let restoreImage {
             let identity = try await PommeCore.inspectLocalRestoreImage(path: restoreImage)
             selectedProfile = identity.recoveryProfile
             resolvedLocalRestoreImage = identity
             PommeCreationRequest.warnIfExperimental(identity.recoveryProfile, version: identity.version,
-                                                    build: identity.build, vmName: vmName)
+                                                    build: identity.build, vmName: vmName,
+                                                    experimentalRecovery: experimentalRecovery)
         } else {
             throw ValidationError("Direct creation requires --version or a verified --restore-image.")
         }
@@ -239,7 +248,8 @@ struct CreateCommand: AsyncParsableCommand {
         let diskSpace = try PommeCore.dryRunSpaceCheck(
             source: memorySource,
             diskSizeBytes: ByteSizeParser.parse(diskSize) ?? 0,
-            vmName: vmName
+            vmName: vmName,
+            experimentalRecovery: experimentalRecovery
         )
         var payload: [String: Any] = [
             "ok": true,
@@ -261,9 +271,10 @@ struct CreateCommand: AsyncParsableCommand {
                 "digest": selectedProfile.digest
             ]
         ]
+        if experimentalRecovery { payload["experimentalRecovery"] = true }
         payload.merge(PommeCore.provisioningDisclosure(virtualization:
             PommeCore.usesVirtualizationProvisioning(guestVersion: selectedProfile.version,
-                firstBootEligible: true))) { _, new in new }
+                firstBootEligible: true), experimentalRecovery: experimentalRecovery)) { _, new in new }
         try CLIOutputWriter.write(
             payload: payload,
             text: "Would create \(vmName) (disk \(diskSize), memory \(memory), boot \(boot.rawValue)).",
@@ -285,7 +296,8 @@ struct CreateCommand: AsyncParsableCommand {
         let diskSpace = try PommeCore.dryRunSpaceCheck(
             source: .template(manifest),
             diskSizeBytes: manifest.diskSizeBytes,
-            vmName: vmName
+            vmName: vmName,
+            experimentalRecovery: experimentalRecovery
         )
         var payload: [String: Any] = [
             "ok": true,
@@ -307,10 +319,12 @@ struct CreateCommand: AsyncParsableCommand {
                 "digest": descriptor.digest
             ]
         ]
+        if experimentalRecovery { payload["experimentalRecovery"] = true }
         payload.merge(PommeCore.provisioningDisclosure(
             virtualization: PommeCore.usesVirtualizationProvisioning(guestVersion: manifest.version,
                 firstBootEligible: !manifest.isProvisioned),
-            templateAgent: manifest.adoptableAgent != nil)) { _, new in new }
+            templateAgent: manifest.adoptableAgent != nil && !experimentalRecovery,
+            experimentalRecovery: experimentalRecovery)) { _, new in new }
         try CLIOutputWriter.write(
             payload: payload,
             text: "Would create \(vmName) from template \(manifest.name) (macOS \(manifest.version) \(manifest.build), disk \(manifest.diskSizeBytes / (1 << 30))GB, memory \(memory), boot \(boot.rawValue)).",

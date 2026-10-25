@@ -40,6 +40,7 @@ struct CLIOptions {
     var sizeOptions = VMSizeOptions.default
     var hasCustomSizeOptions = false
     var create = false
+    var experimentalRecovery = false
     var start = false
     var bootMode: BootMode = .normal
     var stop = false

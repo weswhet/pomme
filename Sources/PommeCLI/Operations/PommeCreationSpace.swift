@@ -14,6 +14,11 @@ enum PommeCreationSpace {
     /// and verifies its agent. Cloning shares every other block.
     static let cloneGrowthEstimateBytes: UInt64 = 5_000_000_000
 
+    /// `--experimental-recovery` keeps the original and prepared Recovery
+    /// images, measured at 1.6 GB and 1.2 GB for macOS 26, and a backing
+    /// switch writes one more copy into the VM's disk image.
+    static let experimentalRecoveryEstimateBytes: UInt64 = 5_000_000_000
+
     /// One part of a creation, and the directory its bytes land in.
     struct Need: Equatable, Sendable {
         enum Kind: String, Sendable {
@@ -21,6 +26,7 @@ enum PommeCreationSpace {
             case installedSystem
             case templateCopy
             case cloneGrowth
+            case experimentalRecoveryImages
         }
 
         let kind: Kind
@@ -34,6 +40,7 @@ enum PommeCreationSpace {
             case .installedSystem: "about \(size) for the installed macOS system"
             case .templateCopy: "\(size) to copy the template, because its volume can't clone files"
             case .cloneGrowth: "about \(size) for the clone's own changes"
+            case .experimentalRecoveryImages: "about \(size) for the original and prepared Recovery images"
             }
         }
     }
@@ -87,6 +94,11 @@ enum PommeCreationSpace {
             .init(kind: .templateCopy, bytes: templateBytes, directory: destination),
             .init(kind: .cloneGrowth, bytes: cloneGrowthEstimateBytes, directory: destination)
         ]
+    }
+
+    /// What `--experimental-recovery` adds to a creation in `destination`.
+    static func experimentalRecoveryNeeds(enabled: Bool, destination: URL) -> [Need] {
+        enabled ? [.init(kind: .experimentalRecoveryImages, bytes: experimentalRecoveryEstimateBytes, directory: destination)] : []
     }
 
     // MARK: Checking

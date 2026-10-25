@@ -2,6 +2,29 @@ import Testing
 
 @Suite("Pomme create resume contract", .serialized)
 struct CreateCommandTests {
+    @Test("Experimental Recovery is opt-in for direct and config creation", arguments: [
+        ["research-agent", "--version", "27.0.1"],
+        ["research-agent", "--from-template", "base"],
+        ["--config", "create.yaml", "--parallel"]
+    ])
+    func experimentalCreation(arguments: [String]) throws {
+        var ordinary = try CreateCommand.parse(arguments)
+        try ordinary.validate()
+        #expect(!ordinary.experimentalRecovery)
+        var experimental = try CreateCommand.parse(arguments + ["--experimental-recovery"])
+        try experimental.validate()
+        #expect(experimental.experimentalRecovery)
+        #expect(throws: (any Error).self) { try CreateCommand.parse(arguments + ["--experimental"]) }
+    }
+
+    @Test("Resume cannot change the durable experimental choice")
+    func experimentalResumeRejected() {
+        #expect(throws: (any Error).self) {
+            var command = try CreateCommand.parse(["research-agent", "--resume", "--experimental-recovery"])
+            try command.validate()
+        }
+    }
+
     @Test("Direct create rejects non-positive and malformed resource sizes in every execution mode", arguments: [
         "0GB",
         "0B",

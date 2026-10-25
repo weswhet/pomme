@@ -6,12 +6,14 @@ enum PommeAgentVSOCKRole: Hashable, Sendable {
     case normal
     case recoveryBootstrap
     case recoveryRuntime
+    case recoveryResident
 
     var port: UInt32 {
         switch self {
         case .normal: PommeAgentPort.persistentNormal
         case .recoveryBootstrap: PommeAgentPort.recoveryBootstrap
         case .recoveryRuntime: PommeAgentPort.recoveryRuntime
+        case .recoveryResident: PommeAgentPort.recoveryResident
         }
     }
 
@@ -253,6 +255,7 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
     func attachNormal() throws { try attach(.normal) }
     func attachRecoveryBootstrap() throws { try attach(.recoveryBootstrap) }
     func attachRecoveryRuntime() throws { try attach(.recoveryRuntime) }
+    func attachRecoveryResident() throws { try attach(.recoveryResident) }
 
     /// A Recovery runtime must only advance once the exact listener role has
     /// completed protocol authentication.  Merely accepting a VSOCK

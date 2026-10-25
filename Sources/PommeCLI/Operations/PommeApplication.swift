@@ -87,7 +87,9 @@ enum PommeApplication {
 
     static func provisioningSummary(_ payload: [String: Any]) -> String {
         guard payload["guestProvisioning"] as? String == "virtualization" else { return "" }
-        return " provisioning=virtualization agent=ssh-bootstrap account=pomme automaticLogin=enabled remoteLogin=off"
+        let method = payload["agentInstallMethod"] as? String == "experimental-recovery"
+            ? "experimental-recovery" : "ssh-bootstrap"
+        return " provisioning=virtualization agent=\(method) account=pomme automaticLogin=enabled remoteLogin=off"
     }
     private static let provisioningServicesLock = NSLock()
     nonisolated(unsafe) private static var provisioningServices = makeProvisioningServices()
@@ -1306,6 +1308,7 @@ enum PommeApplication {
         diskSize: String,
         memory: String,
         startMode: StartMode,
+        experimentalRecovery: Bool = false,
         lease inherited: VMBundleMutationLease? = nil
     ) async throws -> PommeOperationResult {
         try await VMBundleMutationLease.withLease(name: name, inherited: inherited) { lease in
@@ -1326,6 +1329,7 @@ enum PommeApplication {
             startMode: startMode
         )
         options.create = true
+        options.experimentalRecovery = experimentalRecovery
         let payload = try await PommeCore.createVMPayload(
             arguments: options,
             reference: reference,
@@ -1341,6 +1345,7 @@ enum PommeApplication {
         var options = CLIOptions()
         options.vmName = plan.name
         options.create = true
+        options.experimentalRecovery = plan.experimentalRecovery
         options.restoreImageVersionSelection = plan.firmware.buildid
         options.ipswDeviceIdentifier = plan.config.ipswDevice
         options.resumeDownload = true
@@ -1663,7 +1668,7 @@ enum PommeApplication {
         let metadata = try metadataPayload(bundle: reference.bundle)
         guard let user = metadata[Constants.guestKCPasswordUserMetadataKey] as? String,
               !user.isEmpty,
-              user != "agent-token" else {
+              !["agent-token", "recovery-resident-token"].contains(user) else {
             throw RunnerError.sipCredentialUnavailable(
                 "A Recovery security mutation requires POMME_AUTHORIZED_USER and POMME_AUTHORIZED_PASSWORD or an exact Pomme VM owner credential in Keychain."
             )

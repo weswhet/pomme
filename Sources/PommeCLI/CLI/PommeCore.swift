@@ -65,6 +65,9 @@ private enum PommeProvisioningCredentialReference {
     /// This account is intentionally fixed. The VM UUID is the Keychain
     /// service scope, so callers cannot select an arbitrary credential.
     static let agentAccount = "agent-token"
+    /// The experimental Recovery resident's credential, which preparation
+    /// embeds in the guest's Recovery image. It authenticates only that role.
+    static let recoveryResidentAccount = "recovery-resident-token"
 }
 
 /// Inputs which are safe to persist next to a provisioning journal. The
@@ -406,9 +409,12 @@ struct PommeCore {
     /// `templateAgent` describes a Recovery-route clone of a provisioned
     /// template whose agent credential was kept: its agent comes from the
     /// template, in normal macOS, and not from a Recovery installation.
-    static func provisioningDisclosure(virtualization: Bool, templateAgent: Bool = false) -> [String: String] {
+    static func provisioningDisclosure(
+        virtualization: Bool, templateAgent: Bool = false, experimentalRecovery: Bool = false
+    ) -> [String: String] {
         var fields = ["guestProvisioning": virtualization ? "virtualization" : "recovery",
-                      "agentInstallMethod": virtualization ? "ssh-bootstrap" : templateAgent ? "template" : "recovery",
+                      "agentInstallMethod": experimentalRecovery ? "experimental-recovery"
+                          : virtualization ? "ssh-bootstrap" : templateAgent ? "template" : "recovery",
                       "automaticLogin": virtualization ? "enabled" : "legacy",
                       "remoteLogin": virtualization ? "off" : "legacy"]
         if virtualization { fields["account"] = "pomme" }
@@ -418,7 +424,7 @@ struct PommeCore {
     /// Runtime disclosure describes proven state, unlike dry-run output which
     /// describes the requested final state. A provision intent is not a proof.
     static func provisioningDisclosure(journal: PommeProvisioningV2Journal) -> [String: String] {
-        var fields = provisioningDisclosure(virtualization: true)
+        var fields = provisioningDisclosure(virtualization: true, experimentalRecovery: journal.plan.experimentalRecovery != nil)
         if !journal.events.contains(where: { $0.phase == .verifyNormalAgent && $0.kind == .receipt }) {
             fields["automaticLogin"] = "pending"
             fields["remoteLogin"] = "unknown"
@@ -427,8 +433,15 @@ struct PommeCore {
     }
 
     private static func provisioningDisclosure(bundle: BundleLayout) throws -> [String: String] {
-        guard try provisioningSchemaIfPresent(bundle: bundle) == 2 else {
+        guard let schema = try provisioningSchemaIfPresent(bundle: bundle) else {
             return provisioningDisclosure(virtualization: false, templateAgent: installsTemplateAgent(bundle: bundle))
+        }
+        guard schema == 2 else {
+            // Status and inspect only read this, so a plan that doesn't load
+            // keeps the fixed Recovery-route fields instead of failing them.
+            let plan = try? loadOwnedProvisioningPlan(reference: .init(name: nil, bundle: bundle))
+            return provisioningDisclosure(virtualization: false, templateAgent: installsTemplateAgent(bundle: bundle),
+                                          experimentalRecovery: plan?.experimentalRecovery != nil)
         }
         return try provisioningDisclosure(journal: loadProvisioningV2(reference: .init(name: nil, bundle: bundle)))
     }
@@ -981,6 +994,7 @@ struct PommeCore {
         let capturedState = try await captureAndStopForLiveRecovery(reference: reference)
         warnIfBootFirmwareBlocksRecovery(reference: reference)
         do {
+        let resident = try await experimentalRecoveryResident(for: plan, mode: .recovery, activate: true)
         try await waitForLiveRecoveryAuxiliaryStorageRelease(
             at: reference.bundle.auxiliaryStorageURL,
             vmName: plan.vm.name
@@ -1029,6 +1043,18 @@ struct PommeCore {
             },
             exchangeTimeout: Constants.agentRoundTripTimeout
         )
+        let residentCoordinator: PommeAgentVSOCKCoordinator?
+        if let resident {
+            let secret = try existingRecoveryResidentCredential(for: plan)
+            residentCoordinator = PommeAgentVSOCKCoordinator(socketDevice: socketDevice, queue: queue,
+                secretProvider: { role in
+                    guard role == .recoveryResident else { throw PommeAgentVSOCKError.invalidBinding }
+                    return secret
+                }, bindingProvider: { role in
+                    guard role == .recoveryResident else { throw PommeAgentVSOCKError.invalidBinding }
+                    return PommeAgentVSOCKBinding(vmID: plan.vm.uuid, sessionID: resident.sessionID)
+                })
+        } else { residentCoordinator = nil }
         let bundle = reference.bundle
         let vmRuntime = PommeVMRuntime(
             vm: vm,
@@ -1090,18 +1116,37 @@ struct PommeCore {
                 request.vmUUID == plan.vm.uuid
                     && plan.vm.bundlePath == reference.standardizedPath
             },
-            startRecovery: { try await resources.runtime.start() },
+            startRecovery: {
+                do {
+                    try residentCoordinator?.attachRecoveryResident()
+                    try await resources.runtime.start()
+                } catch {
+                    residentCoordinator?.teardown()
+                    throw error
+                }
+            },
             launchRecoveryAgent: {},
             verifyRecoveryBoot: { resources.isRunningRecovery() },
             helperIsAlive: { resources.isRunningRecovery() },
             verifyBootstrapAttachment: { resources.hasExactBootstrapAttachment() },
-            stopReapAndClean: { try await resources.stopReapAndClean() }
+            stopReapAndClean: {
+                defer { residentCoordinator?.teardown() }
+                return try await resources.stopReapAndClean()
+            }
         )
         return .init(
             coordinator: coordinator,
             vmPort: vmPort,
             effects: effects,
             terminalPort: terminal,
+            authenticatedLauncher: residentCoordinator.map { resident in
+                { @Sendable in
+                    try await PommeExperimentalRecoveryBootstrap.launch(coordinator: resident,
+                        executableSHA256: plan.recoveryAgent.executableDigest, launcher: launcher,
+                        timeout: Constants.defaultRecoveryAgentTimeout)
+                    log("Experimental Recovery authenticated launcher submitted without UI navigation.", vmName: plan.vm.name)
+                }
+            },
             clearHostStagingBeforeOperation: {
                 try resources.clearHostStaging()
             },
@@ -1291,13 +1336,13 @@ struct PommeCore {
         catch { throw PommeLiveRecoveryIntegration.Error.credentialRejected }
     }
 
-    private static func provisioningEffects() -> PommeProvisioningEffects {
+    private static func provisioningEffects(lease: VMBundleMutationLease? = nil) -> PommeProvisioningEffects {
         provisioningEffectsLock.lock()
         defer { provisioningEffectsLock.unlock() }
         if let installedProvisioningEffects {
             return installedProvisioningEffects
         }
-        return makeLiveProvisioningEffects()
+        return makeLiveProvisioningEffects(lease: lease)
     }
 
     // MARK: Public argument and output helpers
@@ -2026,10 +2071,12 @@ struct PommeCore {
         // Resolve and authenticate the reference while its owning bundle is
         // still present. A failed credential cleanup must retain the journal.
         var ownerReference: PommeOwnerCredentialReference?
+        var usesExperimentalRecovery = false
         do {
             let schema = try provisioningSchemaIfPresent(bundle: reference.bundle)
             let ownedPlan = try schema.map { _ in try loadOwnedProvisioningPlan(reference: reference) }
             credentialUUID = try deletionCredentialUUID(plan: ownedPlan, bundle: reference.bundle)
+            usesExperimentalRecovery = ownedPlan?.experimentalRecovery != nil
             if schema == 2 {
                 let journal = try loadProvisioningV2(reference: reference)
                 guard journal.plan == ownedPlan else { throw PommeProvisioningError.ownershipMismatch }
@@ -2053,17 +2100,21 @@ struct PommeCore {
             do { ownerSnapshot = try ownerStore.read(ownerReference) }
             catch PommeOwnerCredentialStoreError.keychainMissing { ownerSnapshot = nil }
         } else { ownerSnapshot = nil }
-        let agentSnapshot: String?
+        // An experimental Recovery plan also owns the resident's credential.
+        let agentAccounts = [PommeProvisioningCredentialReference.agentAccount]
+            + (usesExperimentalRecovery ? [PommeProvisioningCredentialReference.recoveryResidentAccount] : [])
+        var agentSnapshots: [String: String] = [:]
         if let credentialUUID {
-            do { agentSnapshot = try agentStore.read(vmUUID: credentialUUID, account: PommeProvisioningCredentialReference.agentAccount) }
-            catch PommeAgentCredentialStore.Error.credentialMissing { agentSnapshot = nil }
-        } else { agentSnapshot = nil }
+            for account in agentAccounts {
+                do { agentSnapshots[account] = try agentStore.read(vmUUID: credentialUUID, account: account) }
+                catch PommeAgentCredentialStore.Error.credentialMissing {}
+            }
+        }
         try performProvisioningDeletion(cleanupOwner: {
             if let ownerReference { try ownerStore.remove(reference: ownerReference) }
         }, cleanupAgent: {
             if let credentialUUID {
-                try agentStore.remove(vmUUID: credentialUUID,
-                    account: PommeProvisioningCredentialReference.agentAccount)
+                for account in agentAccounts { try agentStore.remove(vmUUID: credentialUUID, account: account) }
             }
         }, removeBundle: { try FileManager.default.removeItem(at: reference.bundle.rootURL) },
         restoreOwner: {
@@ -2074,11 +2125,17 @@ struct PommeCore {
                 }
             }
         }, restoreAgent: {
-            if let credentialUUID, let agentSnapshot {
-                let restored = try agentStore.readOrCreate(vmUUID: credentialUUID,
-                    account: PommeProvisioningCredentialReference.agentAccount, generate: { agentSnapshot })
-                guard restored == agentSnapshot else { throw PommeAgentCredentialStore.Error.unexpectedCredentialData }
+            guard let credentialUUID else { return }
+            // Attempt every snapshot so that one failure doesn't strand another.
+            var restoreError: (any Error)?
+            for account in agentAccounts {
+                guard let snapshot = agentSnapshots[account] else { continue }
+                do {
+                    let restored = try agentStore.readOrCreate(vmUUID: credentialUUID, account: account, generate: { snapshot })
+                    guard restored == snapshot else { throw PommeAgentCredentialStore.Error.unexpectedCredentialData }
+                } catch { restoreError = error }
             }
+            if let restoreError { throw restoreError }
         })
         return ["ok": true, "operation": "delete", "name": name, "bundlePath": reference.bundle.rootURL.path,
                 "credentialsRetained": false, "hostExitCode": 0]
@@ -2465,7 +2522,7 @@ struct PommeCore {
         let orchestrator = PommeProvisioningOrchestrator(
             signer: preparation.signer,
             repository: repository,
-            effects: provisioningEffects()
+            effects: provisioningEffects(lease: lease)
         )
 
         do {
@@ -2493,7 +2550,7 @@ struct PommeCore {
                 try await PommeProvisioningV2Orchestrator(
                     signer: PommeProvisioningV2Signer(key: key),
                     repository: provisioningV2Repository(bundle: reference.bundle, key: key),
-                    effects: provisioningV2Effects()
+                    effects: provisioningV2Effects(lease: lease)
                 ).start(preparation.plan)
             } else {
                 try await orchestrator.start(preparation.plan)
@@ -2520,7 +2577,8 @@ struct PommeCore {
         ]
         payload.merge(provisioningDisclosure(
             virtualization: preparation.virtualization,
-            templateAgent: !preparation.virtualization && installsTemplateAgent(bundle: reference.bundle)
+            templateAgent: !preparation.virtualization && installsTemplateAgent(bundle: reference.bundle),
+            experimentalRecovery: preparation.plan.experimentalRecovery != nil
         )) { _, new in new }
         if let metadata = try? metadataPayload(bundle: reference.bundle) {
             payload["metadata"] = metadata
@@ -2596,7 +2654,8 @@ struct PommeCore {
         guard requested == manifest.diskSizeBytes else {
             throw PommeTemplateError.diskSizeMismatch(template: manifest.diskSizeBytes, requested: requested)
         }
-        try PommeCreationSpace.enforce(templateSpaceNeeds(bundle: bundle, destination: destination), subject: vmName)
+        try PommeCreationSpace.enforce(templateSpaceNeeds(bundle: bundle, destination: destination,
+            experimentalRecovery: arguments.experimentalRecovery), subject: vmName)
         let hardwareModelData = try Data(contentsOf: bundle.hardwareModelURL)
         guard let hardwareModel = VZMacHardwareModel(dataRepresentation: hardwareModelData),
               hardwareModel.isSupported
@@ -2615,7 +2674,9 @@ struct PommeCore {
             diskSizeBytes: manifest.diskSizeBytes,
             templateBundlePath: bundle.rootURL.standardizedFileURL.path,
             firstBootEligible: !manifest.isProvisioned,
-            templateAgent: manifest.adoptableAgent
+            // An experimental Recovery creation prepares the image in the
+            // Recovery installation phase, which a template agent skips.
+            templateAgent: arguments.experimentalRecovery ? nil : manifest.adoptableAgent
         )
     }
 
@@ -2661,11 +2722,9 @@ struct PommeCore {
         // A clone that gets its template's agent in normal macOS plans no
         // Recovery navigation, so the experimental-profile warning would
         // describe a step that doesn't run.
-        if profileDescriptor.qualification == .experimental, source.templateAgent == nil {
-            warning(
-                "Warning: Recovery support for macOS \(version) (\(build)) is experimental. Creation will attempt the observed-screen navigation and stop if it does not match.",
-                vmName: vmName
-            )
+        if source.templateAgent == nil {
+            PommeCreationRequest.warnIfExperimental(profileDescriptor, version: version, build: build,
+                vmName: vmName, experimentalRecovery: arguments.experimentalRecovery)
         }
 
         let memory = arguments.sizeOptions.memorySizeBytes
@@ -2705,7 +2764,8 @@ struct PommeCore {
             profile: profile,
             normalAgent: normalAgent,
             recoveryAgent: recoveryAgent,
-            finalState: finalState
+            finalState: finalState,
+            experimentalRecovery: arguments.experimentalRecovery ? .init(sessionID: UUID()) : nil
         )
         let machineIdentifierData = VZMacMachineIdentifier().dataRepresentation
         let input = PommeProvisioningInput(
@@ -2733,11 +2793,11 @@ struct PommeCore {
         }
     }
 
-    private static func makeLiveProvisioningEffects() -> PommeProvisioningEffects {
+    private static func makeLiveProvisioningEffects(lease: VMBundleMutationLease? = nil) -> PommeProvisioningEffects {
         .init(
             verifyOwnership: { expected in try await verifyProvisioningOwnership(expected) },
             install: { plan in try await installProvisioningVM(plan) },
-            installRecoveryAgent: { plan in try await installRecoveryAgent(plan) },
+            installRecoveryAgent: { plan in try await installRecoveryAgent(plan, lease: lease) },
             verifyNormalAgent: { plan in try await verifyNormalAgent(plan) },
             restoreFinalState: { plan in try await restoreProvisioningFinalState(plan) },
             recoveryRepair: { plan, state in try await repairProvisioningAgent(plan, finalState: state) },
@@ -2747,7 +2807,7 @@ struct PommeCore {
         )
     }
 
-    private static func provisioningV2Effects() -> PommeProvisioningV2Effects {
+    private static func provisioningV2Effects(lease: VMBundleMutationLease? = nil) -> PommeProvisioningV2Effects {
         if let injected = provisioningEffectsLock.withLock({ installedProvisioningV2Effects }) { return injected }
         return .init(
             verifyOwnership: { try await verifyProvisioningOwnership($0) },
@@ -2758,7 +2818,7 @@ struct PommeCore {
             },
             install: { try await installProvisioningVM($0) },
             provisionGuest: { try await provisionVirtualizationGuest($0) },
-            bootstrapNormalAgent: { try await bootstrapNormalAgent($0) },
+            bootstrapNormalAgent: { try await bootstrapNormalAgent($0, lease: lease) },
             verifyNormalAgent: { try await verifyFrameworkProvisioning($0) },
             restoreFinalState: { plan in
                 let bundle = provisioningReference(for: plan).bundle
@@ -3047,7 +3107,7 @@ struct PommeCore {
         return true
     }
 
-    private static func bootstrapNormalAgent(_ plan: PommeProvisioningPlan) async throws -> String {
+    private static func bootstrapNormalAgent(_ plan: PommeProvisioningPlan, lease: VMBundleMutationLease? = nil) async throws -> String {
         PommeProgressContext.sink?.step(vm: plan.vm.name, "Bootstrapping Pomme agent for normal boot")
         var diagnostics = PommeBootstrapDiagnostics()
         log(diagnostics.checkpoint(.started))
@@ -3070,6 +3130,15 @@ struct PommeCore {
             throw PommeProvisioningV2Error.ambiguousProvisionGuest
         }
         log(diagnostics.checkpoint(.dispatchMarkerVerified))
+        // A prior interrupted host-image transaction must be reconciled while
+        // stopped before the normal readiness boot can touch this disk again.
+        // A completed one returns without changes.
+        if try experimentalRecoveryHasReceipt(plan) {
+            guard let lease, lease.validates(name: plan.vm.name) else {
+                throw VMBundleMutationLease.Error.invalidScope(name: plan.vm.name)
+            }
+            try await prepareExperimentalRecoveryImage(plan, lease: lease)
+        }
         let token = Data(try existingProvisioningAgentCredential(for: plan).utf8)
         log(diagnostics.checkpoint(.agentCredentialAvailable))
         let retained: PommeRetainedRuntime
@@ -3084,6 +3153,9 @@ struct PommeCore {
         }
         guard let coordinator = retained.coordinator, retained.mode == .normal else { throw PommeSSHBootstrapError.invalid }
         if try await bootstrapAgentMatches(coordinator.status(), plan: plan) {
+            if plan.experimentalRecovery != nil {
+                _ = try await PommeExperimentalRecoveryImage.validateCompleted(experimentalRecoveryRequest(plan), expectedMode: .normal)
+            }
             log(diagnostics.checkpoint(.agentConnected))
             try await verifyBootstrapBuddyPreferencesPrerequisites(coordinator: coordinator,
                 expectedGeneratedUID: owner.generatedUID)
@@ -3163,6 +3235,11 @@ struct PommeCore {
         guard let uid = UInt32(String(decoding: uidBytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)),
               uid >= 501 else { throw PommeSSHBootstrapError.invalid }
         log(diagnostics.checkpoint(.sshUIDVerified))
+        if plan.experimentalRecovery != nil {
+            _ = try await installRecoveryAgent(plan, lease: lease)
+            try cleanupBootstrapWorkspace(plan: plan, completed: false)
+            return try receiptDigest("bootstrap-normal-agent", plan: plan, bundle: reference.bundle)
+        }
         let requestURL = workspace.appendingPathComponent("request.json")
         let request: PommeBootstrapRequest
         if FileManager.default.fileExists(atPath: requestURL.path) {
@@ -3409,14 +3486,16 @@ struct PommeCore {
                 throw RunnerError.hostCommandFailed("The restore image does not exist: \(url.path)")
             }
             try PommeCreationSpace.enforce(
-                restoreSpaceNeeds(firmware: nil, diskSizeBytes: disk, destination: destination), subject: subject
+                restoreSpaceNeeds(firmware: nil, diskSizeBytes: disk, destination: destination,
+                    experimentalRecovery: arguments.experimentalRecovery), subject: subject
             )
             return url
         }
         let selection = arguments.restoreImageVersionSelection ?? "latest"
         let firmware = try await resolveIPSWFirmware(selection: selection, deviceIdentifier: arguments.ipswDeviceIdentifier)
         try PommeCreationSpace.enforce(
-            restoreSpaceNeeds(firmware: firmware, diskSizeBytes: disk, destination: destination), subject: subject
+            restoreSpaceNeeds(firmware: firmware, diskSizeBytes: disk, destination: destination,
+                experimentalRecovery: arguments.experimentalRecovery), subject: subject
         )
         return try await downloadFirmware(firmware, resume: true, vmName: vmName)
     }
@@ -3427,7 +3506,8 @@ struct PommeCore {
     static func restoreSpaceNeeds(
         firmware: IPSWMEFirmware?,
         diskSizeBytes: UInt64,
-        destination: URL
+        destination: URL,
+        experimentalRecovery: Bool = false
     ) throws -> [PommeCreationSpace.Need] {
         let directory = try applicationSupportRoot().appendingPathComponent(Constants.restoreImageDirectoryName, isDirectory: true)
         return PommeCreationSpace.restoreNeeds(
@@ -3435,15 +3515,18 @@ struct PommeCore {
             downloadDirectory: directory,
             diskSizeBytes: diskSizeBytes,
             destination: destination
-        )
+        ) + PommeCreationSpace.experimentalRecoveryNeeds(enabled: experimentalRecovery, destination: destination)
     }
 
     /// What creating from the template in `bundle` needs.
-    static func templateSpaceNeeds(bundle: BundleLayout, destination: URL) -> [PommeCreationSpace.Need] {
+    static func templateSpaceNeeds(
+        bundle: BundleLayout, destination: URL, experimentalRecovery: Bool = false
+    ) -> [PommeCreationSpace.Need] {
         let bytes = [bundle.diskImageURL, bundle.auxiliaryStorageURL, bundle.hardwareModelURL]
             .compactMap(fileSize)
             .reduce(UInt64(0)) { $0 + UInt64(max($1, 0)) }
         return PommeCreationSpace.templateNeeds(template: bundle.diskImageURL, templateBytes: bytes, destination: destination)
+            + PommeCreationSpace.experimentalRecoveryNeeds(enabled: experimentalRecovery, destination: destination)
     }
 
     /// The bytes of `firmware` that a download would still write: none for
@@ -3559,16 +3642,20 @@ struct PommeCore {
     static func dryRunSpaceCheck(
         source: DryRunRestoreSource,
         diskSizeBytes: UInt64,
-        vmName: String
+        vmName: String,
+        experimentalRecovery: Bool = false
     ) throws -> [String: Any] {
         let destination = try namedBundleURL(for: vmName)
         let needs: [PommeCreationSpace.Need] = switch source {
         case .localImage:
-            try restoreSpaceNeeds(firmware: nil, diskSizeBytes: diskSizeBytes, destination: destination)
+            try restoreSpaceNeeds(firmware: nil, diskSizeBytes: diskSizeBytes, destination: destination,
+                experimentalRecovery: experimentalRecovery)
         case .firmware(let firmware):
-            try restoreSpaceNeeds(firmware: firmware, diskSizeBytes: diskSizeBytes, destination: destination)
+            try restoreSpaceNeeds(firmware: firmware, diskSizeBytes: diskSizeBytes, destination: destination,
+                experimentalRecovery: experimentalRecovery)
         case .template(let manifest):
-            templateSpaceNeeds(bundle: try PommeTemplateStore.bundle(for: manifest.name), destination: destination)
+            templateSpaceNeeds(bundle: try PommeTemplateStore.bundle(for: manifest.name), destination: destination,
+                experimentalRecovery: experimentalRecovery)
         }
         return PommeCreationSpace.payload(try PommeCreationSpace.enforce(needs, subject: vmName))
     }
@@ -3829,6 +3916,27 @@ struct PommeCore {
         } catch PommeAgentCredentialStore.Error.credentialMissing {
             return false
         }
+    }
+
+    /// Returns the UUID-scoped resident Recovery credential, creating it only
+    /// inside the journaled Recovery-install phase. It's separate from the
+    /// persistent-agent credential, because the prepared image embeds it.
+    private static func provisioningRecoveryResidentCredential(for plan: PommeProvisioningPlan) throws -> String {
+        try provisioningCredentialQueue.sync {
+            try PommeAgentCredentialStore().readOrCreate(
+                vmUUID: plan.vm.uuid,
+                account: PommeProvisioningCredentialReference.recoveryResidentAccount,
+                generate: randomAgentSecret
+            )
+        }
+    }
+
+    /// Reads the existing resident Recovery credential without creating one.
+    private static func existingRecoveryResidentCredential(for plan: PommeProvisioningPlan) throws -> String {
+        try loadProvisioningAgentCredential(
+            vmUUID: plan.vm.uuid,
+            account: PommeProvisioningCredentialReference.recoveryResidentAccount
+        )
     }
 
     /// Remove exactly one UUID-scoped persistent-agent credential. Not-found is
@@ -4319,7 +4427,7 @@ struct PommeCore {
         try validateMemorySize(memory, requirements: requirements)
         if source.profileDescriptor.qualification == .experimental {
             warning(
-                "Warning: Recovery support for macOS \(source.version) (\(source.build)) is experimental; VMs created from this template will attempt observed-screen navigation.",
+                "Warning: Recovery support for macOS \(source.version) (\(source.build)) is experimental; verify the selected creation method on this build.",
                 vmName: validName
             )
         }
@@ -4432,7 +4540,7 @@ struct PommeCore {
     /// and Recovery ports through the installed adapter.  The default
     /// adapter refuses the phase after the intent is durable, preserving the
     /// exact VM/journal for a configured Recovery integration.
-    private static func installRecoveryAgent(_ plan: PommeProvisioningPlan) async throws -> String {
+    private static func installRecoveryAgent(_ plan: PommeProvisioningPlan, lease: VMBundleMutationLease? = nil) async throws -> String {
         PommeProgressContext.sink?.step(vm: plan.vm.name, "Bootstrapping Pomme agent in Recovery")
         try await stopRetainedRuntime(for: plan.vm.bundlePath)
         guard let adapter = currentProvisioningRecoveryAdapter() else {
@@ -4447,11 +4555,191 @@ struct PommeCore {
         // metadata. A failed phase keeps the exact VM/journal and this
         // UUID-scoped Keychain item available for an explicit resume/repair.
         _ = try provisioningAgentCredential(for: plan)
+        if plan.experimentalRecovery != nil {
+            guard let lease, lease.validates(name: plan.vm.name) else {
+                throw VMBundleMutationLease.Error.invalidScope(name: plan.vm.name)
+            }
+            try await prepareExperimentalRecoveryImage(plan, lease: lease)
+        }
         // Recovery installation must leave the exact VM stopped. Normal-agent
         // verification and the plan's requested final state are separate
         // subsequent journal phases; collapsing them here can make a failed
         // bootstrap look complete and can boot an unverified agent.
-        return try await adapter(plan, .stopped)
+        let receipt = try await adapter(plan, .stopped)
+        if plan.experimentalRecovery != nil {
+            try await activateExperimentalRecoveryBacking(plan, mode: .normal, lease: lease)
+        }
+        return receipt
+    }
+
+    private static func experimentalRecoveryRoot(_ plan: PommeProvisioningPlan) -> URL {
+        provisioningRoot(bundle: provisioningReference(for: plan).bundle)
+            .appendingPathComponent("experimental-recovery", isDirectory: true)
+    }
+
+    private static func experimentalRecoveryHasReceipt(_ plan: PommeProvisioningPlan) throws -> Bool {
+        guard plan.experimentalRecovery != nil else { return false }
+        let receipt = experimentalRecoveryRoot(plan).appendingPathComponent("image/receipt.json")
+        var info = stat()
+        if lstat(receipt.path, &info) == 0 { return true }
+        guard errno == ENOENT else { throw PommeProvisioningError.integrityFailure }
+        return false
+    }
+
+    /// Binds the image transaction to the staged artifacts. Preparation also
+    /// passes the resident credential from Keychain; boot selection doesn't
+    /// need it, so a locked Keychain doesn't block a boot.
+    private static func experimentalRecoveryRequest(
+        _ plan: PommeProvisioningPlan, credential: String? = nil
+    ) throws -> PommeExperimentalRecoveryImage.Request {
+        guard let configuration = plan.experimentalRecovery else { throw PommeProvisioningError.integrityFailure }
+        let bundle = provisioningReference(for: plan).bundle
+        let root = experimentalRecoveryRoot(plan)
+        let staging = root.appendingPathComponent("staging", isDirectory: true)
+        let manifest = try PommeSSHBootstrap.privateRead(staging.appendingPathComponent("manifest.json"), owner: geteuid(), allowedModes: [0o600])
+        return .init(diskURL: bundle.diskImageURL,
+            workspaceURL: root.appendingPathComponent("image", isDirectory: true),
+            vmID: plan.vm.uuid, sessionID: configuration.sessionID,
+            artifacts: .init(executableURL: staging.appendingPathComponent("pomme"),
+                tokenURL: staging.appendingPathComponent("agent.token"),
+                autostartURL: staging.appendingPathComponent("autostart.sh"),
+                launchdPlistURL: staging.appendingPathComponent("launchd.plist")),
+            executableSHA256: plan.recoveryAgent.executableDigest,
+            credentialSHA256: credential.map { PommeProvisioningDigest.sha256(Data($0.utf8)) },
+            manifestSHA256: PommeProvisioningDigest.sha256(manifest))
+    }
+
+    private struct ExperimentalRecoveryActivation {
+        let request: PommeExperimentalRecoveryImage.Request
+        let lease: VMBundleMutationLease
+        let preservingDisk: Bool
+    }
+
+    /// Nil when the plan doesn't use the strategy or preparation hasn't
+    /// started. Without a receipt the Recovery image is unmodified, as on a
+    /// V2 first boot, which provisions the owner before preparation.
+    private static func experimentalRecoveryActivation(
+        _ plan: PommeProvisioningPlan, lease supplied: VMBundleMutationLease? = nil
+    ) throws -> ExperimentalRecoveryActivation? {
+        guard try experimentalRecoveryHasReceipt(plan) else { return nil }
+        let lease = try supplied ?? VMBundleMutationLease.requireCurrent(name: plan.vm.name)
+        let reference = provisioningReference(for: plan)
+        guard lease.validates(name: plan.vm.name), retainedRuntime(for: plan.vm.bundlePath) == nil,
+              try stableVMRunState(reference: reference) == .stopped else {
+            throw VMBundleMutationLease.Error.invalidScope(name: plan.vm.name)
+        }
+        // A saved state holds the guest's file system in memory, so restoring
+        // it requires the disk exactly as the snapshot left it.
+        let preservingDisk = [reference.bundle.saveStateURL, reference.bundle.requiredSnapshotRestoreURL]
+            .contains { FileManager.default.fileExists(atPath: $0.path) }
+        return .init(request: try experimentalRecoveryRequest(plan), lease: lease, preservingDisk: preservingDisk)
+    }
+
+    private static func activateExperimentalRecoveryBacking(
+        _ plan: PommeProvisioningPlan, mode: BootMode, lease supplied: VMBundleMutationLease? = nil
+    ) async throws {
+        guard let activation = try experimentalRecoveryActivation(plan, lease: supplied) else { return }
+        let receipt = try await PommeExperimentalRecoveryImage.activate(activation.request,
+            mode: mode == .normal ? .normal : .recovery, preservingDisk: activation.preservingDisk)
+        guard activation.lease.validates(name: plan.vm.name) else { throw VMBundleMutationLease.Error.invalidScope(name: plan.vm.name) }
+        logExperimentalRecoveryActivation(receipt, mode: mode, vmName: plan.vm.name)
+    }
+
+    private static func activateExperimentalRecoveryBackingSynchronously(_ plan: PommeProvisioningPlan, mode: BootMode) throws {
+        guard let activation = try experimentalRecoveryActivation(plan) else { return }
+        let name = plan.vm.name
+        let (request, lease, preservingDisk) = (activation.request, activation.lease, activation.preservingDisk)
+        let receipt = try PommeExperimentalRecoveryActivation.synchronously {
+            // Task.detached doesn't inherit the caller's task-local scope.
+            guard lease.validates(name: name) else { throw VMBundleMutationLease.Error.invalidScope(name: name) }
+            let receipt = try await PommeExperimentalRecoveryImage.activate(request,
+                mode: mode == .normal ? .normal : .recovery, preservingDisk: preservingDisk)
+            guard lease.validates(name: name) else { throw VMBundleMutationLease.Error.invalidScope(name: name) }
+            return receipt
+        }
+        logExperimentalRecoveryActivation(receipt, mode: mode, vmName: name)
+    }
+
+    private static func logExperimentalRecoveryActivation(
+        _ receipt: PommeExperimentalRecoveryImage.Receipt, mode: BootMode, vmName: String
+    ) {
+        if receipt.recoveryReplaced == true {
+            log("The guest replaced its Recovery image, probably in a macOS update, so the experimental Recovery agent is no longer installed.", vmName: vmName)
+        } else {
+            log("Experimental Recovery backing is selected for \(mode.rawValue) boot, with no image attached.", vmName: vmName)
+        }
+    }
+
+    /// Selects the backing for this boot when `activate` is set, then returns
+    /// the plan's resident configuration when the prepared agent serves a
+    /// Recovery boot. A replaced Recovery image returns nil, so Recovery
+    /// falls back to the standard route.
+    private static func experimentalRecoveryResident(
+        for plan: PommeProvisioningPlan, mode: BootMode, activate: Bool,
+        lease: VMBundleMutationLease? = nil
+    ) async throws -> PommeExperimentalRecoveryConfiguration? {
+        guard let configuration = plan.experimentalRecovery, try experimentalRecoveryHasReceipt(plan) else { return nil }
+        if activate { try await activateExperimentalRecoveryBacking(plan, mode: mode, lease: lease) }
+        // This validates completion, artifact bindings, and detachment. The
+        // guest executable verifies its digest again at Recovery boot.
+        let receipt = try await PommeExperimentalRecoveryImage.validateCompleted(experimentalRecoveryRequest(plan),
+            expectedMode: mode == .normal ? .normal : .recovery)
+        guard mode == .recovery, receipt.recoveryReplaced != true else { return nil }
+        return configuration
+    }
+
+    private static func prepareExperimentalRecoveryImage(_ plan: PommeProvisioningPlan, lease: VMBundleMutationLease) async throws {
+        guard lease.validates(name: plan.vm.name), let configuration = plan.experimentalRecovery else {
+            throw VMBundleMutationLease.Error.invalidScope(name: plan.vm.name)
+        }
+        let reference = provisioningReference(for: plan)
+        try await stopRetainedRuntime(for: plan.vm.bundlePath)
+        try await restoreStableVMRunState(.stopped, reference: reference)
+        guard try stableVMRunState(reference: reference) == .stopped else {
+            throw PommeRecoverySessionError.finalStateUnverified
+        }
+        let root = experimentalRecoveryRoot(plan)
+        let staging = root.appendingPathComponent("staging", isDirectory: true)
+        let image = root.appendingPathComponent("image", isDirectory: true)
+        for directory in [root, staging, image] {
+            if !FileManager.default.fileExists(atPath: directory.path) {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            }
+            var info = stat()
+            guard lstat(directory.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR,
+                  info.st_uid == geteuid(), info.st_mode & 0o777 == 0o700,
+                  directory.resolvingSymlinksInPath().path == directory.path else {
+                throw PommeProvisioningError.integrityFailure
+            }
+        }
+        // Preparation runs inside a journaled phase, so creating the resident
+        // credential here follows its durable intent.
+        let credential = try provisioningRecoveryResidentCredential(for: plan)
+        // A completed image needs no staging. Boot activation selects it, so
+        // a resumed creation doesn't switch the backing twice.
+        if try experimentalRecoveryHasReceipt(plan),
+           try PommeExperimentalRecoveryImage.receipt(experimentalRecoveryRequest(plan, credential: credential)).completed {
+            // An interruption after completion can leave the staged copy.
+            try PommeExperimentalRecoveryPayload.removeCredential(from: staging)
+            return
+        }
+        let executable = try PommeAgentArtifactStore(rootURL: applicationSupportRoot(create: false))
+            .resolve(sha256: plan.recoveryAgent.executableDigest)
+        try PommeExperimentalRecoveryPayload.stage(
+            directory: staging, target: plan.vm.name, sessionID: configuration.sessionID,
+            executable: executable, expectedDigest: plan.recoveryAgent.executableDigest,
+            credential: credential, vmID: plan.vm.uuid, diskPath: reference.bundle.diskImageURL.path)
+        PommeProgressContext.sink?.step(vm: plan.vm.name, "Preparing experimental Recovery image")
+        let receipt = try await PommeExperimentalRecoveryImage.prepare(experimentalRecoveryRequest(plan, credential: credential))
+        guard receipt.completed, receipt.pendingAttachmentImages.isEmpty,
+              lease.validates(name: plan.vm.name),
+              try stableVMRunState(reference: reference) == .stopped else {
+            throw PommeProvisioningError.integrityFailure
+        }
+        // The prepared image now carries the credential, and Keychain keeps
+        // the only host copy.
+        try PommeExperimentalRecoveryPayload.removeCredential(from: staging)
+        log("Experimental Recovery image prepared and all image attachments detached.", vmName: plan.vm.name)
     }
 
     /// Boots the verified guest through the background VM helper, the same
@@ -4880,8 +5168,14 @@ struct PommeCore {
         plan: PommeProvisioningPlan,
         mode: BootMode,
         attachAgent: Bool,
-        guestProvisioningIntent: PommeMacGuestProvisioningIntent? = nil
+        guestProvisioningIntent: PommeMacGuestProvisioningIntent? = nil,
+        activateRecoveryBacking: Bool = true
     ) async throws -> PommeRetainedRuntime {
+        // The background helper's parent selects the backing before launch,
+        // so the helper itself only validates the selection.
+        let productionResident = try await experimentalRecoveryResident(
+            for: plan, mode: mode, activate: activateRecoveryBacking
+        )
         let bundle = BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
         let input = try loadProvisioningInput(for: plan)
         let hardwareModel = try loadHardwareModel(input.hardwareModelData)
@@ -4892,7 +5186,7 @@ struct PommeCore {
         let auxiliaryStorage = VZMacAuxiliaryStorage(url: bundle.auxiliaryStorageURL)
         let queue = DispatchQueue(label: "com.github.weswhet.pomme.runtime")
         let terminalBootstrapShare: PommeRecoveryTerminalBootstrapShare?
-        if mode == .recovery, !attachAgent {
+        if mode == .recovery, !attachAgent, productionResident == nil {
             terminalBootstrapShare = try PommeRecoveryTerminalBootstrapShare(
                 parentURL: try applicationSupportRoot(create: true)
                     .appendingPathComponent("RecoveryTerminalBootstrap", isDirectory: true),
@@ -4922,7 +5216,7 @@ struct PommeCore {
         }
         let coordinator: PommeAgentVSOCKCoordinator?
         do {
-            if attachAgent || terminalBootstrapShare != nil {
+            if attachAgent || terminalBootstrapShare != nil || productionResident != nil {
                 guard let socketDevice = queue.sync(execute: { vm.socketDevices.first as? VZVirtioSocketDevice }) else {
                     throw RunnerError.hostCommandFailed("Pomme could not attach the VM agent socket.")
                 }
@@ -4934,9 +5228,19 @@ struct PommeCore {
                         if let terminalAdmissionState {
                             return try terminalAdmissionState.secret(for: role)
                         }
+                        // The resident has its own credential, so the copy
+                        // embedded in Recovery can't authenticate a normal agent.
+                        if productionResident != nil {
+                            guard role == .recoveryResident else { throw PommeAgentVSOCKError.invalidBinding }
+                            return try existingRecoveryResidentCredential(for: plan)
+                        }
                         return try normalAgentCredential(for: plan, rotation: rotation)
                     },
                     bindingProvider: { role in
+                        if let productionResident {
+                            guard role == .recoveryResident else { throw PommeAgentVSOCKError.invalidBinding }
+                            return PommeAgentVSOCKBinding(vmID: plan.vm.uuid, sessionID: productionResident.sessionID)
+                        }
                         if let terminalAdmissionState {
                             return try terminalAdmissionState.sessionBinding(for: role)
                         }
@@ -4945,7 +5249,9 @@ struct PommeCore {
                 )
                 switch mode {
                 case .normal: try provider.attachNormal()
-                case .recovery: try provider.attachRecoveryRuntime()
+                case .recovery:
+                    if productionResident != nil { try provider.attachRecoveryResident() }
+                    else { try provider.attachRecoveryRuntime() }
                 }
                 coordinator = provider
             } else {
@@ -4994,6 +5300,14 @@ struct PommeCore {
             terminalAdmissionCleanup = {
                 await terminalAdmission.cleanup()
             }
+        } else if productionResident != nil, let coordinator {
+            terminalAdmissionEffect = { _, _ in
+                _ = try await PommeExperimentalRecoveryBootstrap.authenticate(coordinator: coordinator,
+                    executableSHA256: plan.recoveryAgent.executableDigest,
+                    timeout: Constants.defaultRecoveryAgentTimeout)
+                return nil
+            }
+            terminalAdmissionCleanup = nil
         } else {
             terminalAdmissionEffect = nil
             terminalAdmissionCleanup = nil
@@ -5507,6 +5821,10 @@ struct PommeCore {
         }
         try bundle.validateForRun()
         if bootMode == .recovery { warnIfBootFirmwareBlocksRecovery(reference: reference) }
+        if try provisioningSchemaIfPresent(bundle: bundle) != nil {
+            let plan = try loadOwnedProvisioningPlan(reference: reference)
+            try activateExperimentalRecoveryBackingSynchronously(plan, mode: bootMode)
+        }
         let executable = try runningExecutableIdentity().url
         let logHandle = try rotateHelperLog(bundle: bundle)
         let process = Process()
@@ -5581,7 +5899,8 @@ struct PommeCore {
         let retained = try await startProvisioningRuntime(
             plan: plan,
             mode: bootMode,
-            attachAgent: bootMode == .normal
+            attachAgent: bootMode == .normal,
+            activateRecoveryBacking: false
         )
         let exitSignal = ExitSignal()
         let server = PommeControlServer(
@@ -6624,13 +6943,13 @@ struct PommeCore {
             try await PommeProvisioningV2Orchestrator(
                 signer: PommeProvisioningV2Signer(key: key),
                 repository: provisioningV2Repository(bundle: reference.bundle, key: key),
-                effects: provisioningV2Effects()).resume(expectedPlan: journal.plan)
+                effects: provisioningV2Effects(lease: lease)).resume(expectedPlan: journal.plan)
             var payload: [String: Any] = ["ok": true, "operation": "create-resume", "name": name,
                 "bundlePath": reference.standardizedPath, "hostExitCode": 0,
                 "provisioning": ["schema": 2, "planDigest": journal.plan.digest,
                     "finalState": journal.plan.finalState.rawValue,
                     "journal": provisioningV2JournalURL(bundle: reference.bundle).path]]
-            payload.merge(provisioningDisclosure(virtualization: true)) { _, new in new }
+            payload.merge(provisioningDisclosure(virtualization: true, experimentalRecovery: journal.plan.experimentalRecovery != nil)) { _, new in new }
             PommeProgressContext.sink?.complete(vm: name)
             return .init(title: "Resume Create", vmName: name, ok: true, hostExitCode: 0,
                 text: "OK resumed Pomme provisioning for \(name).", payload: payload)
@@ -6644,7 +6963,7 @@ struct PommeCore {
         let orchestrator = PommeProvisioningOrchestrator(
             signer: signer,
             repository: repository,
-            effects: provisioningEffects()
+            effects: provisioningEffects(lease: lease)
         )
         try await orchestrator.resume(expectedPlan: journal.plan)
         var payload: [String: Any] = [
@@ -6660,7 +6979,8 @@ struct PommeCore {
             "hostExitCode": 0
         ]
         payload.merge(provisioningDisclosure(
-            virtualization: false, templateAgent: installsTemplateAgent(bundle: reference.bundle)
+            virtualization: false, templateAgent: installsTemplateAgent(bundle: reference.bundle),
+            experimentalRecovery: journal.plan.experimentalRecovery != nil
         )) { _, new in new }
         PommeProgressContext.sink?.complete(vm: name)
         return PommeOperationResult(

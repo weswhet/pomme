@@ -1,8 +1,18 @@
 import CryptoKit
 import Foundation
 
-/// Closed, durable provisioning data.  It deliberately contains neither user
-/// credentials nor mutable transport configuration.
+/// Versions the host-prepared Recovery recipe and pins its session identity.
+struct PommeExperimentalRecoveryConfiguration: Codable, Equatable, Sendable {
+    let version: Int
+    let sessionID: UUID
+
+    init(sessionID: UUID, version: Int = 1) {
+        self.version = version
+        self.sessionID = sessionID
+    }
+}
+
+/// Closed, durable provisioning data without credentials or mutable transport configuration.
 struct PommeProvisioningPlan: Codable, Equatable, Sendable {
     static let schemaVersion = 1
 
@@ -14,6 +24,7 @@ struct PommeProvisioningPlan: Codable, Equatable, Sendable {
     let normalAgent: PommeAgentIdentity
     let recoveryAgent: PommeAgentIdentity
     let finalState: PommeProvisioningFinalState
+    let experimentalRecovery: PommeExperimentalRecoveryConfiguration?
 
     init(
         vm: PommeVMOwnership,
@@ -22,7 +33,8 @@ struct PommeProvisioningPlan: Codable, Equatable, Sendable {
         profile: PommeRecoveryProfileContract,
         normalAgent: PommeAgentIdentity,
         recoveryAgent: PommeAgentIdentity,
-        finalState: PommeProvisioningFinalState
+        finalState: PommeProvisioningFinalState,
+        experimentalRecovery: PommeExperimentalRecoveryConfiguration? = nil
     ) throws {
         self.schema = Self.schemaVersion
         self.vm = vm
@@ -32,11 +44,13 @@ struct PommeProvisioningPlan: Codable, Equatable, Sendable {
         self.normalAgent = normalAgent
         self.recoveryAgent = recoveryAgent
         self.finalState = finalState
+        self.experimentalRecovery = experimentalRecovery
         try validate()
     }
 
     func validate() throws {
-        guard schema == Self.schemaVersion,
+        guard experimentalRecovery.map({ $0.version == 1 }) ?? true,
+              schema == Self.schemaVersion,
               restore.isExact,
               display == .required,
               profile.isUsable(for: restore, display: display),

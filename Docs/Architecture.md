@@ -31,6 +31,18 @@ reconnects can reauthenticate. Recovery listeners use ports `505052` and
 share, launcher, credential, listener, and sensitive in-memory observations
 before the VM can transition to its requested final state.
 
+A VM created with `--experimental-recovery` also has a resident Recovery agent
+that launchd starts from the host-prepared Recovery image. It connects on port
+`505054` with terminal authority only, bound to the plan's fixed Recovery
+session, and authenticates with its own UUID-scoped Keychain credential
+(`recovery-resident-token`) rather than the persistent agent's. Installation
+and security operations still use the request-bound one-shot sessions above,
+which the resident starts as a launcher. A root terminal in Recovery can still
+change anything that Recovery allows, so the resident's authority is narrower
+in protocol than in effect. Before a boot that needs the other image, the host
+switches between the original and prepared Recovery images while the VM is
+stopped. A boot that needs no switch doesn't attach the guest's disk.
+
 Recovery staging keeps its request-bound `/private/var/tmp` spelling. Lexical
 validation must not use Foundation's filesystem-aware URL standardization,
 which can rewrite an existing `/private` path. File operations instead walk

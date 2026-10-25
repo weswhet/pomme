@@ -3,6 +3,25 @@ import Testing
 
 @Suite("VM creation planning")
 struct VMCreationPlanningTests {
+    @Test("The experimental Recovery flag applies to every config member without changing the config")
+    func experimentalBatchSelection() async throws {
+        let planner = VMCreationPlanner(dependencies: .init(
+            firmwareLookup: { selector, _ in
+                firmware(version: selector == "latest" ? "27.0.1" : selector, build: "B-\(selector)")
+            },
+            profileSelection: { _ in PommeRecoveryProfileSelector.tahoe2660Build25G72 },
+            managedVMCollision: { _ in false }
+        ))
+        let config = sampleConfig()
+        let ordinary = try await planner.plans(for: config)
+        let experimental = try await planner.plans(for: config, experimentalRecovery: true)
+        #expect(ordinary.allSatisfy { !$0.experimentalRecovery })
+        #expect(experimental.count == config.versions.count)
+        #expect(experimental.allSatisfy { $0.experimentalRecovery })
+        #expect(experimental.map(\.name) == ordinary.map(\.name))
+        #expect(experimental.allSatisfy { $0.config.versions == config.versions })
+    }
+
     @Test("JSON, YAML, TOML, and Pkl decode the same schema")
     func formatsProduceSameModel() throws {
         let directory = try temporaryDirectory()

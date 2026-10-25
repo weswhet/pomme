@@ -18,6 +18,7 @@ struct PommeCreationRequest: Equatable, Sendable {
     let diskSize: String
     let memory: String
     let boot: CLIBootMode
+    var experimentalRecovery = false
 
     /// Option rules for a direct create. `version` is already `latest` when
     /// `--latest` was given.
@@ -69,14 +70,15 @@ struct PommeCreationRequest: Equatable, Sendable {
         case .version(let selection, let device):
             let firmware = try await PommeCore.resolveIPSWFirmware(selection: selection, deviceIdentifier: device)
             Self.warnIfExperimental(try PommeRecoveryProfileSelector.select(for: firmware),
-                                    version: firmware.version, build: firmware.buildid, vmName: name)
+                                    version: firmware.version, build: firmware.buildid, vmName: name,
+                                    experimentalRecovery: experimentalRecovery)
             restoreArguments = ["--version", firmware.buildid] + (device.map { ["--ipsw-device", $0] } ?? [])
         case .restoreImage(let path):
             restoreArguments = ["--restore-image", path]
         }
         return try await PommeApplication.create(
             name: name, restoreArgs: restoreArguments, diskSize: resolvedDiskSize, memory: memory,
-            startMode: boot.startMode, lease: lease
+            startMode: boot.startMode, experimentalRecovery: experimentalRecovery, lease: lease
         )
     }
 
@@ -115,11 +117,21 @@ struct PommeCreationRequest: Equatable, Sendable {
     }
 
     static func warnIfExperimental(
-        _ profile: PommeCreateRecoveryProfileDescriptor, version: String, build: String, vmName: String
+        _ profile: PommeCreateRecoveryProfileDescriptor, version: String, build: String, vmName: String,
+        experimentalRecovery: Bool = false
     ) {
+        if experimentalRecovery {
+            PommeCore.log(
+                "Warning: --experimental-recovery modifies the VM's Recovery image to embed an agent that starts automatically. Creation verifies the agent before it finishes.",
+                vmName: vmName
+            )
+        }
         guard profile.qualification == .experimental else { return }
+        let warning = experimentalRecovery
+            ? "Warning: macOS \(version) (\(build)) is an unreviewed build for this creation method."
+            : "Warning: macOS \(version) (\(build)) has not been qualified for Recovery automation; creation will attempt it with observed-screen checks."
         PommeCore.log(
-            "Warning: macOS \(version) (\(build)) has not been qualified for Recovery automation; creation will attempt it with observed-screen checks.",
+            warning,
             vmName: vmName
         )
     }

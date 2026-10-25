@@ -24,6 +24,8 @@ depends on:
   experimental attempt. For details, see
   [Supported macOS versions](/crawler/concepts/os-qualification/).
 - The identity of the signed guest agent, pinned by its SHA-256 digest.
+- Whether creation uses experimental Recovery preparation, with a fixed
+  Recovery session identity when selected.
 - At least 4 GiB of guest memory, and the restore image's own minimum when the
   image is already on disk.
 - Enough free space for the rest of the restore image download and the
@@ -51,7 +53,7 @@ phases:
 4. **Restore the final state.** Pomme leaves the VM running in normal macOS,
    stops it, or restarts it in Recovery, as requested with `--boot`.
 
-On the Recovery route, the freshly installed image boots directly into
+On the usual Recovery route, the freshly installed image boots directly into
 Recovery. The verification boot in phase 3 is the guest's first normal boot.
 No normal boot comes before Recovery.
 
@@ -86,6 +88,36 @@ Pomme installs the guest agent through one of three routes:
   VirtioFS share that's bound to one request.
 
 All three routes end in the same verification and final-state phases.
+
+## Recovery image preparation
+
+`pomme create --experimental-recovery` prepares the stopped VM's Recovery
+image on the host and embeds an agent that launchd starts automatically. It
+retains both the original and prepared images. When a boot needs the other
+image, Pomme switches them while the VM is stopped: the prepared image for
+Recovery, and the original for normal macOS. Pomme can connect to Recovery
+without navigating its screens, including on later Recovery boots.
+Agent installation still uses a temporary, read-only share bound to one request.
+The embedded agent has its own credential in your login Keychain, separate from
+the guest agent's.
+Creation requires a fresh restore image or a template with an unmodified
+Recovery image. Templates containing an already modified Recovery image aren't
+supported; Pomme doesn't reuse their embedded agent credentials.
+
+For eligible macOS 27 hosts and guests, first-boot provisioning and SSH checks
+still establish that the owner is ready before Recovery installs the agent.
+Normal agent, owner, and desktop verification remain required, and Remote Login
+is off when creation completes.
+
+The plan fixes this strategy and its Recovery session identity. Resume uses
+those recorded choices; it doesn't accept `--experimental-recovery` or switch an existing
+plan to a different strategy. Creation without the flag is unchanged.
+
+The prepared Recovery image has its APFS System role cleared and its seal
+broken. Normal boots use the original image, and SIP and AMFI stay unchanged.
+After a macOS update replaces the guest's Recovery image, Pomme uses the
+standard Recovery route. For usage and limitations, see
+[Try experimental image preparation](/crawler/guides/create-vms/#try-experimental-image-preparation).
 
 ## Failure and resume
 

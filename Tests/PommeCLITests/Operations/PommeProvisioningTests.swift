@@ -1,9 +1,104 @@
+import CryptoKit
 import Foundation
 import Testing
 
 @Suite("Pomme durable provisioning")
 struct PommeProvisioningTests {
     private let digest = String(repeating: "a", count: 64)
+
+    /// The schema-1 shape before the optional Recovery configuration existed.
+    private struct LegacyPlan: Codable {
+        let schema: Int
+        let vm: PommeVMOwnership
+        let restore: PommeRestoreIdentity
+        let display: PommeDisplayContract
+        let profile: PommeRecoveryProfileContract
+        let normalAgent: PommeAgentIdentity
+        let recoveryAgent: PommeAgentIdentity
+        let finalState: PommeProvisioningFinalState
+
+        init(_ plan: PommeProvisioningPlan) {
+            schema = plan.schema; vm = plan.vm; restore = plan.restore
+            display = plan.display; profile = plan.profile
+            normalAgent = plan.normalAgent; recoveryAgent = plan.recoveryAgent
+            finalState = plan.finalState
+        }
+    }
+
+    /// Signs the old field set directly, without the current journal constructor or signer.
+    private struct LegacyUnsignedJournal: Encodable {
+        let schema: Int
+        let generation: UInt64 = 1
+        let plan: LegacyPlan
+        let planDigest: String
+        let events: [String] = []
+        let route: String?
+    }
+
+    private func legacyJournalBytes(_ plan: PommeProvisioningPlan, schema: Int) throws -> Data {
+        let legacy = LegacyPlan(plan)
+        let oldPlanBytes = try PommeProvisioningCoding.encode(legacy)
+        let unsigned = LegacyUnsignedJournal(schema: schema, plan: legacy,
+            planDigest: PommeProvisioningDigest.sha256(oldPlanBytes),
+            route: schema == 2 ? "virtualization" : nil)
+        let unsignedBytes = try PommeProvisioningCoding.encode(unsigned)
+        let key = SymmetricKey(data: Data(repeating: 7, count: 32))
+        let integrity = Data(HMAC<SHA256>.authenticationCode(for: unsignedBytes, using: key)).base64EncodedString()
+        let decodedObject = try JSONSerialization.jsonObject(with: unsignedBytes)
+        var object = try #require(decodedObject as? [String: Any])
+        object["integrity"] = integrity
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
+    @Test("Absent experimental Recovery preserves legacy plan bytes, digest, and validation")
+    func legacyPlanCompatibility() throws {
+        let ordinary = try plan()
+        let legacyBytes = try PommeProvisioningCoding.encode(LegacyPlan(ordinary))
+        #expect(try PommeProvisioningCoding.encode(ordinary) == legacyBytes)
+        #expect(ordinary.digest == PommeProvisioningDigest.sha256(legacyBytes))
+        let decoded = try JSONDecoder().decode(PommeProvisioningPlan.self, from: legacyBytes)
+        #expect(decoded.experimentalRecovery == nil)
+        #expect(decoded == ordinary)
+        try decoded.validate()
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 7, count: 32))
+        let restored = try JSONDecoder().decode(PommeProvisioningJournal.self,
+            from: legacyJournalBytes(decoded, schema: 1))
+        try signer.verify(restored)
+    }
+
+    @Test("Legacy macOS 27 journals retain the original plan bytes and valid integrity")
+    func legacyV2PlanCompatibility() throws {
+        let descriptor = try PommeRecoveryProfileSelector.descriptor(version: "27.0.1", build: "26A434")
+        let ordinary = try plan(profile: PommeRecoveryProfileContract(descriptor: descriptor),
+                                version: "27.0.1", build: "26A434")
+        let legacyBytes = try PommeProvisioningCoding.encode(LegacyPlan(ordinary))
+        #expect(try PommeProvisioningCoding.encode(ordinary) == legacyBytes)
+        let decoded = try JSONDecoder().decode(PommeProvisioningPlan.self, from: legacyBytes)
+        let signer = try PommeProvisioningV2Signer(key: Data(repeating: 7, count: 32))
+        let restored = try JSONDecoder().decode(PommeProvisioningV2Journal.self,
+            from: legacyJournalBytes(decoded, schema: 2))
+        try signer.verify(restored)
+        #expect(restored.plan.experimentalRecovery == nil)
+        #expect(restored.planDigest == PommeProvisioningDigest.sha256(legacyBytes))
+    }
+
+    @Test("Experimental Recovery session survives encoding and is covered by the plan digest")
+    func experimentalRecoveryPlanRoundTrip() throws {
+        let session = UUID(uuidString: "01234567-89ab-cdef-0123-456789abcdef")!
+        let experimental = try plan(experimentalRecovery: .init(sessionID: session))
+        let bytes = try PommeProvisioningCoding.encode(experimental)
+        let decoded = try JSONDecoder().decode(PommeProvisioningPlan.self, from: bytes)
+        #expect(decoded == experimental)
+        #expect(decoded.experimentalRecovery?.sessionID == session)
+        #expect(decoded.experimentalRecovery?.version == 1)
+        #expect(throws: PommeProvisioningError.self) {
+            try plan(experimentalRecovery: .init(sessionID: session, version: 2))
+        }
+        try decoded.validate()
+        #expect(experimental.digest != (try plan()).digest)
+        #expect(experimental.digest != (try plan(experimentalRecovery: .init(sessionID: UUID()))).digest)
+    }
+
 
     @Test("plans retain reviewed Tahoe and explicit experimental qualifications")
     func closedProfile() throws {
@@ -743,7 +838,8 @@ struct PommeProvisioningTests {
         version: String = "26.6.0",
         build: String = "25G72",
         display: PommeDisplayContract = .required,
-        finalState: PommeProvisioningFinalState = .normalRunning
+        finalState: PommeProvisioningFinalState = .normalRunning,
+        experimentalRecovery: PommeExperimentalRecoveryConfiguration? = nil
     ) throws -> PommeProvisioningPlan {
         try .init(
             vm: .init(name: "pomme-test", uuid: UUID(uuidString: "01234567-89AB-CDEF-0123-456789ABCDEF")!, bundlePath: "/tmp/pomme-test.macvm"),
@@ -752,7 +848,8 @@ struct PommeProvisioningTests {
             profile: profile,
             normalAgent: try .init(identifier: "com.github.weswhet.pomme.agent", executableDigest: digest, role: .normal),
             recoveryAgent: try .init(identifier: "com.github.weswhet.pomme.recovery", executableDigest: digest, role: .recovery),
-            finalState: finalState
+            finalState: finalState,
+            experimentalRecovery: experimentalRecovery
         )
     }
 

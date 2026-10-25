@@ -278,7 +278,7 @@ final class PommeRecoveryRuntimeRootPort: PommeRecoveryRootPort, @unchecked Send
         switch role {
         case .recoveryBootstrap: try coordinator.attachRecoveryBootstrap()
         case .recoveryRuntime: try coordinator.attachRecoveryRuntime()
-        case .normal: throw PommeRecoveryRuntimeError.invalidListener
+        case .normal, .recoveryResident: throw PommeRecoveryRuntimeError.invalidListener
         }
     }
 

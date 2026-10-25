@@ -224,6 +224,7 @@ enum PommeLiveRecoveryIntegration {
         let vmPort: any PommeRecoveryVMPort
         let effects: PommeRecoveryRuntimeEffects
         let terminalPort: any PommeRecoveryTerminalPort
+        let authenticatedLauncher: (@Sendable () async throws -> Void)?
         /// Called only after the Recovery coordinator has authenticated the
         /// exact request-bound session and immediately before the privileged
         /// guest operation. Core must detach this request's share and remove
@@ -242,6 +243,7 @@ enum PommeLiveRecoveryIntegration {
             vmPort: any PommeRecoveryVMPort,
             effects: PommeRecoveryRuntimeEffects,
             terminalPort: any PommeRecoveryTerminalPort,
+            authenticatedLauncher: (@Sendable () async throws -> Void)? = nil,
             clearHostStagingBeforeOperation: @escaping @Sendable () async throws -> Void,
             verifySessionBinding: @escaping @Sendable (PommeRecoverySessionRequest) -> Bool,
             restoreCapturedState: @escaping @Sendable () async throws -> Void
@@ -250,6 +252,7 @@ enum PommeLiveRecoveryIntegration {
             self.vmPort = vmPort
             self.effects = effects
             self.terminalPort = terminalPort
+            self.authenticatedLauncher = authenticatedLauncher
             self.clearHostStagingBeforeOperation = clearHostStagingBeforeOperation
             self.verifySessionBinding = verifySessionBinding
             self.restoreCapturedState = restoreCapturedState
@@ -411,6 +414,7 @@ enum PommeLiveRecoveryIntegration {
         launcher: Launcher,
         vmName: String,
         terminalPort: any PommeRecoveryTerminalPort,
+        authenticatedLauncher: (@Sendable () async throws -> Void)? = nil,
         authenticationTimeout: TimeInterval,
         now: @escaping @Sendable () -> Date
     ) -> PommeRecoveryRuntimeEffects {
@@ -418,6 +422,7 @@ enum PommeLiveRecoveryIntegration {
             base: base, profile: profile, launcher: launcher,
             vmName: vmName,
             terminalPort: terminalPort,
+            authenticatedLauncher: authenticatedLauncher,
             authenticationTimeout: authenticationTimeout, now: now
         )
     }
@@ -575,6 +580,7 @@ enum PommeLiveRecoveryIntegration {
                     launcher: launcher,
                     vmName: vmName,
                     terminalPort: runtime.terminalPort,
+                    authenticatedLauncher: runtime.authenticatedLauncher,
                     authenticationTimeout: dependencies.authenticationTimeout,
                     now: dependencies.now
                 )
@@ -644,6 +650,7 @@ enum PommeLiveRecoveryIntegration {
             launcher: Launcher,
             vmName: String,
             terminalPort: any PommeRecoveryTerminalPort,
+            authenticatedLauncher: (@Sendable () async throws -> Void)? = nil,
             authenticationTimeout: TimeInterval,
             now: @escaping @Sendable () -> Date
         ) -> PommeRecoveryRuntimeEffects {
@@ -662,6 +669,14 @@ enum PommeLiveRecoveryIntegration {
                     // No observation-driven input belongs in startRecovery.
                     PommeCore.log("Recovery bootstrap milestone: recoveryBootVerified.", vmName: vmName)
                     try await base.launchRecoveryAgent()
+                    if let authenticatedLauncher {
+                        guard launcher.expiresAt.timeIntervalSince(now()) >= authenticationTimeout
+                            + PommeLiveRecoveryIntegration.credentialAuthenticationReserve else {
+                            throw Error.credentialRejected
+                        }
+                        try await authenticatedLauncher()
+                        return
+                    }
                     var interaction = try PommeTahoeRecoveryInteraction(evidence: profile)
                     let disposition = await interaction.driveToTerminalAndLaunch(
                         using: terminalPort,

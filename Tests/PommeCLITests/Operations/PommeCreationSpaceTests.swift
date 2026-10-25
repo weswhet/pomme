@@ -21,6 +21,16 @@ struct PommeCreationSpaceTests {
         #expect(small[0].bytes == 1 << 30)
     }
 
+    @Test("Experimental Recovery adds its retained images only when selected")
+    func experimentalRecoveryNeeds() {
+        #expect(PommeCreationSpace.experimentalRecoveryNeeds(enabled: false, destination: vms).isEmpty)
+        let needs = PommeCreationSpace.experimentalRecoveryNeeds(enabled: true, destination: vms)
+        #expect(needs.map(\.kind) == [.experimentalRecoveryImages])
+        #expect(needs.map(\.bytes) == [PommeCreationSpace.experimentalRecoveryEstimateBytes])
+        #expect(needs.map(\.directory) == [vms])
+        #expect(needs[0].phrase.contains("Recovery images"))
+    }
+
     @Test("Needs on one volume add up, and a short volume stops creation with each part named")
     func enforceNamesEveryPart() throws {
         let needs = PommeCreationSpace.restoreNeeds(

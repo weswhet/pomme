@@ -14,6 +14,16 @@ those transactions work and what Pomme needs from you to run them.
 you run `pomme sip`, `pomme amfi`, or `pomme mdm`, or when you create a
 provisioned template.
 
+`pomme create --experimental-recovery` changes the Recovery image separately
+from these settings: it clears the image's APFS System role and breaks its seal
+to embed an agent that starts automatically. Pomme selects that modified image
+for Recovery boots and restores the original image for normal boots, while the
+VM is stopped. SIP and AMFI stay unchanged. The embedded agent has its own
+credential, so the copy in the Recovery image can't authenticate as the guest
+agent. See
+[Try experimental image preparation](/guides/create-vms/#try-experimental-image-preparation)
+for the experiment's limitations.
+
 ## Where each change happens
 
 macOS allows each setting to change only in a specific environment, so a

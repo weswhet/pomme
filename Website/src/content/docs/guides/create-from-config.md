@@ -142,6 +142,24 @@ Pomme keeps the VMs that it created successfully. To continue a failed VM, run
 `pomme create VM_NAME --resume` with that VM's name. For more information, see
 [Create a VM](/guides/create-vms/#resume-an-interrupted-creation).
 
+### Try experimental image preparation
+
+To use host-prepared Recovery images for every VM in the batch, add
+`--experimental-recovery` to the creation command:
+
+```sh
+pomme create --config lab.yaml --experimental-recovery
+```
+
+This prepares a modified Recovery image for each VM, breaking its seal without
+changing SIP or AMFI. Pomme uses the prepared image for Recovery boots and the
+original image for normal boots. Review the limitations in
+[Try experimental image preparation](/guides/create-vms/#try-experimental-image-preparation)
+before using it. The flag is a command option, not a config key.
+
+To resume a failed VM, run `pomme create VM_NAME --resume` without the flag.
+The VM's journal keeps the original method.
+
 ### Create two VMs at a time
 
 By default, Pomme creates the VMs one after another. To create them two at a

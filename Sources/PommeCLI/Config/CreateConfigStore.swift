@@ -163,19 +163,22 @@ struct VMCreationPlan: Sendable {
     let config: VMCreationConfigV1
     let recoveryProfile: PommeCreateRecoveryProfileDescriptor
     let agentRequest: PommeCreateAgentPlanRequest
+    let experimentalRecovery: Bool
 
     init(
         name: String,
         selector: String,
         firmware: IPSWMEFirmware,
         config: VMCreationConfigV1,
-        recoveryProfile: PommeCreateRecoveryProfileDescriptor
+        recoveryProfile: PommeCreateRecoveryProfileDescriptor,
+        experimentalRecovery: Bool = false
     ) {
         self.name = name
         self.selector = selector
         self.firmware = firmware
         self.config = config
         self.recoveryProfile = recoveryProfile
+        self.experimentalRecovery = experimentalRecovery
         agentRequest = .init(profile: recoveryProfile)
     }
 
@@ -385,14 +388,14 @@ enum CreateConfigStore {
 /// Resolves and executes version-driven create configs.
 enum CreateConfigRunner {
     /// Resolves the exact firmware and generated VM name for every requested version.
-    static func plans(path: String) async throws -> [VMCreationPlan] {
+    static func plans(path: String, experimentalRecovery: Bool = false) async throws -> [VMCreationPlan] {
         let config = try CreateConfigStore.load(path: path)
-        return try await VMCreationPlanner(dependencies: .live).plans(for: config)
+        return try await VMCreationPlanner(dependencies: .live).plans(for: config, experimentalRecovery: experimentalRecovery)
     }
 
     /// Executes a config batch sequentially or with bounded concurrency.
-    static func run(path: String, dryRun: Bool, parallelism: Int) async throws -> [PommeOperationResult] {
-        let plans = try await plans(path: path)
+    static func run(path: String, dryRun: Bool, parallelism: Int, experimentalRecovery: Bool = false) async throws -> [PommeOperationResult] {
+        let plans = try await plans(path: path, experimentalRecovery: experimentalRecovery)
         return try await VMCreationExecutor(dependencies: .live).execute(
             plans,
             dryRun: dryRun,
@@ -420,7 +423,7 @@ struct VMCreationPlanningDependencies: Sendable {
 struct VMCreationPlanner: Sendable {
     let dependencies: VMCreationPlanningDependencies
 
-    func plans(for config: VMCreationConfigV1) async throws -> [VMCreationPlan] {
+    func plans(for config: VMCreationConfigV1, experimentalRecovery: Bool = false) async throws -> [VMCreationPlan] {
         var plans: [VMCreationPlan] = []
         for selector in config.versions {
             let firmware = try await dependencies.firmwareLookup(selector, config.ipswDevice)
@@ -431,7 +434,8 @@ struct VMCreationPlanner: Sendable {
                 selector: selector,
                 firmware: firmware,
                 config: config,
-                recoveryProfile: recoveryProfile
+                recoveryProfile: recoveryProfile,
+                experimentalRecovery: experimentalRecovery
             ))
         }
 
@@ -482,12 +486,15 @@ struct VMCreationExecutionDependencies: Sendable {
             let diskSpace = try PommeCore.dryRunSpaceCheck(
                 source: .firmware(plan.firmware),
                 diskSizeBytes: plan.diskSizeBytes,
-                vmName: plan.name
+                vmName: plan.name,
+                experimentalRecovery: plan.experimentalRecovery
             )
             var payload: [String: Any] = ["memoryMinimum": check.payload, "diskSpace": diskSpace]
+            if plan.experimentalRecovery { payload["experimentalRecovery"] = true }
             payload.merge(PommeCore.provisioningDisclosure(
                 virtualization: PommeCore.usesVirtualizationProvisioning(
-                    guestVersion: plan.firmware.version, firstBootEligible: true)
+                    guestVersion: plan.firmware.version, firstBootEligible: true),
+                experimentalRecovery: plan.experimentalRecovery
             )) { _, new in new }
             return payload
         },
@@ -500,7 +507,8 @@ struct VMCreationExecutionDependencies: Sendable {
                 needs += try PommeCore.restoreSpaceNeeds(
                     firmware: firmware,
                     diskSizeBytes: plan.diskSizeBytes,
-                    destination: try namedBundleURL(for: plan.name)
+                    destination: try namedBundleURL(for: plan.name),
+                    experimentalRecovery: plan.experimentalRecovery
                 )
             }
             try PommeCreationSpace.enforce(needs, subject: "the \(plans.count) VMs in this config")

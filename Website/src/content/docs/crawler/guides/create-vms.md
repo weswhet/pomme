@@ -110,7 +110,8 @@ Keep the following in mind:
   the whole disk size. Before it downloads or writes anything, Pomme checks
   that the volume that holds your VMs has room for the rest of the restore
   image download and about 35 GB for the installed system, or the disk size
-  if it's smaller. A clone of a template needs about 5 GB. If there isn't
+  if it's smaller. A clone of a template needs about 5 GB, and
+  `--experimental-recovery` adds about 5 GB. If there isn't
   enough space, creation stops with the
   [`host-disk-space-insufficient`](/crawler/reference/errors/#host-disk-space-insufficient)
   error and changes nothing. The System checks your pockets before the ride,
@@ -181,6 +182,62 @@ installed depends on the host and guest:
 The generated password for the `pomme` account stays in your login Keychain.
 Creation never changes System Integrity Protection (SIP) or AMFI. If you want
 those dropped, that's a separate room with its own warnings.
+
+## Try experimental image preparation
+
+Use a fresh restore image or a template with an unmodified Recovery image.
+Templates containing an already modified Recovery image aren't supported.
+
+To prepare the Recovery image on the host before booting Recovery, add
+`--experimental-recovery` when you create the VM:
+
+```sh
+pomme create VM_NAME --latest --memory 4GB --disk-size 40GB --experimental-recovery
+```
+
+Pomme keeps the original Recovery image and prepares a modified copy with an
+agent that starts automatically. While the VM is stopped, Pomme selects the
+modified image for Recovery boots and restores the original for normal boots.
+Initial agent startup and later Recovery terminal connections don't require
+navigating the Recovery screens. Without this flag, creation keeps its usual
+behavior.
+
+On eligible macOS 27 hosts and guests, Pomme still uses Apple's first-boot
+provisioning and SSH checks to prepare and verify the owner account. It then
+installs the guest agent through Recovery. Creation still verifies the normal
+agent, owner account, and desktop, and turns Remote Login off before it finishes.
+
+Read the fine print, Crawler. The sponsors certainly didn't:
+
+- The embedded agent has its own credential, which can't authenticate as the
+  VM's guest agent. Your login Keychain keeps it, and the prepared image
+  contains a copy. The VM's bundle keeps that image, and the guest's disk holds
+  it while Recovery is selected. `pomme delete` removes the credential with the
+  VM's other credentials.
+- Pomme attaches the VM's disk on the host only to switch images, such as on
+  the first Recovery boot after normal boots. That start takes longer, because
+  Pomme copies a Recovery image of more than 1 GB. Bring a snack.
+- The VM keeps both images, so creation needs about 5 GB more free space.
+- The modified image replaces the Recovery job that saves panic reports
+  (`com.apple.DumpPanicRecoveryOS`), so the VM's Recovery doesn't save them.
+  Crash quietly.
+- Restoring a snapshot can't switch images, because that would change the disk
+  under the saved state. If the VM last booted Recovery, start it in normal
+  macOS and stop it before you restore a snapshot.
+- A macOS update in the guest changes the Recovery image as soon as the update
+  is prepared, before it's installed. Pomme detects the change on the next
+  Recovery boot, stops using the embedded agent, and uses the standard
+  Recovery route from then on, which navigates the Recovery screens. Normal
+  boots aren't affected.
+
+:::caution
+The modified Recovery image has its APFS System role cleared and its seal
+broken. Normal boots use the original image. This experiment doesn't change
+SIP or AMFI.
+:::
+
+The journal records this choice. To resume, use `pomme create VM_NAME --resume`
+without `--experimental-recovery`. You can't switch an existing creation to this method.
 
 ## Resume an interrupted creation
 

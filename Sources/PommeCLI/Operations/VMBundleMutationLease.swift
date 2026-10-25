@@ -47,6 +47,17 @@ final class VMBundleMutationLease: @unchecked Sendable {
     }
   }
 
+  /// Carries an already-held lease through an operation's async call tree.
+  /// Detached work must capture and validate the lease explicitly.
+  @TaskLocal static var current: VMBundleMutationLease?
+
+  static func requireCurrent(name: String) throws -> VMBundleMutationLease {
+    guard let lease = current, lease.validates(name: name) else {
+      throw Error.invalidScope(name: name)
+    }
+    return lease
+  }
+
   private let name: String
   private let lockPath: String
   private let descriptor: Int32
@@ -181,11 +192,11 @@ final class VMBundleMutationLease: @unchecked Sendable {
   ) throws -> T {
     if let lease {
       guard lease.validates(name: name) else { throw Error.invalidScope(name: name) }
-      return try body(lease)
+      return try $current.withValue(lease) { try body(lease) }
     }
     let acquired = try acquire(name: name)
     defer { acquired.release() }
-    return try body(acquired)
+    return try $current.withValue(acquired) { try body(acquired) }
   }
 
   static func withLease<T>(
@@ -195,11 +206,11 @@ final class VMBundleMutationLease: @unchecked Sendable {
   ) async throws -> T {
     if let lease {
       guard lease.validates(name: name) else { throw Error.invalidScope(name: name) }
-      return try await body(lease)
+      return try await $current.withValue(lease) { try await body(lease) }
     }
     let acquired = try acquire(name: name)
     defer { acquired.release() }
-    return try await body(acquired)
+    return try await $current.withValue(acquired) { try await body(acquired) }
   }
 
   private func requireActive() throws {
