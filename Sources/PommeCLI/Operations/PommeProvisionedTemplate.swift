@@ -13,6 +13,13 @@ import Foundation
 /// the template. A clone recovers it from its own `/etc/kcpassword` through the
 /// root agent, because the host Keychain item is scoped to the UUID of the VM
 /// this template was captured from and cannot follow the clone.
+///
+/// The persistent agent's credential is different: the capture copies it
+/// into a Keychain item scoped to the template (see
+/// `PommeTemplateAgentReference`), so a clone's embedded agent can be
+/// authenticated, updated, and given its own credential in normal macOS
+/// instead of being reinstalled through Recovery. Deleting the template
+/// deletes that item.
 enum PommeProvisionedTemplate {
     /// Suffix for the disposable VM the template is captured from. It is
     /// created, provisioned, captured, and destroyed inside one command.
@@ -76,11 +83,16 @@ enum PommeProvisionedTemplate {
         } catch {
             // The half-built template is never left behind, but the VM is:
             // it holds the owner account and a retained security journal, so
-            // deleting it would discard evidence the failure needs.
-            try? FileManager.default.removeItem(at: bundle.rootURL)
-            let warning = "Template \(validName) was not created. The disposable VM \(vmName) was retained for inspection; delete it with `pomme delete \(vmName) --force`."
-            if let sink = PommeProgressContext.sink { sink.warning(warning) }
-            else { log(warning) }
+            // deleting it would discard evidence the failure needs. The VM
+            // keeps its own agent credential.
+            let warn: (String) -> Void = { warning in
+                if let sink = PommeProgressContext.sink { sink.warning(warning) } else { log(warning) }
+            }
+            // The template's copy of the credential goes with the bundle.
+            // When it can't be removed, the bundle stays so that
+            // `pomme template delete` can still find the item.
+            _ = discardBundle(bundle, templateName: validName, warn: warn)
+            warn("Template \(validName) was not created. The disposable VM \(vmName) was retained for inspection; delete it with `pomme delete \(vmName) --force`.")
             throw error
         }
     }
@@ -121,6 +133,16 @@ enum PommeProvisionedTemplate {
         ] {
             try PommeTemplateStore.clone(source, to: destination)
         }
+        let warn: (String) -> Void = { warning in
+            if let sink = PommeProgressContext.sink { sink.warning(warning) } else { log(warning) }
+        }
+        let retainedAgent = retainAgent(
+            executableDigest: { try PommeCore.currentNormalAgentDigest(plan: plan) },
+            startupVolumeGroup: { try PommeCore.provisioningRuntimeMetadata(for: plan).startupVolumeGroupUUID },
+            markPending: { try PommeTemplateStore.markPendingCredential($0, in: bundle) },
+            copyCredential: { try PommeCore.retainTemplateAgentCredential(from: plan, credentialID: $0) },
+            warn: warn
+        )
         let manifest = PommeTemplateManifest(
             name: templateName,
             version: plan.restore.version,
@@ -129,10 +151,76 @@ enum PommeProvisionedTemplate {
             restoreImagePath: input.restoreImagePath,
             diskSizeBytes: diskSize,
             provisionedOwnerAccount: PommeSecurityOwnerIdentity.pomme.username,
-            provisionedSecurityDisabled: true
+            provisionedSecurityDisabled: true,
+            retainedAgent: retainedAgent
         )
+        // A failed write leaves the pending marker, which the caller's
+        // cleanup uses to remove the credential with the bundle.
         try PommeTemplateStore.write(manifest, to: bundle)
+        // The manifest now names the credential; a marker left behind only
+        // names the same item again.
+        try? PommeTemplateStore.clearPendingCredential(in: bundle)
         return manifest
+    }
+
+    /// Removes a half-built template bundle and any credential it kept or
+    /// was about to keep. Returns false, after a warning, when the
+    /// credential can't be removed; the bundle is then kept so
+    /// `pomme template delete` can find the item later.
+    static func discardBundle(
+        _ bundle: BundleLayout,
+        templateName: String,
+        credentials: PommeTemplateAgentCredentialStore = .init(),
+        warn: (String) -> Void
+    ) -> Bool {
+        guard FileManager.default.fileExists(atPath: bundle.rootURL.path) else { return true }
+        do {
+            try PommeTemplateStore.delete(bundle: bundle, credentials: credentials)
+            return true
+        } catch {
+            warn("Warning: Pomme couldn't remove the agent credential that it kept for template \(templateName) from your login Keychain: \(PommeErrorDescriber.clause(for: error)). Unlock the Keychain, and then run `pomme template delete \(templateName)`.")
+            return false
+        }
+    }
+
+    /// Copies the disposable VM's agent credential into a new template-scoped
+    /// Keychain item and returns the reference the manifest records. The
+    /// stopped VM's disk is the one just captured, so its installed agent,
+    /// startup volume group, and credential are exactly what every clone
+    /// carries.
+    ///
+    /// Keeping the credential is what lets clones skip Recovery, but the
+    /// template is still usable without it, so a failure here is a warning:
+    /// the template is created without a kept credential and its clones
+    /// install the agent through Recovery.
+    static func retainAgent(
+        credentialID: UUID = UUID(),
+        executableDigest: () throws -> String,
+        startupVolumeGroup: () throws -> UUID?,
+        markPending: (UUID) throws -> Void = { _ in },
+        copyCredential: (UUID) throws -> Void,
+        warn: (String) -> Void
+    ) -> PommeTemplateAgentReference? {
+        do {
+            guard let group = try startupVolumeGroup() else {
+                warn("Warning: The provisioning VM has no recorded startup volume group, so VMs cloned from this template will install the Pomme agent through Recovery.")
+                return nil
+            }
+            let reference = PommeTemplateAgentReference(
+                credentialID: credentialID,
+                executableDigest: try executableDigest(),
+                startupVolumeGroupUUID: group
+            )
+            guard reference.isValid else { throw PommeProvisioningError.invalidAgent }
+            // Recorded first, so a crash before the manifest names the item
+            // still leaves `template delete` a way to find it.
+            try markPending(credentialID)
+            try copyCredential(credentialID)
+            return reference
+        } catch {
+            warn("Warning: Pomme couldn't keep the provisioning VM's agent credential for this template, so VMs cloned from it will install the Pomme agent through Recovery: \(PommeErrorDescriber.clause(for: error)).")
+            return nil
+        }
     }
 
     private static func payload(
@@ -149,6 +237,7 @@ enum PommeProvisionedTemplate {
             "provisioned": true,
             "securityDisabled": manifest.isSecurityDisabled,
             "ownerAccount": manifest.provisionedOwnerAccount as Any,
+            "agentCredentialRetained": manifest.retainedAgent != nil,
             "bundlePath": bundle.rootURL.path,
         ]
     }

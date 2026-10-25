@@ -307,9 +307,10 @@ struct CreateCommand: AsyncParsableCommand {
                 "digest": descriptor.digest
             ]
         ]
-        payload.merge(PommeCore.provisioningDisclosure(virtualization:
-            PommeCore.usesVirtualizationProvisioning(guestVersion: manifest.version,
-                firstBootEligible: !manifest.isProvisioned))) { _, new in new }
+        payload.merge(PommeCore.provisioningDisclosure(
+            virtualization: PommeCore.usesVirtualizationProvisioning(guestVersion: manifest.version,
+                firstBootEligible: !manifest.isProvisioned),
+            templateAgent: manifest.adoptableAgent != nil)) { _, new in new }
         try CLIOutputWriter.write(
             payload: payload,
             text: "Would create \(vmName) from template \(manifest.name) (macOS \(manifest.version) \(manifest.build), disk \(manifest.diskSizeBytes / (1 << 30))GB, memory \(memory), boot \(boot.rawValue)).",

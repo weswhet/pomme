@@ -3160,29 +3160,35 @@ enum PommeApplication {
         String(data: data, encoding: .utf8) == "Executable=\(helperPath)\n"
     }
 
+    /// `standardInput`, when set, is written to the process and then closed.
+    /// It travels only in the helper request and the agent's stream frames,
+    /// so it can carry a secret that must stay out of process arguments.
     static func runMDMGuestProcess(
         reference: VMReference,
         path: String,
         arguments: [String],
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        standardInput: Data? = nil
     ) async throws -> MDMGuestProcessResult {
         guard path.hasPrefix("/"), !path.contains("\0"),
               arguments.allSatisfy({ !$0.contains("\0") }),
               timeout.isFinite, timeout >= 1, timeout <= 300 else {
             throw PommeMDMEnrollmentError.invalidRequest
         }
+        var payload: [String: Any] = [
+            "path": path,
+            "arguments": arguments,
+            "timeout": timeout,
+            "detached": false,
+        ]
+        if let standardInput { payload["stdinDataBase64"] = standardInput.base64EncodedString() }
         let response: [String: Any]
         do {
             response = try PommeCore.sendForegroundControlObject(
                 [
                     "command": "agent.perform",
                     "operation": "process.start",
-                    "payload": [
-                        "path": path,
-                        "arguments": arguments,
-                        "timeout": timeout,
-                        "detached": false,
-                    ],
+                    "payload": payload,
                 ],
                 bundle: reference.bundle
             )

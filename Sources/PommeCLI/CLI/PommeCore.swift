@@ -90,6 +90,12 @@ struct PommeProvisioningInput: Codable, Sendable {
     /// `restoreImagePath` (which then records the image the template came
     /// from). Absent in inputs written before templates existed.
     let templateBundlePath: String?
+    /// Set when the template is a provisioned one whose agent credential the
+    /// host kept: the agent-installation phase then authenticates the agent
+    /// the clone carries in normal macOS instead of installing one through
+    /// Recovery. Fixed when the plan is made, so a template replaced later
+    /// under the same name can't change how an existing VM is created.
+    let templateAgent: PommeTemplateAgentReference?
 
     init(
         restoreImagePath: String,
@@ -99,7 +105,8 @@ struct PommeProvisioningInput: Codable, Sendable {
         machineIdentifierData: Data,
         agentCredentialAccount: String = PommeProvisioningCredentialReference.agentAccount,
         startupVolumeGroupUUID: UUID? = nil,
-        templateBundlePath: String? = nil
+        templateBundlePath: String? = nil,
+        templateAgent: PommeTemplateAgentReference? = nil
     ) {
         schema = Self.schema
         self.restoreImagePath = restoreImagePath
@@ -110,6 +117,7 @@ struct PommeProvisioningInput: Codable, Sendable {
         self.agentCredentialAccount = agentCredentialAccount
         self.startupVolumeGroupUUID = startupVolumeGroupUUID
         self.templateBundlePath = templateBundlePath
+        self.templateAgent = templateAgent
     }
 
     func validate(for plan: PommeProvisioningPlan) throws {
@@ -117,6 +125,9 @@ struct PommeProvisioningInput: Codable, Sendable {
             guard !templateBundlePath.isEmpty,
                   URL(fileURLWithPath: templateBundlePath).standardizedFileURL.path == templateBundlePath
             else { throw PommeProvisioningError.invalidPlan }
+        }
+        if let templateAgent {
+            guard templateBundlePath != nil, templateAgent.isValid else { throw PommeProvisioningError.invalidPlan }
         }
         guard schema == Self.schema,
               URL(fileURLWithPath: restoreImagePath).standardizedFileURL.path == restoreImagePath,
@@ -392,9 +403,12 @@ struct PommeCore {
             hostMajor: ProcessInfo.processInfo.operatingSystemVersion.majorVersion, apiAvailable: true)
     }
 
-    static func provisioningDisclosure(virtualization: Bool) -> [String: String] {
+    /// `templateAgent` describes a Recovery-route clone of a provisioned
+    /// template whose agent credential was kept: its agent comes from the
+    /// template, in normal macOS, and not from a Recovery installation.
+    static func provisioningDisclosure(virtualization: Bool, templateAgent: Bool = false) -> [String: String] {
         var fields = ["guestProvisioning": virtualization ? "virtualization" : "recovery",
-                      "agentInstallMethod": virtualization ? "ssh-bootstrap" : "recovery",
+                      "agentInstallMethod": virtualization ? "ssh-bootstrap" : templateAgent ? "template" : "recovery",
                       "automaticLogin": virtualization ? "enabled" : "legacy",
                       "remoteLogin": virtualization ? "off" : "legacy"]
         if virtualization { fields["account"] = "pomme" }
@@ -414,9 +428,26 @@ struct PommeCore {
 
     private static func provisioningDisclosure(bundle: BundleLayout) throws -> [String: String] {
         guard try provisioningSchemaIfPresent(bundle: bundle) == 2 else {
-            return provisioningDisclosure(virtualization: false)
+            return provisioningDisclosure(virtualization: false, templateAgent: installsTemplateAgent(bundle: bundle))
         }
         return try provisioningDisclosure(journal: loadProvisioningV2(reference: .init(name: nil, bundle: bundle)))
+    }
+
+    /// Whether the agent of a Recovery-route VM comes from its template: the
+    /// plan says so, unless a later installation went through Recovery
+    /// instead, for example after the template's credential was deleted.
+    private static func installsTemplateAgent(bundle: BundleLayout) -> Bool {
+        let root = provisioningRoot(bundle: bundle)
+        if let data = try? PommeSSHBootstrap.privateRead(
+               root.appendingPathComponent(PommeAgentInstallDispatch.fileName),
+               owner: geteuid(), allowedModes: [0o600]),
+           let dispatch = try? JSONDecoder().decode(PommeAgentInstallDispatch.self, from: data) {
+            return dispatch.method == .template
+        }
+        guard let data = try? Data(contentsOf: provisioningInputURL(bundle: bundle)),
+              let input = try? JSONDecoder().decode(PommeProvisioningInput.self, from: data)
+        else { return false }
+        return input.templateAgent != nil
     }
 
     private static func discloseProvisioningState(_ payload: inout [String: Any], bundle: BundleLayout) throws {
@@ -543,7 +574,12 @@ struct PommeCore {
                 },
                 persistentAgentSecret: { reference in
                     let plan = try loadOwnedProvisioningPlan(reference: reference)
-                    return try existingProvisioningAgentCredential(for: plan)
+                    let credential = try existingProvisioningAgentCredential(for: plan)
+                    // From here the guest may install an agent that holds this
+                    // credential even if the session fails afterward, for
+                    // example while Recovery cleans up.
+                    recordAgentInstallDispatch(plan: plan, method: .recovery)
+                    return credential
                 },
                 resolveInstallMode: { reference, payload in
                     let requested = try JSONDecoder().decode(PommeProvisioningPlan.self, from: payload)
@@ -2481,7 +2517,10 @@ struct PommeCore {
                 "journal": (preparation.virtualization ? provisioningV2JournalURL(bundle: reference.bundle) : provisioningJournalURL(bundle: reference.bundle)).path
             ]
         ]
-        payload.merge(provisioningDisclosure(virtualization: preparation.virtualization)) { _, new in new }
+        payload.merge(provisioningDisclosure(
+            virtualization: preparation.virtualization,
+            templateAgent: !preparation.virtualization && installsTemplateAgent(bundle: reference.bundle)
+        )) { _, new in new }
         if let metadata = try? metadataPayload(bundle: reference.bundle) {
             payload["metadata"] = metadata
         }
@@ -2491,8 +2530,9 @@ struct PommeCore {
 
     /// Everything that distinguishes a fresh restore from a template clone.
     /// The plan built from it is identical in shape: a template-sourced VM
-    /// records the template's restore image digest and runs the same
-    /// Recovery bootstrap and verification phases.
+    /// records the template's restore image digest and runs the same phases.
+    /// Only the agent-installation phase differs for a provisioned template
+    /// that kept its agent credential: it runs in normal macOS.
     private struct ProvisioningSource {
         let version: String
         let build: String
@@ -2504,6 +2544,8 @@ struct PommeCore {
         let diskSizeBytes: UInt64
         let templateBundlePath: String?
         let firstBootEligible: Bool
+        /// The agent a provisioned template's clone gets in normal macOS.
+        var templateAgent: PommeTemplateAgentReference? = nil
     }
 
     /// - Parameters:
@@ -2571,7 +2613,8 @@ struct PommeCore {
             requirements: nil,
             diskSizeBytes: manifest.diskSizeBytes,
             templateBundlePath: bundle.rootURL.standardizedFileURL.path,
-            firstBootEligible: !manifest.isProvisioned
+            firstBootEligible: !manifest.isProvisioned,
+            templateAgent: manifest.adoptableAgent
         )
     }
 
@@ -2614,7 +2657,10 @@ struct PommeCore {
         let version = source.version
         let build = source.build
         let profileDescriptor = source.profileDescriptor
-        if profileDescriptor.qualification == .experimental {
+        // A clone that gets its template's agent in normal macOS plans no
+        // Recovery navigation, so the experimental-profile warning would
+        // describe a step that doesn't run.
+        if profileDescriptor.qualification == .experimental, source.templateAgent == nil {
             warning(
                 "Warning: Recovery support for macOS \(version) (\(build)) is experimental. Creation will attempt the observed-screen navigation and stop if it does not match.",
                 vmName: vmName
@@ -2668,7 +2714,8 @@ struct PommeCore {
             hardwareModelData: source.hardwareModelData,
             machineIdentifierData: machineIdentifierData,
             agentCredentialAccount: PommeProvisioningCredentialReference.agentAccount,
-            templateBundlePath: source.templateBundlePath
+            templateBundlePath: source.templateBundlePath,
+            templateAgent: source.templateAgent
         )
         try input.validate(for: plan)
         let signer = try provisioningSigner(bundleURL: reference.bundle.rootURL)
@@ -2692,7 +2739,10 @@ struct PommeCore {
             installRecoveryAgent: { plan in try await installRecoveryAgent(plan) },
             verifyNormalAgent: { plan in try await verifyNormalAgent(plan) },
             restoreFinalState: { plan in try await restoreProvisioningFinalState(plan) },
-            recoveryRepair: { plan, state in try await repairProvisioningAgent(plan, finalState: state) }
+            recoveryRepair: { plan, state in try await repairProvisioningAgent(plan, finalState: state) },
+            adoptTemplateAgent: { plan in try await adoptTemplateAgent(plan) },
+            probeInstalledAgent: { plan in try await probeInstalledNormalAgent(plan) },
+            repairInNormalBoot: { plan, state in try await repairAgentInNormalBoot(plan, finalState: state) }
         )
     }
 
@@ -3731,6 +3781,55 @@ struct PommeCore {
         )
     }
 
+    /// The credential the VM helper offers this VM's persistent agent: only
+    /// its own, except while a template adoption lease is held, when the
+    /// template's is offered in turn too. The agent cloned from a provisioned
+    /// template authenticates with the template's credential until the
+    /// adoption gives it this VM's own.
+    private static func normalAgentCredential(
+        for plan: PommeProvisioningPlan,
+        rotation: PommeAgentCredentialRotation
+    ) throws -> String {
+        let own = try existingProvisioningAgentCredential(for: plan)
+        guard let template = try? leasedTemplateAgentCredential(for: plan) else { return own }
+        return rotation.next([own, template]) ?? own
+    }
+
+    private static func leasedTemplateAgentCredential(for plan: PommeProvisioningPlan) throws -> String? {
+        guard let template = try loadProvisioningInput(for: plan).templateAgent,
+              let lease = try templateAdoptionLease(for: plan),
+              lease.matches(plan, template: template)
+        else { return nil }
+        return try provisioningCredentialQueue.sync {
+            try PommeTemplateAgentCredentialStore().read(credentialID: template.credentialID)
+        }
+    }
+
+    /// Copies the persistent-agent credential of a VM that a provisioned
+    /// template is captured from into the template-scoped item
+    /// `credentialID`. The secret never leaves this function.
+    static func retainTemplateAgentCredential(from plan: PommeProvisioningPlan, credentialID: UUID) throws {
+        try plan.validate()
+        try provisioningCredentialQueue.sync {
+            let credential = try PommeAgentCredentialStore().read(
+                vmUUID: plan.vm.uuid, account: PommeProvisioningCredentialReference.agentAccount)
+            try PommeTemplateAgentCredentialStore().retain(credential, credentialID: credentialID)
+        }
+    }
+
+    /// Only a missing item is false. A locked or denied Keychain is an error,
+    /// so the user can unlock it and resume instead of paying for Recovery.
+    private static func templateAgentCredentialExists(_ template: PommeTemplateAgentReference) throws -> Bool {
+        do {
+            _ = try provisioningCredentialQueue.sync {
+                try PommeTemplateAgentCredentialStore().read(credentialID: template.credentialID)
+            }
+            return true
+        } catch PommeAgentCredentialStore.Error.credentialMissing {
+            return false
+        }
+    }
+
     /// Remove exactly one UUID-scoped persistent-agent credential. Not-found is
     /// an idempotent cleanup success; every other OSStatus is surfaced.
     static func removeProvisioningAgentCredential(for plan: PommeProvisioningPlan) throws {
@@ -3776,6 +3875,90 @@ struct PommeCore {
 
     static func provisioningV2JournalURL(bundle: BundleLayout) -> URL {
         provisioningRoot(bundle: bundle).appendingPathComponent("provisioning-v2.json")
+    }
+
+    // MARK: Agent-installation evidence and the template adoption lease
+
+    private static func agentInstallDispatchURL(bundle: BundleLayout) -> URL {
+        provisioningRoot(bundle: bundle).appendingPathComponent(PommeAgentInstallDispatch.fileName)
+    }
+
+    private static func templateAdoptionLeaseURL(bundle: BundleLayout) -> URL {
+        provisioningRoot(bundle: bundle).appendingPathComponent(PommeTemplateAdoptionLease.fileName)
+    }
+
+    /// Reads an optional owner-only record. Absent is nil; anything else
+    /// that can't be read is an error.
+    private static func readOptionalPrivateRecord<Record: Decodable>(_ type: Record.Type, at url: URL) throws -> Record? {
+        var info = stat()
+        if lstat(url.path, &info) != 0 {
+            guard errno == ENOENT else { throw PommeProvisioningError.integrityFailure }
+            return nil
+        }
+        let data = try PommeSSHBootstrap.privateRead(url, owner: geteuid(), allowedModes: [0o600])
+        return try JSONDecoder().decode(Record.self, from: data)
+    }
+
+    private static func agentInstallDispatch(for plan: PommeProvisioningPlan) -> PommeAgentInstallDispatch? {
+        let bundle = provisioningReference(for: plan).bundle
+        guard let record = try? readOptionalPrivateRecord(
+                PommeAgentInstallDispatch.self, at: agentInstallDispatchURL(bundle: bundle)),
+              record.matches(plan)
+        else { return nil }
+        return record
+    }
+
+    /// Records that this VM's credential is about to reach the guest in the
+    /// pending agent-installation attempt. The record only lets a later
+    /// repair or resume check normal macOS before Recovery, so a failure to
+    /// write it is logged, not fatal.
+    private static func recordAgentInstallDispatch(plan: PommeProvisioningPlan, method: PommeAgentInstallDispatch.Method) {
+        do {
+            let bundle = provisioningReference(for: plan).bundle
+            let journal = try provisioningRepository(
+                bundleURL: bundle.rootURL, signer: PommeProvisioningJournalSigner(key: provisioningKey(bundle: bundle))
+            ).load()
+            guard journal.plan == plan, let pending = journal.events.last, pending.kind == .intent,
+                  pending.phase == .installRecoveryAgent else { return }
+            let record = agentInstallDispatch(for: plan)?.dispatched(method: method, attempt: pending.attempt)
+                ?? .init(vmUUID: plan.vm.uuid, planDigest: plan.digest, method: method, attempt: pending.attempt)
+            try writePrivate(try PommeProvisioningCoding.encode(record), to: agentInstallDispatchURL(bundle: bundle))
+        } catch {
+            log("Pomme couldn't record the agent installation attempt [code=\(PommeErrorReport(error).code.rawValue)].",
+                vmName: plan.vm.name)
+        }
+    }
+
+    /// A failed normal-boot check is recorded so the same dispatch isn't
+    /// checked again before the next Recovery installation.
+    private static func recordAgentInstallProbe(_ dispatch: PommeAgentInstallDispatch, plan: PommeProvisioningPlan) {
+        let bundle = provisioningReference(for: plan).bundle
+        try? writePrivate(try PommeProvisioningCoding.encode(dispatch.probed()), to: agentInstallDispatchURL(bundle: bundle))
+    }
+
+    private static func templateAdoptionLease(for plan: PommeProvisioningPlan) throws -> PommeTemplateAdoptionLease? {
+        try readOptionalPrivateRecord(
+            PommeTemplateAdoptionLease.self,
+            at: templateAdoptionLeaseURL(bundle: provisioningReference(for: plan).bundle))
+    }
+
+    private static func writeTemplateAdoptionLease(
+        _ plan: PommeProvisioningPlan, template: PommeTemplateAgentReference
+    ) throws {
+        let lease = PommeTemplateAdoptionLease(
+            vmUUID: plan.vm.uuid, planDigest: plan.digest, credentialID: template.credentialID)
+        try writePrivate(try PommeProvisioningCoding.encode(lease),
+                         to: templateAdoptionLeaseURL(bundle: provisioningReference(for: plan).bundle))
+    }
+
+    /// Withdraws the template's credential from the VM helper. Returns true
+    /// when a lease was present.
+    @discardableResult
+    private static func removeTemplateAdoptionLease(_ plan: PommeProvisioningPlan) throws -> Bool {
+        let url = templateAdoptionLeaseURL(bundle: provisioningReference(for: plan).bundle)
+        if unlink(url.path) == 0 { return true }
+        guard errno == ENOENT else { throw PommeProvisioningError.integrityFailure }
+        return false
     }
 
     static func provisioningSchemaIfPresent(bundle: BundleLayout) throws -> Int? {
@@ -4254,6 +4437,9 @@ struct PommeCore {
         guard let adapter = currentProvisioningRecoveryAdapter() else {
             throw PommeProvisioningError.unavailableIntegration("request-bound Recovery agent installation")
         }
+        // The Recovery installation replaces whatever credential the guest
+        // holds, so the template's must not stay acceptable.
+        try removeTemplateAdoptionLease(plan)
         // The Recovery installer receives this credential through the
         // request-bound application adapter. Ensure it exists before entering
         // Recovery, but never copy it into the plan, journal, or staging
@@ -4275,28 +4461,289 @@ struct PommeCore {
         PommeProgressContext.sink?.step(vm: plan.vm.name, "Verifying Pomme agent")
         try await stopRetainedRuntime(for: plan.vm.bundlePath)
         let reference = provisioningReference(for: plan)
-        let deadline = Date().addingTimeInterval(Constants.defaultRecoveryAgentTimeout)
-        _ = try startRuntimeInBackground(
-            reference: reference,
-            bootMode: .normal,
-            timeout: Constants.defaultRecoveryAgentTimeout
-        )
+        guard try await provePinnedNormalAgent(plan, timeout: Constants.defaultRecoveryAgentTimeout) else {
+            throw PommeProvisioningError.phaseFailed(.verifyNormalAgent)
+        }
+        return try receiptDigest("verify-normal-agent", plan: plan, bundle: reference.bundle)
+    }
+
+    /// The exact proof that verification requires: the helper's persistent
+    /// agent session is connected and reports the plan's pinned digest,
+    /// protocol, and capabilities.
+    static func provesPinnedNormalAgent(_ status: PommeAgentClosedStatus, plan: PommeProvisioningPlan) -> Bool {
+        status.connection == .connected
+            && status.role == .normal
+            && status.protocolVersion == plan.normalAgent.protocolVersion
+            && status.executableDigest == plan.normalAgent.executableDigest
+            && supportsProvisioningAgentCapabilities(status.capabilities)
+    }
+
+    /// Starts normal macOS through the VM helper, or keeps a normal boot that
+    /// is already running, and waits up to `timeout` for the pinned agent.
+    private static func provePinnedNormalAgent(_ plan: PommeProvisioningPlan, timeout: TimeInterval) async throws -> Bool {
+        let reference = provisioningReference(for: plan)
+        let deadline = Date().addingTimeInterval(timeout)
+        _ = try startRuntimeInBackground(reference: reference, bootMode: .normal, timeout: timeout)
         while true {
-            let status = try await provisioningAgentStatus(name: plan.vm.name)
-            if status.connection == .connected,
-               status.role == .normal,
-               status.protocolVersion == plan.normalAgent.protocolVersion,
-               status.executableDigest == plan.normalAgent.executableDigest,
-               supportsProvisioningAgentCapabilities(status.capabilities) {
-                break
+            if provesPinnedNormalAgent(try await provisioningAgentStatus(name: plan.vm.name), plan: plan) {
+                return true
             }
-            guard Date() < deadline else {
-                throw PommeProvisioningError.phaseFailed(.verifyNormalAgent)
-            }
+            guard Date() < deadline else { return false }
             try Task.checkCancellation()
             try await Task.sleep(nanoseconds: 250_000_000)
         }
-        return try receiptDigest("verify-normal-agent", plan: plan, bundle: reference.bundle)
+    }
+
+    /// How long a check of normal macOS waits for an agent that an earlier
+    /// installation might have left, before Pomme uses Recovery instead. A
+    /// persistent agent is a LaunchDaemon and connects well before login.
+    static let installedAgentProbeTimeout: TimeInterval = 150
+
+    /// `create --resume` and `agent repair` call this before a Recovery
+    /// installation. When an earlier attempt handed this VM's credential to
+    /// the guest, the guest might already run the pinned agent, for example
+    /// when only Recovery's cleanup failed after the installation. A normal
+    /// boot then proves it in a fraction of a Recovery session's time.
+    ///
+    /// Only this VM's own credential can prove the agent here: any lease that
+    /// an interrupted adoption left is withdrawn first, and a helper that
+    /// might still hold a session from under that lease is stopped, so the
+    /// proof comes from a session authenticated after this point. Returns nil,
+    /// with the VM stopped by the framework stop that a following Recovery
+    /// boot requires, when there's no such evidence or the agent doesn't
+    /// prove itself. A proven agent's normal boot is kept for verification.
+    private static func probeInstalledNormalAgent(_ plan: PommeProvisioningPlan) async throws -> String? {
+        guard let dispatch = agentInstallDispatch(for: plan), dispatch.awaitsProbe else { return nil }
+        let reference = provisioningReference(for: plan)
+        PommeProgressContext.sink?.step(vm: plan.vm.name, "Checking for an installed Pomme agent")
+        log("checking normal macOS for the agent that installation attempt \(dispatch.attempt) sent before using Recovery.",
+            vmName: plan.vm.name)
+        try await stopRetainedRuntime(for: plan.vm.bundlePath)
+        return try await PommeInstalledAgentProbe(
+            withdrawLease: { try removeTemplateAdoptionLease(plan) },
+            // A running helper may hold a session that the template's
+            // credential authenticated, so the proof always starts from a
+            // fresh boot. The framework stop is what a following Recovery
+            // boot requires.
+            stopHelper: { try await stopHelperForcingIfNeeded(reference: reference) },
+            prove: { try await provePinnedNormalAgent(plan, timeout: installedAgentProbeTimeout) },
+            recordVolumeGroup: {
+                // A Recovery installation that failed after the guest step,
+                // for example in cleanup, never recorded the startup volume
+                // group that security workflows and MDM enrollment bind to.
+                let recorded = try provisioningRuntimeMetadata(for: plan).startupVolumeGroupUUID
+                let group = try await observeStartupVolumeGroup(
+                    reference: reference, expected: recorded, vmName: plan.vm.name)
+                try persistProvisioningStartupVolumeGroup(group, for: plan)
+            },
+            markProbed: { recordAgentInstallProbe(dispatch, plan: plan) },
+            receipt: { try receiptDigest("probe-installed-agent", plan: plan, bundle: reference.bundle) },
+            log: { log($0, vmName: plan.vm.name) }
+        ).run()
+    }
+
+    /// Stops the VM helper with the framework stop, which a following
+    /// Recovery boot requires, and forces the stop when that fails, so no
+    /// agent session survives it.
+    private static func stopHelperForcingIfNeeded(reference: VMReference) async throws {
+        do {
+            try await stopForLiveRecovery(reference: reference, allowAgentShutdown: false)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            log("the VM helper didn't stop gracefully [code=\(PommeErrorReport(error).code.rawValue)]; forcing it.",
+                vmName: reference.displayName)
+            do {
+                _ = try sendControlObject(["command": PommeLifecycleCommand.forceStop.rawValue], bundle: reference.bundle)
+            } catch RunnerError.noRunningVM {
+                return
+            }
+            let deadline = Date().addingTimeInterval(Constants.gracefulStopTimeoutSeconds)
+            while (try? runtimeRecord(for: reference.bundle)) != nil {
+                guard Date() < deadline else {
+                    throw RunnerError.virtualMachineState("The Pomme VM helper didn't stop.")
+                }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+    }
+
+    /// Installs the agent of a VM cloned from a provisioned template in normal
+    /// macOS, without Recovery. Returns nil when the VM isn't such a clone, or
+    /// the template's credential is gone, and the Recovery installation runs
+    /// instead.
+    ///
+    /// The clone's disk already holds the agent that this host installed in
+    /// the VM the template was captured from, and the template kept that
+    /// agent's credential. The adoption authenticates that agent, replaces it
+    /// with the plan's pinned, signed build, and installs this VM's own
+    /// credential in the same guest transaction, so the template's credential
+    /// stops working in the clone. It then stops the VM, and the verification
+    /// phase boots it again from the persisted installation with only this
+    /// VM's credential acceptable.
+    ///
+    /// Every step can repeat after a crash. This VM's credential is durable in
+    /// the Keychain before the guest can receive it, and the helper accepts
+    /// either credential while the lease is held, so a resumed attempt
+    /// authenticates whichever one the guest holds and reinstalls the same
+    /// bytes.
+    private static func adoptTemplateAgent(_ plan: PommeProvisioningPlan) async throws -> String? {
+        guard let template = try loadProvisioningInput(for: plan).templateAgent else { return nil }
+        let reference = provisioningReference(for: plan)
+        try await stopRetainedRuntime(for: plan.vm.bundlePath)
+        let prepared = PreparedTemplateAdoption()
+        return try await PommeTemplateAdoptionRun(
+            credentialExists: { try templateAgentCredentialExists(template) },
+            withdrawLease: { try removeTemplateAdoptionLease(plan) },
+            stopHelper: { try await stopHelperForcingIfNeeded(reference: reference) },
+            prepare: {
+                // This VM's credential is durable before the guest can
+                // receive it.
+                prepared.set(credential: try provisioningAgentCredential(for: plan),
+                             artifact: try pinnedNormalAgentArtifact(for: plan))
+            },
+            writeLease: { try writeTemplateAdoptionLease(plan, template: template) },
+            install: {
+                PommeProgressContext.sink?.step(vm: plan.vm.name, "Installing the Pomme agent in normal macOS")
+                guard let values = prepared.values else { throw PommeProvisioningError.invalidPlan }
+                try await installTemplateAgent(
+                    plan, template: template, reference: reference, credential: values.0, artifact: values.1)
+            },
+            // The installed agent is the plan's pin, so an update record
+            // that superseded it would be stale.
+            recordInstalled: {
+                try recordNormalAgentUpdate(plan: plan, previousDigest: plan.normalAgent.executableDigest,
+                                            digest: plan.normalAgent.executableDigest)
+            },
+            shutDown: { try await restoreStableVMRunState(.stopped, reference: reference) },
+            receipt: {
+                log("installed the pinned Pomme agent with its own credential in normal macOS.", vmName: plan.vm.name)
+                return try receiptDigest("adopt-template-agent", plan: plan, bundle: reference.bundle)
+            },
+            warn: { warning($0, vmName: plan.vm.name) }
+        ).run()
+    }
+
+    /// Holds the adoption's prepared credential and artifact between steps.
+    private final class PreparedTemplateAdoption: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: (String, URL)?
+        func set(credential: String, artifact: URL) { lock.withLock { stored = (credential, artifact) } }
+        var values: (String, URL)? { lock.withLock { stored } }
+    }
+
+    /// The adoption's guest steps, run while the lease admits the template's
+    /// credential. `PommeTemplateAdoptionRun` removes the lease and stops the
+    /// helper when any of them fails.
+    private static func installTemplateAgent(
+        _ plan: PommeProvisioningPlan, template: PommeTemplateAgentReference,
+        reference: VMReference, credential: String, artifact: URL
+    ) async throws {
+        if (try? stableVMRunState(reference: reference)) == .running(.recovery) {
+            try await stopForLiveRecovery(reference: reference, allowAgentShutdown: false)
+        }
+        _ = try startRuntimeInBackground(
+            reference: reference, bootMode: .normal, timeout: Constants.defaultRecoveryAgentTimeout)
+        let deadline = Date().addingTimeInterval(Constants.defaultRecoveryAgentTimeout)
+        var status = try await provisioningAgentStatus(name: plan.vm.name)
+        while status.connection != .connected || status.role != .normal {
+            guard Date() < deadline else { throw PommeTemplateAgentAdoptionError.agentUnavailable(vmName: plan.vm.name) }
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: 250_000_000)
+            status = try await provisioningAgentStatus(name: plan.vm.name)
+        }
+        guard [template.executableDigest, plan.normalAgent.executableDigest].contains(status.executableDigest) else {
+            throw PommeTemplateAgentAdoptionError.unexpectedAgent(vmName: plan.vm.name)
+        }
+        guard PommeTemplateAgentAdoption.accepts(
+            digest: status.executableDigest, capabilities: status.capabilities, template: template, plan: plan
+        ) else { throw PommeTemplateAgentAdoptionError.unsupportedAgent(vmName: plan.vm.name) }
+
+        // Security workflows and MDM enrollment bind to the startup volume
+        // group, which a Recovery installation would otherwise record.
+        let group = try await observeStartupVolumeGroup(
+            reference: reference, expected: template.startupVolumeGroupUUID, vmName: plan.vm.name)
+        try persistProvisioningStartupVolumeGroup(group, for: plan)
+
+        recordAgentInstallDispatch(plan: plan, method: .template)
+        try await PommeApplication.installStagedAgent(
+            reference: reference, executable: artifact,
+            sha256: plan.normalAgent.executableDigest, replacementCredential: credential)
+        // The guest now holds only this VM's credential; the run withdraws
+        // the template's before anything can reconnect with it.
+    }
+
+    /// `agent repair` in normal macOS: the template adoption when it applies,
+    /// otherwise the check for an agent that an earlier attempt installed.
+    /// Either proves the pinned agent in normal macOS before the requested
+    /// final state is restored. Returns nil when neither applies and the
+    /// Recovery repair runs instead.
+    private static func repairAgentInNormalBoot(
+        _ plan: PommeProvisioningPlan,
+        finalState: PommeProvisioningFinalState
+    ) async throws -> String? {
+        let installation: String
+        let verification: String
+        if let adopted = try await adoptTemplateAgent(plan) {
+            installation = adopted
+            verification = try await verifyNormalAgent(plan)
+        } else if let probed = try await probeInstalledNormalAgent(plan) {
+            installation = probed
+            verification = try await verifyNormalAgent(plan)
+        } else {
+            return nil
+        }
+        // The proven agent is the creation pin; drop any superseding
+        // `pomme agent update` record, as the Recovery repair does.
+        try recordNormalAgentUpdate(plan: plan, previousDigest: plan.normalAgent.executableDigest,
+                                    digest: plan.normalAgent.executableDigest)
+        let receipt = PommeProvisioningDigest.sha256(Data((installation + verification).utf8))
+        do {
+            _ = try await restoreProvisioningState(plan, finalState: finalState)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // The agent is installed and verified; only the final state
+            // failed, which a Recovery reinstall wouldn't fix.
+            throw PommeAgentRepairFinalStateFailure(receipt: receipt, cause: error)
+        }
+        return receipt
+    }
+
+    /// The plan's pinned agent executable: this executable when it is the
+    /// pin, otherwise the copy that the artifact store retained for it.
+    private static func pinnedNormalAgentArtifact(for plan: PommeProvisioningPlan) throws -> URL {
+        let digest = plan.normalAgent.executableDigest
+        let identity = try runningExecutableIdentity()
+        let url: URL
+        if identity.sha256 == digest {
+            url = identity.url
+        } else {
+            url = try PommeAgentArtifactStore(rootURL: applicationSupportRoot(create: false)).resolve(sha256: digest)
+        }
+        try PommeAgentArtifactStore.Dependencies().verifyCodeSignature(url)
+        return url
+    }
+
+    /// Reads the guest's startup volume group in normal macOS through the
+    /// authenticated agent, and requires `expected` when there is one.
+    private static func observeStartupVolumeGroup(
+        reference: VMReference, expected: UUID?, vmName: String
+    ) async throws -> UUID {
+        func diskutil(_ arguments: [String]) async throws -> Data {
+            let result = try await PommeApplication.runMDMGuestProcess(
+                reference: reference, path: "/usr/sbin/diskutil", arguments: arguments, timeout: 60)
+            guard result.exitedSuccessfully, result.exitCode == 0 else {
+                throw PommeTemplateAgentAdoptionError.startupVolumeMismatch(vmName: vmName)
+            }
+            return result.stdout
+        }
+        let groups = try await diskutil(["apfs", "listVolumeGroups", "-plist"])
+        let root = try await diskutil(["info", "-plist", "/"])
+        guard let group = PommeTemplateAgentAdoption.startupVolumeGroup(
+            volumeGroups: groups, rootInfo: root, expected: expected
+        ) else { throw PommeTemplateAgentAdoptionError.startupVolumeMismatch(vmName: vmName) }
+        return group
     }
 
     private static func provisioningReference(for plan: PommeProvisioningPlan) -> VMReference {
@@ -4378,12 +4825,32 @@ struct PommeCore {
         finalState: PommeProvisioningFinalState
     ) async throws -> String {
         PommeProgressContext.sink?.step(vm: plan.vm.name, "Repairing Pomme agent")
-        // A repair is deliberately Recovery-only.  The adapter constructs a
-        // request-bound PommeRecoverySession; no normal agent is accepted as
-        // a repair authority.
+        // This repair is Recovery-only. The adapter constructs a request-bound
+        // PommeRecoverySession; no normal agent is accepted as a repair
+        // authority, because the agent being repaired is one that failed or
+        // that Pomme can't vouch for, and an agent can't be trusted to install
+        // its own replacement.
+        //
+        // `repairAgentInNormalBoot`, which `agent repair` tries first, doesn't
+        // contradict this. Its check of an earlier installation proves only
+        // what the host already authorized: the session must authenticate
+        // with this VM's own credential, which only this host and a Pomme
+        // installation that it ran ever held, and report the plan's pinned
+        // digest. Its template adoption trusts the agent that a clone carries
+        // only because this host installed that agent in the VM it captured
+        // the template from, the template's credential never left this host's
+        // Keychain, and the clone's disk is a copy of that capture. Even then
+        // the adopted agent installs nothing of its own choosing: the host
+        // uploads the pinned, signed build and a new credential, and a fresh
+        // boot verifies them. Guest root can impersonate any installed agent
+        // at any time, so neither path weakens what a Recovery installation
+        // proves after the guest has booted.
         guard let adapter = currentProvisioningRecoveryAdapter() else {
             throw PommeProvisioningError.unavailableIntegration("authenticated Recovery agent repair")
         }
+        // The Recovery installation replaces whatever credential the guest
+        // holds, so the template's must not stay acceptable.
+        try removeTemplateAdoptionLease(plan)
         let primary: Result<String, Error>
         do {
             // Installation ends stopped so normal-agent verification cannot be
@@ -4458,6 +4925,7 @@ struct PommeCore {
                 guard let socketDevice = queue.sync(execute: { vm.socketDevices.first as? VZVirtioSocketDevice }) else {
                     throw RunnerError.hostCommandFailed("Pomme could not attach the VM agent socket.")
                 }
+                let rotation = PommeAgentCredentialRotation()
                 let provider = PommeAgentVSOCKCoordinator(
                     socketDevice: socketDevice,
                     queue: queue,
@@ -4465,7 +4933,7 @@ struct PommeCore {
                         if let terminalAdmissionState {
                             return try terminalAdmissionState.secret(for: role)
                         }
-                        return try existingProvisioningAgentCredential(for: plan)
+                        return try normalAgentCredential(for: plan, rotation: rotation)
                     },
                     bindingProvider: { role in
                         if let terminalAdmissionState {
@@ -6189,7 +6657,9 @@ struct PommeCore {
             ],
             "hostExitCode": 0
         ]
-        payload.merge(provisioningDisclosure(virtualization: false)) { _, new in new }
+        payload.merge(provisioningDisclosure(
+            virtualization: false, templateAgent: installsTemplateAgent(bundle: reference.bundle)
+        )) { _, new in new }
         PommeProgressContext.sink?.complete(vm: name)
         return PommeOperationResult(
             title: "Resume Create",
@@ -6280,64 +6750,23 @@ struct PommeCore {
             state = try capturedProvisioningFinalState(reference: reference)
         }
 
-        // Repair is an external Recovery effect too: journal its intent before
-        // starting it, then reconcile the failed phase with a receipt on
-        // success. This makes a subsequent resume continue with verification
-        // instead of repeating agent installation.
-        let intent = try PommeProvisioningCoordinator.appendingIntent(
-            to: journal,
-            phase: next.phase,
-            attempt: next.attempt,
-            signer: signer
-        )
-        try repository.commit(intent, replacing: journal.generation)
-        do {
-            let receipt = try await effects.recoveryRepair(intent.plan, state)
-            guard PommeProvisioningDigest.isSHA256(receipt) else {
-                throw PommeProvisioningError.phaseFailed(.installRecoveryAgent)
-            }
-            let completed = try PommeProvisioningCoordinator.appendingResult(
-                to: intent,
-                kind: .receipt,
-                phase: next.phase,
-                attempt: next.attempt,
-                receiptDigest: receipt,
-                signer: signer
-            )
-            try repository.commit(completed, replacing: intent.generation)
-        } catch {
-            // Repair reports the same redacted failure code the orchestrator
-            // logs, so the command that exists to diagnose a retained journal
-            // does not say strictly less than `create --resume` about the same
-            // failure.
-            warning(
-                "provisioning phase \(next.phase.rawValue) failed "
-                    + "[code=\(PommeProvisioningFailureDiagnostic.code(for: error))].",
-                vmName: intent.plan.vm.name
-            )
-            let digest = PommeProvisioningDigest.sha256(Data(String(describing: error).utf8))
-            let failed = try PommeProvisioningCoordinator.appendingResult(
-                to: intent,
-                kind: .failure,
-                phase: next.phase,
-                attempt: next.attempt,
-                receiptDigest: digest,
-                signer: signer
-            )
-            try repository.commit(failed, replacing: intent.generation)
-            throw PommeProvisioningError.phaseFailed(
-                next.phase,
-                vmName: intent.plan.vm.name,
-                cause: PommeProvisioningError.phaseCause(of: error)
-            )
-        }
+        // Repair is an external effect too: the orchestrator journals its
+        // intent before starting it, then reconciles the failed phase, and
+        // the verification that the repair already performed, with receipts
+        // on success. A subsequent resume continues with the final state
+        // instead of repeating agent installation or verification.
+        let route = try await PommeProvisioningOrchestrator(
+            signer: signer, repository: repository, effects: effects
+        ).repairAgentInstallation(from: journal, phase: next, finalState: state)
         let payload: [String: Any] = [
             "ok": true,
             "operation": "agent-repair",
             "name": name,
             "finalState": state.rawValue,
             "journalReconciled": true,
-            "role": PommeProvisioningAgentRole.recovery.rawValue,
+            "role": route == .recovery
+                ? PommeProvisioningAgentRole.recovery.rawValue
+                : PommeProvisioningAgentRole.normal.rawValue,
             "hostExitCode": 0
         ]
         return PommeOperationResult(
@@ -6345,7 +6774,9 @@ struct PommeCore {
             vmName: name,
             ok: true,
             hostExitCode: 0,
-            text: "OK repaired the Pomme agent through Recovery for \(name).",
+            text: route == .recovery
+                ? "OK repaired the Pomme agent through Recovery for \(name)."
+                : "OK repaired the Pomme agent in normal macOS for \(name).",
             payload: payload
         )
     }

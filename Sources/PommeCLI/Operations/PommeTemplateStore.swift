@@ -29,6 +29,12 @@ struct PommeTemplateManifest: Codable, Equatable, Sendable {
     /// owner-authenticated workflow without any security mutation. Every VM
     /// cloned from such a template inherits that posture.
     let provisionedSecurityDisabled: Bool?
+    /// Present when a provisioned capture kept the host credential of the
+    /// agent installed in its disk, so a VM cloned from it gets its agent in
+    /// normal macOS instead of through Recovery. Absent on installed-only
+    /// templates and on provisioned templates captured before Pomme kept the
+    /// credential; their clones install the agent through Recovery.
+    let retainedAgent: PommeTemplateAgentReference?
 
     init(
         name: String,
@@ -39,7 +45,8 @@ struct PommeTemplateManifest: Codable, Equatable, Sendable {
         diskSizeBytes: UInt64,
         createdAt: Date = Date(),
         provisionedOwnerAccount: String? = nil,
-        provisionedSecurityDisabled: Bool? = nil
+        provisionedSecurityDisabled: Bool? = nil,
+        retainedAgent: PommeTemplateAgentReference? = nil
     ) {
         schema = Self.schemaVersion
         self.name = name
@@ -51,9 +58,13 @@ struct PommeTemplateManifest: Codable, Equatable, Sendable {
         self.createdAt = createdAt
         self.provisionedOwnerAccount = provisionedOwnerAccount
         self.provisionedSecurityDisabled = provisionedSecurityDisabled
+        self.retainedAgent = retainedAgent
     }
 
     var isProvisioned: Bool { provisionedOwnerAccount != nil }
+    /// The agent a clone can get in normal macOS: only a provisioned
+    /// template's, and only when its credential was kept.
+    var adoptableAgent: PommeTemplateAgentReference? { isProvisioned ? retainedAgent : nil }
     /// True only for a capture taken with SIP disabled and the AMFI override
     /// active. Absent in manifests written before that was recorded.
     var isSecurityDisabled: Bool { provisionedSecurityDisabled == true }
@@ -64,7 +75,8 @@ struct PommeTemplateManifest: Codable, Equatable, Sendable {
               PommeProvisioningDigest.isSHA256(restoreImageDigest),
               diskSizeBytes > 0,
               provisionedOwnerAccount.map(
-                PommeGuestOwnerCredentialReader.isSafeAccount) ?? true
+                PommeGuestOwnerCredentialReader.isSafeAccount) ?? true,
+              retainedAgent.map({ $0.isValid && provisionedOwnerAccount != nil }) ?? true
         else { throw PommeTemplateError.invalidManifest }
     }
 }
@@ -78,10 +90,13 @@ enum PommeTemplateError: Error, Equatable, PommeDescribedError {
     /// Copying a template file into a VM bundle failed. `cause` keeps the
     /// file-system reason, such as a full disk.
     case cloneFailed(cause: PommeErrorReport)
+    /// A template being deleted has a manifest or pending-credential marker
+    /// that can't be read, so Pomme can't tell which Keychain item it owns.
+    case credentialUnresolved(String)
 
     var code: PommeErrorCode {
         switch self {
-        case .invalidManifest: .templateManifestInvalid
+        case .invalidManifest, .credentialUnresolved: .templateManifestInvalid
         case .notFound: .templateNotFound
         case .alreadyExists: .templateExists
         case .incompleteBundle: .templateIncomplete
@@ -109,6 +124,8 @@ enum PommeTemplateError: Error, Equatable, PommeDescribedError {
             return "The template disk is \(byteCountText(template)), and --disk-size asks for \(byteCountText(requested)). A VM cloned from a template keeps the template's disk size."
         case .cloneFailed(let cause):
             return "Cloning the template failed: \(PommeErrorDescriber.clause(for: cause))."
+        case .credentialUnresolved:
+            return "Pomme can't read the template's manifest, so it can't tell which agent credential the template kept in your login Keychain. The template wasn't deleted."
         }
     }
 
@@ -124,6 +141,8 @@ enum PommeTemplateError: Error, Equatable, PommeDescribedError {
             return "Omit --disk-size to use the template's size."
         case .cloneFailed(let cause):
             return cause.hint
+        case .credentialUnresolved(let path):
+            return "Restore the template's manifest and retry, or remove \(path) yourself and delete any Keychain Access item with the account `template-agent-token` that no template uses."
         }
     }
 }
@@ -193,13 +212,66 @@ enum PommeTemplateStore {
             .sorted { $0.name < $1.name }
     }
 
-    static func delete(name: String) throws -> URL {
+    /// Deletes the template and the agent credential kept for it. The
+    /// credential goes first: a template left without one still clones, with
+    /// the agent installed through Recovery, but a credential left without its
+    /// template could never be found again to delete.
+    static func delete(
+        name: String,
+        credentials: PommeTemplateAgentCredentialStore = .init()
+    ) throws -> URL {
         let bundle = try bundle(for: name)
         guard FileManager.default.fileExists(atPath: bundle.rootURL.path) else {
             throw PommeTemplateError.notFound(name)
         }
-        try FileManager.default.removeItem(at: bundle.rootURL)
+        try delete(bundle: bundle, credentials: credentials)
         return bundle.rootURL
+    }
+
+    static func delete(bundle: BundleLayout, credentials: PommeTemplateAgentCredentialStore) throws {
+        for credentialID in try keptCredentialIDs(in: bundle) {
+            try credentials.remove(credentialID: credentialID)
+        }
+        try FileManager.default.removeItem(at: bundle.rootURL)
+    }
+
+    /// Names the agent credential that a capture is about to keep, before
+    /// the Keychain item exists, so an interrupted capture can't orphan it.
+    static let pendingCredentialName = "AgentCredential.pending"
+
+    static func markPendingCredential(_ credentialID: UUID, in bundle: BundleLayout) throws {
+        try Data(credentialID.uuidString.lowercased().utf8)
+            .write(to: bundle.rootURL.appendingPathComponent(pendingCredentialName), options: .atomic)
+    }
+
+    static func clearPendingCredential(in bundle: BundleLayout) throws {
+        let url = bundle.rootURL.appendingPathComponent(pendingCredentialName)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        try FileManager.default.removeItem(at: url)
+    }
+
+    /// Every agent credential that a template being deleted may own: the
+    /// manifest's and a pending capture's. Deletion works on an incomplete
+    /// bundle too, so the image files aren't required, but it fails closed
+    /// when a manifest or marker exists that it can't read: deleting the
+    /// bundle then would orphan a Keychain item that nothing names.
+    static func keptCredentialIDs(in bundle: BundleLayout) throws -> [UUID] {
+        var identifiers: [UUID] = []
+        let manifestURL = manifestURL(for: bundle)
+        if FileManager.default.fileExists(atPath: manifestURL.path) {
+            guard let data = try? Data(contentsOf: manifestURL),
+                  let manifest = try? decoder().decode(PommeTemplateManifest.self, from: data)
+            else { throw PommeTemplateError.credentialUnresolved(bundle.rootURL.path) }
+            if let retained = manifest.retainedAgent { identifiers.append(retained.credentialID) }
+        }
+        let pendingURL = bundle.rootURL.appendingPathComponent(pendingCredentialName)
+        if FileManager.default.fileExists(atPath: pendingURL.path) {
+            guard let data = try? Data(contentsOf: pendingURL),
+                  let pending = UUID(uuidString: String(decoding: data, as: UTF8.self))
+            else { throw PommeTemplateError.credentialUnresolved(bundle.rootURL.path) }
+            if !identifiers.contains(pending) { identifiers.append(pending) }
+        }
+        return identifiers
     }
 
     /// Copy-on-write clone of one template file into a VM bundle. APFS

@@ -133,34 +133,7 @@ extension PommeApplication {
             throw PommeAgentUpdateError.activeWork(vmName: name, jobs: active.jobs, sessions: active.sessions)
         }
 
-        progress?.step(vm: name, "Copying Pomme agent")
-        let staged = PommeAgentInstall.updatePrefix + UUID().uuidString.lowercased()
-        let transfer = PommeGuestFileTransfer { operation, payload in
-            try performAuthenticatedAgentOperation(reference: reference, operation: operation, payload: payload)
-        }
-        let receipt = try transfer.copy(.init(source: .host(host.url), destination: .guest(staged)))
-        guard receipt.sha256 == host.sha256 else {
-            _ = try? await runMDMGuestProcess(reference: reference, path: "/bin/rm", arguments: ["-f", staged], timeout: 30)
-            throw PommeAgentUpdateError.transferMismatch
-        }
-
-        progress?.step(vm: name, "Installing Pomme agent")
-        let chmod = try await runMDMGuestProcess(reference: reference, path: "/bin/chmod",
-                                                 arguments: ["0500", staged], timeout: 30)
-        guard chmod.exited, chmod.exitCode == 0 else {
-            _ = try? await runMDMGuestProcess(reference: reference, path: "/bin/rm", arguments: ["-f", staged], timeout: 30)
-            throw PommeAgentUpdateError.applyFailed(detail: "The staged agent could not be made executable.")
-        }
-        let apply = try await runMDMGuestProcess(reference: reference, path: staged,
-            arguments: [PommeAgentUpdateApply.flag, staged, host.sha256], timeout: 120)
-        let output = String(decoding: apply.stdout, as: UTF8.self)
-        guard apply.exited, apply.exitCode == 0,
-              ["\(PommeAgentUpdateApply.Outcome.applied.rawValue) \(host.sha256)\n",
-               "\(PommeAgentUpdateApply.Outcome.alreadyApplied.rawValue) \(host.sha256)\n"].contains(output) else {
-            _ = try? await runMDMGuestProcess(reference: reference, path: "/bin/rm", arguments: ["-f", staged], timeout: 30)
-            throw PommeAgentUpdateError.applyFailed(
-                detail: "Update mode exited with status \(apply.exitCode.map(String.init) ?? "unknown").")
-        }
+        try await installStagedAgent(reference: reference, executable: host.url, sha256: host.sha256)
 
         progress?.step(vm: name, "Restarting Pomme agent")
         // The restart ends the agent that carries this request, so its reply
@@ -190,6 +163,61 @@ extension PommeApplication {
         try PommeCore.recordNormalAgentUpdate(plan: plan, previousDigest: current.digest, digest: host.sha256)
         return agentUpdateResult(name: name, reference: reference, previous: current.digest,
                                  digest: host.sha256, updated: true)
+    }
+
+    /// Copies `executable` into the guest's private agent directory through
+    /// the authenticated agent and runs it in update mode, which installs it
+    /// as the persistent agent in one recoverable guest transaction. The
+    /// running daemon isn't restarted.
+    ///
+    /// With `replacementCredential`, the same transaction also installs that
+    /// credential in place of the agent's current one. It reaches the guest
+    /// only on the update process's standard input, never in its arguments,
+    /// a file, or a log.
+    static func installStagedAgent(
+        reference: VMReference,
+        executable: URL,
+        sha256: String,
+        replacementCredential: String? = nil
+    ) async throws {
+        let progress = PommeProgressContext.sink
+        let name = reference.displayName
+        progress?.step(vm: reference.name, "Copying Pomme agent")
+        let staged = PommeAgentInstall.updatePrefix + UUID().uuidString.lowercased()
+        let transfer = PommeGuestFileTransfer { operation, payload in
+            try performAuthenticatedAgentOperation(reference: reference, operation: operation, payload: payload)
+        }
+        let receipt = try transfer.copy(.init(source: .host(executable), destination: .guest(staged)))
+        guard receipt.sha256 == sha256 else {
+            _ = try? await runMDMGuestProcess(reference: reference, path: "/bin/rm", arguments: ["-f", staged], timeout: 30)
+            throw PommeAgentUpdateError.transferMismatch
+        }
+
+        progress?.step(vm: reference.name, "Installing Pomme agent")
+        let chmod = try await runMDMGuestProcess(reference: reference, path: "/bin/chmod",
+                                                 arguments: ["0500", staged], timeout: 30)
+        guard chmod.exited, chmod.exitCode == 0 else {
+            _ = try? await runMDMGuestProcess(reference: reference, path: "/bin/rm", arguments: ["-f", staged], timeout: 30)
+            throw PommeAgentUpdateError.applyFailed(detail: "The staged agent could not be made executable.")
+        }
+        var arguments = [PommeAgentUpdateApply.flag, staged, sha256]
+        var input: Data?
+        if let replacementCredential {
+            arguments.append(PommeAgentUpdateApply.replaceCredentialFlag)
+            input = Data((try PommeAgentAuthentication.normalized(replacementCredential) + "\n").utf8)
+        }
+        let apply = try await runMDMGuestProcess(reference: reference, path: staged,
+            arguments: arguments, timeout: 120, standardInput: input)
+        let output = String(decoding: apply.stdout, as: UTF8.self)
+        guard apply.exited, apply.exitCode == 0,
+              ["\(PommeAgentUpdateApply.Outcome.applied.rawValue) \(sha256)\n",
+               "\(PommeAgentUpdateApply.Outcome.alreadyApplied.rawValue) \(sha256)\n"].contains(output) else {
+            _ = try? await runMDMGuestProcess(reference: reference, path: "/bin/rm", arguments: ["-f", staged], timeout: 30)
+            PommeCore.log("agent update mode exited with status \(apply.exitCode.map(String.init) ?? "unknown").",
+                          vmName: name)
+            throw PommeAgentUpdateError.applyFailed(
+                detail: "Update mode exited with status \(apply.exitCode.map(String.init) ?? "unknown").")
+        }
     }
 
     private static func activeAgentWork(

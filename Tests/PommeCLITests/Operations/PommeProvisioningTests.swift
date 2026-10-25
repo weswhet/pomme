@@ -497,6 +497,247 @@ struct PommeProvisioningTests {
         #expect(await calls.repairStates == [.normalRunning])
     }
 
+    @Test("a template clone installs its agent in normal macOS and never boots Recovery")
+    func templateAdoptionSkipsRecovery() async throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 21, count: 32))
+        let repository = MemoryRepository()
+        let calls = CallLog()
+        let orchestrator = PommeProvisioningOrchestrator(
+            signer: signer, repository: repository,
+            effects: routedEffects(calls: calls, adopt: true, probe: true))
+        try await orchestrator.start(plan())
+
+        let journal = try repository.load()
+        try signer.verify(journal)
+        #expect(journal.events.filter { $0.kind == .receipt }.map(\.phase) == PommeProvisioningPhase.allCases)
+        #expect(await calls.routes == ["adopt"])
+        #expect(await calls.phases == [.install, .verifyNormalAgent, .restoreFinalState])
+    }
+
+    @Test("resume proves an agent that an earlier attempt installed instead of repeating Recovery")
+    func resumeProbeSkipsRecovery() async throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 22, count: 32))
+        let repository = MemoryRepository()
+        let calls = CallLog()
+        let vmPlan = try plan()
+        try repository.create(try signer.make(
+            generation: 1, plan: vmPlan,
+            events: try eventsThrough(.install) + [
+                try event(kind: .intent, phase: .installRecoveryAgent),
+                try event(kind: .failure, phase: .installRecoveryAgent),
+            ]))
+
+        try await PommeProvisioningOrchestrator(
+            signer: signer, repository: repository,
+            effects: routedEffects(calls: calls, adopt: false, probe: true)
+        ).resume(expectedPlan: vmPlan)
+
+        let completed = try repository.load()
+        #expect(completed.events.filter { $0.kind == .receipt }.map(\.phase) == PommeProvisioningPhase.allCases)
+        #expect(completed.events.filter { $0.phase == .installRecoveryAgent && $0.kind == .receipt }.map(\.attempt) == [2])
+        #expect(await calls.routes == ["adopt?", "probe"])
+        #expect(await calls.phases == [.verifyNormalAgent, .restoreFinalState])
+    }
+
+    @Test("without normal-boot evidence the Recovery installation runs as before")
+    func recoveryInstallWhenNormalBootDoesNotApply() async throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 23, count: 32))
+        let repository = MemoryRepository()
+        let calls = CallLog()
+        try await PommeProvisioningOrchestrator(
+            signer: signer, repository: repository,
+            effects: routedEffects(calls: calls, adopt: false, probe: false)
+        ).start(plan())
+
+        #expect(await calls.routes == ["adopt?", "probe?"])
+        #expect(await calls.phases == [.install, .installRecoveryAgent, .verifyNormalAgent, .restoreFinalState])
+    }
+
+    @Test("agent repair in normal macOS journals installation and verification in one commit")
+    func normalBootRepairJournalsVerification() async throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 24, count: 32))
+        let repository = MemoryRepository()
+        let calls = CallLog()
+        let vmPlan = try plan(finalState: .stopped)
+        let failed = try signer.make(
+            generation: 1, plan: vmPlan,
+            events: try eventsThrough(.install) + [
+                try event(kind: .intent, phase: .installRecoveryAgent),
+                try event(kind: .failure, phase: .installRecoveryAgent),
+            ])
+        try repository.create(failed)
+        let orchestrator = PommeProvisioningOrchestrator(
+            signer: signer, repository: repository,
+            effects: routedEffects(calls: calls, adopt: false, probe: false, normalRepair: .proves))
+        let next = try PommeProvisioningCoordinator.repairPhase(in: failed)
+
+        let route = try await orchestrator.repairAgentInstallation(from: failed, phase: next, finalState: .normalRunning)
+
+        #expect(route == .normal)
+        #expect(await calls.repairStates.isEmpty)
+        #expect(await calls.normalRepairStates == [.normalRunning])
+        let repaired = try repository.load()
+        try signer.verify(repaired)
+        // Intent, then one commit with both receipts.
+        #expect(repaired.generation == failed.generation + 2)
+        #expect(Array(repaired.events.suffix(4)).map { "\($0.kind)-\($0.phase)" } == [
+            "intent-installRecoveryAgent", "receipt-installRecoveryAgent",
+            "intent-verifyNormalAgent", "receipt-verifyNormalAgent",
+        ])
+
+        // A later resume only restores the plan's final state.
+        try await orchestrator.resume(expectedPlan: vmPlan)
+        #expect(await calls.phases == [.restoreFinalState])
+    }
+
+    @Test("agent repair falls back to Recovery when normal macOS doesn't apply or fails",
+          arguments: [NormalRepair.declines, .fails])
+    func repairFallsBackToRecovery(normalRepair: NormalRepair) async throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 25, count: 32))
+        let repository = MemoryRepository()
+        let calls = CallLog()
+        let vmPlan = try plan()
+        let notStarted = try signer.make(generation: 1, plan: vmPlan, events: try eventsThrough(.install))
+        try repository.create(notStarted)
+        let orchestrator = PommeProvisioningOrchestrator(
+            signer: signer, repository: repository,
+            effects: routedEffects(calls: calls, adopt: false, probe: false, normalRepair: normalRepair))
+
+        let route = try await orchestrator.repairAgentInstallation(
+            from: notStarted, phase: try PommeProvisioningCoordinator.repairPhase(in: notStarted), finalState: .stopped)
+
+        #expect(route == .recovery)
+        #expect(await calls.normalRepairStates == [.stopped])
+        #expect(await calls.repairStates == [.stopped])
+        let repaired = try repository.load()
+        #expect(repaired.events.filter { $0.kind == .receipt }.map(\.phase) == [.install, .installRecoveryAgent, .verifyNormalAgent])
+    }
+
+    @Test("a failed agent repair is journaled as a failure of the installation attempt")
+    func failedRepairIsJournaled() async throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 26, count: 32))
+        let repository = MemoryRepository()
+        let calls = CallLog()
+        let vmPlan = try plan()
+        let notStarted = try signer.make(generation: 1, plan: vmPlan, events: try eventsThrough(.install))
+        try repository.create(notStarted)
+        var effects = routedEffects(calls: calls, adopt: false, probe: false, normalRepair: .declines)
+        effects = .init(
+            verifyOwnership: effects.verifyOwnership, install: effects.install,
+            installRecoveryAgent: effects.installRecoveryAgent, verifyNormalAgent: effects.verifyNormalAgent,
+            restoreFinalState: effects.restoreFinalState,
+            recoveryRepair: { _, _ in throw PommeProvisioningError.unavailableIntegration("test Recovery") },
+            repairInNormalBoot: effects.repairInNormalBoot)
+
+        await #expect(throws: PommeProvisioningError.self) {
+            try await PommeProvisioningOrchestrator(signer: signer, repository: repository, effects: effects)
+                .repairAgentInstallation(
+                    from: notStarted, phase: try PommeProvisioningCoordinator.repairPhase(in: notStarted),
+                    finalState: .stopped)
+        }
+        let journal = try repository.load()
+        #expect(journal.events.suffix(2).map(\.kind) == [.intent, .failure])
+        #expect(try PommeProvisioningCoordinator.repairPhase(in: journal).attempt == 2)
+    }
+
+    @Test("a repair whose final state fails after the agent is proven records the proof and skips Recovery")
+    func repairFinalStateFailureKeepsProof() async throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 28, count: 32))
+        let repository = MemoryRepository()
+        let calls = CallLog()
+        let vmPlan = try plan()
+        let notStarted = try signer.make(generation: 1, plan: vmPlan, events: try eventsThrough(.install))
+        try repository.create(notStarted)
+        var effects = routedEffects(calls: calls, adopt: false, probe: false)
+        effects.repairInNormalBoot = { _, _ in
+            throw PommeAgentRepairFinalStateFailure(
+                receipt: self.digest, cause: RunnerError.virtualMachineState("stop failed"))
+        }
+
+        await #expect(throws: PommeProvisioningError.self) {
+            try await PommeProvisioningOrchestrator(signer: signer, repository: repository, effects: effects)
+                .repairAgentInstallation(
+                    from: notStarted, phase: try PommeProvisioningCoordinator.repairPhase(in: notStarted),
+                    finalState: .stopped)
+        }
+        #expect(await calls.repairStates.isEmpty)
+        let journal = try repository.load()
+        try signer.verify(journal)
+        #expect(journal.events.filter { $0.kind == .receipt }.map(\.phase) == [.install, .installRecoveryAgent, .verifyNormalAgent])
+        #expect(!journal.events.contains { $0.kind == .failure })
+    }
+
+    @Test("resume installs through Recovery when the template's agent never connects")
+    func resumeFallsBackAfterUnavailableTemplateAgent() async throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 29, count: 32))
+        let repository = MemoryRepository()
+        let calls = CallLog()
+        var effects = routedEffects(calls: calls, adopt: false, probe: false)
+        effects.adoptTemplateAgent = { plan in
+            await calls.route("adopt!")
+            throw PommeTemplateAgentAdoptionError.agentUnavailable(vmName: plan.vm.name)
+        }
+        try await PommeProvisioningOrchestrator(signer: signer, repository: repository, effects: effects).start(plan())
+        #expect(await calls.routes == ["adopt!", "probe?"])
+        #expect(await calls.phases == [.install, .installRecoveryAgent, .verifyNormalAgent, .restoreFinalState])
+
+        // Any other adoption failure stops creation for `--resume` or repair.
+        let failing = MemoryRepository()
+        effects.adoptTemplateAgent = { plan in throw PommeTemplateAgentAdoptionError.unexpectedAgent(vmName: plan.vm.name) }
+        await #expect(throws: PommeProvisioningError.self) {
+            try await PommeProvisioningOrchestrator(signer: signer, repository: failing, effects: effects).start(plan())
+        }
+        #expect(try failing.load().events.last?.kind == .failure)
+    }
+
+    @Test("a receipt can complete only the phases that follow in order")
+    func receiptCompletesFollowingPhasesInOrder() throws {
+        let signer = try PommeProvisioningJournalSigner(key: Data(repeating: 27, count: 32))
+        let pending = try signer.make(
+            generation: 1, plan: plan(),
+            events: try eventsThrough(.install, leavingIntentFor: .installRecoveryAgent))
+        #expect(throws: PommeProvisioningError.unexpectedEvent) {
+            try PommeProvisioningCoordinator.appendingReceipt(
+                to: pending, phase: .installRecoveryAgent, attempt: 1, receiptDigest: digest,
+                completing: [.restoreFinalState], signer: signer)
+        }
+        #expect(throws: PommeProvisioningError.unexpectedEvent) {
+            try PommeProvisioningCoordinator.appendingReceipt(
+                to: pending, phase: .verifyNormalAgent, attempt: 1, receiptDigest: digest,
+                completing: [], signer: signer)
+        }
+        let completed = try PommeProvisioningCoordinator.appendingReceipt(
+            to: pending, phase: .installRecoveryAgent, attempt: 1, receiptDigest: digest,
+            completing: [.verifyNormalAgent, .restoreFinalState], signer: signer)
+        try signer.verify(completed)
+        #expect(try PommeProvisioningCoordinator.nextPhase(in: completed) == nil)
+    }
+
+    enum NormalRepair: Sendable { case proves, declines, fails }
+
+    private func routedEffects(
+        calls: CallLog, adopt: Bool, probe: Bool, normalRepair: NormalRepair = .declines
+    ) -> PommeProvisioningEffects {
+        var effects = self.effects(calls: calls)
+        effects.adoptTemplateAgent = { _ in
+            await calls.route(adopt ? "adopt" : "adopt?")
+            return adopt ? self.digest : nil
+        }
+        effects.probeInstalledAgent = { _ in
+            await calls.route(probe ? "probe" : "probe?")
+            return probe ? self.digest : nil
+        }
+        effects.repairInNormalBoot = { _, state in
+            await calls.recordNormalRepair(state)
+            switch normalRepair {
+            case .proves: return self.digest
+            case .declines: return nil
+            case .fails: throw PommeProvisioningError.unavailableIntegration("test normal repair")
+            }
+        }
+        return effects
+    }
+
     private func plan(
         profile: PommeRecoveryProfileContract = .tahoe,
         version: String = "26.6.0",
@@ -600,6 +841,11 @@ private final class MemoryRepository: PommeProvisioningJournalRepository, @unche
 private actor CallLog {
     var phases: [PommeProvisioningPhase] = []
     var repairStates: [PommeProvisioningFinalState] = []
+    var routes: [String] = []
+    var normalRepairStates: [PommeProvisioningFinalState] = []
+
+    func route(_ name: String) { routes.append(name) }
+    func recordNormalRepair(_ state: PommeProvisioningFinalState) { normalRepairStates.append(state) }
 
     func record(_ phase: PommeProvisioningPhase, digest: String, fail: PommeProvisioningPhase?) throws -> String {
         phases.append(phase)

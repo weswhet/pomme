@@ -40,13 +40,90 @@ struct PommeAgentUpdateApplyTests {
         }
 
         func apply(
-            target: String? = nil, selfExecutable: URL? = nil,
+            target: String? = nil, selfExecutable: URL? = nil, replacement: Data? = nil,
             install: @escaping (Data, Data, Data, PommeAgentRecoveryInstaller.Paths) throws -> Void
         ) throws -> PommeAgentUpdateApply.Outcome {
             try PommeAgentUpdateApply.apply(
                 staged: staged, targetSHA256: target ?? digest, selfExecutable: selfExecutable ?? staged,
+                replacementCredential: replacement,
                 paths: paths, stagedPrefix: prefix, expectedOwner: getuid(), install: install)
         }
+    }
+
+    @Test func replacementCredentialIsInstalledWithTheNewBytes() throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let replacement = Data(String(repeating: "c", count: 64).utf8)
+        var installed: (Data, Data, Data)?
+        let outcome = try fixture.apply(replacement: replacement + Data("\n".utf8)) { executable, token, plist, _ in
+            installed = (executable, token, plist)
+        }
+        #expect(outcome == .applied)
+        #expect(installed?.0 == fixture.bytes)
+        // The token file holds the bare credential, exactly as an install writes it.
+        #expect(installed?.1 == replacement)
+        #expect(installed?.2 == Data(try PommeAgentInstall.definition(digest: fixture.digest).utf8))
+        #expect(!FileManager.default.fileExists(atPath: fixture.staged.path))
+    }
+
+    @Test func replacementCredentialAloneStillInstalls() throws {
+        // A rerun after the bytes were installed but before the credential was
+        // must not report the update as already applied.
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try fixture.bytes.write(to: fixture.paths.executable)
+        try Data(PommeAgentInstall.definition(digest: fixture.digest).utf8).write(to: fixture.paths.plist)
+        let replacement = Data(String(repeating: "c", count: 64).utf8)
+        var installedToken: Data?
+        #expect(try fixture.apply(replacement: replacement) { _, token, _, _ in installedToken = token } == .applied)
+        #expect(installedToken == replacement)
+
+        let rerun = try Fixture()
+        defer { try? FileManager.default.removeItem(at: rerun.root) }
+        try rerun.bytes.write(to: rerun.paths.executable)
+        try Data(PommeAgentInstall.definition(digest: rerun.digest).utf8).write(to: rerun.paths.plist)
+        try replacement.write(to: rerun.paths.token)
+        #expect(try rerun.apply(replacement: replacement) { _, _, _, _ in Issue.record("installed again") } == .alreadyApplied)
+    }
+
+    @Test func interruptedTransactionIsRecoveredBeforeTheAlreadyAppliedCheck() throws {
+        // The installed files look current, but an interrupted transaction
+        // left a journal whose recovery changes them: the comparison must see
+        // the recovered state, not skip recovery.
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let replacement = Data(String(repeating: "c", count: 64).utf8)
+        try fixture.bytes.write(to: fixture.paths.executable)
+        try Data(PommeAgentInstall.definition(digest: fixture.digest).utf8).write(to: fixture.paths.plist)
+        try replacement.write(to: fixture.paths.token)
+        var recovered: [URL] = []
+        var installedToken: Data?
+        let outcome = try PommeAgentUpdateApply.apply(
+            staged: fixture.staged, targetSHA256: fixture.digest, selfExecutable: fixture.staged,
+            replacementCredential: replacement, paths: fixture.paths, stagedPrefix: fixture.prefix,
+            expectedOwner: getuid(),
+            recoverInstallJournal: { journal in
+                recovered.append(journal)
+                // Rolling back restores the previous credential.
+                try fixture.token.write(to: fixture.paths.token)
+            },
+            install: { _, token, _, _ in installedToken = token })
+        #expect(recovered == [fixture.paths.privateDirectory.appendingPathComponent("agent-install.journal")])
+        #expect(outcome == .applied)
+        #expect(installedToken == replacement)
+    }
+
+    @Test func malformedReplacementCredentialIsRejectedBeforeInstall() throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        for bad in ["", "short", String(repeating: "C", count: 64), String(repeating: "c", count: 64) + "\n\n"] {
+            #expect(throws: (any Error).self) {
+                try fixture.apply(replacement: Data(bad.utf8)) { _, _, _, _ in Issue.record("installed a bad credential") }
+            }
+        }
+        #expect(FileManager.default.fileExists(atPath: fixture.staged.path))
+        #expect(try PommeAgentUpdateApply.credential(fromStandardInput: Data((String(repeating: "a", count: 64) + "\n").utf8))
+            == Data(String(repeating: "a", count: 64).utf8))
     }
 
     @Test func installsStagedBytesWithUnchangedTokenAndNewPin() throws {

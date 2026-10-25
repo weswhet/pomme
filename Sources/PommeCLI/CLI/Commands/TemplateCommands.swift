@@ -135,6 +135,7 @@ struct TemplateListCommand: ParsableCommand {
                     "provisioned": manifest.isProvisioned,
                     "securityDisabled": manifest.isSecurityDisabled,
                     "ownerAccount": manifest.provisionedOwnerAccount as Any,
+                    "agentCredentialRetained": manifest.adoptableAgent != nil,
                     "createdAt": ISO8601DateFormatter().string(from: manifest.createdAt)
                 ]
             }

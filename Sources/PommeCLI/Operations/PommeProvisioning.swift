@@ -631,10 +631,14 @@ enum PommeProvisioningCoordinator {
     }
 
     static func nextPhase(in journal: PommeProvisioningJournal) throws -> (phase: PommeProvisioningPhase, attempt: UInt64)? {
-        try validate(events: journal.events)
+        try nextPhase(events: journal.events)
+    }
+
+    private static func nextPhase(events: [PommeProvisioningEvent]) throws -> (phase: PommeProvisioningPhase, attempt: UInt64)? {
+        try validate(events: events)
         var completed = Set<PommeProvisioningPhase>()
         var attempts: [PommeProvisioningPhase: UInt64] = [:]
-        for event in journal.events {
+        for event in events {
             attempts[event.phase] = max(attempts[event.phase] ?? 0, event.attempt)
             if event.kind == .receipt { completed.insert(event.phase) }
         }
@@ -671,6 +675,37 @@ enum PommeProvisioningCoordinator {
         else { throw PommeProvisioningError.unexpectedEvent }
         return try signer.make(generation: journal.generation + 1, plan: journal.plan, events: journal.events + [.init(kind: kind, phase: phase, attempt: attempt, digest: receiptDigest)])
     }
+
+    /// Appends the receipt for the pending intent and, in the same
+    /// generation, an intent and receipt for each phase in `completing`,
+    /// which must be the phases that follow it in order. An effect that
+    /// already proved a later phase records that proof this way: a single
+    /// commit can't leave behind an intent that `create --resume` won't
+    /// re-execute.
+    static func appendingReceipt(
+        to journal: PommeProvisioningJournal,
+        phase: PommeProvisioningPhase,
+        attempt: UInt64,
+        receiptDigest: String,
+        completing following: [PommeProvisioningPhase],
+        signer: PommeProvisioningJournalSigner
+    ) throws -> PommeProvisioningJournal {
+        guard journal.events.last?.kind == .intent,
+              journal.events.last?.phase == phase,
+              journal.events.last?.attempt == attempt
+        else { throw PommeProvisioningError.unexpectedEvent }
+        var events = journal.events + [try .init(kind: .receipt, phase: phase, attempt: attempt, digest: receiptDigest)]
+        for next in following {
+            guard let expected = try nextPhase(events: events), expected.phase == next else {
+                throw PommeProvisioningError.unexpectedEvent
+            }
+            events += [
+                try .init(kind: .intent, phase: next, attempt: expected.attempt),
+                try .init(kind: .receipt, phase: next, attempt: expected.attempt, digest: receiptDigest),
+            ]
+        }
+        return try signer.make(generation: journal.generation + 1, plan: journal.plan, events: events)
+    }
 }
 
 struct PommeProvisioningEffects: Sendable {
@@ -680,6 +715,39 @@ struct PommeProvisioningEffects: Sendable {
     let verifyNormalAgent: @Sendable (PommeProvisioningPlan) async throws -> String
     let restoreFinalState: @Sendable (PommeProvisioningPlan) async throws -> String
     let recoveryRepair: @Sendable (PommeProvisioningPlan, PommeProvisioningFinalState) async throws -> String
+    /// The agent-installation phase in normal macOS for a VM cloned from a
+    /// provisioned template whose agent credential the host kept. Returns
+    /// nil when that doesn't apply, and the phase continues below.
+    var adoptTemplateAgent: @Sendable (PommeProvisioningPlan) async throws -> String? = { _ in nil }
+    /// Proves, in normal macOS, an agent that an earlier installation attempt
+    /// left in the guest. Returns nil when there's no evidence of one or it
+    /// doesn't prove itself, and the Recovery installation runs instead.
+    var probeInstalledAgent: @Sendable (PommeProvisioningPlan) async throws -> String? = { _ in nil }
+    /// `agent repair` in normal macOS: the adoption or the check above,
+    /// followed by verification and the requested final state. Returns nil
+    /// when neither applies, and `recoveryRepair` runs instead.
+    var repairInNormalBoot: @Sendable (PommeProvisioningPlan, PommeProvisioningFinalState) async throws -> String? = { _, _ in nil }
+}
+
+/// `repairInNormalBoot` installed and verified the agent, and only the
+/// requested final state failed. The repair records the proven phases and
+/// reports the final state's failure instead of reinstalling through
+/// Recovery.
+struct PommeAgentRepairFinalStateFailure: Error, PommeDescribedError {
+    let receipt: String
+    let cause: any Error
+
+    var code: PommeErrorCode { .provisioningPhaseFailed }
+    var underlying: (any Error)? { cause }
+    var errorDescription: String? {
+        "The Pomme agent was repaired, but restoring the VM's previous state failed: \(PommeErrorDescriber.clause(for: cause))."
+    }
+}
+
+/// How `agent repair` reinstalled or proved the agent.
+enum PommeAgentRepairRoute: String, Equatable, Sendable {
+    case normal
+    case recovery
 }
 
 struct PommeProvisioningOrchestrator: Sendable {
@@ -786,6 +854,85 @@ struct PommeProvisioningOrchestrator: Sendable {
         }
     }
 
+    /// `pomme agent repair` for a creation stopped at the agent-installation
+    /// phase that `PommeProvisioningCoordinator.repairPhase` returned. The
+    /// intent is journaled before any effect. Normal macOS is tried first;
+    /// when it doesn't apply or fails, the Recovery repair runs exactly as
+    /// before. Both routes verify the pinned agent in normal macOS before
+    /// they return, so the verification phase is journaled with the
+    /// installation's receipt, in one commit, and a later `create --resume`
+    /// continues with the final state.
+    func repairAgentInstallation(
+        from journal: PommeProvisioningJournal,
+        phase next: (phase: PommeProvisioningPhase, attempt: UInt64),
+        finalState: PommeProvisioningFinalState
+    ) async throws -> PommeAgentRepairRoute {
+        let intent = try PommeProvisioningCoordinator.appendingIntent(
+            to: journal, phase: next.phase, attempt: next.attempt, signer: signer)
+        try repository.commit(intent, replacing: journal.generation)
+        let vmName = intent.plan.vm.name
+        var provenWithoutFinalState: PommeAgentRepairFinalStateFailure?
+        do {
+            var route = PommeAgentRepairRoute.normal
+            var receipt: String?
+            do {
+                receipt = try await effects.repairInNormalBoot(intent.plan, finalState)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let failure as PommeAgentRepairFinalStateFailure {
+                provenWithoutFinalState = failure
+                throw failure
+            } catch {
+                PommeCore.warning(
+                    "repairing the agent in normal macOS failed "
+                        + "[code=\(PommeProvisioningFailureDiagnostic.code(for: error))]; repairing it through Recovery.",
+                    vmName: vmName)
+            }
+            if receipt == nil {
+                route = .recovery
+                PommeProgressContext.sink?.step(vm: vmName, "Repairing Pomme agent in Recovery")
+                receipt = try await effects.recoveryRepair(intent.plan, finalState)
+            }
+            guard let receipt, PommeProvisioningDigest.isSHA256(receipt) else {
+                throw PommeProvisioningError.phaseFailed(next.phase)
+            }
+            let completed = try PommeProvisioningCoordinator.appendingReceipt(
+                to: intent, phase: next.phase, attempt: next.attempt, receiptDigest: receipt,
+                completing: [.verifyNormalAgent], signer: signer)
+            try repository.commit(completed, replacing: intent.generation)
+            return route
+        } catch {
+            if let failure = provenWithoutFinalState {
+                // The agent is installed and verified in normal macOS; a
+                // Recovery reinstall wouldn't fix the final state. Record the
+                // proof and report the final state's failure, which
+                // `create --resume` restores later.
+                let completed = try PommeProvisioningCoordinator.appendingReceipt(
+                    to: intent, phase: next.phase, attempt: next.attempt, receiptDigest: failure.receipt,
+                    completing: [.verifyNormalAgent], signer: signer)
+                try repository.commit(completed, replacing: intent.generation)
+                throw PommeProvisioningError.phaseFailed(
+                    .restoreFinalState, vmName: vmName, cause: PommeErrorReport(keepingSystemCause: failure.cause))
+            }
+            // Repair reports the same redacted failure code the orchestrator
+            // logs, so the command that exists to diagnose a retained journal
+            // does not say strictly less than `create --resume` about the same
+            // failure.
+            PommeCore.warning(
+                "provisioning phase \(next.phase.rawValue) failed "
+                    + "[code=\(PommeProvisioningFailureDiagnostic.code(for: error))].",
+                vmName: vmName
+            )
+            let digest = PommeProvisioningDigest.sha256(Data(String(describing: error).utf8))
+            let failed = try PommeProvisioningCoordinator.appendingResult(
+                to: intent, kind: .failure, phase: next.phase, attempt: next.attempt,
+                receiptDigest: digest, signer: signer)
+            try repository.commit(failed, replacing: intent.generation)
+            throw PommeProvisioningError.phaseFailed(
+                next.phase, vmName: vmName, cause: PommeProvisioningError.phaseCause(of: error))
+        }
+    }
+
     private func exactOwnership(_ expected: PommeVMOwnership) async throws -> PommeVMOwnership {
         let actual = try await effects.verifyOwnership(expected)
         guard actual == expected, actual.marker == PommeVMOwnership.provenance else {
@@ -797,10 +944,30 @@ struct PommeProvisioningOrchestrator: Sendable {
     private func effect(_ phase: PommeProvisioningPhase, plan: PommeProvisioningPlan) async throws -> String {
         switch phase {
         case .install: try await effects.install(plan)
-        case .installRecoveryAgent: try await effects.installRecoveryAgent(plan)
+        case .installRecoveryAgent: try await installAgent(plan)
         case .verifyNormalAgent: try await effects.verifyNormalAgent(plan)
         case .restoreFinalState: try await effects.restoreFinalState(plan)
         }
+    }
+
+    /// The agent-installation phase boots Recovery only when it has to: a
+    /// provisioned template's clone gets its template's agent in normal
+    /// macOS, and an agent that an earlier attempt already installed is
+    /// proven in normal macOS. The phase keeps its journal name, so
+    /// journals and resume work the same on every route.
+    private func installAgent(_ plan: PommeProvisioningPlan) async throws -> String {
+        do {
+            if let adopted = try await effects.adoptTemplateAgent(plan) { return adopted }
+        } catch let error as PommeTemplateAgentAdoptionError where error.isAgentUnavailable {
+            // The template's agent never authenticated, so nothing reached
+            // the guest, and the adoption withdrew its lease and stopped the
+            // VM. Converge through Recovery instead of failing creation.
+            PommeCore.warning(
+                "the agent from the template didn't connect in normal macOS; installing it through Recovery.",
+                vmName: plan.vm.name)
+        }
+        if let proven = try await effects.probeInstalledAgent(plan) { return proven }
+        return try await effects.installRecoveryAgent(plan)
     }
 }
 

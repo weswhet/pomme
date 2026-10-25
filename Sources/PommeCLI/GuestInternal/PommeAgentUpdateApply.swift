@@ -7,10 +7,15 @@ import Foundation
 /// the same agent. Errors are deliberately non-descriptive.
 ///
 /// The executable and LaunchDaemon definition are replaced in one recoverable
-/// install transaction; the existing token is rewritten unchanged. The running
-/// daemon keeps serving the old bytes until the host restarts the job.
+/// install transaction; the existing token is rewritten unchanged, unless the
+/// host supplies a replacement on standard input, which the same transaction
+/// installs instead. The running daemon keeps serving the old bytes, and its
+/// in-memory token, until the job restarts.
 enum PommeAgentUpdateApply {
     static let flag = "--pomme-agent-update-apply"
+    /// The optional last argument. The new credential is read from standard
+    /// input so it never appears in a process's arguments.
+    static let replaceCredentialFlag = "--replace-credential-from-stdin"
 
     enum Outcome: String, Equatable {
         case applied, alreadyApplied
@@ -30,16 +35,19 @@ enum PommeAgentUpdateApply {
         staged: URL,
         targetSHA256: String,
         selfExecutable: URL,
+        replacementCredential: Data? = nil,
         paths: PommeAgentRecoveryInstaller.Paths = .init(),
         stagedPrefix: String = PommeAgentInstall.updatePrefix,
         expectedOwner: uid_t = 0,
         phase: (Int32) -> Void = { _ in },
+        recoverInstallJournal: (URL) throws -> Void = { try PommeAgentFileTransaction.recoverInstallJournal(at: $0) },
         install: (Data, Data, Data, PommeAgentRecoveryInstaller.Paths) throws -> Void = {
             try PommeAgentRecoveryInstaller().installTransaction(executable: $0, token: $1, plist: $2, paths: $3)
         }
     ) throws -> Outcome {
         phase(Phase.request)
         let target = try PommeAgentAuthentication.normalized(targetSHA256)
+        let replacement = try replacementCredential.map(credential(fromStandardInput:))
         // Only a host-staged file in the agent's private directory may update
         // the agent, and only by running itself.
         // Lexical normalization only: Foundation's file-URL standardization
@@ -61,20 +69,33 @@ enum PommeAgentUpdateApply {
         }
         let plist = Data(try PommeAgentInstall.definition(digest: target).utf8)
 
+        // An interrupted earlier transaction must be rolled forward or back
+        // before the installed files are compared; otherwise a finished-looking
+        // install could keep its backups, including a replaced credential.
+        phase(Phase.install)
+        try recoverInstallJournal(paths.privateDirectory.appendingPathComponent("agent-install.journal"))
         let installed = (try? PommeAgentFileTransaction.readRegular(
             paths.executable, maximumBytes: PommeRecoveryStagingBuilder.maximumExecutableBytes)) ?? Data()
         let installedPlist = (try? PommeAgentFileTransaction.readRegular(paths.plist, maximumBytes: 64 * 1024)) ?? Data()
+        let installedToken = try? PommeAgentFileTransaction.readRegular(paths.token, maximumBytes: 128)
         let outcome: Outcome
-        if installed == executable, installedPlist == plist {
+        if installed == executable, installedPlist == plist, replacement == nil || installedToken == replacement {
             outcome = .alreadyApplied
         } else {
-            // The token is never returned or logged; it is rewritten byte for
-            // byte so the daemon keeps authenticating with the same secret.
+            // The token is never returned or logged. Without a replacement it
+            // is rewritten byte for byte so the daemon keeps authenticating
+            // with the same secret.
             phase(Phase.token)
-            let token = try PommeAgentFileTransaction.readRegular(paths.token, maximumBytes: 128)
-            guard let text = String(data: token, encoding: .utf8),
-                  try PommeAgentAuthentication.normalized(text) == text
-            else { throw PommeAgentOperationError.invalid("The installed agent credential file is malformed") }
+            let token: Data
+            if let replacement {
+                token = replacement
+            } else {
+                guard let existing = installedToken,
+                      let text = String(data: existing, encoding: .utf8),
+                      try PommeAgentAuthentication.normalized(text) == text
+                else { throw PommeAgentOperationError.invalid("The installed agent credential file is malformed") }
+                token = existing
+            }
             phase(Phase.install)
             try install(executable, token, plist, paths)
             outcome = .applied
@@ -112,14 +133,41 @@ enum PommeAgentUpdateApply {
         return bytes == Data(expected.utf8)
     }
 
+    /// The credential the host wrote to standard input: exactly one
+    /// lowercase hexadecimal token, optionally followed by a newline, in the
+    /// exact bytes the installed token file holds.
+    static func credential(fromStandardInput data: Data) throws -> Data {
+        var bytes = data
+        if bytes.last == 0x0A { bytes.removeLast() }
+        guard let text = String(data: bytes, encoding: .utf8),
+              (try? PommeAgentAuthentication.normalized(text)) == text
+        else { throw PommeAgentOperationError.invalid("The replacement agent credential is malformed") }
+        return bytes
+    }
+
+    /// Reads at most `maximum` bytes, so an unexpected stream can't grow
+    /// without bound.
+    private static func readStandardInput(maximum: Int = 256) throws -> Data {
+        var data = Data()
+        while data.count <= maximum {
+            guard let chunk = try FileHandle.standardInput.read(upToCount: maximum + 1 - data.count),
+                  !chunk.isEmpty else { return data }
+            data.append(chunk)
+        }
+        throw PommeAgentOperationError.invalid("The replacement agent credential is too long")
+    }
+
     static func run(arguments: [String]) -> Int32 {
-        guard arguments.count == 3, arguments[0] == flag, geteuid() == 0 else { return 1 }
+        let replacesCredential = arguments.count == 4 && arguments[3] == replaceCredentialFlag
+        guard arguments.count == 3 || replacesCredential, arguments[0] == flag, geteuid() == 0 else { return 1 }
         var failureStatus = Phase.request
         do {
+            let replacement = replacesCredential ? try readStandardInput() : nil
             let outcome = try apply(
                 staged: URL(fileURLWithPath: arguments[1]),
                 targetSHA256: arguments[2],
                 selfExecutable: try PommeExecutableIdentity.currentExecutableURL(),
+                replacementCredential: replacement,
                 phase: { failureStatus = $0 }
             )
             FileHandle.standardOutput.write(Data("\(outcome.rawValue) \(arguments[2])\n".utf8))
