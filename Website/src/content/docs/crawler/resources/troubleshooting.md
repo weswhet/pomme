@@ -57,6 +57,65 @@ first anyway. The System trusts the redaction. The System also trusts you to
 read things, and look how that's going.
 :::
 
+## Collect Pomme's logs
+
+Every run is recorded, Crawler. The System insists. Pomme writes to this
+Mac's unified log under the subsystem `com.github.weswhet.pomme`. The log
+records when each command starts and ends, with its exit code and duration,
+and the progress steps, warnings, and errors that Pomme reports. Each error
+record includes its error code. To watch the replay of what Pomme did before
+you died, run the following command on the host:
+
+```sh
+log show --last 1h --info --debug --predicate 'subsystem == "com.github.weswhet.pomme"'
+```
+
+To narrow the output to one area, add a category to the predicate:
+
+```sh
+log show --last 1h --info --debug --predicate 'subsystem == "com.github.weswhet.pomme" AND category == "recovery"'
+```
+
+Pomme uses the following categories. Think of them as camera angles:
+
+| Category | Records |
+| --- | --- |
+| `cli` | Command start and end, diagnostics, warnings, and reported errors. |
+| `provisioning` | Creation, provisioning phases, and the provisioning journal. |
+| `recovery` | Recovery boots and Recovery sessions. |
+| `experimental-recovery` | `pomme create --experimental-recovery`. |
+| `runtime` | VM start, stop, pause, resume, and boot mode. |
+| `helper` | The helper processes that run each VM. |
+| `security` | SIP, AMFI, owner preparation, and MDM workflows. |
+| `guest-agent` | The host's connection to the guest agent. |
+| `bootstrap` | Guest agent bootstrap and installation. |
+| `process` | External programs that Pomme runs. |
+| `ipsw` | Restore image downloads and verification. |
+| `template` | Templates and clones. |
+| `firmware` | `pomme firmware` and boot firmware repair. |
+| `ui` | UI automation in the guest. |
+
+macOS keeps notices and errors, but it keeps info messages only for a short
+time and doesn't store debug messages. The highlight reel is permanent; the
+bloopers aren't. If the problem happens again, stream the log in another
+Terminal window while you reproduce it:
+
+```sh
+log stream --level debug --predicate 'subsystem == "com.github.weswhet.pomme"'
+```
+
+:::caution[Sponsor Notice: No Secrets on Camera]
+Pomme doesn't write passwords, agent tokens, or other credentials to the
+unified log, and it withholds messages that mention a token, password, or
+secret. The log does include VM names and file paths, so review it before you
+attach it to an issue.
+:::
+
+The host's log doesn't include records from inside the VM. The guest agent
+writes to the guest's own unified log under the same subsystem. To read it from
+the host, run `pomme log NAME`. For details, see
+[View guest agent logs](/crawler/guides/view-guest-logs/).
+
 ## Installing and updating Pomme
 
 Deaths that happen before you even enter the dungeon. Impressive, honestly.
