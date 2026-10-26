@@ -6028,11 +6028,29 @@ struct PommeCore {
         let bundle = reference.bundle
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
         if let existing = try? runtimeRecord(for: bundle) {
-            var status = try sendControlObject(
-                ["command": "status"],
-                bundle: bundle,
-                timeout: max(0.001, deadline - ProcessInfo.processInfo.systemUptime)
-            )
+            var status: [String: Any]
+            do {
+                status = try sendControlObject(
+                    ["command": "status"],
+                    bundle: bundle,
+                    timeout: max(0.001, deadline - ProcessInfo.processInfo.systemUptime)
+                )
+            } catch RunnerError.noRunningVM {
+                // A helper that just stopped its VM closes its socket before
+                // it exits and removes its record, so a start that follows a
+                // stop, as in `restart`, can find the record of a helper
+                // that's leaving. Start a new one once it's gone.
+                PommeUnifiedLog.message("helper pid=\(existing.pid) isn't listening; waiting for it to exit before starting",
+                                        vmName: reference.name, logger: PommeUnifiedLog.runtime)
+                try waitForDeletionHelperExit(
+                    refusal: "\(reference.displayName) can't start because its previous VM helper didn't exit after stopping."
+                ) {
+                    (try? runtimeRecord(for: bundle))?.pid == existing.pid
+                }
+                return try startRuntimeInBackground(
+                    reference: reference, bootMode: bootMode,
+                    timeout: max(0.001, deadline - ProcessInfo.processInfo.systemUptime))
+            }
             if try existingRuntimeNeedsResume(status: status, bootMode: bootMode, displayName: reference.displayName) {
                 PommeProgressContext.sink?.step(vm: reference.name, "Resuming VM")
                 let resumed = try controlCommandPayload(.resume, reference: reference)
@@ -7428,6 +7446,7 @@ struct PommeCore {
     static func waitForDeletionHelperExit(
         timeout: TimeInterval = Constants.gracefulStopTimeoutSeconds,
         pollInterval: TimeInterval = 0.1,
+        refusal: String = "Refusing VM deletion because its helper did not exit after stopping.",
         helperIsRunning: () throws -> Bool
     ) throws {
         guard timeout.isFinite, timeout >= 0, pollInterval.isFinite, pollInterval > 0 else {
@@ -7436,11 +7455,7 @@ struct PommeCore {
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
         while try helperIsRunning() {
             let remaining = deadline - ProcessInfo.processInfo.systemUptime
-            guard remaining > 0 else {
-                throw RunnerError.virtualMachineState(
-                    "Refusing VM deletion because its helper did not exit after stopping."
-                )
-            }
+            guard remaining > 0 else { throw RunnerError.virtualMachineState(refusal) }
             Thread.sleep(forTimeInterval: min(pollInterval, remaining))
         }
     }

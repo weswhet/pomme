@@ -26,6 +26,10 @@ personally.
 - `pomme create --experimental-recovery` no longer prints "Pomme couldn't
   record the agent installation attempt" for macOS 27 VMs. The message was
   harmless: creation still verified the agent and finished.
+- `pomme restart` no longer fails with "No running VM helper is listening"
+  when it stops a running VM. The start could find the stopped VM's helper
+  before it finished exiting. `pomme start` right after `pomme stop` had the
+  same problem.
 
 ## Pomme 0.3.0
 
