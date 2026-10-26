@@ -9,17 +9,15 @@ struct PommeMDMCommandRequest: Sendable {
     var timeout: TimeInterval = Constants.defaultGuestCommandTimeout
     var enrollmentMode: MDMEnrollmentMode = .supervised
     var finalSecurity: MDMFinalSecurity = .restore
-    var force = false
     var dryRun = false
     var skipServerPreflight = false
     /// How to create the VM if it does not exist.
     var creation: PommeCreationRequest? = nil
     var creationOptionsSupplied = false
-    var interactive = false
 
     var readiness: PommeMDMReadiness.Request {
-        .init(enrollmentMode: enrollmentMode, finalSecurity: finalSecurity, force: force,
-              interactive: interactive, skipServerPreflight: skipServerPreflight,
+        .init(enrollmentMode: enrollmentMode, finalSecurity: finalSecurity,
+              skipServerPreflight: skipServerPreflight,
               creationSourceSupplied: creation != nil, creationOptionsSupplied: creationOptionsSupplied)
     }
 }
@@ -60,7 +58,7 @@ struct PommeMDMOrchestratorDependencies: Sendable {
     var checkCreation: @Sendable (PommeCreationRequest) -> String?
     var create: @Sendable (PommeCreationRequest, String, VMBundleMutationLease) async throws -> Void
     var resumeProvisioning: @Sendable (String, VMBundleMutationLease) async throws -> Void
-    var finishSecurity: @Sendable (String, PommeSecurityWorkflowOperation, VMFinalState, Bool, VMBundleMutationLease)
+    var finishSecurity: @Sendable (String, PommeSecurityWorkflowOperation, VMFinalState, VMBundleMutationLease)
         async throws -> Void
     var enroll: @Sendable (PommeMDMCommandRequest, VMBundleMutationLease?) async throws -> PommeOperationResult
 
@@ -80,16 +78,16 @@ struct PommeMDMOrchestratorDependencies: Sendable {
             checkCreation: { $0.hostProblem },
             create: { creation, name, lease in _ = try await creation.create(name: name, lease: lease) },
             resumeProvisioning: { name, lease in _ = try await PommeCore.resumeProvisioning(name: name, lease: lease) },
-            finishSecurity: { name, operation, finalState, force, lease in
+            finishSecurity: { name, operation, finalState, lease in
                 // Enrollment boots normal macOS next, so the retained
                 // operation doesn't restore a Recovery final state first.
                 try await PommeSecurityWorkflowContinuation.$continuesInNormalBoot.withValue(true) {
                     if operation.isSIP {
                         _ = try await PommeApplication.sipWorkflow(name: name, action: operation.requestsDisabled ? .disable : .enable,
-                            finalState: finalState, force: force, lease: lease)
+                            finalState: finalState, lease: lease)
                     } else {
                         _ = try await PommeApplication.amfiWorkflow(name: name, action: operation.requestsDisabled ? .disable : .enable,
-                            finalState: finalState, force: force, lease: lease)
+                            finalState: finalState, lease: lease)
                     }
                 }
             },
@@ -97,7 +95,7 @@ struct PommeMDMOrchestratorDependencies: Sendable {
                 try await PommeApplication.mdmEnroll(
                     name: request.name, profilePath: request.profilePath, guestPath: request.guestPath,
                     timeout: request.timeout, enrollmentMode: request.enrollmentMode,
-                    finalSecurity: request.finalSecurity, force: request.force, lease: lease)
+                    finalSecurity: request.finalSecurity, lease: lease)
             }
         )
     }
@@ -177,7 +175,7 @@ extension PommeApplication {
                 case .resumeProvisioning:
                     try await dependencies.resumeProvisioning(request.name, lease)
                 case .finishSecurityWorkflow(let operation, let finalState):
-                    try await dependencies.finishSecurity(request.name, operation, finalState, request.force, lease)
+                    try await dependencies.finishSecurity(request.name, operation, finalState, lease)
                 case .enroll:
                     break
                 }

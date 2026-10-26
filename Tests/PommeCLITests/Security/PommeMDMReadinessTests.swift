@@ -155,15 +155,11 @@ struct PommeMDMReadinessTests {
         }
     }
 
-    @Test("Disabled final security and possible owner creation are surfaced")
+    @Test("Disabled final security is surfaced, and owner creation needs no warning")
     func warnings() {
         #expect(plan(ready()) { $0.finalSecurity = .disabled }.warnings == [.finalSecurityDisabled])
-        let v1 = ready { $0.provisioning = .complete(schema: 1) }
-        #expect(plan(v1).warnings == [.ownerConsentMayBeRequired])
-        #expect(plan(v1) { $0.force = true }.warnings.isEmpty)
-        #expect(plan(v1) { $0.interactive = true }.warnings.isEmpty)
-        #expect(plan(ready { $0.provisioning = .complete(schema: 1); $0.sipDisabled = true; $0.amfiDisabled = true })
-            .warnings.isEmpty)
+        // A fresh VM's owner is created without confirmation.
+        #expect(plan(ready { $0.provisioning = .complete(schema: 1) }).warnings.isEmpty)
     }
 
     @Test("A macOS 27 restore warns that SIP stays disabled for push identity")

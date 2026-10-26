@@ -90,8 +90,6 @@ enum PommeMDMReadiness {
     struct Request: Equatable, Sendable {
         var enrollmentMode: MDMEnrollmentMode = .supervised
         var finalSecurity: MDMFinalSecurity = .restore
-        var force = false
-        var interactive = false
         var skipServerPreflight = false
         /// A template, version, or restore image was supplied.
         var creationSourceSupplied = false
@@ -311,7 +309,6 @@ enum PommeMDMReadiness {
         case serverUnreachableFromHost
         case finalSecurityDisabled
         case enrollmentOutcomeUnknown
-        case ownerConsentMayBeRequired
         case sipKeptForPushIdentity
 
         var message: String {
@@ -321,7 +318,6 @@ enum PommeMDMReadiness {
             case .serverUnreachableFromHost: "The host could not reach the MDM server; the guest checks again before enrolling."
             case .finalSecurityDisabled: "SIP/AMFI settings this enrollment disables will stay disabled."
             case .enrollmentOutcomeUnknown: "A retained enrollment has an unknown outcome; installation will not be repeated without evidence."
-            case .ownerConsentMayBeRequired: "If this VM has no owner account, creating one needs --force or an interactive confirmation."
             case .sipKeptForPushIdentity: "On macOS 27, SIP stays disabled after enrollment so that the guest can receive MDM push commands."
             }
         }
@@ -388,10 +384,6 @@ enum PommeMDMReadiness {
             case .conflicting: blockers.append(.conflictingEnrollment)
             case .downgrade: blockers.append(.downgradeUnsupported)
             default: break
-            }
-            if case .complete(1) = facts.provisioning, !request.force, !request.interactive,
-               facts.enrollment != .satisfied, facts.sipDisabled != true || facts.amfiDisabled != true {
-                warnings.append(.ownerConsentMayBeRequired)
             }
         }
 

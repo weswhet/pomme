@@ -72,8 +72,7 @@ those steps, in order, under one exclusive lease on the VM:
 By default, Pomme then restores the original SIP and AMFI settings and the VM's
 original run state. A VM that was paused in Recovery ends stopped.
 
-If the VM has no owner account, the SIP step creates the `pomme` owner. Pomme
-asks you to confirm first; to confirm without a prompt, add `--force`.
+If the VM has no owner account, the SIP step creates the `pomme` owner.
 
 ## Create the VM as part of enrollment
 
@@ -86,7 +85,7 @@ run the following:
 
 ```sh
 pomme mdm VM_NAME --profile PROFILE_PATH \
-  --from-template TEMPLATE_NAME --memory 4GB --force
+  --from-template TEMPLATE_NAME --memory 4GB
 ```
 
 Replace the following:

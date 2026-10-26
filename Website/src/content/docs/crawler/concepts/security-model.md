@@ -56,11 +56,9 @@ Because of this split, the order of operations matters:
 - To turn AMFI off, turn SIP off first, and then turn AMFI off.
 - To restore AMFI, restore it before you turn SIP back on.
 
-The `--force` flag doesn't bypass this ordering.
-
 :::caution[Hazard Detected: Wrong Door Order]
-SIP off comes before AMFI off. AMFI back on comes before SIP back on. No flag,
-including `--force`, changes that order. Crawlers who try to skip ahead simply
+SIP off comes before AMFI off. AMFI back on comes before SIP back on. No flag
+changes that order. Crawlers who try to skip ahead simply
 get stopped, which is the least dramatic outcome possible.
 :::
 
@@ -85,19 +83,17 @@ calls this account the owner, and it handles the owner in one of two ways.
 
 ### Fresh VMs
 
-If the VM is proven to be fresh and Pomme-owned, Pomme can create the owner
-itself. It creates a `pomme` administrator account, turns on persistent
+If the VM is proven to be fresh and Pomme-owned, Pomme creates the owner
+itself, without asking. It creates a `pomme` administrator account, turns on persistent
 automatic login for it, and completes Setup Assistant. Pomme generates the
 password, stores it in your login Keychain, and never prints it. Not even for
 the viewers. They've asked.
 
-Because this branch creates an account, Pomme asks you to confirm it. The
-`--force` flag gives that confirmation in advance, which you need for
-unattended runs.
-
 Pomme decides that a VM is fresh only when its local accounts exactly match
 the stock accounts of a newly installed macOS. An unfamiliar account blocks
-the decision, and `--force` can't override it.
+the decision, so Pomme never adds an account to a guest that someone has set
+up. Because the account only completes a VM that Pomme itself created, Pomme
+doesn't ask you to confirm it.
 
 ### Existing owners
 
@@ -120,7 +116,7 @@ Before it turns on automatic login, Pomme checks for conditions under which
 macOS refuses automatic login, such as FileVault, managed login-window
 preferences, and protections tied to Touch ID, Apple Pay, and the App Store.
 If any restriction applies, the workflow stops. Pomme has no override for
-these restrictions, and `--force` doesn't bypass them.
+these restrictions.
 
 ## Final state
 

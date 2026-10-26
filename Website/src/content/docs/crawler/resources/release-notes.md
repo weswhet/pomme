@@ -23,6 +23,12 @@ personally.
 
 ### Fixes
 
+- `pomme sip disable`, `pomme amfi disable`, and `pomme mdm` no longer ask
+  before they create the `pomme` owner account on a verified fresh VM, such as
+  a macOS 26 VM that `pomme create` made. Pomme creates an owner only on a VM
+  that nobody has set up, so the question added nothing. `-f` and `--force`
+  are still accepted but have no effect, and the
+  `security-confirmation-required` error is gone.
 - `pomme create --experimental-recovery` no longer prints "Pomme couldn't
   record the agent installation attempt" for macOS 27 VMs. The message was
   harmless: creation still verified the agent and finished.

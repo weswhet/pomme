@@ -1399,17 +1399,15 @@ enum PommeApplication {
     static func sipWorkflow(
         name: String,
         action: SIPAction,
-        finalState: VMFinalState,
-        force: Bool = false
+        finalState: VMFinalState
     ) async throws -> PommeOperationResult {
-        try await sipWorkflow(name: name, action: action, finalState: finalState, force: force, lease: nil)
+        try await sipWorkflow(name: name, action: action, finalState: finalState, lease: nil)
     }
 
     static func sipWorkflow(
         name: String,
         action: SIPAction,
         finalState: VMFinalState,
-        force: Bool = false,
         lease: VMBundleMutationLease?
     ) async throws -> PommeOperationResult {
         try await VMBundleMutationLease.withLease(name: name, inherited: lease) { acquiredLease in
@@ -1427,7 +1425,7 @@ enum PommeApplication {
                 let operation: PommeSecurityWorkflowOperation = action == .enable ? .sipEnable : .sipDisable
                 let payload = try await PommeSecurityWorkflow.runLive(
                     reference: reference, operation: operation, finalState: finalState,
-                    force: force, lease: acquiredLease,
+                    lease: acquiredLease,
                     recoveryFactory: currentRecoveryIntegrationFactory()
                 )
                 return result(
@@ -1474,17 +1472,15 @@ enum PommeApplication {
     static func amfiWorkflow(
         name: String,
         action: AMFIAction,
-        finalState: VMFinalState,
-        force: Bool = false
+        finalState: VMFinalState
     ) async throws -> PommeOperationResult {
-        try await amfiWorkflow(name: name, action: action, finalState: finalState, force: force, lease: nil)
+        try await amfiWorkflow(name: name, action: action, finalState: finalState, lease: nil)
     }
 
     static func amfiWorkflow(
         name: String,
         action: AMFIAction,
         finalState: VMFinalState,
-        force: Bool = false,
         lease: VMBundleMutationLease?
     ) async throws -> PommeOperationResult {
         try await VMBundleMutationLease.withLease(name: name, inherited: lease) { acquiredLease in
@@ -1495,7 +1491,7 @@ enum PommeApplication {
                 let operation: PommeSecurityWorkflowOperation = action == .enable ? .amfiEnable : .amfiDisable
                 let payload = try await PommeSecurityWorkflow.runLive(
                     reference: reference, operation: operation, finalState: finalState,
-                    force: force, lease: acquiredLease,
+                    lease: acquiredLease,
                     recoveryFactory: currentRecoveryIntegrationFactory()
                 )
                 return result(
@@ -1805,7 +1801,7 @@ enum PommeApplication {
     static func mdmEnroll(
         name: String, profilePath: String, guestPath: String?, timeout: TimeInterval,
         enrollmentMode: MDMEnrollmentMode = .supervised, finalSecurity: MDMFinalSecurity = .restore,
-        force: Bool = false, lease inherited: VMBundleMutationLease? = nil
+        lease inherited: VMBundleMutationLease? = nil
     ) async throws -> PommeOperationResult {
         guard timeout.isFinite, timeout >= 1, timeout <= 300 else {
             throw RunnerError.invalidRequest(field: "--timeout", reason: "must be between 1 and 300 seconds.")
@@ -1945,10 +1941,10 @@ enum PommeApplication {
                         try await PommeMDMChildScope.$vmName.withValue(name) {
                             if operation.isSIP {
                                 _ = try await sipWorkflow(name: name, action: operation.requestsDisabled ? .disable : .enable,
-                                    finalState: .normal, force: force, lease: lease)
+                                    finalState: .normal, lease: lease)
                             } else {
                                 _ = try await amfiWorkflow(name: name, action: operation.requestsDisabled ? .disable : .enable,
-                                    finalState: .normal, force: force, lease: lease)
+                                    finalState: .normal, lease: lease)
                             }
                         }
                     }

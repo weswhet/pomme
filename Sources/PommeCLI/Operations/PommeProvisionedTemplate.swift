@@ -69,7 +69,7 @@ enum PommeProvisionedTemplate {
             // disabled. Both end stopped, which is what the capture needs.
             log("Preparing the owner account and disabling System Integrity Protection on \(vmName).")
             _ = try await PommeApplication.sipWorkflow(
-                name: vmName, action: .disable, finalState: .stopped, force: true)
+                name: vmName, action: .disable, finalState: .stopped)
             log("Configuring the AMFI override on \(vmName).")
             _ = try await PommeApplication.amfiWorkflow(
                 name: vmName, action: .disable, finalState: .stopped)

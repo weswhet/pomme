@@ -68,8 +68,6 @@ struct PommeSecurityWorkflowState: Equatable, Sendable {
 enum PommeSecurityWorkflowError: PommeDescribedError, Equatable, Sendable {
   case statusUnverified
   case ownerUnavailable(PommeRetainedCause = .init())
-  case confirmationRequired
-  case confirmationDeclined
   case agentUnverified
   case commandIncomplete
   case privateInputUnsupported
@@ -84,8 +82,6 @@ enum PommeSecurityWorkflowError: PommeDescribedError, Equatable, Sendable {
     switch self {
     case .statusUnverified: .securityStatusUnverified
     case .ownerUnavailable: .credentialUnavailable
-    case .confirmationRequired: .securityConfirmationRequired
-    case .confirmationDeclined: .operationCancelled
     case .agentUnverified: .securityAgentUnverified
     case .commandIncomplete: .securityCommandIncomplete
     case .privateInputUnsupported: .securityAgentUnsupported
@@ -131,9 +127,6 @@ enum PommeSecurityWorkflowError: PommeDescribedError, Equatable, Sendable {
       cause.describing(
         "Owner credentials are required.",
         then: "Set both POMME_AUTHORIZED_USER and POMME_AUTHORIZED_PASSWORD, restore the exact VM-scoped Keychain item, or run from an interactive terminal.")
-    case .confirmationRequired:
-      "Creating the owner account on this verified fresh VM requires confirmation. Run from an interactive terminal or pass -f/--force."
-    case .confirmationDeclined: "Owner account creation was declined; security is unchanged."
     case .agentUnverified:
       "Pomme couldn't authenticate the VM's guest agent with the identity that it recorded when it created the VM."
     case .commandIncomplete:

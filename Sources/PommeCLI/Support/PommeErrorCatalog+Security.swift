@@ -4,7 +4,6 @@ import Foundation
 
 extension PommeErrorCode {
     static let securityStatusUnverified: Self = "security-status-unverified"
-    static let securityConfirmationRequired: Self = "security-confirmation-required"
     static let securityAgentUnverified: Self = "security-agent-unverified"
     static let securityAgentUnsupported: Self = "security-agent-unsupported"
     static let securityCommandIncomplete: Self = "security-command-incomplete"
@@ -47,11 +46,6 @@ extension PommeErrorCatalog {
               title: "Pomme couldn't verify the VM's security state.",
               cause: "Pomme reads the SIP and AMFI state from the guest and accepts only a reply that it can parse exactly. The reply was missing, incomplete, or in an unexpected format.",
               resolution: [securityStatusStep, "Run `pomme agent status NAME` to check that the guest agent is connected."]),
-        .init(.securityConfirmationRequired, area: securityArea,
-              title: "Creating the owner account needs confirmation.",
-              cause: "To change SIP or AMFI on a fresh VM, Pomme creates a `pomme` administrator account in the guest. It asks first, and the command ran without an interactive terminal.",
-              resolution: ["Run the command in an interactive terminal and confirm the prompt.", "Or add `--force` to confirm in a script.", securityGuide],
-              hint: "Run the command in an interactive terminal, or add `--force`."),
         .init(.securityAgentUnverified, area: securityArea,
               title: "Pomme couldn't authenticate the guest agent.",
               cause: "SIP and AMFI changes use the guest agent that Pomme installed when it created the VM. The agent didn't answer, or it didn't prove the identity that Pomme recorded for it.",

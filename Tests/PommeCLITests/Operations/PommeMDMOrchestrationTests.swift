@@ -44,13 +44,10 @@ struct PommeMDMOrchestrationTests {
             ready { $0.retainedSecurity = retained },
             ready(),
         ])
-        var request = harness.request
-        request.force = true
-
-        let result = try await PommeApplication.mdm(request, dependencies: harness.dependencies)
+        let result = try await PommeApplication.mdm(harness.request, dependencies: harness.dependencies)
 
         #expect(result.ok)
-        #expect(await harness.effects.values() == ["resume", "finish:sipDisable:normal:force", "enroll:leased"])
+        #expect(await harness.effects.values() == ["resume", "finish:sipDisable:normal", "enroll:leased"])
         #expect(stepNames(result) == ["resumeProvisioning", "finishSecurityWorkflow", "enroll"])
     }
 
@@ -207,7 +204,7 @@ private struct Harness {
     init(facts: [PommeMDMReadiness.Facts], trust: MDMServerTrustDecision = .publicTrust, leaseBusy: Bool = false,
          failResume: Bool = false, profileReadable: Bool = true) {
         let name = "mdm-orchestration-\(UUID().uuidString.prefix(8).lowercased())"
-        request = PommeMDMCommandRequest(name: name, profilePath: "/tmp/profile.mobileconfig", interactive: false)
+        request = PommeMDMCommandRequest(name: name, profilePath: "/tmp/profile.mobileconfig")
         let effects = effects
         let leaseChecks = leaseChecks
         let queue = FactsQueue(facts)
@@ -242,9 +239,9 @@ private struct Harness {
                 await effects.append("resume")
                 if failResume { throw PommeProvisioningError.invalidJournal }
             },
-            finishSecurity: { name, operation, finalState, force, lease in
+            finishSecurity: { name, operation, finalState, lease in
                 await leaseChecks.append(lease.validates(name: name))
-                await effects.append("finish:\(operation.rawValue):\(finalState.rawValue)\(force ? ":force" : "")")
+                await effects.append("finish:\(operation.rawValue):\(finalState.rawValue)")
             },
             enroll: { request, lease in
                 if let lease { await leaseChecks.append(lease.validates(name: request.name)) }

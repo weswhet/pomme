@@ -82,9 +82,9 @@ incomplete.
 
 ## Lower SIP, then AMFI
 
-AMFI changes require SIP to be off, so you turn off SIP first. The `--force`
-flag doesn't bypass this order. The System has seen Crawlers try. The System
-has the footage.
+AMFI changes require SIP to be off, so you turn off SIP first. No flag
+bypasses this order. The System has seen Crawlers try. The System has the
+footage.
 
 To turn off SIP and then AMFI, follow these steps:
 
@@ -178,32 +178,21 @@ authorization depends on whether the VM already has an owner.
 
 ### Fresh VMs without an owner
 
-On a VM that Pomme verifies as fresh and Pomme-owned, the workflow can create
-the owner account for you. It creates a `pomme` administrator, turns on
-automatic login for that account, and finishes Setup Assistant. Free labor.
-Enjoy it.
+On a VM that Pomme verifies as fresh and Pomme-owned, the workflow creates the
+owner account for you, without asking. It creates a `pomme` administrator,
+turns on automatic login for that account, and finishes Setup Assistant. Free
+labor. Enjoy it. A VM is fresh only when nobody has set it up, which means that Setup Assistant
+hasn't finished, and the guest has no user accounts and no volume owner. This
+is the case for a macOS 26 VM that `pomme create` made, because only macOS 27
+lets Pomme create the owner while it installs macOS.
 
-Pomme asks you to confirm before it creates the account. To confirm without a
-prompt, for example in a script, add `--force`:
+If macOS refuses automatic login, for example because of Touch ID, Apple Pay,
+or App Store protections, the workflow stops.
 
-```sh
-pomme sip disable VM_NAME --force
-```
-
-If you run the command without a terminal and without `--force`, it stops with
-the following error:
-
-```text
-Creating the owner account on this verified fresh VM requires confirmation. Run from an interactive terminal or pass -f/--force.
-```
-
-:::caution[Read the Fine Print, Crawler]
-`--force` only confirms creating the owner on a verified fresh VM. It doesn't
-override owner credentials, freshness or identity checks, native login
-restrictions, an unfinished transaction, or a failed cleanup step. If macOS
-refuses automatic login, for example because of Touch ID, Apple Pay, or App
-Store protections, the workflow stops and `--force` can't change that. It's a
-confirmation, not a skeleton key.
+:::note[Patch Notes, Crawler]
+Earlier versions asked you to confirm before they created the account, and
+`--force` confirmed in advance. Pomme still accepts `-f` and `--force` so that
+existing scripts keep working, but the flags have no effect.
 :::
 
 ### VMs with an existing owner

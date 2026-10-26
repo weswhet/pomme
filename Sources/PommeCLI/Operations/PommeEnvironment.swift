@@ -25,8 +25,8 @@ struct GuestOperations: Sendable {
 }
 
 struct VMSecurity: Sendable {
-    let sip: @Sendable (String, SIPAction, VMFinalState, Bool) async throws -> PommeOperationResult
-    let amfi: @Sendable (String, AMFIAction, VMFinalState, Bool) async throws -> PommeOperationResult
+    let sip: @Sendable (String, SIPAction, VMFinalState) async throws -> PommeOperationResult
+    let amfi: @Sendable (String, AMFIAction, VMFinalState) async throws -> PommeOperationResult
     let mdm: @Sendable (PommeMDMCommandRequest) async throws -> PommeOperationResult
 }
 
@@ -60,8 +60,8 @@ struct PommeEnvironment: Sendable {
                 ui: { try PommeApplication.ui(name: $0, request: $1) }
             ),
             security: .init(
-                sip: { try await PommeApplication.sipWorkflow(name: $0, action: $1, finalState: $2, force: $3) },
-                amfi: { try await PommeApplication.amfiWorkflow(name: $0, action: $1, finalState: $2, force: $3) },
+                sip: { try await PommeApplication.sipWorkflow(name: $0, action: $1, finalState: $2) },
+                amfi: { try await PommeApplication.amfiWorkflow(name: $0, action: $1, finalState: $2) },
                 mdm: { try await PommeApplication.mdm($0) }
             )
         )

@@ -11,12 +11,7 @@ struct ForceFlagTests {
         SnapshotDeleteCommand.self,
         TemplateDeleteCommand.self,
         SessionsTerminateCommand.self,
-        ConfigInitCommand.self,
-        SIPEnableCommand.self,
-        SIPDisableCommand.self,
-        AMFIEnableCommand.self,
-        AMFIDisableCommand.self,
-        MDMCommand.self
+        ConfigInitCommand.self
     ])
     func shortForce(_ command: ParsableCommand.Type) {
         #expect(command.helpMessage(columns: 400).contains("-f, --force"), "\(command._commandName)")
@@ -28,5 +23,23 @@ struct ForceFlagTests {
         #expect(try DeleteCommand.parse(["-af"]).force)
         #expect(try SessionsTerminateCommand.parse(["dev", "--session", "00000000-0000-0000-0000-000000000000", "-f"]).force)
         #expect(try SnapshotDeleteCommand.parse(["dev", "--snapshot", "clean", "-f"]).force)
+    }
+
+    @Test("Security commands still accept the retired -f and --force", arguments: [
+        SIPEnableCommand.self as ParsableCommand.Type,
+        SIPDisableCommand.self,
+        AMFIEnableCommand.self,
+        AMFIDisableCommand.self
+    ])
+    func retiredSecurityForce(_ command: ParsableCommand.Type) throws {
+        #expect(!command.helpMessage(columns: 400).contains("--force"), "\(command._commandName)")
+        _ = try command.parseAsRoot(["dev", "-f"])
+        _ = try command.parseAsRoot(["dev", "--force"])
+    }
+
+    @Test("pomme mdm still accepts the retired --force")
+    func retiredMDMForce() throws {
+        #expect(!MDMCommand.helpMessage(columns: 400).contains("--force"))
+        _ = try MDMCommand.parseAsRoot(["dev", "--profile", "/tmp/p.mobileconfig", "-f"])
     }
 }

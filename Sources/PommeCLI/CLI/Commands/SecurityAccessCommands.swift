@@ -26,7 +26,7 @@ struct SIPStatusCommand: AsyncParsableCommand {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
         try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(workflow.output.debug) {
             try CLIOutputWriter.write(
-                await PommeEnvironment.live().security.sip(target, .status, workflow.finalState, false),
+                await PommeEnvironment.live().security.sip(target, .status, workflow.finalState),
                 options: workflow.output
             )
         }
@@ -36,7 +36,9 @@ struct SIPStatusCommand: AsyncParsableCommand {
 struct SIPEnableCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "enable", abstract: "Enable SIP and restore the VM state.")
     @Argument var name: String?
-    @Flag(name: [.customShort("f"), .customLong("force")], help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
+    // Accepted so existing scripts keep working; Pomme no longer asks before
+    // creating the owner on a verified fresh VM.
+    @Flag(name: [.customShort("f"), .customLong("force")], help: .hidden)
     var force = false
     @OptionGroup private var workflow: SecurityWorkflowOptions
 
@@ -44,7 +46,7 @@ struct SIPEnableCommand: AsyncParsableCommand {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
         try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(workflow.output.debug) {
             try CLIOutputWriter.write(
-                await PommeEnvironment.live().security.sip(target, .enable, workflow.finalState, force),
+                await PommeEnvironment.live().security.sip(target, .enable, workflow.finalState),
                 options: workflow.output
             )
         }
@@ -54,7 +56,9 @@ struct SIPEnableCommand: AsyncParsableCommand {
 struct SIPDisableCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "disable", abstract: "Disable SIP and restore the VM state.")
     @Argument var name: String?
-    @Flag(name: [.customShort("f"), .customLong("force")], help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
+    // Accepted so existing scripts keep working; Pomme no longer asks before
+    // creating the owner on a verified fresh VM.
+    @Flag(name: [.customShort("f"), .customLong("force")], help: .hidden)
     var force = false
     @OptionGroup private var workflow: SecurityWorkflowOptions
 
@@ -62,7 +66,7 @@ struct SIPDisableCommand: AsyncParsableCommand {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
         try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(workflow.output.debug) {
             try CLIOutputWriter.write(
-                await PommeEnvironment.live().security.sip(target, .disable, workflow.finalState, force),
+                await PommeEnvironment.live().security.sip(target, .disable, workflow.finalState),
                 options: workflow.output
             )
         }
@@ -87,7 +91,7 @@ struct AMFIStatusCommand: AsyncParsableCommand {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
         try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(workflow.output.debug) {
             try CLIOutputWriter.write(
-                await PommeEnvironment.live().security.amfi(target, .status, workflow.finalState, false),
+                await PommeEnvironment.live().security.amfi(target, .status, workflow.finalState),
                 options: workflow.output
             )
         }
@@ -97,7 +101,9 @@ struct AMFIStatusCommand: AsyncParsableCommand {
 struct AMFIEnableCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "enable", abstract: "Restore the saved AMFI configuration and the VM state.")
     @Argument var name: String?
-    @Flag(name: [.customShort("f"), .customLong("force")], help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
+    // Accepted so existing scripts keep working; Pomme no longer asks before
+    // creating the owner on a verified fresh VM.
+    @Flag(name: [.customShort("f"), .customLong("force")], help: .hidden)
     var force = false
     @OptionGroup private var workflow: SecurityWorkflowOptions
 
@@ -105,7 +111,7 @@ struct AMFIEnableCommand: AsyncParsableCommand {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
         try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(workflow.output.debug) {
             try CLIOutputWriter.write(
-                await PommeEnvironment.live().security.amfi(target, .enable, workflow.finalState, force),
+                await PommeEnvironment.live().security.amfi(target, .enable, workflow.finalState),
                 options: workflow.output
             )
         }
@@ -115,7 +121,9 @@ struct AMFIEnableCommand: AsyncParsableCommand {
 struct AMFIDisableCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "disable", abstract: "Configure AMFI as disabled and restore the VM state.")
     @Argument var name: String?
-    @Flag(name: [.customShort("f"), .customLong("force")], help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
+    // Accepted so existing scripts keep working; Pomme no longer asks before
+    // creating the owner on a verified fresh VM.
+    @Flag(name: [.customShort("f"), .customLong("force")], help: .hidden)
     var force = false
     @OptionGroup private var workflow: SecurityWorkflowOptions
 
@@ -123,7 +131,7 @@ struct AMFIDisableCommand: AsyncParsableCommand {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
         try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(workflow.output.debug) {
             try CLIOutputWriter.write(
-                await PommeEnvironment.live().security.amfi(target, .disable, workflow.finalState, force),
+                await PommeEnvironment.live().security.amfi(target, .disable, workflow.finalState),
                 options: workflow.output
             )
         }
@@ -147,7 +155,9 @@ struct MDMCommand: AsyncParsableCommand {
     var enrollmentMode: MDMEnrollmentMode = .supervised
     @Option(name: .customLong("final-security"), help: "SIP/AMFI after enrollment: restore (default) re-enables what enrollment disabled, except SIP on macOS 27, which push delivery needs off; disabled leaves both off.")
     var finalSecurity: MDMFinalSecurity = .restore
-    @Flag(name: [.customShort("f"), .customLong("force")], help: "Allow owner creation and automatic login on a verified fresh VM without confirmation.")
+    // Accepted so existing scripts keep working; Pomme no longer asks before
+    // creating the owner on a verified fresh VM.
+    @Flag(name: [.customShort("f"), .customLong("force")], help: .hidden)
     var force = false
     @Flag(name: .customLong("dry-run"), help: "Report the detected state and planned steps without changing the VM.")
     var dryRun = false
@@ -211,9 +221,9 @@ struct MDMCommand: AsyncParsableCommand {
         let target = try VMTargetResolver.names(from: name.map { [$0] } ?? [], allowMultiple: false)[0]
         let request = PommeMDMCommandRequest(
             name: target, profilePath: profile, guestPath: guestPath, timeout: try timeout.value(),
-            enrollmentMode: enrollmentMode, finalSecurity: finalSecurity, force: force, dryRun: dryRun,
+            enrollmentMode: enrollmentMode, finalSecurity: finalSecurity, dryRun: dryRun,
             skipServerPreflight: skipServerPreflight, creation: creation,
-            creationOptionsSupplied: creationOptionsSupplied, interactive: isatty(STDIN_FILENO) == 1)
+            creationOptionsSupplied: creationOptionsSupplied)
         try await PommeRecoveryDebugContext.$screenshotsEnabled.withValue(output.debug) {
             try CLIOutputWriter.write(try await PommeEnvironment.live().security.mdm(request), options: output)
         }

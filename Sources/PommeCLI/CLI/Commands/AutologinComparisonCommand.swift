@@ -114,7 +114,7 @@ enum PommeAutologinComparison {
             let normal = PommeSecurityNormalAgent(
                 reference: reference, expectedExecutableDigest: try PommeCore.currentNormalAgentDigest(plan: plan))
             let owner = PommeSecurityLiveOwnerPreparation(
-                reference: reference, normal: normal, force: true, labStrategy: strategy.ownerPreparationOverride)
+                reference: reference, normal: normal, labStrategy: strategy.ownerPreparationOverride)
             let started = Date()
             if strategy.ownerPreparationOverride == nil {
                 PommeCore.log("Production owner workflow harness: normal owner sequencing selected; isolated journal; no SIP or AMFI operation will run.", vmName: name)

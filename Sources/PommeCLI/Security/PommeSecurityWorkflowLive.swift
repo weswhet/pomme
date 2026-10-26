@@ -45,14 +45,13 @@ extension PommeSecurityWorkflow {
     reference: VMReference,
     operation: PommeSecurityWorkflowOperation,
     finalState: VMFinalState,
-    force: Bool,
     lease: VMBundleMutationLease,
     recoveryFactory: PommeRecoveryIntegrationFactory
   ) async throws -> JSONValue {
     // Capture this before the first boot this workflow starts.
     let original = try PommeCore.stableVMRunState(reference: reference)
     PommeUnifiedLog.security.notice(
-      "[\(reference.displayName, privacy: .public)] security workflow \(operation.wireName, privacy: .public) starting: original=\(original.logLabel, privacy: .public) finalState=\(finalState.rawValue, privacy: .public) force=\(force, privacy: .public) bundle=\(reference.bundle.rootURL.path, privacy: .public)")
+      "[\(reference.displayName, privacy: .public)] security workflow \(operation.wireName, privacy: .public) starting: original=\(original.logLabel, privacy: .public) finalState=\(finalState.rawValue, privacy: .public) bundle=\(reference.bundle.rootURL.path, privacy: .public)")
     let plan = try PommeCore.securityProvisioningPlan(reference: reference)
     // Only `csrutil disable` always needs Recovery, so only it is refused up
     // front on a build whose Recovery automation isn't qualified. Every other
@@ -196,7 +195,7 @@ extension PommeSecurityWorkflow {
       }
     }
     let owner = PommeSecurityLiveOwnerPreparation(
-      reference: reference, normal: normal, force: force)
+      reference: reference, normal: normal)
     let changeNormalBootArguments: @Sendable () async throws -> JSONValue = {
       PommeCore.log(
         "Booting normal macOS for the journaled AMFI boot-argument change.",
@@ -486,16 +485,14 @@ struct PommeSecurityFrameworkOwnerPreparation: Sendable {
 struct PommeSecurityLiveOwnerPreparation: Sendable {
   let reference: VMReference
   let normal: PommeSecurityNormalAgent
-  let force: Bool
   let labStrategy: PommeAutologinComparisonStrategy?
   private let credentials = PommeOwnerCredentialStore()
   private let interaction = PommeSecurityOwnerInteraction()
 
-  init(reference: VMReference, normal: PommeSecurityNormalAgent, force: Bool,
+  init(reference: VMReference, normal: PommeSecurityNormalAgent,
        labStrategy: PommeAutologinComparisonStrategy? = nil) {
     self.reference = reference
     self.normal = normal
-    self.force = force
     self.labStrategy = labStrategy
   }
 
@@ -644,7 +641,12 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
       throw PommeSecurityWorkflowJournalError.immutableRequestMismatch
     }
     if progress.journal.owner == nil {
-      try interaction.authorizeFreshOwner(vmName: reference.displayName, force: force)
+      // The probe proved that nobody has set this VM up: Pomme created it,
+      // Setup Assistant never finished, and it has no accounts or volume
+      // owner. Creating the owner here changes nothing anyone configured,
+      // so it needs no confirmation.
+      PommeUnifiedLog.security.notice(
+        "[\(reference.displayName, privacy: .public)] creating owner \(account, privacy: .public) on a verified fresh VM")
       try progress.update {
         try progress.store.recordOwnerIntent(
           $0, accountUsername: account, ownerPreparation: .new, lease: progress.lease)

@@ -21,15 +21,6 @@ struct PommeSecurityOwnerInteraction: Sendable {
     return readSecureLine(prompt: prompt)
   }
 
-  func authorizeFreshOwner(vmName: String, force: Bool) throws {
-    if force { return }
-    guard isInteractive() else { throw PommeSecurityWorkflowError.confirmationRequired }
-    guard confirm("Create administrator pomme and enable persistent automatic login on \(vmName)?")
-    else {
-      throw PommeSecurityWorkflowError.confirmationDeclined
-    }
-  }
-
   func existingOwner(vmName: String) throws -> PommeGuestSecurityCredentials {
     guard isInteractive(),
       let user = readPrivate("Owner account for \(vmName): "),
