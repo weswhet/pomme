@@ -30,6 +30,13 @@ personally.
   when it stops a running VM. The start could find the stopped VM's helper
   before it finished exiting. `pomme start` right after `pomme stop` had the
   same problem.
+- Stopping a VM that's in Recovery no longer waits 30 seconds. recoveryOS
+  ignores the shutdown request, so Pomme now powers the VM off at once instead
+  of after the wait.
+- For a VM created with `--experimental-recovery`, `pomme restart --mode
+  recovery` and the commands that boot Recovery, such as `pomme sip disable`,
+  let the guest shut itself down in a few seconds before the Recovery boot,
+  instead of waiting up to 30 seconds and then powering it off.
 
 ## Pomme 0.3.0
 
