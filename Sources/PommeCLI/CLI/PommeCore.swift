@@ -4024,6 +4024,10 @@ struct PommeCore {
     private static func recordAgentInstallDispatch(plan: PommeProvisioningPlan, method: PommeAgentInstallDispatch.Method) {
         do {
             let bundle = provisioningReference(for: plan).bundle
+            // Only schema 1 resumes and repairs read the record. A schema 2
+            // bootstrap checks normal macOS for the agent on every attempt,
+            // and its journal doesn't load as schema 1.
+            guard try provisioningSchema(bundle: bundle) != 2 else { return }
             let journal = try provisioningRepository(
                 bundleURL: bundle.rootURL, signer: PommeProvisioningJournalSigner(key: provisioningKey(bundle: bundle))
             ).load()
