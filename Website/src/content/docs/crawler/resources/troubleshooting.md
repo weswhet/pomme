@@ -95,10 +95,11 @@ Pomme uses the following categories. Think of them as camera angles:
 | `firmware` | `pomme firmware` and boot firmware repair. |
 | `ui` | UI automation in the guest. |
 
-macOS keeps notices and errors, but it keeps info messages only for a short
-time and doesn't store debug messages. The highlight reel is permanent; the
-bloopers aren't. If the problem happens again, stream the log in another
-Terminal window while you reproduce it:
+macOS keeps notices and errors, and Pomme records its diagnostics and progress
+steps as notices, so they're kept even when a command is interrupted. macOS
+keeps info messages only for a short time and doesn't store debug messages. The
+highlight reel is permanent; the bloopers aren't. For the most detail, stream
+the log in another Terminal window while you reproduce the problem:
 
 ```sh
 log stream --level debug --predicate 'subsystem == "com.github.weswhet.pomme"'
@@ -106,9 +107,11 @@ log stream --level debug --predicate 'subsystem == "com.github.weswhet.pomme"'
 
 :::caution[Sponsor Notice: No Secrets on Camera]
 Pomme doesn't write passwords, agent tokens, or other credentials to the
-unified log, and it withholds messages that mention a token, password, or
-secret. The log does include VM names and file paths, so review it before you
-attach it to an issue.
+unified log. As a safeguard, it replaces the value of any field named like a
+password, token, or credential with `<redacted>`, and shortens long strings of
+letters and digits, such as digests, to their first eight characters. The log
+does include VM names and file paths, so review it before you attach it to an
+issue.
 :::
 
 The host's log doesn't include records from inside the VM. The guest agent
