@@ -396,7 +396,11 @@ final class PommeVMRuntime: @unchecked Sendable {
     /// A guest that was asked to shut itself down is worth waiting for. Where
     /// nobody asked, the framework's request either lands quickly or not at
     /// all — recoveryOS never acts on it — so those stops keep the short
-    /// window they have always had.
+    /// window they have always had. Keep that window for Recovery even
+    /// though it always ends in a forced stop: it gives Recovery time to
+    /// finish writing a security change. Powering off 40 ms after
+    /// `csrutil disable` left a macOS 27 guest hanging at the Apple logo on
+    /// its next boot (October 25, 2026).
     static func guestShutdownWindow(expectingGuestShutdown: Bool, bootMode: BootMode) -> TimeInterval {
         expectingGuestShutdown && bootMode == .normal
             ? Constants.guestShutdownTimeoutSeconds
