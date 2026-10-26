@@ -360,23 +360,47 @@ final class PommeVMRuntime: @unchecked Sendable {
     /// Each lifecycle call reports whether it changed the VM's state, so the
     /// reply can tell a stop, pause, or resume apart from a no-op. A stop also
     /// reports whether the guest shut itself down or had to be powered off.
+    /// `recoveryFlushCoordinator` names the connection to flush Recovery
+    /// through when it isn't this runtime's own agent provider.
     @discardableResult
-    func stop(expectingGuestShutdown: Bool = false) async throws -> VMStopOutcome {
+    func stop(
+        expectingGuestShutdown: Bool = false,
+        recoveryFlushCoordinator: PommeAgentVSOCKCoordinator? = nil
+    ) async throws -> VMStopOutcome {
         let state = await PommeCore.state(of: vm, on: queue)
         guard state != .stopped else { await teardown(); return .alreadyStopped }
         PommeUnifiedLog.runtime.notice(
             "[\(self.logVMName, privacy: .public)] VM stop requested: state=\(self.stateDescription(state), privacy: .public) bootMode=\(self.bootMode.rawValue, privacy: .public) expectingGuestShutdown=\(expectingGuestShutdown, privacy: .public)"
         )
+        // recoveryOS ignores the stop request, so the window below always
+        // ends in a forced stop. Once the guest has flushed its file systems
+        // there is nothing left for that window to protect. A failed flush
+        // spends part of the window, so the stop never takes longer than it
+        // did without one.
+        var flushElapsed: TimeInterval = 0
+        if bootMode == .recovery, state == .running {
+            let flushStarted = Date()
+            if await PommeRecoveryFileSystemFlush.run(
+                coordinator: recoveryFlushCoordinator ?? agentProvider as? PommeAgentVSOCKCoordinator,
+                vmName: logVMName
+            ) {
+                try await forceStop()
+                PommeUnifiedLog.runtime.notice("[\(self.logVMName, privacy: .public)] VM powered off after the Recovery flush")
+                await teardown()
+                return .forced
+            }
+            flushElapsed = Date().timeIntervalSince(flushStarted)
+        }
         // A paused guest is frozen, so it can never act on the request and
         // waiting out the window would only delay the power off. The host
         // resumes a VM it means to shut down cleanly before asking for this.
         if state != .paused, await PommeCore.canRequestStop(vm, on: queue) {
             do {
                 try await PommeCore.requestStop(vm, on: queue)
-                let window = Self.guestShutdownWindow(
+                let window = max(0, Self.guestShutdownWindow(
                     expectingGuestShutdown: expectingGuestShutdown,
                     bootMode: bootMode
-                )
+                ) - flushElapsed)
                 if await waitUntilStopped(timeout: window) {
                     PommeUnifiedLog.runtime.notice("[\(self.logVMName, privacy: .public)] guest stopped the VM after a stop request")
                     await teardown()
@@ -396,11 +420,10 @@ final class PommeVMRuntime: @unchecked Sendable {
     /// A guest that was asked to shut itself down is worth waiting for. Where
     /// nobody asked, the framework's request either lands quickly or not at
     /// all — recoveryOS never acts on it — so those stops keep the short
-    /// window they have always had. Keep that window for Recovery even
-    /// though it always ends in a forced stop: it gives Recovery time to
-    /// finish writing a security change. Powering off 40 ms after
-    /// `csrutil disable` left a macOS 27 guest hanging at the Apple logo on
-    /// its next boot (October 25, 2026).
+    /// window they have always had. A Recovery stop that couldn't flush the
+    /// guest keeps that window even though it always ends in a forced stop:
+    /// it gives Recovery time to finish writing a security change. See
+    /// `PommeRecoveryFileSystemFlush`.
     static func guestShutdownWindow(expectingGuestShutdown: Bool, bootMode: BootMode) -> TimeInterval {
         expectingGuestShutdown && bootMode == .normal
             ? Constants.guestShutdownTimeoutSeconds

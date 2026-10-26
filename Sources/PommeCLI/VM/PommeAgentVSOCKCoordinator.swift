@@ -269,6 +269,12 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
     func attachRecoveryRuntime() throws { try attach(.recoveryRuntime) }
     func attachRecoveryResident() throws { try attach(.recoveryResident) }
 
+    /// Whether a listener for `role` is installed, so an agent of that role
+    /// may still connect.
+    func isListening(for role: PommeAgentVSOCKRole) -> Bool {
+        lock.withLock { attached.contains(role) }
+    }
+
     /// A Recovery runtime must only advance once the exact listener role has
     /// completed protocol authentication.  Merely accepting a VSOCK
     /// connection is intentionally not sufficient evidence.

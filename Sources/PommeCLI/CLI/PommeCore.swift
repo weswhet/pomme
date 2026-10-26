@@ -270,11 +270,15 @@ private final class PommeLiveRecoveryRuntimeResources: @unchecked Sendable {
         try staging.removeHostArtifacts()
     }
 
-    func stopReapAndClean() async throws -> PommeRecoveryRuntimeCleanup {
+    /// The experimental image's resident outlives the request-bound agent,
+    /// so it can still flush Recovery before the power-off.
+    func stopReapAndClean(
+        recoveryFlushCoordinator: PommeAgentVSOCKCoordinator? = nil
+    ) async throws -> PommeRecoveryRuntimeCleanup {
         coordinator.teardown()
 
         var firstError: Error?
-        do { try await runtime.stop() }
+        do { try await runtime.stop(recoveryFlushCoordinator: recoveryFlushCoordinator) }
         catch { firstError = error }
 
         let stopped = queue.sync { vm.state == .stopped }
@@ -1141,7 +1145,7 @@ struct PommeCore {
             verifyBootstrapAttachment: { resources.hasExactBootstrapAttachment() },
             stopReapAndClean: {
                 defer { residentCoordinator?.teardown() }
-                return try await resources.stopReapAndClean()
+                return try await resources.stopReapAndClean(recoveryFlushCoordinator: residentCoordinator)
             }
         )
         return .init(

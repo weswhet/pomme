@@ -69,9 +69,17 @@ take a minute or more to act on. The stop sequence works as follows:
 2. If the VM is running normal macOS and the guest agent is connected, Pomme
    asks the guest to shut down and then sends the framework's stop request.
    The guest has up to 120 seconds to power off.
-3. In every other case, including a VM running in Recovery, Pomme sends only
-   the framework's stop request and waits up to 30 seconds.
-4. If the VM is still running when the wait ends, the helper stops the VM
+3. If the VM is running Recovery, which never acts on the framework's stop
+   request, Pomme runs `sync` through the Pomme agent in Recovery so that
+   any change Recovery made reaches the disk, and then stops the VM
+   outright. A VM created with `--experimental-recovery` starts that agent
+   with Recovery, and Pomme waits up to 20 seconds for it to connect. In
+   other VMs, the agent connects only when you open a Recovery terminal
+   session.
+4. In every other case, including Recovery when the agent can't run `sync`,
+   Pomme sends only the framework's stop request and waits up to 30 seconds,
+   less any time spent waiting for the agent.
+5. If the VM is still running when the wait ends, the helper stops the VM
    outright.
 
 Pomme reports how each stop ended, so an unclean stop is never silent. In

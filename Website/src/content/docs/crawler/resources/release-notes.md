@@ -34,6 +34,12 @@ personally.
   recovery` and the commands that boot Recovery, such as `pomme sip disable`,
   let the guest shut itself down in a few seconds before the Recovery boot,
   instead of waiting up to 30 seconds and then powering it off.
+- A stop from Recovery no longer waits 30 seconds before it powers the VM
+  off. When the Pomme agent in Recovery is connected, as it always is for a
+  VM created with `--experimental-recovery`, Pomme runs `sync` in the guest
+  first and then powers the VM off. `pomme stop`, `pomme restart`, and the
+  commands that leave Recovery, such as `pomme sip disable`, finish up to
+  30 seconds sooner.
 
 ## Pomme 0.3.0
 

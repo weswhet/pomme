@@ -116,10 +116,12 @@ Replace `VM_NAME` with the name of the VM.
 
 When the VM runs normal macOS and its guest agent is connected, Pomme first
 asks the guest to shut itself down, and gives it up to 120 seconds to finish. A
-paused VM is resumed first, because a paused guest can't shut down. In other
-cases, such as a VM in Recovery, Pomme asks Virtualization.framework to stop
-the VM and waits up to 30 seconds. If the VM is still running after that
-window, Pomme powers it off.
+paused VM is resumed first, because a paused guest can't shut down. In
+Recovery, when the Pomme agent there is connected, Pomme runs `sync` in the
+guest and then powers the VM off, which takes a few seconds. A VM created with
+`--experimental-recovery` always has that agent. In other cases, Pomme asks
+Virtualization.framework to stop the VM and waits up to 30 seconds. If the VM
+is still running after that window, Pomme powers it off.
 
 Pomme reports a power-off in its output instead of presenting it as a clean
 stop. In structured output, the `stopMethod` field is one of the following
