@@ -77,6 +77,11 @@ To update, run `pomme update`.
   instead of booting Recovery only to pause it again. If Pomme can't reach a
   requested final state after a Recovery session, it no longer boots Recovery
   again on the way back.
+- The progress spinner on an interactive terminal spells `pomme` in lowercase
+  letters, one letter at a time. It draws each letter one dot at a time in its
+  own color and then replaces it with the next, which starts beside the dot
+  where the last one ended. The spinner is one column wider than before.
+  `--progress plain` output is unchanged.
 
 ### Fixes
 

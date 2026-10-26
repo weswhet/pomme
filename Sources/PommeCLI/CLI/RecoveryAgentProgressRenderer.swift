@@ -70,7 +70,7 @@ final class RecoveryAgentProgressRenderer {
                 write("\u{001B}[?25l")
                 cursorHidden = true
             }
-            let frame = PommeProgressSession.squareFrame(step: frameIndex, color: color)
+            let frame = PommeProgressSession.pommeFrame(step: frameIndex, color: color)
             frameIndex += 1
             write("\r\u{001B}[2K\(frame) \(elapsed)s \(vmName) \(stage.rawValue)")
             fflush(stderr)

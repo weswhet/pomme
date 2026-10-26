@@ -221,7 +221,7 @@ final class PommeProgressSession: @unchecked Sendable {
             guard !active.isEmpty else { clearLine(); return }
             let width = max(1, terminalWidth() - 1)
             let step = Int(elapsed * 1_000) / Self.frameMilliseconds
-            let frame = unicode ? Self.squareFrame(step: step, color: color) : ["|", "/", "-", "\\"][step % 4]
+            let frame = unicode ? Self.pommeFrame(step: step, color: color) : ["|", "/", "-", "\\"][step % 4]
             let count = statuses.count > 1 ? " \(statuses.filter(\.complete).count)/\(statuses.count)" : ""
             // The elapsed time sits beside the spinner, ahead of the VM and step.
             let prefix = frame + " \(Int(elapsed))s\(count) "
@@ -485,41 +485,52 @@ final class PommeProgressSession: @unchecked Sendable {
     /// How long each spinner frame shows; the render timer runs at this rate.
     static let frameMilliseconds = 120
 
-    /// The outline of a 4-by-4-dot square drawn in two Braille cells,
-    /// clockwise from the top-left corner. Terminal cells are about twice as
-    /// tall as they are wide, so these dots look square.
-    static let squarePerimeter: [(x: Int, y: Int)] =
-        (0..<4).map { ($0, 0) } + [(3, 1), (3, 2)] + (0..<4).reversed().map { ($0, 3) } + [(0, 2), (0, 1)]
+    /// The pen strokes that spell "pomme" in lowercase, one letter at a time,
+    /// in a 5-by-4-dot grid drawn in three Braille cells. The pen moves one dot
+    /// per frame. Where it retraces a dot it already drew, as up the middle leg
+    /// of the m, the frame repeats. Every letter starts on or beside the dot
+    /// where the previous one ended, and e ends beside the start of p, so the
+    /// pen never jumps.
+    static let pommeStrokes: [(letter: Character, dots: [(x: Int, y: Int)])] = [
+        ("p", [(2, 2), (3, 1), (2, 0), (1, 0), (0, 0), (0, 1), (0, 2), (0, 3), (0, 2), (1, 2)]),
+        ("o", [(1, 3), (2, 3), (3, 2), (3, 1), (2, 0), (1, 0), (0, 1), (0, 2)]),
+        ("m", [(0, 3), (0, 2), (0, 1), (0, 0), (1, 0), (2, 1), (2, 2), (2, 3), (2, 2), (2, 1), (3, 0), (4, 1), (4, 2), (4, 3)]),
+        ("m", [(4, 3), (4, 2), (4, 1), (3, 0), (2, 1), (2, 2), (2, 3), (2, 2), (2, 1), (1, 0), (0, 0), (0, 1), (0, 2), (0, 3)]),
+        ("e", [(0, 2), (0, 1), (1, 0), (2, 0), (3, 1), (2, 1), (1, 1), (0, 2), (1, 3), (2, 3), (3, 3)]),
+    ]
 
-    /// The square's dots fill in clockwise one at a time until the outline is
-    /// complete, then empty in the same direction from the first dot, so the
-    /// filled run swirls around the square. It's never blank.
-    static let squareFrames: [String] = {
+    /// Frames that hold each finished letter before the pen erases it.
+    static let pommeHoldFrames = 4
+
+    /// Each letter draws one step at a time, holds, and then erases from its
+    /// first dot, two dots a frame, down to its last dot. The next letter's
+    /// first frame replaces that dot. It's never blank.
+    static let pommeFrames: [(text: String, letter: Int)] = {
         let bits = [[0, 1, 2, 6], [3, 4, 5, 7]]
-        let perimeter = squarePerimeter
-        func frame(_ lit: Range<Int>) -> String {
-            var cells = [UInt32](repeating: 0, count: 2)
-            for index in lit {
-                let point = perimeter[index]
+        func frame(_ dots: ArraySlice<(x: Int, y: Int)>) -> String {
+            var cells = [UInt32](repeating: 0, count: 3)
+            for point in dots {
                 cells[point.x / 2] |= 1 << bits[point.x % 2][point.y]
             }
             return String(String.UnicodeScalarView(cells.map { UnicodeScalar(0x2800 + $0)! }))
         }
-        let count = perimeter.count
-        return (1...count).map { frame(0..<$0) } + (1..<count).map { frame($0..<count) }
+        return pommeStrokes.enumerated().flatMap { letter, stroke in
+            let dots = stroke.dots
+            let drawn = (1...dots.count).map { frame(dots[0..<$0]) }
+            let held = Array(repeating: frame(dots[...]), count: pommeHoldFrames)
+            let erased = stride(from: 2, to: dots.count - 1, by: 2).map { frame(dots[$0...]) } + [frame(dots.suffix(1))]
+            return (drawn + held + erased).map { ($0, letter) }
+        }
     }()
 
-    /// Apple colors, one for each lap of the square, as 256-color indexes:
-    /// red, orange, gold, and green.
-    static let squareColors = [196, 208, 220, 112]
+    /// Colors from the six-color Apple logo, one for each letter, as 256-color
+    /// indexes: green, yellow, orange, red, and purple.
+    static let pommeColors = [112, 220, 208, 196, 129]
 
-    /// The spinner for one timer step. Each lap fills and empties the square
-    /// once and takes the next apple color.
-    static func squareFrame(step: Int, color: Bool) -> String {
-        let step = max(0, step)
-        let frame = squareFrames[step % squareFrames.count]
-        guard color else { return frame }
-        let lap = step / squareFrames.count
-        return "\u{001B}[38;5;\(squareColors[lap % squareColors.count])m" + frame + "\u{001B}[0m"
+    /// The spinner for one timer step: a frame of "pomme" in its letter's color.
+    static func pommeFrame(step: Int, color: Bool) -> String {
+        let frame = pommeFrames[max(0, step) % pommeFrames.count]
+        guard color else { return frame.text }
+        return "\u{001B}[38;5;\(pommeColors[frame.letter])m" + frame.text + "\u{001B}[0m"
     }
 }

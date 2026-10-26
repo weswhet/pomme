@@ -337,44 +337,64 @@ struct PommeProgressTests {
         }
     }
 
-    @Test("Square frames fill clockwise, then empty from the first dot")
-    func square() {
-        let frames = PommeProgressSession.squareFrames
-        let perimeter = PommeProgressSession.squarePerimeter.map { "\($0.x),\($0.y)" }
-        #expect(perimeter.count == 12 && Set(perimeter).count == 12)
-        #expect(frames.count == 23 && Set(frames).count == frames.count)
+    @Test("Lowercase pomme draws one letter at a time, and each starts where the last ended")
+    func pommeLetters() {
+        let strokes = PommeProgressSession.pommeStrokes
+        let frames = PommeProgressSession.pommeFrames
+        #expect(String(strokes.map(\.letter)) == "pomme")
+        #expect(Set(frames.map(\.letter)) == Set(strokes.indices))
 
         // Decodes a frame into the "x,y" dots it lights.
         func dots(_ frame: String) -> Set<String> {
             let bits = [[0, 1, 2, 6], [3, 4, 5, 7]]
             let cells = frame.unicodeScalars.map { $0.value - 0x2800 }
             var lit: Set<String> = []
-            for x in 0..<4 {
+            for x in 0..<6 {
                 for y in 0..<4 where cells[x / 2] & (1 << bits[x % 2][y]) != 0 {
                     lit.insert("\(x),\(y)")
                 }
             }
             return lit
         }
+        func adjacent(_ a: (x: Int, y: Int), _ b: (x: Int, y: Int)) -> Bool {
+            max(abs(a.x - b.x), abs(a.y - b.y)) <= 1
+        }
 
-        for (index, frame) in frames.enumerated() {
-            #expect(frame.unicodeScalars.count == 2)
-            #expect(frame.unicodeScalars.allSatisfy { (0x2800...0x28FF).contains($0.value) })
-            #expect(PommeProgressSession.displayWidth(frame) == 2)
-            let lit = index < 12 ? perimeter[0...index] : perimeter[(index - 11)...]
-            #expect(dots(frame) == Set(lit), "frame \(index)")
+        for (index, stroke) in strokes.enumerated() {
+            let points = stroke.dots.map { "\($0.x),\($0.y)" }
+            // A stroke can retrace a dot, but every step moves the pen.
+            #expect(zip(points, points.dropFirst()).allSatisfy { $0 != $1 }, "letter \(index)")
+            #expect(zip(stroke.dots, stroke.dots.dropFirst()).allSatisfy { adjacent($0, $1) }, "letter \(index)")
+            let next = strokes[(index + 1) % strokes.count]
+            #expect(adjacent(stroke.dots.last!, next.dots.first!), "letter \(index)")
+
+            // The letter draws one dot per frame, holds, and erases from its first dot.
+            let own = frames.filter { $0.letter == index }.map { dots($0.text) }
+            for count in 1...points.count {
+                #expect(own[count - 1] == Set(points[0..<count]), "letter \(index) frame \(count)")
+            }
+            #expect(own.dropFirst(points.count).prefix(PommeProgressSession.pommeHoldFrames).allSatisfy { $0 == Set(points) })
+            #expect(own.last == [points.last!])
+        }
+        for frame in frames {
+            #expect(frame.text.unicodeScalars.count == 3)
+            #expect(frame.text.unicodeScalars.allSatisfy { (0x2800...0x28FF).contains($0.value) })
+            #expect(PommeProgressSession.displayWidth(frame.text) == 3)
+            #expect(!dots(frame.text).isEmpty)
         }
     }
 
-    @Test("Each lap of the square takes the next color, and NO_COLOR leaves it plain")
-    func squareColor() {
-        let laps = PommeProgressSession.squareFrames.count
-        let first = PommeProgressSession.squareFrame(step: 0, color: true)
-        let second = PommeProgressSession.squareFrame(step: laps, color: true)
-        #expect(first.hasPrefix("\u{001B}[38;5;196m") && first.hasSuffix("\u{001B}[0m"))
-        #expect(second.hasPrefix("\u{001B}[38;5;208m"))
-        #expect(PommeProgressSession.displayWidth(first) == 2)
-        #expect(PommeProgressSession.squareFrame(step: 0, color: false) == PommeProgressSession.squareFrames[0])
+    @Test("Each letter takes the next color, and NO_COLOR leaves it plain")
+    func pommeColor() {
+        let frames = PommeProgressSession.pommeFrames
+        let firstO = frames.firstIndex { $0.letter == 1 }!
+        let first = PommeProgressSession.pommeFrame(step: 0, color: true)
+        let second = PommeProgressSession.pommeFrame(step: firstO, color: true)
+        #expect(first.hasPrefix("\u{001B}[38;5;112m") && first.hasSuffix("\u{001B}[0m"))
+        #expect(second.hasPrefix("\u{001B}[38;5;220m"))
+        #expect(PommeProgressSession.pommeFrame(step: frames.count, color: true) == first)
+        #expect(PommeProgressSession.displayWidth(first) == 3)
+        #expect(PommeProgressSession.pommeFrame(step: 0, color: false) == frames[0].text)
     }
 
     @Test("The elapsed time follows the spinner, ahead of the VM and step")
@@ -385,7 +405,7 @@ struct PommeProgressTests {
         harness.time = 12.5
         session.tick()
         let line = harness.output.replacingOccurrences(of: "\r\u{001B}[2K", with: "")
-        let frame = PommeProgressSession.squareFrame(step: 12_500 / PommeProgressSession.frameMilliseconds, color: false)
+        let frame = PommeProgressSession.pommeFrame(step: 12_500 / PommeProgressSession.frameMilliseconds, color: false)
         #expect(line == frame + " 12s devme · Starting macOS")
     }
 
