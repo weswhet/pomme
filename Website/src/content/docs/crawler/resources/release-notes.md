@@ -9,9 +9,20 @@ working. You should too. The entries below are the official record, so the
 System has been told to keep its commentary out of them. It's taking this
 personally.
 
-## Pomme 0.3.1 (pre-release)
+## Pomme 0.4.0
 
-### Changes
+Pomme 0.4.0 writes its diagnostics to the host's unified log, and makes
+`pomme sip disable` and the other commands that leave Recovery faster. A stop
+from Recovery now takes under a second when the Pomme agent in Recovery is
+connected, instead of 30 seconds. `pomme sip disable`, `pomme amfi disable`,
+and `pomme mdm` no longer ask before they create the owner account on a fresh
+VM. Like 0.3.0, it's beta software, and it was released before the release
+qualification matrices for Tahoe and Sequoia ran. For what qualification
+covers, see
+[Supported macOS versions](/crawler/concepts/os-qualification/#release-qualification).
+To update, run `pomme update`.
+
+### Features
 
 - Pomme writes its diagnostics to the host's unified log under the subsystem
   `com.github.weswhet.pomme`, so you can read what a failed command did after
