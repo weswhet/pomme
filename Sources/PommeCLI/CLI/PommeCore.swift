@@ -6476,12 +6476,23 @@ struct PommeCore {
         }
     }
 
+    /// An unavailable agent is the expected answer while a guest boots, and
+    /// callers poll for it several times a second, so the unified log keeps
+    /// it only as a debug message. The helper log still gets every failure.
+    private static func logControlFailure(_ context: String, _ report: PommeErrorReport) {
+        let line = "control \(context) failed [code=\(report.code.rawValue)]: \(report.message)"
+            .split(whereSeparator: \.isNewline).joined(separator: " ")
+        guard report.code == .guestAgentUnavailable else { return log(line) }
+        PommeUnifiedLog.message(line, level: .debug)
+        writeDiagnostic(line)
+    }
+
     /// The failure payload that the helper returns for `error`: the existing
     /// `error` text, plus the redacted report that keeps its code and causes.
     /// Every failure is also written to the helper log with its code.
     static func controlFailurePayload(_ error: Error, hostExitCode: Int = 1, context: String) -> [String: Any] {
         let report = PommeErrorReport(error)
-        log("control \(context) failed [code=\(report.code.rawValue)]: \(report.message)")
+        logControlFailure(context, report)
         return [
             "ok": false,
             "error": error.localizedDescription,
@@ -6494,7 +6505,7 @@ struct PommeCore {
     /// into a failed response that keeps the report.
     static func controlErrorLine(_ error: Error, context: String) -> String {
         let report = PommeErrorReport(error)
-        log("control \(context) failed [code=\(report.code.rawValue)]: \(report.message)")
+        logControlFailure(context, report)
         guard let data = try? JSONEncoder().encode(report), let json = String(data: data, encoding: .utf8) else {
             return "ERROR \(error.localizedDescription)"
         }
