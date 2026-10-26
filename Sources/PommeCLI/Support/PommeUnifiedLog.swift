@@ -6,11 +6,12 @@ import os
 ///
 /// Never pass a password, agent token, credential, Keychain item, SSH key, or
 /// request body here, not even as private data. Free-form text goes through
-/// `scrubbed(_:)`, which withholds anything that mentions a secret.
+/// `scrubbed(_:)`, which redacts secret values that slip through anyway.
 ///
-/// The system keeps `.info` messages only in memory until an error is
-/// logged, and never stores `.debug` messages without a logging
-/// configuration change, so failures are logged with `.error`.
+/// The system keeps `.info` messages only in memory until the same process
+/// logs an error, and never stores `.debug` messages without a logging
+/// configuration change. Diagnostics that must survive an interrupted run,
+/// such as `PommeCore.log`, are notices, and failures are errors.
 enum PommeUnifiedLog {
     static let subsystem = "com.github.weswhet.pomme"
 
@@ -43,22 +44,72 @@ enum PommeUnifiedLog {
     /// UI automation in the guest.
     static let ui = Logger(subsystem: subsystem, category: "ui")
 
-    /// Words that withhold a log message in addition to those that
-    /// `PommeErrorRedaction` checks. The unified log keeps text longer than
-    /// the CLI's output, so it's stricter without changing that output.
-    private static let extraSecretMarkers = [
-        "credential", "passphrase", "private key", "-----begin", "authorization:",
-        "bearer ", "proof", "kcpassword",
+    /// Keys whose values are redacted in `key=value` and `key: value` text.
+    private static let secretKeyPattern =
+        "password|passwd|passphrase|secret|token|credential|api[_-]?key|authorization|cookie|private[_-]?key|kcpassword"
+
+    private static let pemBlock = try! NSRegularExpression(
+        pattern: "-----BEGIN [^-]+-----.*?(-----END [^-]+-----|$)", options: [.dotMatchesLineSeparators])
+    private static let bearer = try! NSRegularExpression(
+        pattern: "\\bbearer\\s+[A-Za-z0-9._~+/=-]{8,}", options: [.caseInsensitive])
+    private static let secretAssignment = try! NSRegularExpression(
+        pattern: "\\b([A-Za-z_-]*(?:\(secretKeyPattern))[A-Za-z_-]*)(\"?\\s*[:=]\\s*)(\"[^\"]*\"|'[^']*'|[^\\s,;)\\]}]+)",
+        options: [.caseInsensitive])
+    private static let opaqueRun = try! NSRegularExpression(pattern: "[A-Za-z0-9+=]{32,}")
+    /// Values of a secret-named key that say whether it exists, not what it is.
+    private static let descriptiveValues: Set<String> = [
+        "true", "false", "yes", "no", "nil", "null", "none", "present", "missing", "absent", "available",
+        "unavailable", "required", "optional", "set", "unset", "valid", "invalid", "redacted", "<redacted>",
     ]
 
-    /// One line of free-form text that is safe to log as public data: text
-    /// that mentions a secret is withheld, and newlines are flattened.
+    /// One line of free-form text that is safe to log as public data. Pomme
+    /// never logs a secret on purpose, so this removes secret values rather
+    /// than whole messages, keeping the diagnostic: values of secret-named
+    /// keys, bearer credentials, and PEM blocks are redacted, and a run of 32
+    /// or more letters and digits, such as a digest or an agent credential,
+    /// keeps only its first 8. Names with hyphens, dots, or slashes, such as
+    /// UUIDs, VM names, and paths, are kept. Newlines are flattened.
     static func scrubbed(_ text: String) -> String {
-        let lowered = text.lowercased()
-        if PommeErrorRedaction.mentionsSecret(text) || extraSecretMarkers.contains(where: { lowered.contains($0) }) {
-            return PommeErrorRedaction.withheldMessage
+        var line = text.split(whereSeparator: \.isNewline).joined(separator: " ")
+        line = replacing(pemBlock, in: line) { _ in "<redacted key>" }
+        line = replacing(bearer, in: line) { match in
+            match.split(separator: " ", maxSplits: 1).first.map { "\($0) <redacted>" } ?? "<redacted>"
         }
-        return String(text.split(whereSeparator: \.isNewline).joined(separator: " ").prefix(1024))
+        line = replacing(secretAssignment, in: line, groups: true) { groups in
+            let value = groups[3].trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            if descriptiveValues.contains(value.lowercased()) || (value.count <= 4 && Int(value) != nil) {
+                return groups[0]
+            }
+            return groups[1] + groups[2] + "<redacted>"
+        }
+        line = replacing(opaqueRun, in: line) { run in
+            guard run.contains(where: \.isNumber), run.contains(where: \.isLetter) else { return run }
+            return "\(run.prefix(8))…"
+        }
+        return String(line.prefix(1024))
+    }
+
+    private static func replacing(
+        _ expression: NSRegularExpression, in text: String, transform: (String) -> String
+    ) -> String {
+        replacing(expression, in: text, groups: true) { transform($0[0]) }
+    }
+
+    /// Replaces each match, from the last to the first, with what `transform`
+    /// returns for its capture groups; group 0 is the whole match.
+    private static func replacing(
+        _ expression: NSRegularExpression, in text: String, groups: Bool, transform: ([String]) -> String
+    ) -> String {
+        var result = text
+        let matches = expression.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        for match in matches.reversed() {
+            guard let whole = Range(match.range, in: result) else { continue }
+            let captured = (0..<match.numberOfRanges).map { index -> String in
+                Range(match.range(at: index), in: result).map { String(result[$0]) } ?? ""
+            }
+            result.replaceSubrange(whole, with: transform(captured))
+        }
+        return result
     }
 
     /// Records a diagnostic message, attributed to a VM when one is named.
@@ -88,14 +139,14 @@ enum PommeUnifiedLog {
 
     /// Records an error with its catalog code, Swift type, description, and
     /// the domain and code of each underlying error. Text passes through
-    /// `PommeErrorRedaction`, so a message that mentions a secret is withheld.
+    /// `scrubbed(_:)`, which removes secret values but keeps the message.
     static func error(
         _ error: any Error,
         context: String,
         vmName: String? = nil,
         logger: Logger = cli
     ) {
-        let report = PommeErrorReport(error, redaction: .secrets)
+        let report = PommeErrorReport(error, redaction: .none)
         let nsError = error as NSError
         let type = String(reflecting: Swift.type(of: error))
         let causes = report.causes

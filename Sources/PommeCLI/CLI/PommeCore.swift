@@ -1389,7 +1389,8 @@ struct PommeCore {
         let safe = message
             .split(whereSeparator: \.isNewline)
             .joined(separator: " ")
-        PommeUnifiedLog.message(safe)
+        // A notice, so that it's kept even when the run ends without an error.
+        PommeUnifiedLog.notice(safe)
         writeDiagnostic(safe)
     }
 
