@@ -9,6 +9,24 @@ working. You should too. The entries below are the official record, so the
 System has been told to keep its commentary out of them. It's taking this
 personally.
 
+## Pomme 0.3.1 (pre-release)
+
+### Changes
+
+- Pomme writes its diagnostics to the host's unified log under the subsystem
+  `com.github.weswhet.pomme`, so you can read what a failed command did after
+  its Terminal window is closed. The log records each command's start and
+  end, progress steps, warnings, and reported errors with their error codes,
+  and leaves out passwords, tokens, and other secrets. For the commands that
+  read it, see
+  [Collect Pomme's logs](/crawler/resources/troubleshooting/#collect-pommes-logs).
+
+### Fixes
+
+- `pomme create --experimental-recovery` no longer prints "Pomme couldn't
+  record the agent installation attempt" for macOS 27 VMs. The message was
+  harmless: creation still verified the agent and finished.
+
 ## Pomme 0.3.0
 
 Pomme 0.3.0 boots macOS Recovery only for changes that macOS allows nowhere
