@@ -169,24 +169,29 @@ struct PommeForegroundControlTests {
                 result: .object(["exited": .bool(true)])
             )
         )
-        let writerDone = DispatchSemaphore(value: 0)
+        // A fake clock makes the frame arrive after the guest deadline on
+        // every run. The first poll elapses empty past the deadline, and the
+        // helper writes the terminal frame before the second poll.
         let peer = sockets[1]
         let nominalGuestDeadline = 0.05
-        Thread.detachNewThread {
-            defer { writerDone.signal() }
-            usleep(100_000)
-            _ = response.withUnsafeBytes {
-                Darwin.write(peer, $0.baseAddress, $0.count)
-            }
-        }
-        defer { _ = writerDone.wait(timeout: .now() + .seconds(1)) }
-
+        var clock: TimeInterval = 0
+        var polls = 0
         let result = try PommeCore.collectForegroundResponse(
             timeout: nominalGuestDeadline + 0.2,
+            now: { clock },
             receive: { remaining in
-                try session.receiveEventIfAvailable(timeout: remaining)
+                polls += 1
+                if polls == 1 {
+                    clock = nominalGuestDeadline + 0.1
+                    return nil
+                }
+                _ = response.withUnsafeBytes {
+                    Darwin.write(peer, $0.baseAddress, $0.count)
+                }
+                return try session.receiveEventIfAvailable(timeout: remaining)
             }
         )
+        #expect(polls == 2)
         #expect(result["exited"] as? Bool == true)
     }
 
