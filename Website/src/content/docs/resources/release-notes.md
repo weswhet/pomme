@@ -5,6 +5,10 @@ description: Changes in each version of Pomme.
 
 This page lists changes in each version of Pomme, newest first.
 
+## Pomme 0.4.1 (pre-release)
+
+No changes yet.
+
 ## Pomme 0.4.0
 
 Pomme 0.4.0 writes its diagnostics to the host's unified log, and makes

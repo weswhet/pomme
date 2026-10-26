@@ -9,6 +9,10 @@ working. You should too. The entries below are the official record, so the
 System has been told to keep its commentary out of them. It's taking this
 personally.
 
+## Pomme 0.4.1 (pre-release)
+
+No changes yet.
+
 ## Pomme 0.4.0
 
 Pomme 0.4.0 writes its diagnostics to the host's unified log, and makes
