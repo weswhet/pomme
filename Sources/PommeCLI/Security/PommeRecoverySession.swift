@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import os
 import Security
 
 /// The two listener numbers reserved for a temporary Recovery session.
@@ -540,7 +541,20 @@ actor PommeRecoverySession {
     private let registry: PommeRecoveryCredentialRegistry
     private let now: @Sendable () -> Date
 
-    private(set) var lifecycle: PommeRecoverySessionLifecycle = .created
+    private(set) var lifecycle: PommeRecoverySessionLifecycle = .created {
+        didSet {
+            guard lifecycle != oldValue else { return }
+            // The request ID and operation correlate one session; the
+            // credential, challenge, and proof are never logged.
+            let level: OSLogType = lifecycle == .failed ? .error : .default
+            let id = request.requestID.uuidString, operation = request.operation
+            let old = oldValue.rawValue, new = lifecycle.rawValue
+            PommeUnifiedLog.recovery.log(level: level, """
+                Recovery session \(id, privacy: .public) operation=\(operation, privacy: .public): \
+                \(old, privacy: .public) -> \(new, privacy: .public)
+                """)
+        }
+    }
     private var rootEvidence: PommeRecoveryRootEvidence?
     private var vmState: PommeRecoveryRunState?
     private var challengeValue: String?
@@ -603,27 +617,53 @@ actor PommeRecoverySession {
             // started and then cleaned the VM; `.previous` must still resolve
             // to the exact pre-request state and surface the primary failure.
             vmState = state
+            PommeUnifiedLog.recovery.notice("""
+                Recovery session \(self.request.requestID.uuidString, privacy: .public) preparing: \
+                vm=\(self.request.vmUUID.uuidString, privacy: .public) \
+                operation=\(self.request.operation, privacy: .public) \
+                listenerPort=\(self.request.listenerPort, privacy: .public) \
+                captured=\(String(describing: state), privacy: .public) \
+                finalState=\(self.request.requestedFinalState, privacy: .public)
+                """)
             let rootEvidenceValue = try await root.prepare(request: request)
             guard rootEvidenceValue.requestID == request.requestID,
                   rootEvidenceValue.vmUUID == request.vmUUID,
                   rootEvidenceValue.listenerPort == request.listenerPort,
                   rootEvidenceValue.isAcceptable
             else {
+                let e = rootEvidenceValue
+                PommeUnifiedLog.recovery.error("""
+                    Recovery session \(self.request.requestID.uuidString, privacy: .public) rejected root evidence: \
+                    requestBound=\(e.requestID == self.request.requestID && e.vmUUID == self.request.vmUUID, privacy: .public) \
+                    portMatches=\(e.listenerPort == self.request.listenerPort, privacy: .public) \
+                    shareReadOnly=\(e.shareReadOnly, privacy: .public) \
+                    signatureVerified=\(e.executableSignatureVerified, privacy: .public) \
+                    digestVerified=\(e.executableDigestVerified, privacy: .public) \
+                    inodeVerified=\(e.inodeVerified, privacy: .public) \
+                    modeVerified=\(e.modeVerified, privacy: .public) \
+                    launcherInstalled=\(e.launcherInstalled, privacy: .public) \
+                    listenerReady=\(e.listenerReady, privacy: .public)
+                    """)
                 throw PommeRecoverySessionError.rootEvidenceRejected
             }
             rootEvidence = rootEvidenceValue
             lifecycle = .prepared
             return evidence()
         } catch let error as PommeRecoverySessionError {
+            logFailure(error, phase: "prepare")
             lifecycle = .failed
             throw error
         } catch let error as PommeRecoveryRuntimeError {
+            logFailure(error, phase: "prepare")
             lifecycle = .failed
             throw error
         } catch is CancellationError {
+            PommeUnifiedLog.recovery.notice(
+                "Recovery session \(self.request.requestID.uuidString, privacy: .public) preparation cancelled")
             lifecycle = .failed
             throw CancellationError()
         } catch {
+            logFailure(error, phase: "prepare")
             lifecycle = .failed
             throw PommeRecoverySessionError.preparationFailed(PommeRetainedCause(error))
         }
@@ -692,12 +732,15 @@ actor PommeRecoverySession {
             }
             return result
         } catch let error as PommeRecoveryGuestOperationFailure {
+            logFailure(error, phase: "guest operation")
             lifecycle = .failed
             throw error
         } catch let error as PommeRecoverySessionError {
+            logFailure(error, phase: "guest operation")
             lifecycle = .failed
             throw error
         } catch {
+            logFailure(error, phase: "guest operation")
             lifecycle = .failed
             throw PommeRecoverySessionError.guestOperationFailed(PommeRetainedCause(codesOnly: error))
         }
@@ -720,6 +763,15 @@ actor PommeRecoverySession {
         do {
             let cleanup = try await root.cleanup(request: request)
             guard cleanup.isComplete else {
+                PommeUnifiedLog.recovery.error("""
+                    Recovery session \(self.request.requestID.uuidString, privacy: .public) cleanup incomplete: \
+                    shareRemoved=\(cleanup.shareRemoved, privacy: .public) \
+                    launcherRemoved=\(cleanup.launcherRemoved, privacy: .public) \
+                    credentialRemoved=\(cleanup.credentialRemoved, privacy: .public) \
+                    listenerClosed=\(cleanup.listenerClosed, privacy: .public) \
+                    sensitiveFramesCleared=\(cleanup.sensitiveFramesCleared, privacy: .public) \
+                    unknownStateRejected=\(cleanup.unknownStateRejected, privacy: .public)
+                    """)
                 lifecycle = .failed
                 throw PommeRecoverySessionError.cleanupFailed()
             }
@@ -730,6 +782,7 @@ actor PommeRecoverySession {
             lifecycle = .failed
             throw error
         } catch {
+            logFailure(error, phase: "cleanup")
             lifecycle = .failed
             throw PommeRecoverySessionError.cleanupFailed(PommeRetainedCause(error))
         }
@@ -744,6 +797,8 @@ actor PommeRecoverySession {
             throw PommeRecoverySessionError.requestMismatch
         }
         let resolvedFinalState = try resolvedFinalState(finalState)
+        PommeUnifiedLog.recovery.notice(
+            "Recovery session \(self.request.requestID.uuidString, privacy: .public) restoring final state \(resolvedFinalState.rawValue, privacy: .public) (requested \(finalState.rawValue, privacy: .public))")
         do {
             try await vm.requestFinalState(resolvedFinalState)
             guard try await vm.proveFinalState(resolvedFinalState) else {
@@ -752,6 +807,7 @@ actor PommeRecoverySession {
             lifecycle = .finalized
             return evidence()
         } catch {
+            logFailure(error, phase: "final state \(resolvedFinalState.rawValue)")
             lifecycle = .failed
             // The requested transition may have partially succeeded before
             // its proof failed. Make one bounded best-effort return to the
@@ -777,13 +833,24 @@ actor PommeRecoverySession {
         case .paused:
             capturedFinalState = .paused
         }
+        PommeUnifiedLog.recovery.notice(
+            "Recovery session \(self.request.requestID.uuidString, privacy: .public) returning to captured state \(capturedFinalState.rawValue, privacy: .public) after a final-state failure")
         do {
             try await vm.requestFinalState(capturedFinalState)
             _ = try await vm.proveFinalState(capturedFinalState)
         } catch {
             // The stable public error already communicates that no final
             // state can be trusted; never surface an underlying host error.
+            // The unified log keeps it for diagnosis.
+            logFailure(error, phase: "captured-state return")
         }
+    }
+
+    private func logFailure(_ error: any Error, phase: String) {
+        PommeUnifiedLog.error(
+            error,
+            context: "Recovery session \(request.requestID.uuidString) \(request.operation) \(phase)",
+            logger: PommeUnifiedLog.recovery)
     }
 
     private func resolvedFinalState(_ requested: VMFinalState) throws -> VMFinalState {

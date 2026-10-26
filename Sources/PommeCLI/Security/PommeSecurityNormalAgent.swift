@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Only proof outcomes enter this diagnostic; no guest identity or output is retained.
 struct PommeSecurityDesktopProofObservation: Equatable, Sendable {
@@ -449,10 +450,21 @@ struct PommeSecurityNormalAgent: Sendable {
         if requirePrivateInput, object["privatePTYInputVersion"] != .integer(1) {
           throw PommeSecurityWorkflowError.privateInputUnsupported
         }
+        PommeUnifiedLog.security.info(
+          "[\(reference.displayName, privacy: .public)] normal agent authenticated (privateInput=\(requirePrivateInput, privacy: .public))")
         return
       } catch {
-        if (error as? PommeSecurityWorkflowError) == .privateInputUnsupported { throw error }
+        if (error as? PommeSecurityWorkflowError) == .privateInputUnsupported {
+          PommeUnifiedLog.error(
+            error, context: "normal agent authentication", vmName: reference.displayName,
+            logger: PommeUnifiedLog.security)
+          throw error
+        }
         guard ProcessInfo.processInfo.systemUptime < deadline else {
+          // The last attempt's error explains why the deadline passed.
+          PommeUnifiedLog.error(
+            error, context: "normal agent authentication (deadline \(Int(timeout))s)",
+            vmName: reference.displayName, logger: PommeUnifiedLog.security)
           throw PommeSecurityWorkflowError.agentUnverified
         }
         try Task.checkCancellation()
@@ -533,6 +545,8 @@ struct PommeSecurityNormalAgent: Sendable {
     } catch {
       throw PommeSecurityNormalAgentError.rebootRequestFailed(PommeRetainedCause(error))
     }
+    PommeUnifiedLog.security.notice(
+      "[\(reference.displayName, privacy: .public)] native guest reboot scheduled from boot \(originalBootIdentity, privacy: .public)")
 
     var requiresNormalStart = false
     var sawRunningNormal = false
@@ -579,7 +593,11 @@ struct PommeSecurityNormalAgent: Sendable {
           let current = try Self.validatedBootIdentity(
             hooks.captureBootIdentity(try remaining(Self.bootIdentityRequestTimeout)))
           sawAuthenticatedBoot = true
-          if current != originalBootIdentity { return current }
+          if current != originalBootIdentity {
+            PommeUnifiedLog.security.notice(
+              "[\(reference.displayName, privacy: .public)] native reboot verified in place: new boot \(current, privacy: .public)")
+            return current
+          }
         } catch is CancellationError {
           throw CancellationError()
         } catch {
@@ -594,6 +612,8 @@ struct PommeSecurityNormalAgent: Sendable {
     }
 
     if requiresNormalStart {
+      PommeUnifiedLog.security.notice(
+        "[\(reference.displayName, privacy: .public)] guest stopped after native reboot; starting normal macOS")
       // Recheck immediately before starting. This preserves the no-stop
       // guarantee if another lifecycle owner changed the state while polling.
       do {
@@ -609,6 +629,8 @@ struct PommeSecurityNormalAgent: Sendable {
         throw PommeSecurityNormalAgentError.rebootStartFailed(PommeRetainedCause(error))
       }
     } else {
+      PommeUnifiedLog.security.error(
+        "[\(reference.displayName, privacy: .public)] native reboot unproven: sawRunningNormal=\(sawRunningNormal, privacy: .public) sawAuthenticatedBoot=\(sawAuthenticatedBoot, privacy: .public)")
       if sawAuthenticatedBoot {
         throw PommeSecurityNormalAgentError.rebootBootIdentityUnchanged
       }
@@ -628,7 +650,11 @@ struct PommeSecurityNormalAgent: Sendable {
         let current = try Self.validatedBootIdentity(
           hooks.captureBootIdentity(try remaining(Self.bootIdentityRequestTimeout)))
         sawAuthenticatedAfterStart = true
-        if current != originalBootIdentity { return current }
+        if current != originalBootIdentity {
+          PommeUnifiedLog.security.notice(
+            "[\(reference.displayName, privacy: .public)] native reboot verified after a normal start: new boot \(current, privacy: .public)")
+          return current
+        }
       } catch is CancellationError {
         throw CancellationError()
       } catch {
@@ -638,6 +664,8 @@ struct PommeSecurityNormalAgent: Sendable {
       let interval = min(Self.rebootPollInterval, max(0, deadline.timeIntervalSince(hooks.now())))
       if interval > 0 { try await hooks.sleep(interval) }
     }
+    PommeUnifiedLog.security.error(
+      "[\(reference.displayName, privacy: .public)] native reboot unproven after a normal start: authenticated=\(sawAuthenticatedAfterStart || sawAuthenticatedBoot, privacy: .public)")
     if sawAuthenticatedAfterStart || sawAuthenticatedBoot {
       throw PommeSecurityNormalAgentError.rebootBootIdentityUnchanged
     }
@@ -978,6 +1006,10 @@ struct PommeSecurityNormalAgent: Sendable {
     _ diagnostic: PommeSecurityNormalAgentDiagnostic,
     vmName: String
   ) {
+    // The code is allowlisted and carries no guest text. The security
+    // category records it as an error so that it survives in the log store.
+    PommeUnifiedLog.security.error(
+      "[\(vmName, privacy: .public)] normal desktop proof failed: \(diagnostic.diagnosticCode, privacy: .public)")
     PommeCore.log(
       "Normal desktop proof diagnostic: \(diagnostic.diagnosticCode).",
       vmName: vmName)

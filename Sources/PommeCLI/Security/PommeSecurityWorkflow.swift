@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// One sequential durable cursor, shared with the synchronous native-tool
 /// callbacks. The per-VM lease covers the complete lifetime of this cursor.
@@ -115,6 +116,7 @@ enum PommeSecurityWorkflow {
       dependencies.log("Inspecting security state before owner preparation.")
       PommeProgressContext.sink?.step(vm: progress.journal.identity.vmName, "Checking security state")
       let state = try await dependencies.observe()
+      logObservedState(state, progress: progress)
       let matches = state.disabled == operation.requestsDisabled
       let baselineNeedsRestoration = operation == .amfiEnable && state.baselinePresent
       let reconciled = !state.reconciliationRequired && !baselineNeedsRestoration
@@ -217,6 +219,7 @@ enum PommeSecurityWorkflow {
       return result(progress: progress, noOp: noOp, normalBootVerified: normalBootVerified)
     } catch {
       let primary = error
+      logFailure(error, progress: progress)
       if let preparation = error as? OwnerPreparationFailure {
         PommeProgressContext.sink?.warning("Owner preparation failed; VM state and journal retained without failure restoration or retry.")
         dependencies.log("Owner preparation failed at \(progress.journal.phase.rawValue); VM state and journal retained without failure restoration or retry.")
@@ -232,6 +235,9 @@ enum PommeSecurityWorkflow {
       PommeProgressContext.sink?.warning("Security progress was retained; restoring the VM run state after failure.")
       dependencies.log("Security progress was retained; restoring the VM run state after failure.")
       do { try await dependencies.restore(progress.journal.originalRunState) } catch {
+        PommeUnifiedLog.error(
+          error, context: "security failure restoration",
+          vmName: progress.journal.identity.vmName, logger: PommeUnifiedLog.security)
         throw PommeSecurityWorkflowError.restorationIncomplete(after: error)
       }
       throw primary
@@ -260,6 +266,7 @@ enum PommeSecurityWorkflow {
       return result(progress: progress, noOp: false, normalBootVerified: true)
     } catch {
       let primary = error
+      logFailure(error, progress: progress)
       if let preparation = error as? OwnerPreparationFailure {
         PommeProgressContext.sink?.warning("Owner preparation failed; VM state and journal retained without failure restoration or retry.")
         dependencies.log("Owner preparation failed at \(progress.journal.phase.rawValue); VM state and journal retained without failure restoration or retry.")
@@ -275,6 +282,9 @@ enum PommeSecurityWorkflow {
       PommeProgressContext.sink?.warning("Security progress was retained; restoring the VM run state after failure.")
       dependencies.log("Security progress was retained; restoring the VM run state after failure.")
       do { try await dependencies.restore(progress.journal.originalRunState) } catch {
+        PommeUnifiedLog.error(
+          error, context: "security failure restoration",
+          vmName: progress.journal.identity.vmName, logger: PommeUnifiedLog.security)
         throw PommeSecurityWorkflowError.restorationIncomplete(after: error)
       }
       throw primary
@@ -290,6 +300,35 @@ enum PommeSecurityWorkflow {
     var errorDescription: String? { PommeErrorDescriber.describe(failure).message }
     var recoverySuggestion: String? { PommeErrorDescriber.describe(failure).hint }
     var underlying: (any Error)? { PommeErrorDescriber.underlying(of: failure) }
+  }
+
+  /// Records the guest's security evidence that decides whether the
+  /// workflow mutates, reconciles, or finishes as a no-op.
+  private static func logObservedState(
+    _ state: PommeSecurityWorkflowState, progress: PommeSecurityWorkflowProgress
+  ) {
+    let journal = progress.journal
+    PommeUnifiedLog.security.notice("""
+      [\(journal.identity.vmName, privacy: .public)] security state observed: \
+      operation=\(journal.operation.wireName, privacy: .public) \
+      phase=\(journal.phase.rawValue, privacy: .public) \
+      disabled=\(state.disabled, privacy: .public) \
+      baselinePresent=\(state.baselinePresent, privacy: .public) \
+      baselinePhase=\(state.baselinePhase ?? "none", privacy: .public) \
+      reconciliationRequired=\(state.reconciliationRequired, privacy: .public)
+      """)
+  }
+
+  /// Records a workflow failure with the journal phase it stopped at, before
+  /// the failure path decides whether to restore the VM run state.
+  private static func logFailure(_ error: any Error, progress: PommeSecurityWorkflowProgress) {
+    let journal = progress.journal
+    let path = error is OwnerPreparationFailure ? "owner preparation" : "security workflow"
+    PommeUnifiedLog.error(
+      (error as? OwnerPreparationFailure)?.failure ?? error,
+      context: "\(path) \(journal.operation.wireName) at \(journal.phase.rawValue)",
+      vmName: journal.identity.vmName,
+      logger: PommeUnifiedLog.security)
   }
 
   private static func prepareOwnerPreservingFailure(

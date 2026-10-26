@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import os
 
 /// The public, UI-friendly description of an immutable local snapshot.
 struct VMSnapshotRecord: Codable, Equatable, Sendable {
@@ -189,7 +190,16 @@ enum VMSnapshotStore {
             throw RunnerError.posix(function: "publish snapshot", code: errno)
         }
         try syncDirectory(bundle.snapshotsURL)
+        PommeUnifiedLog.runtime.notice("""
+            [\(logName(bundle), privacy: .public)] snapshot \(name, privacy: .public) published: \
+            sourceState=\(sourceState, privacy: .public) machineStateBytes=\(record.machineStateBytes, privacy: .public)
+            """)
         return record
+    }
+
+    /// The VM's name, for unified-log lines.
+    private static func logName(_ bundle: BundleLayout) -> String {
+        bundle.rootURL.deletingPathExtension().lastPathComponent
     }
 
     static func manifest(bundle: BundleLayout, name: String) throws -> VMSnapshotManifest {
@@ -205,6 +215,12 @@ enum VMSnapshotStore {
         if try digest(bundle.machineIdentifierURL) != manifest.machineIdentifierSHA256 { drift.append("machineIdentifier") }
         if try externalFingerprint(bundle.diskImageURL) != manifest.diskFingerprint { drift.append("disk") }
         if try externalFingerprint(bundle.auxiliaryStorageURL) != manifest.auxiliaryStorageFingerprint { drift.append("auxiliaryStorage") }
+        if !drift.isEmpty {
+            PommeUnifiedLog.runtime.info("""
+                [\(logName(bundle), privacy: .public)] snapshot \(manifest.record.name, privacy: .public) \
+                drift: \(drift.joined(separator: ","), privacy: .public)
+                """)
+        }
         return drift
     }
 
@@ -216,6 +232,7 @@ enum VMSnapshotStore {
         try syncDirectory(bundle.snapshotsURL)
         try FileManager.default.removeItem(at: tombstone)
         try syncDirectory(bundle.snapshotsURL)
+        PommeUnifiedLog.runtime.notice("[\(logName(bundle), privacy: .public)] snapshot \(name, privacy: .public) deleted")
     }
 
     static func installMachineState(bundle: BundleLayout, name: String) throws {
@@ -269,6 +286,7 @@ enum VMSnapshotStore {
         try syncDirectory(bundle.rootURL)
         try FileManager.default.removeItem(at: bundle.requiredSnapshotRestoreURL)
         try syncDirectory(bundle.rootURL)
+        PommeUnifiedLog.runtime.notice("[\(logName(bundle), privacy: .public)] required snapshot restore consumed")
     }
 
     private static func installRequiredMachineState(_ source: URL, bundle: BundleLayout) throws {
@@ -287,10 +305,18 @@ enum VMSnapshotStore {
             try syncFile(bundle.requiredSnapshotRestoreURL)
             try syncFile(bundle.saveStateURL)
             try syncDirectory(bundle.rootURL)
+            PommeUnifiedLog.runtime.notice("""
+                [\(logName(bundle), privacy: .public)] installed required saved-state restore \
+                from \(source.deletingLastPathComponent().lastPathComponent, privacy: .public)
+                """)
         } catch {
+            PommeUnifiedLog.error(error, context: "install required saved-state restore", vmName: logName(bundle), logger: PommeUnifiedLog.runtime)
             do {
                 try removeRequiredRestoreArtifacts(bundle: bundle)
             } catch let cleanupError {
+                PommeUnifiedLog.error(
+                    cleanupError, context: "saved-state restore staging cleanup", vmName: logName(bundle), logger: PommeUnifiedLog.runtime
+                )
                 throw RunnerError.virtualMachineState(
                     "Saved-state restore staging failed and cleanup could not be proven: \(error.localizedDescription); cleanup: \(cleanupError.localizedDescription)"
                 )

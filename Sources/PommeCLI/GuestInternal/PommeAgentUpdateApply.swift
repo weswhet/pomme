@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 
 /// Replaces the persistent normal-boot agent in a running guest with the bytes
 /// of the staged executable that runs this mode. The host uploads that
@@ -159,8 +160,17 @@ enum PommeAgentUpdateApply {
 
     static func run(arguments: [String]) -> Int32 {
         let replacesCredential = arguments.count == 4 && arguments[3] == replaceCredentialFlag
-        guard arguments.count == 3 || replacesCredential, arguments[0] == flag, geteuid() == 0 else { return 1 }
+        let log = PommeUnifiedLog.bootstrap
+        guard arguments.count == 3 || replacesCredential, arguments[0] == flag, geteuid() == 0 else {
+            log.error("Agent update rejected its arguments or isn't running as root")
+            return 1
+        }
         var failureStatus = Phase.request
+        // The replacement credential on standard input is never logged.
+        log.notice("""
+            Agent update starting: target=\(arguments[2], privacy: .public) \
+            replacesCredential=\(replacesCredential, privacy: .public)
+            """)
         do {
             let replacement = replacesCredential ? try readStandardInput() : nil
             let outcome = try apply(
@@ -168,11 +178,17 @@ enum PommeAgentUpdateApply {
                 targetSHA256: arguments[2],
                 selfExecutable: try PommeExecutableIdentity.currentExecutableURL(),
                 replacementCredential: replacement,
-                phase: { failureStatus = $0 }
+                phase: { phase in
+                    failureStatus = phase
+                    log.info("Agent update phase \(phase, privacy: .public)")
+                }
             )
+            log.notice("Agent update finished: outcome=\(outcome.rawValue, privacy: .public)")
             FileHandle.standardOutput.write(Data("\(outcome.rawValue) \(arguments[2])\n".utf8))
             return 0
         } catch {
+            log.error("Agent update failed in phase \(failureStatus, privacy: .public)")
+            PommeUnifiedLog.error(error, context: "Agent update", logger: log)
             return failureStatus
         }
     }

@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import os
 
 enum PommeProvisioningV2Route: String, Codable, Sendable { case virtualization }
 
@@ -448,6 +449,10 @@ struct PommeProvisioningV2Orchestrator: Sendable {
 
     func start(_ plan: PommeProvisioningPlan) async throws {
         try repository.create(signer.make(generation: 1, plan: plan, events: []))
+        PommeUnifiedLog.notice(
+            "provisioning v2 journal created: finalState=\(plan.finalState.rawValue) "
+                + "experimentalRecovery=\(plan.experimentalRecovery != nil)",
+            vmName: plan.vm.name, logger: PommeUnifiedLog.provisioning)
         try await resume(expectedPlan: plan)
     }
 
@@ -455,9 +460,16 @@ struct PommeProvisioningV2Orchestrator: Sendable {
         var journal = try repository.load()
         try signer.verify(journal)
         guard expectedPlan == nil || expectedPlan == journal.plan else { throw PommeProvisioningError.invalidPlan }
+        let vmName = journal.plan.vm.name
+        let lastEvent = journal.events.last.map { "\($0.phase.rawValue)/\($0.kind.rawValue)" } ?? "none"
+        PommeUnifiedLog.notice(
+            "provisioning v2 journal resumed: generation=\(journal.generation) events=\(journal.events.count) last=\(lastEvent)",
+            vmName: vmName, logger: PommeUnifiedLog.provisioning)
         if journal.events.contains(where: { $0.phase == .provisionGuest && $0.kind == .intent }),
            !journal.events.contains(where: { $0.phase == .provisionGuest && $0.kind == .receipt }),
            try effects.provisionGuestWasDispatched(journal.plan) {
+            PommeUnifiedLog.message("provisionGuest intent has no receipt but was dispatched; refusing to retry",
+                                    vmName: vmName, level: .error, logger: PommeUnifiedLog.provisioning)
             throw PommeProvisioningV2Error.ambiguousProvisionGuest
         }
         guard try await effects.verifyOwnership(journal.plan.vm) == journal.plan.vm else {
@@ -468,6 +480,9 @@ struct PommeProvisioningV2Orchestrator: Sendable {
                 guard next.phase == .provisionGuest || next.phase == .bootstrapNormalAgent || next.phase == .verifyNormalAgent || next.phase == .restoreFinalState else {
                     throw PommeProvisioningV2Error.interruptedPhase(next.phase)
                 }
+                PommeUnifiedLog.notice(
+                    "phase retry after interrupted intent: \(next.phase.rawValue) attempt=\(next.attempt)",
+                    vmName: vmName, logger: PommeUnifiedLog.provisioning)
             } else {
                 var reference = journal.ownerReference
                 if next.phase == .provisionGuest, reference == nil {
@@ -475,6 +490,9 @@ struct PommeProvisioningV2Orchestrator: Sendable {
                 }
                 journal = try commit(journal, reference: reference, event: .init(kind: .intent,
                     phase: next.phase, attempt: next.attempt))
+                PommeUnifiedLog.notice(
+                    "phase intent: \(next.phase.rawValue) attempt=\(next.attempt) generation=\(journal.generation)",
+                    vmName: vmName, logger: PommeUnifiedLog.provisioning)
             }
             let receipt: String
             var verifiedReference = journal.ownerReference
@@ -508,6 +526,9 @@ struct PommeProvisioningV2Orchestrator: Sendable {
                 }
                 guard PommeProvisioningDigest.isSHA256(receipt) else { throw PommeProvisioningV2Error.phaseFailed(next.phase) }
             } catch {
+                PommeUnifiedLog.error(
+                    error, context: "provisioning phase \(next.phase.rawValue) attempt \(next.attempt)",
+                    vmName: vmName, logger: PommeUnifiedLog.provisioning)
                 // Hash only a fixed redacted category, never exception text containing secrets.
                 _ = try commit(journal, reference: journal.ownerReference, event: .init(kind: .failure,
                     phase: next.phase, attempt: next.attempt,
@@ -516,7 +537,11 @@ struct PommeProvisioningV2Orchestrator: Sendable {
             }
             journal = try commit(journal, reference: verifiedReference, startupVolumeGroupUUID: verifiedVolumeGroup, event: .init(kind: .receipt,
                 phase: next.phase, attempt: next.attempt, digest: receipt))
+            PommeUnifiedLog.notice(
+                "phase receipt: \(next.phase.rawValue) attempt=\(next.attempt) generation=\(journal.generation)",
+                vmName: vmName, logger: PommeUnifiedLog.provisioning)
         }
+        PommeUnifiedLog.notice("provisioning v2 complete", vmName: vmName, logger: PommeUnifiedLog.provisioning)
     }
 
     /// The codes-only cause of a failed phase. A bare `phaseFailed` that a

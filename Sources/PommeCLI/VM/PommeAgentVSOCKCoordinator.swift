@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 @preconcurrency import Virtualization
 
 enum PommeAgentVSOCKRole: Hashable, Sendable {
@@ -19,6 +20,16 @@ enum PommeAgentVSOCKRole: Hashable, Sendable {
 
     var statusRole: GuestAgentStatusV1.Role {
         self == .normal ? .normal : .recovery
+    }
+
+    /// The role's name in unified-log lines.
+    var logName: String {
+        switch self {
+        case .normal: "normal"
+        case .recoveryBootstrap: "recovery-bootstrap"
+        case .recoveryRuntime: "recovery-runtime"
+        case .recoveryResident: "recovery-resident"
+        }
     }
 }
 
@@ -250,6 +261,7 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
             attached.insert(role)
             lastRole = role
         }
+        PommeUnifiedLog.guestAgent.info("listening for the \(role.logName, privacy: .public) agent on vsock port \(role.port, privacy: .public)")
     }
 
     func attachNormal() throws { try attach(.normal) }
@@ -278,6 +290,10 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
             phase = .disconnected
             return (connections, session)
         }
+        PommeUnifiedLog.guestAgent.info("""
+            detached the \(role.logName, privacy: .public) listener; \
+            closed \(closing.connections.count, privacy: .public) connection(s) session=\(closing.session != nil, privacy: .public)
+            """)
         closing.connections.forEach { $0.close() }
         close(closing.session)
     }
@@ -294,6 +310,10 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
             phase = .disconnected
             return (connections, session)
         }
+        PommeUnifiedLog.guestAgent.info("""
+            coordinator torn down: closed \(closing.connections.count, privacy: .public) connection(s) \
+            session=\(closing.session != nil, privacy: .public)
+            """)
         closing.connections.forEach { $0.close() }
         close(closing.session)
     }
@@ -353,6 +373,7 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
                 if let status = GuestAgentStatusV1.described(description, role: active.role.statusRole) { return status }
                 return .init(connection: .connected, role: active.role.statusRole, protocolVersion: nil, executableDigest: nil, capabilities: [], updateState: .unavailable)
             } catch {
+                PommeUnifiedLog.error(error, context: "guest agent status describe", logger: PommeUnifiedLog.guestAgent)
                 connectionDidDisconnect(active.connection, as: active.role)
             }
         }
@@ -375,6 +396,10 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
             if active == nil { phase = .connecting(role) }
             return (connections, session)
         }
+        PommeUnifiedLog.guestAgent.info("""
+            accepted a \(role.logName, privacy: .public) agent connection; \
+            replacing \(previous.connections.count, privacy: .public) pending candidate(s)
+            """)
         previous.connections.forEach { $0.close() }
         close(previous.session)
         Task { [weak self, connection] in await self?.authenticate(connection, as: role) }
@@ -393,6 +418,7 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
                 if binding == nil { throw PommeAgentVSOCKError.missingBinding }
             }
         } catch {
+            PommeUnifiedLog.error(error, context: "\(role.logName) agent binding", logger: PommeUnifiedLog.guestAgent)
             lock.withLock {
                 guard attached.contains(role) else { return }
                 if pending.map({ sameConnection($0.connection, connection) }) == true {
@@ -412,6 +438,14 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
             do {
                 return try await connection.exchange(request, timeout: requestTimeout)
             } catch {
+                // Only the operation name is logged, never the payload, which
+                // can carry a credential; the decoded request isn't kept.
+                let operation = (try? PommeAgentProtocol.decode(Data(request.dropLast())))?.operation ?? "unknown"
+                PommeUnifiedLog.error(
+                    error,
+                    context: "\(role.logName) agent exchange \(operation) (timeout \(requestTimeout)s)",
+                    logger: PommeUnifiedLog.guestAgent
+                )
                 self?.connectionDidDisconnect(connection, as: role)
                 throw error
             }
@@ -421,6 +455,7 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
             // to a protocol diagnostic.
             try await session.authenticate(token: try secretProvider(role))
         } catch {
+            PommeUnifiedLog.error(error, context: "\(role.logName) agent authentication", logger: PommeUnifiedLog.guestAgent)
             let shouldClose = lock.withLock { () -> Bool in
                 guard attached.contains(role) else { return true }
                 if pending.map({ sameConnection($0.connection, connection) }) == true {
@@ -441,6 +476,14 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
             pending = nil
             phase = .connected(role)
             return (previous, previousSession)
+        }
+        if replaced.connections.contains(where: { sameConnection($0, connection) }) {
+            PommeUnifiedLog.guestAgent.notice("\(role.logName, privacy: .public) agent authenticated after its listener was removed or replaced; closing it")
+        } else {
+            PommeUnifiedLog.guestAgent.notice("""
+                \(role.logName, privacy: .public) agent authenticated and active; \
+                replaced previous session=\(replaced.session != nil, privacy: .public)
+                """)
         }
         replaced.connections.forEach { $0.close() }
         close(replaced.session)
@@ -463,6 +506,11 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
                 phase = .disconnected
             }
             return nil
+        }
+        if session != nil {
+            PommeUnifiedLog.guestAgent.notice("\(role.logName, privacy: .public) agent disconnected; active session closed")
+        } else {
+            PommeUnifiedLog.guestAgent.info("\(role.logName, privacy: .public) agent connection closed (not the active session)")
         }
         connection.close()
         close(session)

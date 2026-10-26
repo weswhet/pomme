@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 
 /// Reads and repairs the boot firmware that a macOS VM keeps in its auxiliary
 /// storage, without Virtualization.framework.
@@ -160,7 +161,18 @@ enum VMBootFirmware {
         let descriptor = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard descriptor >= 0 else { throw RunnerError.posix(function: "open auxiliary storage", code: errno) }
         defer { _ = Darwin.close(descriptor) }
-        return inspect(data: try read(descriptor, length: minimumFileLength))
+        let inspection = inspect(data: try read(descriptor, length: minimumFileLength))
+        log(inspection, context: "inspected \(url.path)")
+        return inspection
+    }
+
+    private static func log(_ inspection: Inspection, context: String) {
+        PommeUnifiedLog.firmware.info("""
+            \(context, privacy: .public): status=\(inspection.status.rawValue, privacy: .public) \
+            activeSlot=\(inspection.active?.name ?? "none", privacy: .public) \
+            activeVersion=\(inspection.active?.version ?? "none", privacy: .public) \
+            fallbackVersion=\(inspection.fallback?.version ?? "none", privacy: .public)
+            """)
     }
 
     static func inspect(data: Data) -> Inspection {
@@ -274,6 +286,23 @@ enum VMBootFirmware {
     /// the same exclusive lock that a running VM holds on the file, so a VM
     /// can't start while it writes.
     static func repair(auxiliaryStorageURL url: URL, backupDirectory: URL, now: Date = Date()) throws -> RepairOutcome {
+        PommeUnifiedLog.firmware.notice("firmware repair requested for \(url.path, privacy: .public)")
+        do {
+            let outcome = try performRepair(auxiliaryStorageURL: url, backupDirectory: backupDirectory, now: now)
+            if let backupURL = outcome.backupURL {
+                PommeUnifiedLog.firmware.notice("firmware repaired; backup at \(backupURL.path, privacy: .public)")
+                log(outcome.after, context: "repaired firmware")
+            } else {
+                PommeUnifiedLog.firmware.notice("firmware repair not needed: status=\(outcome.before.status.rawValue, privacy: .public)")
+            }
+            return outcome
+        } catch {
+            PommeUnifiedLog.error(error, context: "firmware repair", logger: PommeUnifiedLog.firmware)
+            throw error
+        }
+    }
+
+    private static func performRepair(auxiliaryStorageURL url: URL, backupDirectory: URL, now: Date) throws -> RepairOutcome {
         let descriptor = Darwin.open(url.path, O_RDWR | O_NOFOLLOW | O_CLOEXEC)
         guard descriptor >= 0 else { throw RunnerError.posix(function: "open auxiliary storage", code: errno) }
         defer { _ = Darwin.close(descriptor) }
@@ -294,6 +323,7 @@ enum VMBootFirmware {
         case .incompatibleUpdate: break
         }
         guard let active = before.active, let fallback = before.fallback else { throw VMBootFirmwareError.unrecognized }
+        log(before, context: "firmware before repair")
 
         let backupURL = try writeBackup(original, directory: backupDirectory, now: now)
         let replacement = original.subdata(in: fallback.offset ..< fallback.offset + slotLength)

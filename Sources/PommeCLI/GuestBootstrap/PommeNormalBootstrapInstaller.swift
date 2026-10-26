@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 
 /// A one-shot normal-OS installer. All errors are deliberately non-descriptive.
 enum PommeNormalBootstrapInstaller {
@@ -117,18 +118,41 @@ enum PommeNormalBootstrapInstaller {
     }
 
     static func run(arguments: [String]) -> Int32 {
+        let log = PommeUnifiedLog.bootstrap
         guard arguments.count == 7, arguments[0] == flag,
-              let vmUUID = UUID(uuidString: arguments[3]), let requestID = UUID(uuidString: arguments[6]) else { return 1 }
+              let vmUUID = UUID(uuidString: arguments[3]), let requestID = UUID(uuidString: arguments[6]) else {
+            log.error("Normal bootstrap installer rejected its arguments")
+            return 1
+        }
         var failureStatus: Int32 = 51
+        // Staged paths and IDs only; the staged token is never logged.
+        log.notice("""
+            Normal bootstrap install starting: vm=\(vmUUID.uuidString, privacy: .public) \
+            request=\(requestID.uuidString, privacy: .public)
+            """)
         do {
             try install(workspace: URL(fileURLWithPath: arguments[1]), sourceWorkspace: URL(fileURLWithPath: arguments[2]),
                         expected: .init(vmUUID: vmUUID, planSHA256: arguments[4], executableSHA256: arguments[5], requestID: requestID),
-                        selfExecutable: URL(fileURLWithPath: CommandLine.arguments[0]), phase: { failureStatus = $0 }) { executable, arguments in
+                        selfExecutable: URL(fileURLWithPath: CommandLine.arguments[0]), phase: { phase in
+                            failureStatus = phase
+                            log.info("Normal bootstrap install phase \(phase, privacy: .public)")
+                        }) { executable, arguments in
                 let process = Process(); process.executableURL = URL(fileURLWithPath: executable); process.arguments = arguments
                 process.standardInput = FileHandle.nullDevice; process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
-                try process.run(); process.waitUntilExit(); return process.terminationStatus
+                try process.run(); process.waitUntilExit()
+                log.info("""
+                    \(executable, privacy: .public) \(arguments.first ?? "", privacy: .public) \
+                    exited with status \(process.terminationStatus, privacy: .public)
+                    """)
+                return process.terminationStatus
             }
+            log.notice("Normal bootstrap install finished; the agent is loaded")
             return 0
-        } catch { return failureStatus }
+        } catch {
+            // Installer errors are deliberately non-descriptive; the phase locates the failure.
+            log.error("Normal bootstrap install failed in phase \(failureStatus, privacy: .public)")
+            PommeUnifiedLog.error(error, context: "Normal bootstrap install", logger: log)
+            return failureStatus
+        }
     }
 }

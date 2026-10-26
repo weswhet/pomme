@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 enum PommeMDMChildScope {
     @TaskLocal static var vmName: String?
@@ -237,6 +238,16 @@ struct PommeMDMWorkflowExecution: Sendable {
             let before = try await dependencies.observe()
             let initial = progress.journal
             let disposition = try before.disposition(profile: initial.profile, mode: initial.enrollmentMode)
+            PommeUnifiedLog.security.notice("""
+                [\(initial.identity.vmName, privacy: .public)] MDM enrollment observed: \
+                disposition=\(String(describing: disposition), privacy: .public) \
+                profileInstalled=\(before.installed != nil, privacy: .public) \
+                enrolled=\(before.status.enrolled, privacy: .public) \
+                userApproved=\(before.status.userApproved, privacy: .public) \
+                supervised=\(before.supervised, privacy: .public) \
+                mode=\(initial.enrollmentMode.rawValue, privacy: .public) \
+                phase=\(initial.phase.rawValue, privacy: .public)
+                """)
             // A previous launch may still have committed after losing its
             // reply. Only an observed installed profile permits an upgrade;
             // absence never authorizes replaying that installation.
@@ -313,6 +324,10 @@ struct PommeMDMWorkflowExecution: Sendable {
                 failure = progress.journal.enrollmentVerified ? .restoration
                     : (progress.journal.enrollmentDispatched ? .outcomeUnknown : .beforeDispatch)
             }
+            PommeUnifiedLog.error(
+                error,
+                context: "MDM enrollment at \(progress.journal.phase.rawValue) (disposition \(failure.rawValue))",
+                vmName: progress.journal.identity.vmName, logger: PommeUnifiedLog.security)
             try progress.record(failure: failure)
             throw error
         }
@@ -322,6 +337,8 @@ struct PommeMDMWorkflowExecution: Sendable {
         try progress.record(pendingChild: .some(operation),
             sipChangeRequested: operation == .sipDisable ? true : nil,
             amfiChangeRequested: operation == .amfiDisable ? true : nil)
+        PommeUnifiedLog.security.notice(
+            "[\(progress.journal.identity.vmName, privacy: .public)] MDM child security workflow \(operation.wireName, privacy: .public) starting")
         try await dependencies.runSecurity(operation)
         try progress.record(pendingChild: .some(nil))
     }

@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import os
 
 /// Fixed, secret-free paths for the normal-boot LaunchDaemon.  The token is
 /// never placed in a plist, protocol response, error, or journal.
@@ -148,6 +149,11 @@ struct PommeAgentRecoveryInstaller: Sendable {
             digest: request.executableSHA256
         )
         let target = try targetDataRoot(from: payload)
+        PommeUnifiedLog.bootstrap.notice("""
+            Recovery agent install: request=\(requestID.uuidString, privacy: .public) \
+            volumeGroup=\(target.volumeGroupUUID.uuidString, privacy: .public) \
+            sha256=\(request.executableSHA256, privacy: .public)
+            """)
         let paths = try effectivePaths(under: target.root)
         try prepareTargetDirectories(under: target.root, paths: paths)
         try installTransaction(
@@ -314,7 +320,10 @@ struct PommeAgentRecoveryInstaller: Sendable {
             try verifyInstalled(files: files)
             Darwin.sync()
             try verifyInstalled(files: files)
+            // Paths only; the credential file's contents are never logged.
+            PommeUnifiedLog.bootstrap.notice("Agent files installed: \(paths.executable.path, privacy: .public)")
         } catch {
+            PommeUnifiedLog.error(error, context: "Agent file install transaction", logger: PommeUnifiedLog.bootstrap)
             for item in staged { try? PommeAgentFileTransaction.removeAdjacentStage(item.stage, for: item.target) }
             if case .described(_, let reason)? = error as? PommeAgentOperationError {
                 throw PommeAgentOperationError.invalid("Installing the agent files failed: \(reason)")

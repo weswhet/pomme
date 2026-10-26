@@ -1,7 +1,9 @@
 import CryptoKit
 import Darwin
 import Foundation
+import os
 import Security
+import Synchronization
 @preconcurrency import Virtualization
 
 private enum PommeLogContext {
@@ -931,9 +933,15 @@ struct PommeCore {
     ) async throws {
         // A restore that is already satisfied changes nothing, so it must not
         // replace the label of the step that called it.
-        if (try? stableVMRunState(reference: reference)) != desired {
+        let current = try? stableVMRunState(reference: reference)
+        if current != desired {
             PommeProgressContext.sink?.step(vm: reference.name, "Restoring VM run state")
         }
+        PommeUnifiedLog.runtime.notice("""
+            [\(reference.displayName, privacy: .public)] restoring run state: \
+            current=\(current.map { String(describing: $0) } ?? "unknown", privacy: .public) \
+            desired=\(String(describing: desired), privacy: .public)
+            """)
         let finalState: VMFinalState
         let captured: PommeRecoveryRunState
         switch desired {
@@ -1381,6 +1389,13 @@ struct PommeCore {
         let safe = message
             .split(whereSeparator: \.isNewline)
             .joined(separator: " ")
+        PommeUnifiedLog.message(safe)
+        writeDiagnostic(safe)
+    }
+
+    /// Writes one already-flattened diagnostic line to the active sink or
+    /// standard error, without recording it in the unified log.
+    private static func writeDiagnostic(_ safe: String) {
         if let sink = PommeLogContext.sink {
             sink(safe)
             return
@@ -1395,9 +1410,14 @@ struct PommeCore {
 
     static func warning(_ message: String, vmName: String? = nil) {
         let text = vmName.map { "\($0) \(message)" } ?? message
-        if PommeLogContext.sink != nil { log(text) }
-        else if let sink = PommeProgressContext.sink { sink.warning(text) }
-        else { log(text) }
+        // The progress sink records its own warnings in the unified log.
+        if PommeLogContext.sink == nil, let sink = PommeProgressContext.sink {
+            sink.warning(text)
+        } else {
+            let safe = text.split(whereSeparator: \.isNewline).joined(separator: " ")
+            PommeUnifiedLog.warning(safe)
+            writeDiagnostic(safe)
+        }
     }
 
     /// Attributes a diagnostic to one VM without sharing mutable target state.
@@ -1405,9 +1425,24 @@ struct PommeCore {
         log("\(vmName) \(message)")
     }
 
+    /// The last install-progress decile recorded in the unified log, per VM.
+    private static let loggedInstallDeciles = Mutex<[String: Int]>([:])
+
     /// Renders the installer's progress using the same VM scope as its plan.
+    /// Every tick reaches the diagnostic output, but the unified log records
+    /// only each 10% step, so that an install doesn't flood it.
     static func logInstallProgress(fractionCompleted: Double, vmName: String) {
-        log("install progress: \(Int(fractionCompleted * 100))%", vmName: vmName)
+        let percent = Int(fractionCompleted * 100)
+        writeDiagnostic("\(vmName) install progress: \(percent)%")
+        let decile = percent / 10
+        let isNewDecile = loggedInstallDeciles.withLock { logged in
+            guard logged[vmName] != decile else { return false }
+            logged[vmName] = decile
+            return true
+        }
+        if isNewDecile {
+            PommeUnifiedLog.notice("install progress: \(decile * 10)%", vmName: vmName, logger: PommeUnifiedLog.provisioning)
+        }
     }
 
     static func withLogSink<Result: Sendable>(
@@ -2502,6 +2537,11 @@ struct PommeCore {
         }
 
         PommeProgressContext.sink?.step(vm: name, "Preparing creation")
+        PommeUnifiedLog.provisioning.notice("""
+            [\(name, privacy: .public)] create started: bundle=\(reference.bundle.rootURL.path, privacy: .public) \
+            configured=\(config != nil, privacy: .public) \
+            experimentalRecovery=\(arguments.experimentalRecovery, privacy: .public)
+            """)
 
         // The floor runs before any download so a too-small request costs
         // nothing; the image's exact minimum is checked again once loaded.
@@ -2545,6 +2585,11 @@ struct PommeCore {
                 )
             }
             try writeProvisioningPreparation(preparation, bundle: reference.bundle)
+            PommeUnifiedLog.provisioning.notice("""
+                [\(name, privacy: .public)] provisioning prepared: schema=\(preparation.virtualization ? 2 : 1, privacy: .public) \
+                restore=\(preparation.plan.restore.version, privacy: .public) (\(preparation.plan.restore.build, privacy: .public)) \
+                finalState=\(preparation.plan.finalState.rawValue, privacy: .public)
+                """)
             if preparation.virtualization {
                 let key = try Data(contentsOf: provisioningKeyURL(bundle: reference.bundle))
                 try await PommeProvisioningV2Orchestrator(
@@ -2558,6 +2603,8 @@ struct PommeCore {
         } catch {
             // Never delete a failed VM or its journal.  The caller can resume
             // the exact plan after correcting the external integration.
+            PommeUnifiedLog.error(error, context: "create (bundle and journal retained for --resume)",
+                                  vmName: name, logger: PommeUnifiedLog.provisioning)
             throw error
         }
 
@@ -2583,6 +2630,7 @@ struct PommeCore {
         if let metadata = try? metadataPayload(bundle: reference.bundle) {
             payload["metadata"] = metadata
         }
+        PommeUnifiedLog.notice("create finished", vmName: name, logger: PommeUnifiedLog.provisioning)
         PommeProgressContext.sink?.complete(vm: name)
         return payload
     }
@@ -2923,6 +2971,11 @@ struct PommeCore {
         }
         let intent = PommeMacGuestProvisioningIntent(password: password, guestMajor: guestMajor,
             markDispatched: { try persistProvisioningDispatch(marker, at: markerURL) })
+        // The intent carries the owner password; only the guest major and
+        // attempt are logged.
+        PommeUnifiedLog.notice(
+            "provisionGuest: first boot with framework provisioning (macOS \(guestMajor), attempt \(event.attempt))",
+            vmName: plan.vm.name, logger: PommeUnifiedLog.provisioning)
         let retained = try await startProvisioningRuntime(plan: plan, mode: .normal,
             attachAgent: true, guestProvisioningIntent: intent)
         retainRuntime(retained, for: plan.vm.bundlePath)
@@ -2938,6 +2991,8 @@ struct PommeCore {
         func checkpoint(_ next: Stage) {
             stage = next
             log("framework verification checkpoint stage=\(stage.rawValue)")
+            PommeUnifiedLog.notice("framework verification stage=\(stage.rawValue)", vmName: plan.vm.name,
+                                   logger: PommeUnifiedLog.provisioning)
         }
         checkpoint(.ownerReference)
         do {
@@ -2993,6 +3048,8 @@ struct PommeCore {
                      ownerReference: try owner.bindingGeneratedUID(proof.owner.generatedUID),
                      startupVolumeGroupUUID: proof.owner.startupVolumeGroupUUID)
         } catch {
+            PommeUnifiedLog.error(error, context: "framework verification at stage \(stage.rawValue)",
+                                  vmName: plan.vm.name, logger: PommeUnifiedLog.provisioning)
             log("framework verification failed stage=\(stage.rawValue)")
             // These closed error types contain only fixed cases, enum labels,
             // and numeric exit statuses, never guest output or credentials.
@@ -3045,7 +3102,26 @@ struct PommeCore {
         diagnostic: (String) -> Void = { message in
             if PommeRecoveryDebugContext.screenshotsEnabled { log(message) }
         }) throws -> Data {
-        func report(_ outcome: PommeBootstrapDiagnostics.Outcome) {
+        // The unified log gets the same closed labels plus the executable path
+        // and exit status: never arguments (remote commands, addresses), input
+        // bytes (owner password, agent token), or output. Unlabeled calls are
+        // discovery retries, so they stay at debug level.
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let label = operation?.rawValue ?? "unlabeled"
+        func report(_ outcome: PommeBootstrapDiagnostics.Outcome, status: Int32? = nil) {
+            if outcome == .started {
+                PommeUnifiedLog.process.debug(
+                    "bootstrap process launch \(executable, privacy: .public) operation=\(label, privacy: .public)")
+            } else {
+                let elapsed = String(format: "%.1f", ProcessInfo.processInfo.systemUptime - startedAt)
+                let level: OSLogType = operation == nil ? .debug : (outcome == .succeeded ? .info : .error)
+                PommeUnifiedLog.process.log(level: level, """
+                    bootstrap process \(executable, privacy: .public) operation=\(label, privacy: .public) \
+                    outcome=\(outcome.rawValue, privacy: .public) \
+                    status=\(status.map(String.init) ?? "none", privacy: .public) \
+                    elapsedSeconds=\(elapsed, privacy: .public) timeoutSeconds=\(timeout, privacy: .public)
+                    """)
+            }
             guard let operation else { return }
             diagnostic(PommeBootstrapDiagnostics.process(operation, outcome: outcome, timeout: timeout))
         }
@@ -3084,13 +3160,13 @@ struct PommeCore {
             if count <= 0 { Thread.sleep(forTimeInterval: 0.01) }
         }
         guard process.terminationStatus == 0 else { throw PommeSSHBootstrapError.processExited(process.terminationStatus) }
-        report(.succeeded)
+        report(.succeeded, status: 0)
         return bytes
         } catch {
             switch error as? PommeSSHBootstrapError {
             case .processLaunchFailed: report(.launchFailed)
             case .processTimedOut: report(.timedOut)
-            case .processExited: report(.exited)
+            case .processExited(let status): report(.exited, status: status)
             default: report(.channelFailed)
             }
             throw error
@@ -3109,6 +3185,8 @@ struct PommeCore {
 
     private static func bootstrapNormalAgent(_ plan: PommeProvisioningPlan, lease: VMBundleMutationLease? = nil) async throws -> String {
         PommeProgressContext.sink?.step(vm: plan.vm.name, "Bootstrapping Pomme agent for normal boot")
+        PommeUnifiedLog.notice("bootstrapNormalAgent started: experimentalRecovery=\(plan.experimentalRecovery != nil)",
+                               vmName: plan.vm.name, logger: PommeUnifiedLog.bootstrap)
         var diagnostics = PommeBootstrapDiagnostics()
         log(diagnostics.checkpoint(.started))
         do {
@@ -3137,13 +3215,18 @@ struct PommeCore {
             guard let lease, lease.validates(name: plan.vm.name) else {
                 throw VMBundleMutationLease.Error.invalidScope(name: plan.vm.name)
             }
+            PommeUnifiedLog.message("reconciling the experimental Recovery image before the readiness boot",
+                                    vmName: plan.vm.name, logger: PommeUnifiedLog.bootstrap)
             try await prepareExperimentalRecoveryImage(plan, lease: lease)
         }
         let token = Data(try existingProvisioningAgentCredential(for: plan).utf8)
         log(diagnostics.checkpoint(.agentCredentialAvailable))
         let retained: PommeRetainedRuntime
-        if let existing = retainedRuntime(for: plan.vm.bundlePath) { retained = existing }
-        else {
+        if let existing = retainedRuntime(for: plan.vm.bundlePath) {
+            PommeUnifiedLog.message("reusing the retained normal-boot runtime", vmName: plan.vm.name,
+                                    logger: PommeUnifiedLog.bootstrap)
+            retained = existing
+        } else {
             guard (try? runtimeRecord(for: reference.bundle)) == nil else { throw PommeSSHBootstrapError.invalid }
             log(diagnostics.checkpoint(.runtimeRecordAbsent))
             log(diagnostics.checkpoint(.runtimeStartAttempted))
@@ -3153,6 +3236,8 @@ struct PommeCore {
         }
         guard let coordinator = retained.coordinator, retained.mode == .normal else { throw PommeSSHBootstrapError.invalid }
         if try await bootstrapAgentMatches(coordinator.status(), plan: plan) {
+            PommeUnifiedLog.notice("bootstrapNormalAgent: pinned agent already connected; skipping SSH bootstrap",
+                                   vmName: plan.vm.name, logger: PommeUnifiedLog.bootstrap)
             if plan.experimentalRecovery != nil {
                 _ = try await PommeExperimentalRecoveryImage.validateCompleted(experimentalRecoveryRequest(plan), expectedMode: .normal)
             }
@@ -3186,7 +3271,9 @@ struct PommeCore {
         let deadline = ProcessInfo.processInfo.systemUptime + PommeSSHBootstrap.firstBootReadinessTimeout
         var discovered: (address: String, key: Data)?
         log(diagnostics.checkpoint(.discoveryStarted))
+        var discoveryAttempts = 0
         while discovered == nil {
+            discoveryAttempts += 1
             do {
                 discovered = try PommeSSHBootstrap.discoverHostKey(stableMAC: mac, readLeases: {
                     try PommeSSHBootstrap.readLeases()
@@ -3204,12 +3291,26 @@ struct PommeCore {
                     }
                 })
             } catch {
-                guard ProcessInfo.processInfo.systemUptime < deadline else { throw PommeSSHBootstrapError.invalid }
+                PommeUnifiedLog.bootstrap.debug("""
+                    SSH discovery attempt \(discoveryAttempts, privacy: .public) failed: \
+                    \(String(reflecting: type(of: error)), privacy: .public)
+                    """)
+                guard ProcessInfo.processInfo.systemUptime < deadline else {
+                    PommeUnifiedLog.message(
+                        "SSH host-key discovery timed out after \(discoveryAttempts) attempts "
+                            + "(\(Int(PommeSSHBootstrap.firstBootReadinessTimeout))s)",
+                        vmName: plan.vm.name, level: .error, logger: PommeUnifiedLog.bootstrap)
+                    throw PommeSSHBootstrapError.invalid
+                }
                 try await Task.sleep(for: .seconds(1))
             }
         }
         guard let discovered else { throw PommeSSHBootstrapError.invalid }
         let address = discovered.address
+        PommeUnifiedLog.bootstrap.notice("""
+            [\(plan.vm.name, privacy: .public)] SSH host key discovered at \(address, privacy: .private) \
+            after \(discoveryAttempts, privacy: .public) attempts
+            """)
         try PommeSSHBootstrap.pinHostKey(discovered.key, at: knownHosts)
         log(diagnostics.checkpoint(.keyPinned))
         func authenticatedProcess(_ executable: String, operation: PommeBootstrapDiagnostics.Operation,
@@ -3235,7 +3336,11 @@ struct PommeCore {
         guard let uid = UInt32(String(decoding: uidBytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)),
               uid >= 501 else { throw PommeSSHBootstrapError.invalid }
         log(diagnostics.checkpoint(.sshUIDVerified))
+        PommeUnifiedLog.notice("SSH authentication verified the owner account (uid \(uid))",
+                               vmName: plan.vm.name, logger: PommeUnifiedLog.bootstrap)
         if plan.experimentalRecovery != nil {
+            PommeUnifiedLog.notice("bootstrapNormalAgent: experimental Recovery installs the agent through Recovery",
+                                   vmName: plan.vm.name, logger: PommeUnifiedLog.bootstrap)
             _ = try await installRecoveryAgent(plan, lease: lease)
             try cleanupBootstrapWorkspace(plan: plan, completed: false)
             return try receiptDigest("bootstrap-normal-agent", plan: plan, bundle: reference.bundle)
@@ -3306,9 +3411,15 @@ struct PommeCore {
         _ = try authenticatedProcess("/usr/bin/ssh", operation: .installerInvocation, arguments: PommeSSHBootstrap.arguments(
             address: address, knownHosts: knownHosts, command: PommeSSHBootstrap.installerCommand(request: renewed, stagedRequestSHA256: stagedRequestHash)),
             sudoSuffix: Data((String(decoding: token, as: UTF8.self) + "\n" + renewedLine + "\n").utf8), timeout: 120)
+        PommeUnifiedLog.notice("SSH installer finished; waiting for the pinned agent to connect",
+                               vmName: plan.vm.name, logger: PommeUnifiedLog.bootstrap)
         let agentDeadline = ProcessInfo.processInfo.systemUptime + 120
         while !(try await bootstrapAgentMatches(coordinator.status(), plan: plan)) {
-            guard ProcessInfo.processInfo.systemUptime < agentDeadline else { throw PommeSSHBootstrapError.invalid }
+            guard ProcessInfo.processInfo.systemUptime < agentDeadline else {
+                PommeUnifiedLog.message("the pinned agent didn't connect within 120s of the installer",
+                                        vmName: plan.vm.name, level: .error, logger: PommeUnifiedLog.bootstrap)
+                throw PommeSSHBootstrapError.invalid
+            }
             try await Task.sleep(for: .milliseconds(250))
         }
         // Keep the authenticated original request and host-key pin for replay.
@@ -3317,8 +3428,11 @@ struct PommeCore {
             expectedUID: uid, expectedGeneratedUID: owner.generatedUID)
         // The guest received its token only through the root-private stdin path.
         try cleanupBootstrapWorkspace(plan: plan, completed: false)
+        PommeUnifiedLog.notice("bootstrapNormalAgent succeeded", vmName: plan.vm.name, logger: PommeUnifiedLog.bootstrap)
         return try receiptDigest("bootstrap-normal-agent", plan: plan, bundle: reference.bundle)
         } catch {
+            PommeUnifiedLog.error(error, context: "bootstrapNormalAgent at stage \(diagnostics.stage.rawValue)",
+                                  vmName: plan.vm.name, logger: PommeUnifiedLog.bootstrap)
             log(diagnostics.failure())
             if let processError = error as? PommeSSHBootstrapError {
                 switch processError {
@@ -4379,12 +4493,25 @@ struct PommeCore {
         PommeProgressContext.sink?.step(vm: plan.vm.name, "Cloning template")
         let template = BundleLayout(rootURL: URL(fileURLWithPath: templateBundlePath))
         let manifest = try PommeTemplateStore.manifest(in: template)
+        PommeUnifiedLog.template.notice("""
+            [\(plan.vm.name, privacy: .public)] cloning template \(manifest.name, privacy: .public) \
+            from \(templateBundlePath, privacy: .public)
+            """)
         guard manifest.version == plan.restore.version,
               manifest.build == plan.restore.build,
               manifest.restoreImageDigest == plan.restore.restoreImageDigest,
               manifest.diskSizeBytes == input.diskSizeBytes,
               try Data(contentsOf: template.hardwareModelURL) == input.hardwareModelData
-        else { throw PommeProvisioningError.invalidPlan }
+        else {
+            PommeUnifiedLog.template.error("""
+                [\(plan.vm.name, privacy: .public)] template \(manifest.name, privacy: .public) no longer matches the plan: \
+                template=\(manifest.version, privacy: .public) (\(manifest.build, privacy: .public)) \
+                plan=\(plan.restore.version, privacy: .public) (\(plan.restore.build, privacy: .public)) \
+                diskMatches=\(manifest.diskSizeBytes == input.diskSizeBytes, privacy: .public) \
+                digestMatches=\(manifest.restoreImageDigest == plan.restore.restoreImageDigest, privacy: .public)
+                """)
+            throw PommeProvisioningError.invalidPlan
+        }
         guard let hardwareModel = VZMacHardwareModel(dataRepresentation: input.hardwareModelData),
               hardwareModel.isSupported
         else { throw RunnerError.invalidHardwareModel }
@@ -4435,6 +4562,11 @@ struct PommeCore {
                 vmName: validName
             )
         }
+        PommeUnifiedLog.template.notice("""
+            [\(validName, privacy: .public)] template install started: macOS \(source.version, privacy: .public) \
+            (\(source.build, privacy: .public)) disk=\(source.diskSizeBytes, privacy: .public) \
+            memory=\(memory, privacy: .public) bundle=\(bundle.rootURL.path, privacy: .public)
+            """)
         try FileManager.default.createDirectory(
             at: bundle.rootURL,
             withIntermediateDirectories: false,
@@ -4491,9 +4623,12 @@ struct PommeCore {
             )
             try PommeTemplateStore.write(manifest, to: bundle)
         } catch {
+            PommeUnifiedLog.error(error, context: "template install (bundle removed)", vmName: validName,
+                                  logger: PommeUnifiedLog.template)
             try? FileManager.default.removeItem(at: bundle.rootURL)
             throw error
         }
+        PommeUnifiedLog.notice("template saved", vmName: validName, logger: PommeUnifiedLog.template)
         return [
             "ok": true,
             "operation": "template-create",
@@ -4546,6 +4681,8 @@ struct PommeCore {
     /// exact VM/journal for a configured Recovery integration.
     private static func installRecoveryAgent(_ plan: PommeProvisioningPlan, lease: VMBundleMutationLease? = nil) async throws -> String {
         PommeProgressContext.sink?.step(vm: plan.vm.name, "Bootstrapping Pomme agent in Recovery")
+        PommeUnifiedLog.notice("installRecoveryAgent started: experimentalRecovery=\(plan.experimentalRecovery != nil)",
+                               vmName: plan.vm.name, logger: PommeUnifiedLog.bootstrap)
         try await stopRetainedRuntime(for: plan.vm.bundlePath)
         guard let adapter = currentProvisioningRecoveryAdapter() else {
             throw PommeProvisioningError.unavailableIntegration("request-bound Recovery agent installation")
@@ -4569,7 +4706,18 @@ struct PommeCore {
         // verification and the plan's requested final state are separate
         // subsequent journal phases; collapsing them here can make a failed
         // bootstrap look complete and can boot an unverified agent.
-        let receipt = try await adapter(plan, .stopped)
+        PommeUnifiedLog.notice("installRecoveryAgent: running the Recovery installation", vmName: plan.vm.name,
+                               logger: PommeUnifiedLog.bootstrap)
+        let receipt: String
+        do {
+            receipt = try await adapter(plan, .stopped)
+        } catch {
+            PommeUnifiedLog.error(error, context: "Recovery agent installation", vmName: plan.vm.name,
+                                  logger: PommeUnifiedLog.bootstrap)
+            throw error
+        }
+        PommeUnifiedLog.notice("installRecoveryAgent: Recovery installation finished with the VM stopped",
+                               vmName: plan.vm.name, logger: PommeUnifiedLog.bootstrap)
         if plan.experimentalRecovery != nil {
             try await activateExperimentalRecoveryBacking(plan, mode: .normal, lease: lease)
         }
@@ -4667,6 +4815,10 @@ struct PommeCore {
     private static func logExperimentalRecoveryActivation(
         _ receipt: PommeExperimentalRecoveryImage.Receipt, mode: BootMode, vmName: String
     ) {
+        PommeUnifiedLog.experimentalRecovery.notice("""
+            [\(vmName, privacy: .public)] experimental Recovery backing activated: mode=\(mode.rawValue, privacy: .public) \
+            recoveryReplaced=\(receipt.recoveryReplaced == true, privacy: .public)
+            """)
         if receipt.recoveryReplaced == true {
             log("The guest replaced its Recovery image, probably in a macOS update, so the experimental Recovery agent is no longer installed.", vmName: vmName)
         } else {
@@ -4697,9 +4849,13 @@ struct PommeCore {
             throw VMBundleMutationLease.Error.invalidScope(name: plan.vm.name)
         }
         let reference = provisioningReference(for: plan)
+        PommeUnifiedLog.notice("preparing the experimental Recovery image", vmName: plan.vm.name,
+                               logger: PommeUnifiedLog.experimentalRecovery)
         try await stopRetainedRuntime(for: plan.vm.bundlePath)
         try await restoreStableVMRunState(.stopped, reference: reference)
         guard try stableVMRunState(reference: reference) == .stopped else {
+            PommeUnifiedLog.message("the VM didn't stop before experimental Recovery preparation", vmName: plan.vm.name,
+                                    level: .error, logger: PommeUnifiedLog.experimentalRecovery)
             throw PommeRecoverySessionError.finalStateUnverified
         }
         let root = experimentalRecoveryRoot(plan)
@@ -4713,6 +4869,10 @@ struct PommeCore {
             guard lstat(directory.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR,
                   info.st_uid == geteuid(), info.st_mode & 0o777 == 0o700,
                   directory.resolvingSymlinksInPath().path == directory.path else {
+                PommeUnifiedLog.experimentalRecovery.error("""
+                    [\(plan.vm.name, privacy: .public)] experimental Recovery workspace failed its ownership, \
+                    mode, or symlink check: \(directory.path, privacy: .public)
+                    """)
                 throw PommeProvisioningError.integrityFailure
             }
         }
@@ -4725,6 +4885,8 @@ struct PommeCore {
            try PommeExperimentalRecoveryImage.receipt(experimentalRecoveryRequest(plan, credential: credential)).completed {
             // An interruption after completion can leave the staged copy.
             try PommeExperimentalRecoveryPayload.removeCredential(from: staging)
+            PommeUnifiedLog.notice("the experimental Recovery image was already prepared", vmName: plan.vm.name,
+                                   logger: PommeUnifiedLog.experimentalRecovery)
             return
         }
         let executable = try PommeAgentArtifactStore(rootURL: applicationSupportRoot(create: false))
@@ -4734,16 +4896,32 @@ struct PommeCore {
             executable: executable, expectedDigest: plan.recoveryAgent.executableDigest,
             credential: credential, vmID: plan.vm.uuid, diskPath: reference.bundle.diskImageURL.path)
         PommeProgressContext.sink?.step(vm: plan.vm.name, "Preparing experimental Recovery image")
-        let receipt = try await PommeExperimentalRecoveryImage.prepare(experimentalRecoveryRequest(plan, credential: credential))
+        PommeUnifiedLog.message("experimental Recovery payload staged", vmName: plan.vm.name,
+                                logger: PommeUnifiedLog.experimentalRecovery)
+        let receipt: PommeExperimentalRecoveryImage.Receipt
+        do {
+            receipt = try await PommeExperimentalRecoveryImage.prepare(experimentalRecoveryRequest(plan, credential: credential))
+        } catch {
+            PommeUnifiedLog.error(error, context: "experimental Recovery image preparation", vmName: plan.vm.name,
+                                  logger: PommeUnifiedLog.experimentalRecovery)
+            throw error
+        }
         guard receipt.completed, receipt.pendingAttachmentImages.isEmpty,
               lease.validates(name: plan.vm.name),
               try stableVMRunState(reference: reference) == .stopped else {
+            PommeUnifiedLog.experimentalRecovery.error("""
+                [\(plan.vm.name, privacy: .public)] experimental Recovery preparation ended inconsistent: \
+                completed=\(receipt.completed, privacy: .public) \
+                pendingAttachments=\(receipt.pendingAttachmentImages.count, privacy: .public)
+                """)
             throw PommeProvisioningError.integrityFailure
         }
         // The prepared image now carries the credential, and Keychain keeps
         // the only host copy.
         try PommeExperimentalRecoveryPayload.removeCredential(from: staging)
         log("Experimental Recovery image prepared and all image attachments detached.", vmName: plan.vm.name)
+        PommeUnifiedLog.notice("experimental Recovery image prepared", vmName: plan.vm.name,
+                               logger: PommeUnifiedLog.experimentalRecovery)
     }
 
     /// Boots the verified guest through the background VM helper, the same
@@ -4755,8 +4933,13 @@ struct PommeCore {
         try await stopRetainedRuntime(for: plan.vm.bundlePath)
         let reference = provisioningReference(for: plan)
         guard try await provePinnedNormalAgent(plan, timeout: Constants.defaultRecoveryAgentTimeout) else {
+            PommeUnifiedLog.message(
+                "verifyNormalAgent: the pinned agent didn't prove itself within \(Int(Constants.defaultRecoveryAgentTimeout))s",
+                vmName: plan.vm.name, level: .error, logger: PommeUnifiedLog.provisioning)
             throw PommeProvisioningError.phaseFailed(.verifyNormalAgent)
         }
+        PommeUnifiedLog.notice("verifyNormalAgent: pinned agent proven in normal macOS", vmName: plan.vm.name,
+                               logger: PommeUnifiedLog.provisioning)
         return try receiptDigest("verify-normal-agent", plan: plan, bundle: reference.bundle)
     }
 
@@ -4776,12 +4959,25 @@ struct PommeCore {
     private static func provePinnedNormalAgent(_ plan: PommeProvisioningPlan, timeout: TimeInterval) async throws -> Bool {
         let reference = provisioningReference(for: plan)
         let deadline = Date().addingTimeInterval(timeout)
+        PommeUnifiedLog.notice("starting normal macOS to prove the pinned agent (timeout \(Int(timeout))s)",
+                               vmName: plan.vm.name, logger: PommeUnifiedLog.provisioning)
         _ = try startRuntimeInBackground(reference: reference, bootMode: .normal, timeout: timeout)
         while true {
-            if provesPinnedNormalAgent(try await provisioningAgentStatus(name: plan.vm.name), plan: plan) {
+            let status = try await provisioningAgentStatus(name: plan.vm.name)
+            if provesPinnedNormalAgent(status, plan: plan) {
                 return true
             }
-            guard Date() < deadline else { return false }
+            guard Date() < deadline else {
+                // The last status says which part of the proof was missing.
+                PommeUnifiedLog.provisioning.notice("""
+                    [\(plan.vm.name, privacy: .public)] pinned agent not proven: \
+                    connection=\(status.connection.rawValue, privacy: .public) role=\(status.role.rawValue, privacy: .public) \
+                    protocol=\(status.protocolVersion, privacy: .public)/\(plan.normalAgent.protocolVersion, privacy: .public) \
+                    digestMatches=\(status.executableDigest == plan.normalAgent.executableDigest, privacy: .public) \
+                    capabilitiesSupported=\(supportsProvisioningAgentCapabilities(status.capabilities), privacy: .public)
+                    """)
+                return false
+            }
             try Task.checkCancellation()
             try await Task.sleep(nanoseconds: 250_000_000)
         }
@@ -5080,6 +5276,8 @@ struct PommeCore {
         _ plan: PommeProvisioningPlan,
         finalState: PommeProvisioningFinalState
     ) async throws -> String {
+        PommeUnifiedLog.notice("restoring provisioning final state \(finalState.rawValue)", vmName: plan.vm.name,
+                               logger: PommeUnifiedLog.provisioning)
         try await stopRetainedRuntime(for: plan.vm.bundlePath)
         let reference = provisioningReference(for: plan)
         // The verified normal boot already runs in the background helper.
@@ -5108,6 +5306,10 @@ struct PommeCore {
              (.recoveryRunning, .running(.recovery)):
             break
         default:
+            PommeUnifiedLog.provisioning.error("""
+                [\(plan.vm.name, privacy: .public)] final state unverified: \
+                requested=\(finalState.rawValue, privacy: .public) observed=\(String(describing: observed), privacy: .public)
+                """)
             throw PommeRecoverySessionError.finalStateUnverified
         }
         return try receiptDigest("restore-final-state", plan: plan, bundle: reference.bundle)
@@ -5181,6 +5383,12 @@ struct PommeCore {
             for: plan, mode: mode, activate: activateRecoveryBacking
         )
         let bundle = BundleLayout(rootURL: URL(fileURLWithPath: plan.vm.bundlePath))
+        PommeUnifiedLog.runtime.notice("""
+            [\(plan.vm.name, privacy: .public)] starting provisioning runtime: mode=\(mode.rawValue, privacy: .public) \
+            attachAgent=\(attachAgent, privacy: .public) \
+            experimentalResident=\(productionResident != nil, privacy: .public) \
+            guestProvisioning=\(guestProvisioningIntent != nil, privacy: .public)
+            """)
         let input = try loadProvisioningInput(for: plan)
         let hardwareModel = try loadHardwareModel(input.hardwareModelData)
         guard hardwareModel.isSupported else { throw RunnerError.unsupportedHardwareModel }
@@ -5332,10 +5540,14 @@ struct PommeCore {
         do {
             try await runtime.start()
         } catch {
+            PommeUnifiedLog.error(error, context: "provisioning runtime start (\(mode.rawValue))",
+                                  vmName: plan.vm.name, logger: PommeUnifiedLog.runtime)
             coordinator?.teardown()
             await runtime.teardown()
             throw error
         }
+        PommeUnifiedLog.notice("provisioning runtime started in \(mode.rawValue) mode", vmName: plan.vm.name,
+                               logger: PommeUnifiedLog.runtime)
         return .init(runtime: runtime, coordinator: coordinator, mode: mode)
     }
 
@@ -5393,8 +5605,18 @@ struct PommeCore {
 
     private static func stopRetainedRuntime(for bundlePath: String) async throws {
         guard let retained = removeRetainedRuntime(for: bundlePath) else { return }
+        PommeUnifiedLog.runtime.notice("""
+            stopping retained \(retained.mode.rawValue, privacy: .public) runtime for \(bundlePath, privacy: .public)
+            """)
         await requestGuestShutdown(retained)
-        try await retained.stop()
+        do {
+            try await retained.stop()
+        } catch {
+            PommeUnifiedLog.error(error, context: "retained runtime stop for \(bundlePath)",
+                                  logger: PommeUnifiedLog.runtime)
+            throw error
+        }
+        PommeUnifiedLog.runtime.info("retained runtime stopped for \(bundlePath, privacy: .public)")
     }
 
     /// A workflow that leaves the VM running normally should hand back a VM
@@ -6939,7 +7161,10 @@ struct PommeCore {
             throw VMBundleMutationLease.Error.invalidScope(name: name)
         }
         let reference = try namedVMReference(name, requireExists: true)
-        if try provisioningSchema(bundle: reference.bundle) == 2 {
+        let schema = try provisioningSchema(bundle: reference.bundle)
+        PommeUnifiedLog.notice("create --resume: provisioning schema \(schema)", vmName: name,
+                               logger: PommeUnifiedLog.provisioning)
+        if schema == 2 {
             let journal = try loadProvisioningV2(reference: reference)
             _ = try loadOwnedProvisioningPlan(reference: reference)
             let key = try PommeSSHBootstrap.privateRead(provisioningKeyURL(bundle: reference.bundle),

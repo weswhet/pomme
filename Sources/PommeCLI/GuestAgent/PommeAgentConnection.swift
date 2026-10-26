@@ -44,11 +44,13 @@ final class PommeAgentConnection: @unchecked Sendable {
             let request = try PommeAgentProtocol.decode(line)
             guard request.kind == .request else { throw PommeAgentProtocol.Error.invalidRequest }
             guard seenRequests.insert(request.requestID).inserted else {
+                Self.logger.error("Rejected a replayed request ID for \(request.operation, privacy: .public)")
                 return try PommeAgentProtocol.encode(.failure(to: request, code: "replayed-request", message: "Request IDs are single use."))
             }
             let response: PommeAgentProtocol.Envelope
             if !authenticated {
                 guard request.operation == "authenticate" else {
+                    Self.logger.error("Rejected \(request.operation, privacy: .public) before authentication")
                     response = .failure(to: request, code: "authentication-required", message: "Authenticate before requesting an operation.")
                     return try PommeAgentProtocol.encode(response)
                 }
@@ -59,16 +61,23 @@ final class PommeAgentConnection: @unchecked Sendable {
                       (vmBinding == nil || values["vmID"]?.stringValue == vmBinding),
                       (sessionBinding == nil || values["sessionID"]?.stringValue == sessionBinding)
                 else {
+                    // Only which check failed; never the token, proof, or challenge.
+                    let reason = isExpired ? "expired" : consumed ? "consumed"
+                        : request.payload.objectValue?["challenge"]?.stringValue == nil ? "malformed" : "binding-mismatch"
+                    Self.logger.error("Authentication rejected: reason=\(reason, privacy: .public) lifetime=\(String(describing: self.lifetime), privacy: .public)")
                     response = .failure(to: request, code: "authentication-rejected", message: "Authentication was rejected.")
                     return try PommeAgentProtocol.encode(response)
                 }
                 let proof = try PommeAgentAuthentication.proof(token: token, challenge: challenge)
                 authenticated = true
                 if lifetime == .oneShot { consumed = true }
+                Self.logger.info("Host authenticated: lifetime=\(String(describing: self.lifetime), privacy: .public)")
                 response = .response(to: request, result: .object(["proof": .string(proof)]))
             } else if request.operation == "authenticate" {
+                Self.logger.error("Rejected a second authentication on one connection")
                 response = .failure(to: request, code: "authentication-replayed", message: "Authentication has already completed.")
             } else if isExpired {
+                Self.logger.notice("Rejected \(request.operation, privacy: .public): the session credential has expired")
                 response = .failure(to: request, code: "credential-expired", message: "The session credential has expired.")
             } else {
                 do {
@@ -83,6 +92,7 @@ final class PommeAgentConnection: @unchecked Sendable {
             // A malformed request has no reliable correlation value.  The
             // caller closes the connection rather than emitting an ambiguous
             // uncorrelated response.
+            Self.logger.error("Closing the connection: a request frame couldn't be decoded")
             return Data()
         }
     }
@@ -94,7 +104,9 @@ final class PommeAgentConnection: @unchecked Sendable {
         if lifetime == .oneShot { consumed = true }
     }
 
-    private static let failureLogger = Logger(subsystem: "com.github.weswhet.pomme", category: "operation-failure")
+    /// Authentication and admission decisions, in the guest's unified log.
+    private static let logger = PommeUnifiedLog.agentDaemon
+    private static let failureLogger = Logger(subsystem: PommeUnifiedLog.subsystem, category: "operation-failure")
 
     /// The wire code and message for a failed operation. The message is a
     /// short reason that the thrower chose to be safe to send; the protocol

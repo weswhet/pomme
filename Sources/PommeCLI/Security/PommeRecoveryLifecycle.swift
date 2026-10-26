@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 enum PommeRecoveryLifecycleError: PommeDescribedError, Equatable, Sendable {
     case operationFailed(PommeRetainedCause = .init())
@@ -69,6 +70,10 @@ enum PommeRecoveryLifecycle {
         do {
             operationResult = .success(try await operation())
         } catch {
+            // A later cleanup failure replaces this error in what the caller
+            // sees, so record it now. Operation errors can carry guest
+            // output, so only its codes are logged.
+            logCodes(of: error, context: "Recovery operation")
             operationResult = .failure(error)
         }
 
@@ -81,6 +86,7 @@ enum PommeRecoveryLifecycle {
                 }
                 cleanupResult = .success(evidence)
             } catch {
+                logCodes(of: error, context: "Recovery cleanup")
                 cleanupResult = .failure(error)
             }
         } else {
@@ -97,6 +103,8 @@ enum PommeRecoveryLifecycle {
         }
 
         var finalStateSucceeded = false
+        PommeUnifiedLog.recovery.notice(
+            "Recovery cleanup proven; requesting final state \(finalState.rawValue, privacy: .public)")
         do {
             try await requestFinalState(finalState)
             finalStateSucceeded = try await proveFinalState(finalState)
@@ -104,6 +112,7 @@ enum PommeRecoveryLifecycle {
                 throw PommeRecoveryLifecycleError.finalStateFailed()
             }
         } catch {
+            logCodes(of: error, context: "Recovery final state \(finalState.rawValue)")
             let cause = PommeRetainedCause.wrapping(error)
             throw operationResult.isFailure
                 ? PommeRecoveryLifecycleError.cleanupAndFinalStateFailed(cause)
@@ -121,6 +130,17 @@ enum PommeRecoveryLifecycle {
             operationSucceeded: true
         )
     }
+}
+
+/// Logs an error's catalog code, type, and domain code without its text.
+private func logCodes(of error: any Error, context: String) {
+    let code = PommeErrorReport(error, redaction: .secrets).code.rawValue
+    let nsError = error as NSError
+    PommeUnifiedLog.recovery.error("""
+        \(context, privacy: .public) failed: code=\(code, privacy: .public) \
+        type=\(String(reflecting: type(of: error)), privacy: .public) \
+        domain=\(nsError.domain, privacy: .public) domainCode=\(nsError.code, privacy: .public)
+        """)
 }
 
 private extension Result {

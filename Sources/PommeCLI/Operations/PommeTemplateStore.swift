@@ -278,8 +278,15 @@ enum PommeTemplateStore {
     /// `clonefile(2)` shares the blocks, so a 20 GB image clones in
     /// milliseconds; other filesystems fall back to a plain copy.
     static func clone(_ source: URL, to destination: URL) throws {
-        if Darwin.clonefile(source.path, destination.path, 0) == 0 { return }
+        if Darwin.clonefile(source.path, destination.path, 0) == 0 {
+            PommeUnifiedLog.message("cloned \(source.path) with clonefile", logger: PommeUnifiedLog.template)
+            return
+        }
         let code = errno
+        PommeUnifiedLog.notice(
+            "clonefile of \(source.path) failed (errno \(code): \(String(cString: strerror(code))))"
+                + (code == ENOTSUP || code == EXDEV ? "; copying instead" : ""),
+            logger: PommeUnifiedLog.template)
         guard code == ENOTSUP || code == EXDEV else {
             throw PommeTemplateError.cloneFailed(cause: PommeErrorReport(
                 keepingSystemCause: NSError(domain: NSPOSIXErrorDomain, code: Int(code))
@@ -287,7 +294,9 @@ enum PommeTemplateStore {
         }
         do {
             try FileManager.default.copyItem(at: source, to: destination)
+            PommeUnifiedLog.message("copied \(source.path) to the VM bundle", logger: PommeUnifiedLog.template)
         } catch {
+            PommeUnifiedLog.error(error, context: "template copy of \(source.path)", logger: PommeUnifiedLog.template)
             throw PommeTemplateError.cloneFailed(cause: PommeErrorReport(keepingSystemCause: error))
         }
     }

@@ -1,4 +1,5 @@
 import Foundation
+import os
 import TOML
 import Yams
 
@@ -217,7 +218,10 @@ enum CreateConfigStore {
         pklEvaluator: PklEvaluator = { try evaluatePkl(at: $0) }
     ) throws -> VMCreationConfigV1 {
         let url = URL(fileURLWithPath: path).standardizedFileURL
+        let log = PommeUnifiedLog.provisioning
+        log.info("loading create config \(url.path, privacy: .public)")
         guard FileManager.default.fileExists(atPath: url.path) else {
+            log.error("create config doesn't exist: \(url.path, privacy: .public)")
             throw RunnerError.hostCommandFailed("Config file does not exist: \(url.path)")
         }
 
@@ -244,6 +248,9 @@ enum CreateConfigStore {
                 throw RunnerError.hostCommandFailed("Unsupported config format .\(url.pathExtension). Use .json, .yaml, .yml, .toml, or .pkl.")
             }
         } catch let error as DecodingError {
+            // Decoding text can quote config values, so only the coding path
+            // is logged.
+            log.error("create config \(url.path, privacy: .public) failed to decode at '\(Self.decodingPath(error), privacy: .public)'")
             // Yams wraps an error thrown by the config's own decoding in
             // dataCorrupted; that error already names the problem.
             if case .dataCorrupted(let context) = error, let runnerError = context.underlyingError as? RunnerError {
@@ -251,11 +258,34 @@ enum CreateConfigStore {
             }
             throw RunnerError.configDecoding(path: url.path, message: ConfigDecodingMessage.describe(error))
         } catch let error as TOMLDecodingError {
+            log.error("create config \(url.path, privacy: .public) isn't valid TOML")
             throw RunnerError.configDecoding(path: url.path, message: ConfigDecodingMessage.describe(error))
         }
 
-        try validate(config)
+        do {
+            try validate(config)
+        } catch {
+            PommeUnifiedLog.error(error, context: "create config validation", logger: log)
+            throw error
+        }
+        log.notice("""
+            loaded create config \(url.path, privacy: .public): name=\(config.name, privacy: .public) \
+            versions=\(config.versions.joined(separator: ","), privacy: .public) \
+            device=\(config.ipswDevice ?? "-", privacy: .public)
+            """)
         return config
+    }
+
+    /// The dotted key path of a decoding failure, without its text.
+    private static func decodingPath(_ error: DecodingError) -> String {
+        switch error {
+        case .keyNotFound(let key, let context):
+            ConfigDecodingMessage.dottedPath(context.codingPath + [key])
+        case .typeMismatch(_, let context), .valueNotFound(_, let context), .dataCorrupted(let context):
+            ConfigDecodingMessage.dottedPath(context.codingPath)
+        @unknown default:
+            ""
+        }
     }
 
     /// Encodes a starter config using the extension of `url`.
@@ -349,12 +379,20 @@ enum CreateConfigStore {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
 
+        let log = PommeUnifiedLog.process
         do {
             try process.run()
         } catch {
+            PommeUnifiedLog.error(error, context: "launch pkl eval", logger: log)
             throw RunnerError.hostCommandFailed("Pkl configs require the pkl executable in PATH.")
         }
+        log.info("launched pkl eval pid=\(process.processIdentifier, privacy: .public) for \(url.path, privacy: .public)")
         process.waitUntilExit()
+        // Pkl's standard error can quote config values, so it isn't logged.
+        log.log(
+            level: process.terminationStatus == 0 ? .info : .error,
+            "pkl eval exited status=\(process.terminationStatus, privacy: .public) reason=\(process.terminationReason.rawValue, privacy: .public)"
+        )
         let output = outputPipe.fileHandleForReading.readDataToEndOfFile()
         let errorOutput = errorPipe.fileHandleForReading.readDataToEndOfFile()
         guard process.terminationStatus == 0 else {
@@ -538,7 +576,17 @@ struct VMCreationExecutor: Sendable {
         guard (1...Self.maximumParallelism).contains(parallelism) else {
             throw RunnerError.hostCommandFailed("Parallel creation runs at most \(Self.maximumParallelism) VMs at once.")
         }
-        try dependencies.batchPreflight(plans)
+        PommeUnifiedLog.provisioning.notice("""
+            config batch: \(plans.count, privacy: .public) VM(s) \
+            [\(plans.map(\.name).joined(separator: ", "), privacy: .public)] \
+            parallelism=\(parallelism, privacy: .public) dryRun=\(dryRun, privacy: .public)
+            """)
+        do {
+            try dependencies.batchPreflight(plans)
+        } catch {
+            PommeUnifiedLog.error(error, context: "config batch preflight", logger: PommeUnifiedLog.provisioning)
+            throw error
+        }
         if dryRun {
             var results: [PommeOperationResult] = []
             for plan in plans { results.append(await dryRunResult(plan)) }
@@ -578,6 +626,9 @@ struct VMCreationExecutor: Sendable {
         do {
             return try await dependencies.install(plan)
         } catch {
+            // The batch reports this member's failure as a result instead of
+            // throwing, so the top-level command never logs it.
+            PommeUnifiedLog.error(error, context: "config batch create", vmName: plan.name, logger: PommeUnifiedLog.provisioning)
             return PommeOperationResult(
                 title: "Create VM",
                 vmName: plan.name,
@@ -602,6 +653,7 @@ struct VMCreationExecutor: Sendable {
         do {
             payload.merge(try await dependencies.dryRunPreflight(plan)) { _, new in new }
         } catch {
+            PommeUnifiedLog.error(error, context: "config dry-run preflight", vmName: plan.name, logger: PommeUnifiedLog.provisioning)
             payload["ok"] = false
             payload["hostExitCode"] = 1
             payload["error"] = error.localizedDescription

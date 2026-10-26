@@ -1,4 +1,5 @@
 import Foundation
+import os
 @preconcurrency import Virtualization
 
 /// In-memory only. The caller must authenticate the provisionGuest journal
@@ -258,7 +259,15 @@ final class PommeVMRuntime: @unchecked Sendable {
         )
     }
 
+    /// The bundle's name, which is the VM's name, for unified-log lines.
+    private var logVMName: String {
+        saveStateURL.deletingLastPathComponent().deletingPathExtension().lastPathComponent
+    }
+
     func start() async throws {
+        PommeUnifiedLog.runtime.notice(
+            "[\(self.logVMName, privacy: .public)] VM start requested: bootMode=\(self.bootMode.rawValue, privacy: .public) guestProvisioning=\(self.guestProvisioningIntent != nil, privacy: .public)"
+        )
         do {
             try guestProvisioningIntent?.validate(
                 bootMode: bootMode,
@@ -270,7 +279,9 @@ final class PommeVMRuntime: @unchecked Sendable {
             case .normal: try await startOrRestore()
             case .recovery: try await startRecovery()
             }
+            PommeUnifiedLog.runtime.notice("[\(self.logVMName, privacy: .public)] VM started: bootMode=\(self.bootMode.rawValue, privacy: .public)")
         } catch {
+            PommeUnifiedLog.error(error, context: "VM start (\(bootMode.rawValue))", vmName: logVMName, logger: PommeUnifiedLog.runtime)
             await teardown()
             throw error
         }
@@ -284,6 +295,7 @@ final class PommeVMRuntime: @unchecked Sendable {
             )
         }
         if FileManager.default.fileExists(atPath: saveStateURL.path) {
+            PommeUnifiedLog.runtime.info("[\(self.logVMName, privacy: .public)] restoring saved machine state: requiredSnapshotRestore=\(requiredRestore, privacy: .public)")
             do {
                 try configuration.validateSaveRestoreSupport()
                 try await PommeCore.restoreMachineState(vm, from: saveStateURL, on: queue)
@@ -297,10 +309,12 @@ final class PommeVMRuntime: @unchecked Sendable {
                 try? FileManager.default.removeItem(at: saveStateURL)
                 return
             } catch {
+                PommeUnifiedLog.error(error, context: "restore saved machine state", vmName: logVMName, logger: PommeUnifiedLog.runtime)
                 if requiredRestore || FileManager.default.fileExists(atPath: requiredSnapshotRestoreURL.path) {
                     throw RunnerError.virtualMachineState("Named snapshot restore failed; VM was not cold-started: \(error.localizedDescription)")
                 }
                 quarantineSaveState()
+                PommeUnifiedLog.runtime.notice("[\(self.logVMName, privacy: .public)] saved state was unusable and was quarantined; cold-starting")
             }
         }
         let options = VZMacOSVirtualMachineStartOptions()
@@ -316,6 +330,11 @@ final class PommeVMRuntime: @unchecked Sendable {
             try await PommeCore.start(vm, options: options, on: queue)
         } catch {
             if guestProvisioningIntent != nil {
+                // Framework text can echo provisioning values; keep codes only.
+                PommeUnifiedLog.error(
+                    PommeErrorReport(codesOnly: error),
+                    context: "guest provisioning first boot", vmName: logVMName, logger: PommeUnifiedLog.runtime
+                )
                 throw RunnerError.virtualMachineState("Guest provisioning first boot failed; inspect durable dispatch state before retrying.")
             }
             throw error
@@ -345,6 +364,9 @@ final class PommeVMRuntime: @unchecked Sendable {
     func stop(expectingGuestShutdown: Bool = false) async throws -> VMStopOutcome {
         let state = await PommeCore.state(of: vm, on: queue)
         guard state != .stopped else { await teardown(); return .alreadyStopped }
+        PommeUnifiedLog.runtime.notice(
+            "[\(self.logVMName, privacy: .public)] VM stop requested: state=\(self.stateDescription(state), privacy: .public) bootMode=\(self.bootMode.rawValue, privacy: .public) expectingGuestShutdown=\(expectingGuestShutdown, privacy: .public)"
+        )
         // A paused guest is frozen, so it can never act on the request and
         // waiting out the window would only delay the power off. The host
         // resumes a VM it means to shut down cleanly before asking for this.
@@ -356,12 +378,17 @@ final class PommeVMRuntime: @unchecked Sendable {
                     bootMode: bootMode
                 )
                 if await waitUntilStopped(timeout: window) {
+                    PommeUnifiedLog.runtime.notice("[\(self.logVMName, privacy: .public)] guest stopped the VM after a stop request")
                     await teardown()
                     return .guestStopped
                 }
-            } catch { }
+                PommeUnifiedLog.runtime.notice("[\(self.logVMName, privacy: .public)] guest did not stop within \(window, privacy: .public)s; forcing stop")
+            } catch {
+                PommeUnifiedLog.error(error, context: "VM stop request", vmName: logVMName, logger: PommeUnifiedLog.runtime)
+            }
         }
         try await forceStop()
+        PommeUnifiedLog.runtime.notice("[\(self.logVMName, privacy: .public)] VM force-stopped")
         await teardown()
         return .forced
     }
@@ -377,7 +404,10 @@ final class PommeVMRuntime: @unchecked Sendable {
     }
 
     @discardableResult
-    func forceStopNow() async throws -> VMStopOutcome { try await forceStop(); await teardown(); return .forced }
+    func forceStopNow() async throws -> VMStopOutcome {
+        PommeUnifiedLog.runtime.notice("[\(self.logVMName, privacy: .public)] immediate force stop requested")
+        try await forceStop(); await teardown(); return .forced
+    }
 
     @discardableResult
     func resume() async throws -> Bool {
@@ -387,6 +417,7 @@ final class PommeVMRuntime: @unchecked Sendable {
         let state = await PommeCore.state(of: vm, on: queue)
         guard try VMPauseResumeTransition.requiresFrameworkCall(.resume, state: state, canPause: false, canResume: await PommeCore.canResume(vm, on: queue)) else { return false }
         try await PommeCore.resume(vm, on: queue)
+        PommeUnifiedLog.runtime.info("[\(self.logVMName, privacy: .public)] VM resumed")
         return true
     }
 
@@ -395,6 +426,7 @@ final class PommeVMRuntime: @unchecked Sendable {
         let state = await PommeCore.state(of: vm, on: queue)
         guard try VMPauseResumeTransition.requiresFrameworkCall(.pause, state: state, canPause: await PommeCore.canPause(vm, on: queue), canResume: false) else { return false }
         try await PommeCore.pause(vm, on: queue)
+        PommeUnifiedLog.runtime.info("[\(self.logVMName, privacy: .public)] VM paused")
         return true
     }
 
@@ -405,6 +437,7 @@ final class PommeVMRuntime: @unchecked Sendable {
         guard await PommeCore.state(of: vm, on: queue) == .paused else { throw RunnerError.virtualMachineState("VM must be paused before creating a snapshot.") }
         try configuration.validateSaveRestoreSupport()
         try await PommeCore.saveMachineState(vm, to: destination, on: queue)
+        PommeUnifiedLog.runtime.notice("[\(self.logVMName, privacy: .public)] saved snapshot machine state in stage \(stageName, privacy: .public)")
     }
 
     /// The provider's own reason for having no session, so a request made
@@ -846,9 +879,13 @@ final class PommeVMRuntime: @unchecked Sendable {
         clearRecoveryBootProof()
         if let terminalAdmissionCleanup {
             let verified = await terminalAdmissionCleanup()
-            if !verified { terminalCleanupLock.withLock { terminalCleanupVerified = false } }
+            if !verified {
+                terminalCleanupLock.withLock { terminalCleanupVerified = false }
+                PommeUnifiedLog.runtime.error("[\(self.logVMName, privacy: .public)] Recovery terminal admission cleanup was not verified")
+            }
         }
         agentProvider?.teardown()
+        PommeUnifiedLog.runtime.info("[\(self.logVMName, privacy: .public)] runtime torn down")
     }
 
     func terminalCleanupIsVerified() -> Bool {
@@ -909,7 +946,11 @@ final class PommeVMRuntime: @unchecked Sendable {
 
     private func quarantineSaveState() {
         let quarantine = saveStateURL.deletingLastPathComponent().appendingPathComponent("SaveFile.invalid-\(UUID().uuidString).vzvmsave")
-        try? FileManager.default.moveItem(at: saveStateURL, to: quarantine)
+        do {
+            try FileManager.default.moveItem(at: saveStateURL, to: quarantine)
+        } catch {
+            PommeUnifiedLog.error(error, context: "quarantine saved state", vmName: logVMName, logger: PommeUnifiedLog.runtime)
+        }
     }
 
     private func clearRecoveryBootProof() {

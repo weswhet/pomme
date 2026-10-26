@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 extension PommeSecurityWorkflowOperation {
   var isSIP: Bool { self == .sipEnable || self == .sipDisable }
@@ -49,6 +50,10 @@ struct PommeSecurityRecoveryAdapter: Sendable {
   private func execute(_ operation: PommeRecoveryOperation, payload: JSONValue) async throws
     -> JSONValue
   {
+    // The payload can hold the owner's credentials, so only the operation
+    // is logged.
+    PommeUnifiedLog.security.notice(
+      "[\(reference.displayName, privacy: .public)] running \(operation.wireName, privacy: .public) in authenticated Recovery")
     let integration = try await factory.make(reference: reference, operation: operation)
     let execution = try await integration.adapter.execute(
       operation: operation, payload: PommeProvisioningCoding.encode(payload), finalState: .stopped
@@ -57,6 +62,15 @@ struct PommeSecurityRecoveryAdapter: Sendable {
       execution.evidence.credentialConsumed, execution.evidence.lifecycle == .finalized,
       execution.cleanup.isComplete, execution.finalState == .stopped
     else {
+      PommeUnifiedLog.security.error("""
+        [\(reference.displayName, privacy: .public)] Recovery \(operation.wireName, privacy: .public) evidence rejected: \
+        authenticated=\(execution.evidence.authenticated, privacy: .public) \
+        requestBound=\(execution.evidence.requestBound, privacy: .public) \
+        credentialConsumed=\(execution.evidence.credentialConsumed, privacy: .public) \
+        lifecycle=\(execution.evidence.lifecycle.rawValue, privacy: .public) \
+        cleanupComplete=\(execution.cleanup.isComplete, privacy: .public) \
+        finalState=\(execution.finalState.rawValue, privacy: .public)
+        """)
       throw PommeSecurityWorkflowError.restorationIncomplete()
     }
     let value = try JSONDecoder().decode(JSONValue.self, from: execution.output)

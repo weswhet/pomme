@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import os
 
 /// Adds a signed Pomme executable to the append-only agent artifact store,
 /// as Scripts/archive-agent.sh does. VM creation retains the executable that
@@ -69,6 +70,20 @@ struct PommeAgentArtifactArchiver: Sendable {
     /// Developer ID signature requirement, before it's added.
     @discardableResult
     func retain(executableAt source: URL, sha256: String) throws -> URL {
+        let log = PommeUnifiedLog.bootstrap
+        do {
+            return try retainUnlogged(executableAt: source, sha256: sha256)
+        } catch {
+            log.error("""
+                agent artifact retain failed source=\(source.path, privacy: .public) \
+                sha256=\(String(sha256.prefix(64)), privacy: .public): \(String(describing: error), privacy: .public)
+                """)
+            throw error
+        }
+    }
+
+    private func retainUnlogged(executableAt source: URL, sha256: String) throws -> URL {
+        let log = PommeUnifiedLog.bootstrap
         let store = PommeAgentArtifactStore(rootURL: rootURL, dependencies: dependencies)
         let destination = try store.path(for: sha256)
         let digestDirectory = destination.deletingLastPathComponent()
@@ -81,6 +96,7 @@ struct PommeAgentArtifactArchiver: Sendable {
 
         var existing = stat()
         if lstat(destination.path, &existing) == 0 {
+            log.info("agent artifact already retained sha256=\(sha256, privacy: .public); verifying it")
             return try store.resolve(sha256: sha256)
         }
 
@@ -92,6 +108,7 @@ struct PommeAgentArtifactArchiver: Sendable {
             rmdir(digestDirectory.path)
             throw error
         }
+        log.notice("retained agent artifact sha256=\(sha256, privacy: .public) source=\(source.path, privacy: .public)")
         return try store.resolve(sha256: sha256)
     }
 
@@ -108,8 +125,10 @@ struct PommeAgentArtifactArchiver: Sendable {
 
         // RENAME_EXCL never replaces an entry that another process added
         // first. That entry is checked like any other.
-        if renamex_np(temporary.path, destination.path, UInt32(RENAME_EXCL)) != 0, errno != EEXIST {
-            throw Error.writeFailed(errno: errno)
+        if renamex_np(temporary.path, destination.path, UInt32(RENAME_EXCL)) != 0 {
+            let code = errno
+            guard code == EEXIST else { throw Error.writeFailed(errno: code) }
+            PommeUnifiedLog.bootstrap.info("another process retained agent artifact sha256=\(sha256, privacy: .public) first")
         }
     }
 

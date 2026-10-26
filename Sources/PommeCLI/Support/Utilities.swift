@@ -1,6 +1,7 @@
 import Foundation
 import Security
 import Darwin
+import os
 
 func readSecureLine(prompt: String) -> String? {
     guard isatty(STDIN_FILENO) == 1 else {
@@ -359,9 +360,11 @@ func openHostKeychainResult(
     var keychain: SecKeychain?
     let status = SecKeychainOpen(resolvedPath, &keychain)
     guard status == errSecSuccess, let keychain else {
+        PommeUnifiedLog.security.error("Keychain open failed OSStatus \(status, privacy: .public) path=\(resolvedPath, privacy: .public)")
         throw RunnerError.keychainError("Could not open \(resolvedPath): \(securityErrorMessage(status))")
     }
     let unlockSource = try ensureHostKeychainUnlocked(keychain, path: resolvedPath, unlockPolicy: unlockPolicy)
+    PommeUnifiedLog.security.info("Keychain opened path=\(resolvedPath, privacy: .public) unlock=\(unlockSource, privacy: .public)")
     return HostKeychainOpenResult(keychain: keychain, path: resolvedPath, unlockSource: unlockSource)
 }
 
@@ -373,6 +376,7 @@ func hostKeychainIsUnlocked(_ keychain: SecKeychain) throws -> Bool {
     var status: SecKeychainStatus = 0
     let result = SecKeychainGetStatus(keychain, &status)
     guard result == errSecSuccess else {
+        PommeUnifiedLog.security.error("Keychain lock state read failed OSStatus \(result, privacy: .public)")
         throw RunnerError.keychainError("Could not read keychain lock state: \(securityErrorMessage(result))")
     }
     return (status & UInt32(kSecUnlockStateStatus)) != 0
@@ -398,6 +402,7 @@ func ensureHostKeychainUnlocked(
                 if unlockStatus == errSecSuccess, try hostKeychainIsUnlocked(keychain) {
                     return "hostKCPassword"
                 }
+                PommeUnifiedLog.security.error("login Keychain unlock from the host's automatic login failed OSStatus \(unlockStatus, privacy: .public)")
                 hostKCPasswordError = "host /etc/kcpassword did not unlock the login keychain: \(securityErrorMessage(unlockStatus))"
             } else {
                 hostKCPasswordError = "host /etc/kcpassword is not available"
@@ -408,6 +413,7 @@ func ensureHostKeychainUnlocked(
     }
 
     guard unlockPolicy == .allowTTYPrompt else {
+        PommeUnifiedLog.security.error("Keychain is locked and can't be unlocked non-interactively path=\(path, privacy: .public)")
         var message = "Keychain \(path) is locked and cannot be unlocked non-interactively."
         if let hostKCPasswordError {
             message += " \(hostKCPasswordError)."
@@ -429,6 +435,7 @@ func ensureHostKeychainUnlocked(
         }
     }
     guard unlockStatus == errSecSuccess else {
+        PommeUnifiedLog.security.error("Keychain unlock from the terminal failed OSStatus \(unlockStatus, privacy: .public) path=\(path, privacy: .public)")
         throw RunnerError.keychainError("Could not unlock keychain \(path): \(securityErrorMessage(unlockStatus))")
     }
     guard try hostKeychainIsUnlocked(keychain) else {
@@ -512,6 +519,10 @@ func findHostKeychainPassword(
 
     var item: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &item)
+    PommeUnifiedLog.security.log(
+        level: status == errSecSuccess || status == errSecItemNotFound ? .info : .error,
+        "Keychain read service=\(service, privacy: .public) OSStatus \(status, privacy: .public)"
+    )
     if status == errSecItemNotFound {
         return nil
     }
@@ -537,6 +548,10 @@ func findHostKeychainCredential(
 
     var item: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &item)
+    PommeUnifiedLog.security.log(
+        level: status == errSecSuccess || status == errSecItemNotFound ? .info : .error,
+        "Keychain credential lookup service=\(service, privacy: .public) OSStatus \(status, privacy: .public)"
+    )
     if status == errSecItemNotFound {
         return nil
     }
@@ -570,6 +585,10 @@ func storeHostKeychainPassword(
     addQuery[kSecAttrLabel as String] = "pomme guest credential: \(account)"
 
     let status = SecItemAdd(addQuery as CFDictionary, nil)
+    PommeUnifiedLog.security.log(
+        level: status == errSecSuccess || status == errSecDuplicateItem ? .info : .error,
+        "Keychain add service=\(service, privacy: .public) OSStatus \(status, privacy: .public)"
+    )
     if status == errSecSuccess {
         return openResult
     }
@@ -586,6 +605,10 @@ func storeHostKeychainPassword(
         kSecAttrLabel as String: "pomme guest credential: \(account)"
     ]
     let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updateAttributes as CFDictionary)
+    PommeUnifiedLog.security.log(
+        level: updateStatus == errSecSuccess ? .info : .error,
+        "Keychain update service=\(service, privacy: .public) OSStatus \(updateStatus, privacy: .public)"
+    )
     guard updateStatus == errSecSuccess else {
         throw RunnerError.keychainError("Could not update credential \(service)/\(account): \(securityErrorMessage(updateStatus))")
     }
@@ -757,8 +780,20 @@ func runHostProcessCapturing(
     let errorPipe = Pipe()
     process.standardOutput = outputPipe
     process.standardError = errorPipe
-    try process.run()
+    // Arguments and output aren't logged, since a caller may pass a secret.
+    let log = PommeUnifiedLog.process
+    do {
+        try process.run()
+    } catch {
+        PommeUnifiedLog.error(error, context: "launch \(executable)", logger: log)
+        throw error
+    }
+    log.info("launched \(executable, privacy: .public) pid=\(process.processIdentifier, privacy: .public) argc=\(arguments.count, privacy: .public)")
     process.waitUntilExit()
+    log.log(
+        level: process.terminationStatus == 0 ? .info : .error,
+        "\(executable, privacy: .public) exited status=\(process.terminationStatus, privacy: .public)"
+    )
 
     let stdout = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
     let stderr = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""

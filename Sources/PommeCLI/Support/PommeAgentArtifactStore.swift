@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import os
 import Security
 
 /// Resolves the immutable, signed Pomme agent executable retained for a
@@ -82,24 +83,33 @@ struct PommeAgentArtifactStore: Sendable {
         }
 
         private static func verifyCodeSignature(_ url: URL) throws {
+            let log = PommeUnifiedLog.bootstrap
             var code: SecStaticCode?
-            guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess,
-                  let code
-            else { throw Error.signatureRejected }
+            let createStatus = SecStaticCodeCreateWithPath(url as CFURL, [], &code)
+            guard createStatus == errSecSuccess, let code else {
+                log.error("agent artifact signature: SecStaticCodeCreateWithPath OSStatus \(createStatus, privacy: .public) path=\(url.path, privacy: .public)")
+                throw Error.signatureRejected
+            }
 
             var requirement: SecRequirement?
-            guard SecRequirementCreateWithString(
+            let requirementStatus = SecRequirementCreateWithString(
                 PommeAgentArtifactStore.signingRequirement as CFString,
                 [],
                 &requirement
-            ) == errSecSuccess,
-            let requirement,
-            SecStaticCodeCheckValidity(
+            )
+            guard requirementStatus == errSecSuccess, let requirement else {
+                log.fault("agent artifact signature: SecRequirementCreateWithString OSStatus \(requirementStatus, privacy: .public)")
+                throw Error.signatureRejected
+            }
+            let validityStatus = SecStaticCodeCheckValidity(
                 code,
                 SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures),
                 requirement
-            ) == errSecSuccess
-            else { throw Error.signatureRejected }
+            )
+            guard validityStatus == errSecSuccess else {
+                log.error("agent artifact signature: SecStaticCodeCheckValidity OSStatus \(validityStatus, privacy: .public) path=\(url.path, privacy: .public)")
+                throw Error.signatureRejected
+            }
         }
     }
 
@@ -120,6 +130,23 @@ struct PommeAgentArtifactStore: Sendable {
     /// code signature, stable inode, and SHA-256 bytes.  This method is
     /// strictly read-only.
     func resolve(sha256 expectedSHA256: String) throws -> URL {
+        let log = PommeUnifiedLog.bootstrap
+        // A digest that isn't a lowercase SHA-256 value is logged only by
+        // its length.
+        let digest = Self.isLowercaseSHA256(expectedSHA256)
+            ? expectedSHA256 : "<invalid, \(expectedSHA256.utf8.count) bytes>"
+        log.info("resolving retained agent artifact sha256=\(digest, privacy: .public)")
+        do {
+            let executable = try resolveUnlogged(sha256: expectedSHA256)
+            log.info("resolved retained agent artifact sha256=\(digest, privacy: .public) path=\(executable.path, privacy: .public)")
+            return executable
+        } catch {
+            log.error("agent artifact resolution failed sha256=\(digest, privacy: .public): \(String(describing: error), privacy: .public)")
+            throw error
+        }
+    }
+
+    private func resolveUnlogged(sha256 expectedSHA256: String) throws -> URL {
         guard Self.isLowercaseSHA256(expectedSHA256) else {
             throw Error.invalidDigest
         }
@@ -129,7 +156,10 @@ struct PommeAgentArtifactStore: Sendable {
         guard root.path.hasPrefix("/"),
               rootCandidate.path == root.path,
               root.path == root.resolvingSymlinksInPath().standardizedFileURL.path
-        else { throw Error.unsafeStore }
+        else {
+            PommeUnifiedLog.bootstrap.error("agent artifact store root isn't an absolute, symlink-free path: \(rootCandidate.path, privacy: .public)")
+            throw Error.unsafeStore
+        }
         try Self.validateDirectory(root, missingError: .storeUnavailable)
 
         let artifacts = root.appendingPathComponent(Self.artifactDirectoryName, isDirectory: true)
@@ -157,9 +187,12 @@ struct PommeAgentArtifactStore: Sendable {
     }
 
     private func validateExecutable(at url: URL, expectedSHA256: String) throws {
+        let log = PommeUnifiedLog.bootstrap
         var before = stat()
         guard lstat(url.path, &before) == 0 else {
-            if errno == ENOENT { throw Error.artifactMissing }
+            let code = errno
+            if code != ENOENT { log.error("agent artifact lstat failed errno=\(code, privacy: .public) path=\(url.path, privacy: .public)") }
+            if code == ENOENT { throw Error.artifactMissing }
             throw Error.artifactRejected
         }
         guard before.st_mode & S_IFMT == S_IFREG,
@@ -168,13 +201,25 @@ struct PommeAgentArtifactStore: Sendable {
               before.st_mode & 0o022 == 0,
               before.st_size > 0,
               before.st_size <= off_t(Self.maximumExecutableBytes)
-        else { throw Error.artifactRejected }
+        else {
+            log.error("""
+                agent artifact rejected: mode=\(String(before.st_mode, radix: 8), privacy: .public) \
+                uid=\(before.st_uid, privacy: .public) euid=\(geteuid(), privacy: .public) \
+                nlink=\(before.st_nlink, privacy: .public) size=\(before.st_size, privacy: .public) \
+                path=\(url.path, privacy: .public)
+                """)
+            throw Error.artifactRejected
+        }
 
         do { try dependencies.verifyCodeSignature(url) }
         catch { throw Error.signatureRejected }
 
         let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-        guard descriptor >= 0 else { throw Error.artifactRejected }
+        guard descriptor >= 0 else {
+            let code = errno
+            log.error("agent artifact open failed errno=\(code, privacy: .public) path=\(url.path, privacy: .public)")
+            throw Error.artifactRejected
+        }
         defer { close(descriptor) }
 
         var opened = stat()
@@ -226,16 +271,26 @@ struct PommeAgentArtifactStore: Sendable {
         _ url: URL,
         missingError: Error
     ) throws {
+        let log = PommeUnifiedLog.bootstrap
         var info = stat()
         guard lstat(url.path, &info) == 0 else {
-            if errno == ENOENT { throw missingError }
+            let code = errno
+            if code != ENOENT { log.error("agent artifact store directory lstat failed errno=\(code, privacy: .public) path=\(url.path, privacy: .public)") }
+            if code == ENOENT { throw missingError }
             throw Error.unsafeStore
         }
         guard info.st_mode & S_IFMT == S_IFDIR,
               info.st_uid == geteuid(),
               info.st_nlink >= 2,
               info.st_mode & 0o022 == 0
-        else { throw Error.unsafeStore }
+        else {
+            log.error("""
+                agent artifact store directory unsafe: mode=\(String(info.st_mode, radix: 8), privacy: .public) \
+                uid=\(info.st_uid, privacy: .public) euid=\(geteuid(), privacy: .public) \
+                nlink=\(info.st_nlink, privacy: .public) path=\(url.path, privacy: .public)
+                """)
+            throw Error.unsafeStore
+        }
     }
 
     private static func defaultRootURL() throws -> URL {

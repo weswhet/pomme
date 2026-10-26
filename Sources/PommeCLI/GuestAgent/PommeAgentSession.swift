@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 
 /// A failure that the guest agent reported. `wireCode` is the agent's
 /// protocol code; `code` is the Pomme code that output and docs use.
@@ -103,11 +104,23 @@ actor PommeAgentSession {
         if let vmBinding { payload["vmID"] = .string(vmBinding) }
         if let sessionBinding { payload["sessionID"] = .string(sessionBinding) }
         let request = PommeAgentProtocol.Envelope.request(operation: "authenticate", payload: .object(payload))
-        let response = try await send(request)
+        let response: PommeAgentProtocol.Envelope
+        do { response = try await send(request) } catch {
+            PommeUnifiedLog.error(error, context: "Guest agent authentication", logger: PommeUnifiedLog.guestAgent)
+            throw error
+        }
         guard response.ok == true, let proof = response.result?.objectValue?["proof"]?.stringValue,
               try PommeAgentAuthentication.verifies(proof: proof, token: token, challenge: challenge)
-        else { throw PommeAgentProtocol.Error.invalidResponse }
+        else {
+            // The token, challenge, and proof are never logged.
+            Self.logger.error("""
+                Guest agent authentication failed: role=\(self.role.rawValue, privacy: .public) \
+                agentCode=\(PommeUnifiedLog.scrubbed(response.error?.code ?? "invalid-proof"), privacy: .public)
+                """)
+            throw PommeAgentProtocol.Error.invalidResponse
+        }
         authenticated = true
+        Self.logger.info("Guest agent authenticated: role=\(self.role.rawValue, privacy: .public)")
     }
 
     func request(operation: String, payload: JSONValue = .object([:]), requestID: UUID = UUID()) async throws -> JSONValue {
@@ -154,14 +167,27 @@ actor PommeAgentSession {
     }
 
     private func send(_ request: PommeAgentProtocol.Envelope) async throws -> PommeAgentProtocol.Envelope {
+        // Only the operation name: request payloads can carry credentials.
+        Self.logger.debug("Guest agent request \(request.operation, privacy: .public)")
         let data = try await exchange(PommeAgentProtocol.encode(request))
         guard let response = try await ingest(data, expectedResponse: request) else { throw PommeAgentProtocol.Error.invalidResponse }
         return response
     }
 
+    private static let logger = PommeUnifiedLog.guestAgent
+
     private func result(from response: PommeAgentProtocol.Envelope) throws -> JSONValue {
         guard response.ok == true else {
-            guard let failure = response.error else { throw PommeAgentProtocol.Error.invalidResponse }
+            guard let failure = response.error else {
+                Self.logger.error("Guest agent sent a failed \(response.operation, privacy: .public) response without an error")
+                throw PommeAgentProtocol.Error.invalidResponse
+            }
+            // The agent's message is already redacted on the wire; scrub it again.
+            Self.logger.error("""
+                Guest agent operation \(response.operation, privacy: .public) failed: \
+                agentCode=\(PommeUnifiedLog.scrubbed(failure.code), privacy: .public) \
+                message=\(PommeUnifiedLog.scrubbed(failure.message), privacy: .public)
+                """)
             throw PommeAgentSessionError(failure: failure)
         }
         guard let result = response.result else { throw PommeAgentProtocol.Error.invalidResponse }
@@ -217,7 +243,10 @@ extension PommeAgentSession: PommeAgentSessionProtocol {
         )
     }
 
-    func close() async { authenticated = false }
+    func close() async {
+        if authenticated { Self.logger.info("Guest agent session closed: role=\(self.role.rawValue, privacy: .public)") }
+        authenticated = false
+    }
 }
 
 enum PommeAgentCredential {

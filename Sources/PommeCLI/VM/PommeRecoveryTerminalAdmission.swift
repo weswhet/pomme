@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 @preconcurrency import Virtualization
 
 /// Host-only Recovery navigation artifacts. This is intentionally separate
@@ -288,6 +289,11 @@ actor PommeRecoveryTerminalAdmission {
             throw Error.alreadyAttempted
         }
         phase = .admitting
+        let vmName = plan.vm.name
+        PommeUnifiedLog.recovery.notice("""
+            [\(vmName, privacy: .public)] Recovery terminal admission started: \
+            session=\(sessionID.uuidString.lowercased(), privacy: .public) debugScreenshots=\(recoveryDebugScreenshots, privacy: .public)
+            """)
 
         do {
             let profile = try profileResolver()
@@ -319,6 +325,7 @@ actor PommeRecoveryTerminalAdmission {
             staging = bootstrap.staging
 
             try bootstrap.staging.attachShare(to: vm, on: queue)
+            PommeUnifiedLog.recovery.info("[\(vmName, privacy: .public)] Recovery terminal bootstrap share attached")
             let binding = PommeAgentVSOCKBinding(vmID: request.vmUUID, sessionID: request.requestID)
             state.install(
                 token: String(decoding: credential.hexadecimalDataForStaging(), as: UTF8.self),
@@ -350,18 +357,25 @@ actor PommeRecoveryTerminalAdmission {
                 capabilityProbes: bootstrap.terminalPlan.capabilityProbes,
                 launcherCommand: bootstrap.terminalPlan.command
             )
+            PommeUnifiedLog.recovery.notice("[\(vmName, privacy: .public)] Recovery Terminal navigation finished: \(String(describing: disposition), privacy: .public)")
             guard disposition == .terminalLauncherSubmitted else {
                 throw Error.launcherRejected
             }
             try await waitForAuthentication()
+            PommeUnifiedLog.recovery.notice("[\(vmName, privacy: .public)] Recovery terminal agent authenticated")
 
             try bootstrap.staging.clearShare(from: vm, on: queue)
             try bootstrap.staging.removeHostArtifacts()
             staging = nil
             phase = .admitted
+            PommeUnifiedLog.recovery.notice("[\(vmName, privacy: .public)] Recovery terminal admission complete; bootstrap share cleared")
             return await PommeRecoveryDebugScreenshotMetadata(recorder: debugScreenshotRecorder)
         } catch {
+            PommeUnifiedLog.error(error, context: "Recovery terminal admission", vmName: vmName, logger: PommeUnifiedLog.recovery)
             let cleanupComplete = await abandonAdmission()
+            if !cleanupComplete {
+                PommeUnifiedLog.recovery.error("[\(vmName, privacy: .public)] Recovery terminal admission cleanup was incomplete")
+            }
             let outcome: any Swift.Error = cleanupComplete
                 ? error
                 : PommeRecoveryTerminalAdmission.Error.cleanupFailed(PommeRetainedCause(error))
@@ -390,6 +404,11 @@ actor PommeRecoveryTerminalAdmission {
             removeBootstrap: { try bootstrapShare.removeHostRoot() }
         )
         phase = complete ? .cleaned : .failed
+        if complete {
+            PommeUnifiedLog.recovery.info("Recovery terminal admission cleanup complete")
+        } else {
+            PommeUnifiedLog.recovery.error("Recovery terminal admission cleanup incomplete: framesCleared=\(framesCleared, privacy: .public)")
+        }
         return complete
     }
 
@@ -402,9 +421,15 @@ actor PommeRecoveryTerminalAdmission {
         removeBootstrap: () throws -> Void
     ) -> Bool {
         var complete = sensitiveFramesCleared
-        do { try clearStaging() } catch { complete = false }
+        do { try clearStaging() } catch {
+            PommeUnifiedLog.error(error, context: "Recovery terminal staging cleanup", logger: PommeUnifiedLog.recovery)
+            complete = false
+        }
         clearState()
-        do { try removeBootstrap() } catch { complete = false }
+        do { try removeBootstrap() } catch {
+            PommeUnifiedLog.error(error, context: "Recovery terminal bootstrap share removal", logger: PommeUnifiedLog.recovery)
+            complete = false
+        }
         return complete
     }
 
@@ -422,6 +447,7 @@ actor PommeRecoveryTerminalAdmission {
             try Task.checkCancellation()
             try await Task.sleep(nanoseconds: 25_000_000)
         }
+        PommeUnifiedLog.recovery.error("Recovery terminal agent did not authenticate within \(Constants.defaultRecoveryAgentTimeout, privacy: .public)s")
         throw Error.authenticationTimedOut
     }
 

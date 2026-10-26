@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Starts the existing request-bound launcher through the authenticated resident
 /// terminal. The resident never receives installer or security authority.
@@ -9,10 +10,12 @@ enum PommeExperimentalRecoveryBootstrap {
         launcher: PommeLiveRecoveryIntegration.Launcher,
         timeout: TimeInterval
     ) async throws {
+        PommeUnifiedLog.experimentalRecovery.notice("launching the request-bound Recovery launcher through the resident terminal")
         let session = try await authenticate(coordinator: coordinator,
             executableSHA256: executableSHA256, timeout: timeout)
         guard launcher.expiresAt.timeIntervalSinceNow >= timeout
             + PommeLiveRecoveryIntegration.credentialAuthenticationReserve else {
+            PommeUnifiedLog.experimentalRecovery.error("Recovery launcher credential expires too soon to authenticate; refusing launch")
             throw PommeLiveRecoveryIntegration.Error.credentialRejected
         }
         let terminalID = UUID().uuidString.lowercased()
@@ -27,8 +30,11 @@ enum PommeExperimentalRecoveryBootstrap {
         let result = try await session.request(operation: "terminal.create", payload: .object(payload))
         guard let object = result.objectValue, object["sessionID"] == .string(terminalID),
               case .integer(let pid)? = object["pid"], pid > 0 else {
+            PommeUnifiedLog.experimentalRecovery.error("resident terminal.create returned an invalid receipt for the Recovery launcher")
             throw PommeAgentProtocol.Error.invalidResponse
         }
+        // The launcher command embeds a credential, so only the session and pid are logged.
+        PommeUnifiedLog.experimentalRecovery.notice("Recovery launcher started: terminal=\(terminalID, privacy: .public) pid=\(pid, privacy: .public)")
         // The request-bound daemon remains the foreground child. The existing
         // Recovery root now authenticates that separate one-shot connection;
         // runtime teardown closes this terminal after its transaction finishes.
@@ -42,14 +48,28 @@ enum PommeExperimentalRecoveryBootstrap {
         timeout: TimeInterval
     ) async throws -> PommeAuthenticatedAgentSession {
         let deadline = Date().addingTimeInterval(timeout)
+        PommeUnifiedLog.experimentalRecovery.info("waiting up to \(timeout, privacy: .public)s for the Recovery resident to authenticate")
         while !coordinator.isAuthenticated(as: .recoveryResident) {
-            guard Date() < deadline else { throw PommeRecoverySessionError.observationTimedOut }
+            guard Date() < deadline else {
+                PommeUnifiedLog.experimentalRecovery.error("Recovery resident did not authenticate within \(timeout, privacy: .public)s")
+                throw PommeRecoverySessionError.observationTimedOut
+            }
             try Task.checkCancellation()
             try await Task.sleep(for: .milliseconds(100))
         }
         let session = try coordinator.captureAuthenticatedSession(as: .recoveryResident)
         let description = try await session.request(operation: "agent.describe")
-        try validate(description: description, executableSHA256: executableSHA256)
+        do {
+            try validate(description: description, executableSHA256: executableSHA256)
+        } catch {
+            let observed = description.objectValue?["executableSHA256"]?.stringValue ?? "none"
+            PommeUnifiedLog.experimentalRecovery.error("""
+                Recovery resident description mismatch: expectedSHA256=\(executableSHA256, privacy: .public) \
+                observedSHA256=\(observed, privacy: .public) role=\(description.objectValue?["role"]?.stringValue ?? "none", privacy: .public)
+                """)
+            throw error
+        }
+        PommeUnifiedLog.experimentalRecovery.notice("Recovery resident authenticated and matched executableSHA256=\(executableSHA256, privacy: .public)")
         return session
     }
 

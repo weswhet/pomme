@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import ImageIO
+import os
 import Vision
 
 private func settingsAIFormattedConfidence(_ confidence: Double) -> String {
@@ -326,10 +327,17 @@ struct SettingsAIOCRRecognizer: Sendable {
             let elapsedNanoseconds = DispatchTime.now().uptimeNanoseconds &- startedAt
             onRecognition?(Double(elapsedNanoseconds) / 1_000_000_000)
         }
-        try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
-        if let requestError {
-            throw requestError
+        // Recognized text can show guest data, so only counts are logged.
+        do {
+            try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+            if let requestError {
+                throw requestError
+            }
+        } catch {
+            PommeUnifiedLog.error(error, context: "Vision text recognition", logger: PommeUnifiedLog.ui)
+            throw error
         }
+        PommeUnifiedLog.ui.debug("Vision text recognition found \(recognizedLines.count, privacy: .public) line(s)")
         return recognizedLines
             .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .sorted(by: Self.readingOrder)

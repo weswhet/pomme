@@ -133,6 +133,12 @@ enum PommeCreationSpace {
         volumeIdentifier: (URL) -> AnyHashable? = volumeIdentifier(of:)
     ) throws -> [VolumeCheck] {
         let checks = check(needs, availableBytes: availableBytes, volumeIdentifier: volumeIdentifier)
+        for check in checks {
+            PommeUnifiedLog.message(
+                "space check for \(subject): \(check.directory.path) needs \(check.requiredBytes) bytes, "
+                    + "has \(check.availableBytes.map(String.init) ?? "unknown"), sufficient=\(check.sufficient)",
+                logger: PommeUnifiedLog.provisioning)
+        }
         if let short = checks.first(where: { !$0.sufficient }), let available = short.availableBytes {
             throw PommeCreationSpaceError(subject: subject, check: short, availableBytes: available)
         }

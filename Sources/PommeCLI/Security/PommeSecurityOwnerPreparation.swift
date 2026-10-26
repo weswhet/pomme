@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// TEMPORARY readback diagnostics: no data-bearing values can enter the sink.
 enum PommeAutoLoginReadbackTrace: String, CaseIterable, Sendable {
@@ -15,7 +16,10 @@ enum PommeAutoLoginReadbackTrace: String, CaseIterable, Sendable {
   case artifactValid, artifactInvalid
 
   var message: String { "[DEBUG-autologin-readback-20260922] \(rawValue)" }
-  static func log(_ event: Self) { PommeCore.log(event.message) }
+  static func log(_ event: Self) {
+    PommeUnifiedLog.security.info("autologin readback: \(event.rawValue, privacy: .public)")
+    PommeCore.log(event.message)
+  }
 }
 
 /// Stable, redacted operation names used by the normal-guest owner boundary.
@@ -2304,6 +2308,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
   ) throws -> Int32 {
     let result = try execute(command)
     guard acceptedExitCodes.contains(result.exitCode) else {
+      Self.logCommandFailure(kind, exitCode: result.exitCode)
       throw PommeSecurityOwnerPreparationError.commandFailed(kind, exitCode: Int(result.exitCode))
     }
     return result.exitCode
@@ -2313,14 +2318,26 @@ struct PommeSecurityOwnerPreparation: Sendable {
     _ phase: PommeSecurityOwnerPreparationPhase,
     _ event: PommeSecurityOwnerPreparationEvent
   ) throws {
+    PommeUnifiedLog.security.notice(
+      "owner preparation phase \(phase.rawValue, privacy: .public) \(event.rawValue, privacy: .public)")
     do {
       try reportPhase(phase, event)
     } catch {
       // A parent callback is allowed to use its own journal error type,
       // but this boundary must never forward arbitrary text alongside a
-      // credential-bearing operation.
+      // credential-bearing operation. The unified log keeps its code.
+      PommeUnifiedLog.error(
+        error, context: "owner preparation phase callback \(phase.rawValue)",
+        logger: PommeUnifiedLog.security)
       throw PommeSecurityOwnerPreparationError.phaseCallbackFailed
     }
+  }
+
+  /// Records only the command's allowlisted kind and exit status; its
+  /// arguments and output can carry account names or credentials.
+  private static func logCommandFailure(_ kind: PommeSecurityOwnerCommandKind, exitCode: Int32) {
+    PommeUnifiedLog.security.error(
+      "owner preparation command \(kind.rawValue, privacy: .public) exited \(exitCode, privacy: .public)")
   }
 
   private func run(
@@ -2335,6 +2352,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
     }
     let result = try execute(command)
     guard acceptedExitCodes.contains(result.exitCode) else {
+      Self.logCommandFailure(kind, exitCode: result.exitCode)
       throw PommeSecurityOwnerPreparationError.commandFailed(kind, exitCode: Int(result.exitCode))
     }
     guard result.stdout.utf8.count <= 4 * 1024 * 1024 else {
@@ -2354,6 +2372,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
   ) throws -> String {
     let result = try execute(command)
     guard acceptedExitCodes.contains(result.exitCode) else {
+      Self.logCommandFailure(kind, exitCode: result.exitCode)
       throw PommeSecurityOwnerPreparationError.commandFailed(kind, exitCode: Int(result.exitCode))
     }
     guard result.output.utf8.count <= 4 * 1024 * 1024 else {
@@ -2369,6 +2388,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
   ) throws -> String {
     let result = try execute(command)
     guard acceptedExitCodes.contains(result.exitCode) else {
+      Self.logCommandFailure(kind, exitCode: result.exitCode)
       throw PommeSecurityOwnerPreparationError.commandFailed(kind, exitCode: Int(result.exitCode))
     }
     guard result.output.utf8.count <= 4 * 1024 * 1024 else {
@@ -2966,6 +2986,9 @@ struct PommeSecurityOwnerPreparation: Sendable {
     switch normalized {
     case "local open directory user": return .localOpenDirectoryUser
     case "mdm bootstrap token external key":
+      // The diagnostic's wording names a token, so the unified log would
+      // withhold it; this fixed line records the same classification.
+      PommeUnifiedLog.security.info("APFS owner evidence: recognized an MDM bootstrap key; classified as non-account")
       PommeCore.log("APFS owner evidence: recognized MDM bootstrap-token key; classified as non-account.")
       return .other
     case "disk user", "icloud user", "recovery user", "institutional recovery user",

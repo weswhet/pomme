@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import os
 
 /// The caller must hold the VM mutation lease and keep the VM stopped until
 /// this operation returns a completed receipt. No credentials are created here.
@@ -105,19 +106,44 @@ enum PommeExperimentalRecoveryImage {
     private static func perform(
         _ request: Request, executor: @escaping Executor, mode: BackingMode?, preservingDisk: Bool
     ) async throws -> Receipt {
-        let transaction = try Transaction(request: request, executor: executor)
+        let operation = mode.map { "activate \($0.rawValue) backing" } ?? "prepare image"
+        let vmID = request.vmID.uuidString.lowercased()
+        PommeUnifiedLog.experimentalRecovery.notice(
+            "image \(operation, privacy: .public) started: vmID=\(vmID, privacy: .public) preservingDisk=\(preservingDisk, privacy: .public) workspace=\(request.workspaceURL.path, privacy: .public)"
+        )
+        let transaction: Transaction
+        do { transaction = try Transaction(request: request, executor: executor) }
+        catch {
+            PommeUnifiedLog.error(error, context: "experimental Recovery image transaction open", logger: PommeUnifiedLog.experimentalRecovery)
+            throw error
+        }
         do {
-            if let mode { return try await transaction.activate(mode, preservingDisk: preservingDisk) }
-            return try await transaction.run()
+            let receipt: Receipt
+            if let mode { receipt = try await transaction.activate(mode, preservingDisk: preservingDisk) }
+            else { receipt = try await transaction.run() }
+            PommeUnifiedLog.experimentalRecovery.notice("""
+                image \(operation, privacy: .public) finished: vmID=\(vmID, privacy: .public) \
+                completed=\(receipt.completed, privacy: .public) \
+                activeBacking=\(receipt.activeBacking?.rawValue ?? "none", privacy: .public) \
+                recoveryReplaced=\(receipt.recoveryReplaced ?? false, privacy: .public)
+                """)
+            return receipt
         }
         catch {
+            PommeUnifiedLog.error(error, context: "experimental Recovery image \(operation)", logger: PommeUnifiedLog.experimentalRecovery)
             if transaction.commandTerminationUnconfirmed {
+                PommeUnifiedLog.experimentalRecovery.error("image command termination is unconfirmed; skipping attachment cleanup")
                 throw Failure(reason: "host image command termination is unconfirmed; attachment cleanup was not attempted",
                               pendingAttachmentImages: transaction.journal.receipt.pendingAttachmentImages,
                               processTerminationUnconfirmed: true)
             }
             // Cancellation must not cancel the detach attempt itself.
             let unresolved = await Task.detached { await transaction.detachAll() }.value
+            if !unresolved.isEmpty {
+                PommeUnifiedLog.experimentalRecovery.error(
+                    "cleanup could not verify detachment of \(unresolved.count, privacy: .public) image(s): \(unresolved.joined(separator: ", "), privacy: .public)"
+                )
+            }
             if !unresolved.isEmpty { throw Failure(reason: "cleanup could not verify detachment", pendingAttachmentImages: unresolved) }
             throw error
         }
@@ -373,9 +399,15 @@ enum PommeExperimentalRecoveryImage {
         }
         func command(_ executable: String, _ arguments: [String]) async throws -> Data {
             try Task.checkCancellation()
+            let name = URL(fileURLWithPath: executable).lastPathComponent
+            // Arguments are image paths, device identifiers, and fixed verbs.
+            PommeUnifiedLog.process.debug(
+                "run \(executable, privacy: .public) \(arguments.joined(separator: " "), privacy: .public)"
+            )
             let result: CommandResult
             do { result = try await executor(Command(executable: executable, arguments: arguments)) }
             catch let failure as Failure {
+                PommeUnifiedLog.error(failure, context: "\(name) \(arguments.first ?? "")", logger: PommeUnifiedLog.process)
                 if failure.processTerminationUnconfirmed {
                     commandTerminationUnconfirmed = true
                     journal.unconfirmedCommand = true
@@ -383,7 +415,15 @@ enum PommeExperimentalRecoveryImage {
                 }
                 throw failure
             }
-            guard result.status == 0 else { throw Failure(reason: "\(URL(fileURLWithPath: executable).lastPathComponent) failed with status \(result.status)") }
+            guard result.status == 0 else {
+                let stderr = PommeUnifiedLog.scrubbed(String(decoding: result.stderr.prefix(1024), as: UTF8.self))
+                PommeUnifiedLog.process.error("""
+                    \(executable, privacy: .public) \(arguments.joined(separator: " "), privacy: .public) \
+                    exited with status \(result.status, privacy: .public): \(stderr, privacy: .public)
+                    """)
+                throw Failure(reason: "\(name) failed with status \(result.status)")
+            }
+            PommeUnifiedLog.process.debug("\(name, privacy: .public) \(arguments.first ?? "", privacy: .public) exited 0")
             return result.stdout
         }
         func attach(_ url: URL, readOnly: Bool, raw: Bool = false, shadow: URL? = nil) async throws -> Set<String> {
@@ -402,7 +442,12 @@ enum PommeExperimentalRecoveryImage {
             if raw { args += ["-imagekey", "diskimage-class=CRawDiskImage"] }
             if let shadow { args += ["-shadow", shadow.path] }
             args.append(url.path)
-            return try attachedDevices(await command("/usr/bin/hdiutil", args))
+            let devices = try attachedDevices(await command("/usr/bin/hdiutil", args))
+            PommeUnifiedLog.experimentalRecovery.info("""
+                attached \(url.path, privacy: .public) readOnly=\(readOnly, privacy: .public) raw=\(raw, privacy: .public) \
+                shadow=\(shadow != nil, privacy: .public) devices=\(devices.sorted().joined(separator: ","), privacy: .public)
+                """)
+            return devices
         }
         func apfs(_ devices: Set<String>) async throws -> [Volume] {
             try volumes(apfs: await command("/usr/sbin/diskutil", ["apfs", "list", "-plist"]), attachedDevices: devices)
@@ -425,6 +470,9 @@ enum PommeExperimentalRecoveryImage {
             _ = try await command("/usr/sbin/diskutil", args)
             let info = try dictionary(await command("/usr/sbin/diskutil", ["info", "-plist", "/dev/" + volume.device]))
             guard info["DeviceIdentifier"] as? String == volume.device, info["MountPoint"] as? String == mount.path else { throw Failure(reason: "mounted volume identity does not match") }
+            PommeUnifiedLog.experimentalRecovery.info(
+                "mounted /dev/\(volume.device, privacy: .public) at \(mount.path, privacy: .public) readOnly=\(readOnly, privacy: .public)"
+            )
             return mount
         }
         func detachAll() async -> [String] {
@@ -444,7 +492,9 @@ enum PommeExperimentalRecoveryImage {
                     }
                     let after = try dictionary(await command("/usr/bin/hdiutil", ["info", "-plist"]))
                     guard let remaining = after["images"] as? [[String: Any]], !remaining.contains(where: { ($0["image-path"] as? String) == image }) else { throw Failure(reason: "image remains attached") }
+                    PommeUnifiedLog.experimentalRecovery.info("detached \(image, privacy: .public)")
                 } catch {
+                    PommeUnifiedLog.error(error, context: "detach \(image)", logger: PommeUnifiedLog.experimentalRecovery)
                     if commandTerminationUnconfirmed { return journal.receipt.pendingAttachmentImages }
                     unresolved.append(image)
                 }
@@ -541,6 +591,7 @@ enum PommeExperimentalRecoveryImage {
             journal.receipt.desiredBacking = nil
             journal.receipt.completed = true
             try save()
+            PommeUnifiedLog.experimentalRecovery.notice("receipt committed: image preparation completed")
             // The verified original and private receipt remain available for
             // review/recovery. Delete only known disposable artifacts after detach.
             for name in ["working.dmg", "working.shadow"] where FileManager.default.fileExists(atPath: file(name).path) {
@@ -592,6 +643,10 @@ enum PommeExperimentalRecoveryImage {
             guard !preservingDisk else {
                 throw Failure(reason: "a saved VM state is waiting to be restored, and selecting the \(mode.rawValue) Recovery backing would change the disk under it. Start the VM in normal macOS and stop it, then restore the snapshot")
             }
+            PommeUnifiedLog.experimentalRecovery.notice("""
+                switching Recovery backing: from=\(self.journal.receipt.activeBacking?.rawValue ?? "recovery", privacy: .public) \
+                to=\(mode.rawValue, privacy: .public) interrupted=\(self.journal.receipt.desiredBacking != nil, privacy: .public)
+                """)
             journal.receipt.desiredBacking = mode
             try save() // Fence boot admission throughout activation, including failed verification.
             try await detached()
@@ -603,6 +658,10 @@ enum PommeExperimentalRecoveryImage {
             let current = try digest(image)
             let companionsMatch = try companionHashes(image) == journal.companions
             let recognized = try? backingState(current: current, original: journal.receipt.originalSHA256, prepared: journal.receipt.imageSHA256)
+            PommeUnifiedLog.experimentalRecovery.info("""
+                current backing: state=\(recognized.map { "\($0)" } ?? "unrecognized", privacy: .public) \
+                companionsMatch=\(companionsMatch, privacy: .public) sha256=\(current, privacy: .public)
+                """)
             switch (recognized, companionsMatch) {
             case (.prepared?, false):
                 throw Failure(reason: "Recovery image identity or companion files changed")
@@ -646,10 +705,12 @@ enum PommeExperimentalRecoveryImage {
                 guard fd >= 0 else { throw Failure(reason: "cannot sync activated backing directory") }
                 defer { close(fd) }
                 guard fsync(fd) == 0 else { throw Failure(reason: "cannot sync activated backing") }
+                PommeUnifiedLog.experimentalRecovery.notice("replaced BaseSystem with the \(mode.rawValue, privacy: .public) backing")
             }
             guard try digest(image) == expected, try companionHashes(image) == journal.companions else {
                 throw Failure(reason: "activated backing verification failed")
             }
+            PommeUnifiedLog.experimentalRecovery.info("verified activated \(mode.rawValue, privacy: .public) backing")
             // An interrupted copy may belong to a previous requested mode.
             // Remove only our exact staging names after verifying current bytes.
             try removeAdjacentStaging(beside: image)
@@ -678,6 +739,7 @@ enum PommeExperimentalRecoveryImage {
         /// retained copy can be selected again, and the prepared one embeds
         /// the resident credential, so both are removed before the record.
         func retire(_ image: URL) async throws -> Receipt {
+            PommeUnifiedLog.experimentalRecovery.notice("guest replaced its Recovery image; retiring the prepared and original backings")
             try removeAdjacentStaging(beside: image)
             try await detached()
             for name in ["prepared.dmg", "prepared.dmg.partial", "original.dmg", "original.dmg.partial"] {
@@ -694,6 +756,7 @@ enum PommeExperimentalRecoveryImage {
 
         func run() async throws -> Receipt {
             if journal.receipt.completed { return try await activate(.recovery, preservingDisk: false) }
+            PommeUnifiedLog.experimentalRecovery.notice("preparing image: resuming=\(!self.journal.receipt.relativeImagePath.isEmpty, privacy: .public)")
             try save()
             try await detached() // recover only attachment intents from this private receipt
             var devices = try await attach(request.diskURL, readOnly: false, raw: true)
@@ -708,6 +771,7 @@ enum PommeExperimentalRecoveryImage {
                 try save()
             }
             guard journal.receipt.relativeImagePath == relative, try companionHashes(image) == journal.companions else { throw Failure(reason: "Recovery image identity or companion files changed") }
+            PommeUnifiedLog.experimentalRecovery.info("located BaseSystem \(relative, privacy: .public) sha256=\(current, privacy: .public)")
             if try backingState(current: current, original: journal.receipt.originalSHA256, prepared: journal.receipt.imageSHA256) == .prepared {
                 try await detached()
                 return try finish()
@@ -715,6 +779,7 @@ enum PommeExperimentalRecoveryImage {
             guard !journal.receipt.completed, current == journal.receipt.originalSHA256 else { throw Failure(reason: "backing image conflicts with receipt") }
             guard try exists(request.artifacts.tokenURL) else { throw Failure(reason: "the staged Recovery credential is missing") }
             try copyVerified(image, to: file("original.dmg"), expected: current, mode: 0o600)
+            PommeUnifiedLog.experimentalRecovery.info("copied and verified original BaseSystem")
             try await detached()
             // A retry rebuilds only known scratch artifacts; the original remains intact.
             for name in ["working.dmg", "working.shadow", "prepared.dmg"] where FileManager.default.fileExists(atPath: file(name).path) {
@@ -726,17 +791,21 @@ enum PommeExperimentalRecoveryImage {
             _ = try await command("/usr/sbin/diskutil", ["apfs", "changeVolumeRole", "/dev/" + system.device, "clear"])
             let cleared = try select(await apfs(devices), role: nil)
             guard cleared.device == system.device else { throw Failure(reason: "role change selected a different volume") }
+            PommeUnifiedLog.experimentalRecovery.info("cleared System role on /dev/\(system.device, privacy: .public)")
             let root = try await mount(cleared, name: "image", readOnly: false)
             try embed(root)
+            PommeUnifiedLog.experimentalRecovery.info("embedded the Recovery payload in the working image")
             try await detached()
             _ = try await command("/usr/bin/hdiutil", ["convert", file("working.dmg").path, "-shadow", file("working.shadow").path, "-format", "UDZO", "-o", file("prepared.dmg").path])
             devices = try await attach(file("prepared.dmg"), readOnly: true)
             let verifiedRoot = try await mount(select(await apfs(devices), role: nil), name: "verify", readOnly: true)
             try validatePayload(verifiedRoot)
+            PommeUnifiedLog.experimentalRecovery.info("verified the payload in the converted prepared image")
             try await detached()
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file("prepared.dmg").path)
             journal.receipt.imageSHA256 = try digest(file("prepared.dmg"))
             try save() // crash after rename can now be recognized by its exact hash
+            PommeUnifiedLog.experimentalRecovery.info("recorded prepared image sha256=\(self.journal.receipt.imageSHA256, privacy: .public)")
             devices = try await attach(request.diskURL, readOnly: false, raw: true)
             recovery = try await mount(await installedRecovery(devices), name: "recovery", readOnly: false)
             image = try locateImage(recovery)
@@ -756,6 +825,7 @@ enum PommeExperimentalRecoveryImage {
             let synced = fsync(parent); close(parent)
             guard synced == 0, try digest(image) == journal.receipt.imageSHA256,
                   try companionHashes(image) == journal.companions else { throw Failure(reason: "replacement verification failed") }
+            PommeUnifiedLog.experimentalRecovery.notice("replaced and verified BaseSystem with the prepared image")
             try await detached()
             return try finish()
         }
@@ -812,6 +882,9 @@ enum PommeExperimentalRecoveryImage {
         process.terminationHandler = { child in termination.record(child.terminationStatus) }
         try Task.checkCancellation()
         try process.run()
+        PommeUnifiedLog.process.info(
+            "launched \(command.executable, privacy: .public) pid=\(process.processIdentifier, privacy: .public)"
+        )
         try? out.fileHandleForWriting.close()
         try? err.fileHandleForWriting.close()
         for (pipe, capture) in [(out, stdout), (err, stderr)] {
@@ -836,6 +909,10 @@ enum PommeExperimentalRecoveryImage {
         while termination.result() == nil {
             if Task.isCancelled || Date() >= deadline {
                 cancelled = Task.isCancelled; timedOut = !cancelled
+                PommeUnifiedLog.process.error("""
+                    \(command.executable, privacy: .public) pid=\(process.processIdentifier, privacy: .public) \
+                    \(cancelled ? "cancelled" : "timed out after \(command.timeout)s", privacy: .public); terminating
+                    """)
                 if process.isRunning { process.terminate() }
                 let gracefulDeadline = Date().addingTimeInterval(1)
                 while termination.result() == nil && Date() < gracefulDeadline { await terminationPollDelay() }

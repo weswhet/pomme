@@ -2,6 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 import ObjectiveC.runtime
+import os
 import Security
 
 /// Closed diagnostic vocabulary: values can never contain profile material or native error text.
@@ -56,6 +57,15 @@ enum GuestMDMDiagnostics {
             if let flags { value["flags"] = .integer(flags) }
             if let credentialError { value["credentialError"] = .string(credentialError.wireCode) }
             records.append(.object(value))
+            // The same closed vocabulary as the record: no profile material or native text.
+            let eventName = (event ?? (status == nil ? .begin : .result)).rawValue
+            PommeUnifiedLog.agentDaemon.log(
+                level: event == .failed ? .error : .debug,
+                """
+                MDM stage \(stage.rawValue, privacy: .public) \(eventName, privacy: .public) \
+                status=\(status ?? 0, privacy: .public) flags=\(flags ?? 0, privacy: .public) \
+                credentialError=\(credentialError?.wireCode ?? "none", privacy: .public)
+                """)
         }
         var value: JSONValue {
             lock.lock(); defer { lock.unlock() }

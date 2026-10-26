@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// The only effectful boundary required by Tahoe Recovery navigation.  The
 /// implementation returns one receipt for one closed guest HID effect. The
@@ -175,6 +176,7 @@ struct PommeTahoeRecoveryInteraction: Sendable {
     do {
       input = try PommeRecoveryProfileSelector.inputForAttempt(for: evidence)
     } catch {
+      PommeUnifiedLog.error(error, context: "Recovery navigation qualification", logger: PommeUnifiedLog.ui)
       throw PommeRecoveryInteractionError.incompleteQualification
     }
   }
@@ -189,10 +191,13 @@ struct PommeTahoeRecoveryInteraction: Sendable {
     using port: some PommeRecoveryKeyboardPort,
     onMilestone: @escaping @Sendable (PommeRecoveryInteractionMilestone) async -> Void = { _ in }
   ) async throws -> PommeRecoveryInteractionCleanupSignal {
+    let log = PommeUnifiedLog.ui
     guard !cleanupRequired else {
+      log.error("Recovery navigation refused a step after an uncertain delivery")
       throw PommeRecoveryInteractionError.recoveryCleanupRequired(.recoveryCleanupRequired)
     }
     guard !input.isComplete else {
+      log.fault("Recovery navigation asked for a step after it finished")
       throw PommeRecoveryInteractionError.alreadyComplete
     }
 
@@ -209,7 +214,12 @@ struct PommeTahoeRecoveryInteraction: Sendable {
       try Task.checkCancellation()
       navigationInput = try input.authorizeInput(preEventFrames: preEventFrames)
       preEventFrame = preEventFrames.first
+      log.info("""
+        Recovery navigation: frames \(String(describing: preEventFrames), privacy: .public) \
+        -> input \(String(describing: navigationInput), privacy: .public)
+        """)
     } catch {
+      Self.logFailure(error, stage: "observation before input")
       if Self.isObservationTimeout(error) {
         throw PommeRecoveryInteractionError.observationTimedOut(.noInputDelivered)
       }
@@ -226,6 +236,7 @@ struct PommeTahoeRecoveryInteraction: Sendable {
       }
       receipt = try await port.deliverRecoveryInput(navigationInput)
     } catch {
+      Self.logFailure(error, stage: "input delivery")
       cleanupRequired = true
       if Self.isObservationTimeout(error) {
         throw PommeRecoveryInteractionError.observationTimedOut(.recoveryCleanupRequired)
@@ -238,7 +249,9 @@ struct PommeTahoeRecoveryInteraction: Sendable {
       let postEventFrames = try await port.nextRecoveryFramePair()
       try Task.checkCancellation()
       try input.commit(receipt, postEventFrames: postEventFrames)
+      log.info("Recovery navigation: committed with frames \(String(describing: postEventFrames), privacy: .public)")
     } catch {
+      Self.logFailure(error, stage: "observation after input")
       cleanupRequired = true
       if Self.isObservationTimeout(error) {
         throw PommeRecoveryInteractionError.observationTimedOut(.recoveryCleanupRequired)
@@ -260,6 +273,32 @@ struct PommeTahoeRecoveryInteraction: Sendable {
     authorizeLauncherSubmission: @escaping @Sendable () throws -> Void = {},
     onMilestone: @escaping @Sendable (PommeRecoveryInteractionMilestone) async -> Void = { _ in }
   ) async -> PommeRecoveryTerminalLaunchDisposition {
+    // Commands and markers are never logged; milestones and the outcome are.
+    let log = PommeUnifiedLog.ui
+    let disposition = await driveToTerminalAndLaunchUnlogged(
+      using: port,
+      capabilityProbes: capabilityProbes,
+      launcherCommand: launcherCommand,
+      authorizeLauncherSubmission: authorizeLauncherSubmission,
+      onMilestone: { milestone in
+        log.notice("Recovery milestone: \(milestone.rawValue, privacy: .public)")
+        await onMilestone(milestone)
+      }
+    )
+    log.log(
+      level: disposition == .terminalLauncherSubmitted ? .default : .error,
+      "Recovery Terminal launch finished: \(String(describing: disposition), privacy: .public)"
+    )
+    return disposition
+  }
+
+  private mutating func driveToTerminalAndLaunchUnlogged(
+    using port: some PommeRecoveryTerminalPort,
+    capabilityProbes: [PommeRecoveryVirtioFSCapabilityProbe],
+    launcherCommand: String,
+    authorizeLauncherSubmission: @escaping @Sendable () throws -> Void,
+    onMilestone: @escaping @Sendable (PommeRecoveryInteractionMilestone) async -> Void
+  ) async -> PommeRecoveryTerminalLaunchDisposition {
     guard !capabilityProbes.isEmpty,
       capabilityProbes.allSatisfy({
         PommeRecoveryTerminalCommand.isKeyboardSafe($0.command)
@@ -267,6 +306,7 @@ struct PommeTahoeRecoveryInteraction: Sendable {
       }),
       PommeRecoveryTerminalCommand.isKeyboardSafe(launcherCommand)
     else {
+      PommeUnifiedLog.ui.error("Recovery Terminal launch refused: \(capabilityProbes.count, privacy: .public) probe(s) or the launcher aren't keyboard-safe")
       return .noInputDelivered
     }
 
@@ -286,6 +326,7 @@ struct PommeTahoeRecoveryInteraction: Sendable {
           return .recoveryCleanupRequired
         }
       } catch {
+        Self.logFailure(error, stage: "navigation")
         return .recoveryCleanupRequired
       }
     }
@@ -300,6 +341,7 @@ struct PommeTahoeRecoveryInteraction: Sendable {
         do {
           markerVerified = try await port.terminalMarkerIsVerified(probe.marker)
         } catch {
+          Self.logFailure(error, stage: "capability probe marker")
           if Self.isObservationTimeout(error) {
             return .observationTimedOut
           }
@@ -320,6 +362,7 @@ struct PommeTahoeRecoveryInteraction: Sendable {
       do {
         try authorizeLauncherSubmission()
       } catch {
+        Self.logFailure(error, stage: "launcher authorization")
         await onMilestone(.launcherAuthorizationRejected)
         return .recoveryCleanupRequired
       }
@@ -328,10 +371,22 @@ struct PommeTahoeRecoveryInteraction: Sendable {
       await onMilestone(.launcherSubmitted)
       return .terminalLauncherSubmitted
     } catch {
+      Self.logFailure(error, stage: "Terminal input")
       if Self.isObservationTimeout(error) {
         return .observationTimedOut
       }
       return .recoveryCleanupRequired
+    }
+  }
+
+  /// Records the underlying error before it collapses into a closed
+  /// category. The expected frame of a timeout is a closed value, so the
+  /// log may name it even though the UI boundary doesn't.
+  private static func logFailure(_ error: any Error, stage: String) {
+    if case .observationTimedOut(let expected)? = error as? PommeRecoveryVirtualizationPortError {
+      PommeUnifiedLog.ui.error("Recovery \(stage, privacy: .public) timed out waiting for \(String(describing: expected), privacy: .public)")
+    } else {
+      PommeUnifiedLog.error(error, context: "Recovery \(stage)", logger: PommeUnifiedLog.ui)
     }
   }
 

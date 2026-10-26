@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Security
 
 /// Stores the persistent Pomme agent credential in one explicitly selected
@@ -94,6 +95,22 @@ struct PommeAgentCredentialStore {
             }
         }
 
+        /// The case name and Security status, for the unified log. It holds
+        /// no credential, service, account, or path.
+        var logDescription: String {
+            switch self {
+            case .keychainOpenFailed(let status): "keychainOpenFailed OSStatus \(status)"
+            case .keychainLocked(let status): "keychainLocked OSStatus \(status)"
+            case .credentialMissing(let status): "credentialMissing OSStatus \(status)"
+            case .malformedCredential: "malformedCredential"
+            case .unexpectedCredentialData: "unexpectedCredentialData"
+            case .credentialReadFailed(let status): "credentialReadFailed OSStatus \(status)"
+            case .credentialCreateFailed(let status): "credentialCreateFailed OSStatus \(status)"
+            case .duplicateCredentialReadFailed(let status): "duplicateCredentialReadFailed OSStatus \(status)"
+            case .credentialRemoveFailed(let status): "credentialRemoveFailed OSStatus \(status)"
+            }
+        }
+
         /// The Security framework's text for `status`, with its number.
         private static func reason(_ status: OSStatus) -> String {
             let message = securityErrorMessage(status)
@@ -134,7 +151,7 @@ struct PommeAgentCredentialStore {
     /// - Throws: ``Error`` when the Keychain is unavailable, the item is
     ///   missing, or the stored bytes are malformed.
     func read(vmUUID: UUID, account: String) throws -> String {
-        try withUnlockedKeychain { keychain in
+        try logged("read", vmUUID: vmUUID) { keychain in
             switch try lookup(vmUUID: vmUUID, account: account, keychain: keychain) {
             case .found(let credential):
                 return credential
@@ -163,7 +180,7 @@ struct PommeAgentCredentialStore {
         account: String,
         generate: () throws -> String
     ) throws -> String {
-        try withUnlockedKeychain { keychain in
+        try logged("readOrCreate", vmUUID: vmUUID) { keychain in
             switch try lookup(vmUUID: vmUUID, account: account, keychain: keychain) {
             case .found(let credential):
                 return credential
@@ -182,8 +199,10 @@ struct PommeAgentCredentialStore {
             let addStatus = operations.add(addQuery)
             switch addStatus {
             case errSecSuccess:
+                Self.log.notice("agent credential created for VM \(vmUUID.uuidString, privacy: .public)")
                 return candidate
             case errSecDuplicateItem:
+                Self.log.info("agent credential add for VM \(vmUUID.uuidString, privacy: .public) raced another writer (OSStatus \(addStatus, privacy: .public)); rereading it")
                 do {
                     switch try lookup(vmUUID: vmUUID, account: account, keychain: keychain) {
                     case .found(let credential):
@@ -218,7 +237,7 @@ struct PommeAgentCredentialStore {
     ///   - account: The Keychain account, passed through unchanged.
     /// - Throws: ``Error`` when the Keychain is unavailable or deletion fails.
     func remove(vmUUID: UUID, account: String) throws {
-        try withUnlockedKeychain { keychain in
+        try logged("remove", vmUUID: vmUUID) { keychain in
             let query = hostKeychainLookupQuery(
                 service: pommeCredentialService(forUUID: vmUUID.uuidString),
                 account: account,
@@ -227,10 +246,36 @@ struct PommeAgentCredentialStore {
             let status = operations.delete(query)
             switch status {
             case errSecSuccess, errSecItemNotFound:
+                Self.log.info("agent credential removed for VM \(vmUUID.uuidString, privacy: .public) (OSStatus \(status, privacy: .public))")
                 return
             default:
                 throw Error.credentialRemoveFailed(status: status)
             }
+        }
+    }
+
+    private static let log = PommeUnifiedLog.security
+
+    /// Runs one Keychain operation and records its name, the VM's UUID, and
+    /// its outcome. Credential values, the service, and the account are
+    /// never logged.
+    private func logged<T>(
+        _ operation: String,
+        vmUUID: UUID,
+        _ body: (SecKeychain) throws -> T
+    ) throws -> T {
+        Self.log.debug("agent credential \(operation, privacy: .public) for VM \(vmUUID.uuidString, privacy: .public)")
+        do {
+            let result = try withUnlockedKeychain(body)
+            Self.log.info("agent credential \(operation, privacy: .public) for VM \(vmUUID.uuidString, privacy: .public) succeeded")
+            return result
+        } catch let error as Error {
+            Self.log.error("agent credential \(operation, privacy: .public) for VM \(vmUUID.uuidString, privacy: .public) failed: \(error.logDescription, privacy: .public)")
+            throw error
+        } catch {
+            // Only the generator throws other errors; its text isn't logged.
+            Self.log.error("agent credential \(operation, privacy: .public) for VM \(vmUUID.uuidString, privacy: .public) failed: \(String(reflecting: type(of: error)), privacy: .public)")
+            throw error
         }
     }
 

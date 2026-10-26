@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import os
 
 /// Shared by the main-actor TUI renderer and its child operation task. Every mutable
 /// field is protected by `lock`; the unchecked conformance documents that boundary.
@@ -934,6 +935,9 @@ struct PommeTUI {
     ) async throws -> Bool {
         let progress = TUIActionProgress()
         let startedAt = Date()
+        // The TUI shows an action's failure instead of throwing it, so the
+        // outcome is logged here.
+        PommeUnifiedLog.notice("TUI action started: \(title)", vmName: vmName)
         let task = Task {
             do {
                 let result = try await PommeCore.withLogSink({ message in
@@ -941,8 +945,14 @@ struct PommeTUI {
                 }) {
                     try await operation()
                 }
+                PommeUnifiedLog.message(
+                    "TUI action finished: \(title) ok=\(result.ok) hostExitCode=\(result.hostExitCode)",
+                    vmName: vmName,
+                    level: result.ok ? .default : .error
+                )
                 progress.finish(.success(result))
             } catch {
+                PommeUnifiedLog.error(error, context: "TUI action \(title)", vmName: vmName)
                 progress.finish(.failure(error))
             }
         }
@@ -1020,6 +1030,7 @@ struct PommeTUI {
         do {
             return try vmListAction()
         } catch {
+            PommeUnifiedLog.error(error, context: "TUI VM list")
             statusMessage = error.localizedDescription
             return []
         }
@@ -1031,6 +1042,7 @@ struct PommeTUI {
                 lhs.createdAt > rhs.createdAt
             }
         } catch {
+            PommeUnifiedLog.error(error, context: "TUI snapshot list", vmName: name)
             statusMessage = error.localizedDescription
             return []
         }

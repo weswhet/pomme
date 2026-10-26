@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 enum RecoveryRuntimeAgentStage: String, Codable, CaseIterable, Sendable {
     case disabled
@@ -108,6 +109,7 @@ actor RecoveryRuntimeAgentCoordinator {
                 errorCode = nil
                 return successResult()
             } catch {
+                PommeUnifiedLog.recovery.error("Recovery runtime agent: timed out after \(timeout, privacy: .public)s waiting for launchd to reconnect")
                 state = .failed
                 stage = .failed
                 errorCode = .timedOut
@@ -125,6 +127,7 @@ actor RecoveryRuntimeAgentCoordinator {
             stage = .waitingForRecovery
             errorCode = nil
             launchdManaged = false
+            PommeUnifiedLog.recovery.notice("Recovery runtime agent: bootstrap started (timeout \(timeout, privacy: .public)s)")
             let bootstrap = self.bootstrap
             task = Task { [weak self] in
                 guard let self else { throw CancellationError() }
@@ -150,6 +153,9 @@ actor RecoveryRuntimeAgentCoordinator {
             // and exact workspace cleanup. Wait for that task before
             // publishing 124 so its helper result cannot race cleanup.
             _ = await task.result
+            PommeUnifiedLog.recovery.error(
+                "Recovery runtime agent: timed out after \(timeout, privacy: .public)s at stage \(self.stage.rawValue, privacy: .public)"
+            )
             bootstrapTask = nil
             state = .failed
             stage = .failed
@@ -158,6 +164,7 @@ actor RecoveryRuntimeAgentCoordinator {
                 message: "Timed out waiting for the authenticated Recovery agent."
             )
         } catch is CancellationError {
+            PommeUnifiedLog.recovery.notice("Recovery runtime agent: setup cancelled at stage \(self.stage.rawValue, privacy: .public)")
             task.cancel()
             bootstrapTask = nil
             state = .failed
@@ -176,6 +183,7 @@ actor RecoveryRuntimeAgentCoordinator {
     }
 
     func cancel() {
+        PommeUnifiedLog.recovery.notice("Recovery runtime agent: cancel requested at stage \(self.stage.rawValue, privacy: .public)")
         errorCode = .cancelled
         bootstrapTask?.cancel()
         bootstrapTask = nil
@@ -186,6 +194,7 @@ actor RecoveryRuntimeAgentCoordinator {
     private func record(stage next: RecoveryRuntimeAgentStage) {
         guard state == .progressing || state == .reconnecting else { return }
         stage = next
+        PommeUnifiedLog.recovery.notice("Recovery runtime agent: stage \(next.rawValue, privacy: .public)")
         // `.connecting` records only that the Recovery bootstrap secret was
         // submitted. It is not proof that launchd accepted or relaunched the
         // runtime agent; that proof arrives through bootstrapSucceeded after
@@ -206,9 +215,11 @@ actor RecoveryRuntimeAgentCoordinator {
             state = .reconnecting
             stage = .reconnecting
         }
+        PommeUnifiedLog.recovery.notice("Recovery runtime agent: bootstrap succeeded; state=\(self.state.rawValue, privacy: .public)")
     }
 
     private func bootstrapFailed(_ error: Error) {
+        PommeUnifiedLog.error(error, context: "Recovery runtime agent bootstrap at stage \(stage.rawValue)", logger: PommeUnifiedLog.recovery)
         bootstrapTask = nil
         if errorCode == .timedOut || errorCode == .cancelled { return }
         state = .failed
@@ -234,9 +245,11 @@ actor RecoveryRuntimeAgentCoordinator {
     private func refreshConnectionState() {
         let connected = isConnected()
         if state == .ready, !connected {
+            PommeUnifiedLog.recovery.notice("Recovery runtime agent: connection lost; waiting for launchd to reconnect")
             state = .reconnecting
             stage = .reconnecting
         } else if state == .reconnecting, connected {
+            PommeUnifiedLog.recovery.notice("Recovery runtime agent: reconnected")
             state = .ready
             stage = .ready
             errorCode = nil

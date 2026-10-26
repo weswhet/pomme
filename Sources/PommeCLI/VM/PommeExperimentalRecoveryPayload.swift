@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import os
 
 /// Stages the files that host preparation embeds in the Recovery image: the
 /// pinned agent, the resident credential, a launch script, and a replacement
@@ -28,6 +29,22 @@ enum PommeExperimentalRecoveryPayload {
     /// anything that another writer committed.
     static func stage(directory: URL, target: String, sessionID: UUID, executable: URL,
                       expectedDigest: String, credential: String, vmID: UUID, diskPath: String) throws {
+        // Never log the credential; only where it is staged and for which VM.
+        PommeUnifiedLog.experimentalRecovery.info(
+            "staging Recovery payload: vmID=\(vmID.uuidString.lowercased(), privacy: .public) target=\(target, privacy: .public) directory=\(directory.path, privacy: .public)"
+        )
+        do {
+            try stageOutputs(directory: directory, target: target, sessionID: sessionID, executable: executable,
+                             expectedDigest: expectedDigest, credential: credential, vmID: vmID, diskPath: diskPath)
+        } catch {
+            PommeUnifiedLog.error(error, context: "stage Recovery payload", logger: PommeUnifiedLog.experimentalRecovery)
+            throw error
+        }
+        PommeUnifiedLog.experimentalRecovery.info("staged Recovery payload: executableSHA256=\(expectedDigest, privacy: .public)")
+    }
+
+    private static func stageOutputs(directory: URL, target: String, sessionID: UUID, executable: URL,
+                                     expectedDigest: String, credential: String, vmID: UUID, diskPath: String) throws {
         let fd = try openDirectory(directory)
         defer { close(fd) }
         try validateEntries(directory)
@@ -66,6 +83,7 @@ enum PommeExperimentalRecoveryPayload {
             guard unlinkat(fd, name, 0) == 0 else { throw Failure(reason: "staged credential could not be removed.") }
         }
         guard fsync(fd) == 0 else { throw Failure(reason: "staging directory could not be synced.") }
+        PommeUnifiedLog.experimentalRecovery.info("removed the staged Recovery credential from \(directory.path, privacy: .public)")
     }
 
     static func plist() throws -> Data {

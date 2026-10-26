@@ -172,7 +172,7 @@ actor PommeKeystoreInitMaintenance {
     }
 
     static func log(_ message: String, _ isError: Bool) {
-        let logger = Logger(subsystem: "com.github.weswhet.pomme", category: "keystore-init")
+        let logger = Logger(subsystem: PommeUnifiedLog.subsystem, category: "keystore-init")
         if isError { logger.error("\(message, privacy: .public)") }
         else { logger.notice("\(message, privacy: .public)") }
     }

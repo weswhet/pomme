@@ -4,6 +4,7 @@ import ArgumentParser
 @preconcurrency import CoreImage
 import IOSurface
 import ObjectiveC.runtime
+import os
 @preconcurrency import Virtualization
 import Darwin
 
@@ -323,10 +324,17 @@ enum VirtualizationPrivateABIPreflight {
     private static let liveFrameObservation:
         Result<VirtualizationPrivateFrameObservation, VirtualizationPrivateHeadlessError> = {
             do {
-                return .success(try resolveFrameObservation())
+                let observation = try resolveFrameObservation()
+                PommeUnifiedLog.ui.notice("""
+                    headless frame observation: \(observation.variantName, privacy: .public) \
+                    hostBuild=\(environment.hostBuild, privacy: .public)
+                    """)
+                return .success(observation)
             } catch let error as VirtualizationPrivateHeadlessError {
+                PommeUnifiedLog.error(error, context: "headless frame observation resolution", logger: PommeUnifiedLog.ui)
                 return .failure(error)
             } catch {
+                PommeUnifiedLog.error(error, context: "headless frame observation resolution", logger: PommeUnifiedLog.ui)
                 return .failure(
                     VirtualizationPrivateHeadlessError(
                         .privateABIMismatch,
@@ -363,7 +371,9 @@ enum VirtualizationPrivateABIPreflight {
         observedMethods: [String: String],
         requiring requiredMethods: [VirtualizationPrivateABIMethod]
     ) throws {
+        let log = PommeUnifiedLog.ui
         guard environment.architecture == supportedArchitecture else {
+            log.error("headless preflight: unsupported architecture \(environment.architecture, privacy: .public)")
             throw VirtualizationPrivateHeadlessError(
                 .unsupportedArchitecture,
                 detail: "This backend requires an arm64 host."
@@ -372,6 +382,11 @@ enum VirtualizationPrivateABIPreflight {
         guard environment.frameworkIdentifier == frameworkIdentifier,
               environment.frameworkPath == frameworkPath
         else {
+            log.error("""
+                headless preflight: unexpected Virtualization framework \
+                \(environment.frameworkIdentifier ?? "nil", privacy: .public) at \
+                \(environment.frameworkPath, privacy: .public)
+                """)
             throw VirtualizationPrivateHeadlessError(
                 .privateABIMismatch,
                 detail: "The loaded Virtualization framework is not the expected system framework."
@@ -379,6 +394,12 @@ enum VirtualizationPrivateABIPreflight {
         }
         for requirement in requiredMethods {
             guard observedMethods[requirement.identity] == requirement.encoding else {
+                log.error("""
+                    headless preflight: \(requirement.identity, privacy: .public) observed \
+                    \(observedMethods[requirement.identity] ?? "missing", privacy: .public), \
+                    expected \(requirement.encoding, privacy: .public) \
+                    hostBuild=\(environment.hostBuild, privacy: .public)
+                    """)
                 throw VirtualizationPrivateHeadlessError(
                     .privateABIMismatch,
                     detail: "A required Virtualization private method is missing or has an unqualified encoding."
@@ -416,6 +437,7 @@ enum VirtualizationPrivateABIPreflight {
               let translatorsEncoding = ivar_getTypeEncoding(translatorsIvar),
               String(cString: translatorsEncoding) == "B"
         else {
+            PommeUnifiedLog.ui.error("headless preflight: HID event monitor layout is incompatible hostBuild=\(environment.hostBuild, privacy: .public)")
             throw VirtualizationPrivateHeadlessError(
                 .privateABIMismatch,
                 detail: "The private HID coordinate filter layout is unavailable or incompatible."
@@ -1428,19 +1450,24 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
             return event
         }
 
-        _ = try await HeadlessInputEventDispatcher.dispatch(
-            delayPlans: delayPlans,
-            budget: budget,
-            send: { unitIndex, eventIndex in
-                let event = unitIndex == 0 ? events[0] : events[eventIndex + 1]
-                try self.sendPointerEvent(
-                    event,
-                    deviceIndex: resources.pointingDeviceIndex,
-                    width: resources.width,
-                    height: resources.height
-                )
-            }
-        )
+        do {
+            _ = try await HeadlessInputEventDispatcher.dispatch(
+                delayPlans: delayPlans,
+                budget: budget,
+                send: { unitIndex, eventIndex in
+                    let event = unitIndex == 0 ? events[0] : events[eventIndex + 1]
+                    try self.sendPointerEvent(
+                        event,
+                        deviceIndex: resources.pointingDeviceIndex,
+                        width: resources.width,
+                        height: resources.height
+                    )
+                }
+            )
+        } catch {
+            Self.logFailure(error, operation: "click")
+            throw error
+        }
         return successPayload(
             operation: "click",
             width: resources.width,
@@ -1561,10 +1588,12 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
                 lastTransientError = error
             }
             guard Date() < deadline else {
-                throw lastTransientError ?? VirtualizationPrivateHeadlessError(
+                let error = lastTransientError ?? VirtualizationPrivateHeadlessError(
                     .inputUnavailable,
                     detail: "The running VM did not publish direct input resources before the deadline."
                 )
+                PommeUnifiedLog.error(error, context: "headless input readiness after \(timeout)s", logger: PommeUnifiedLog.ui)
+                throw error
             }
             try await Task.sleep(nanoseconds: 100_000_000)
         }
@@ -1581,6 +1610,17 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
                 .inputUnavailable,
                 detail: "The direct VM input readiness identity changed."
             )
+        }
+    }
+
+    /// Records a failed display operation. Capture failures that callers
+    /// poll through are debug messages; the rest are errors.
+    static func logFailure(_ error: any Error, operation: String) {
+        if error is CancellationError || isTransientCaptureFailure(error) {
+            let kind = (error as? VirtualizationPrivateHeadlessError)?.kind.rawValue ?? "cancelled"
+            PommeUnifiedLog.ui.debug("headless \(operation, privacy: .public) failed transiently: \(kind, privacy: .public)")
+        } else {
+            PommeUnifiedLog.error(error, context: "headless \(operation)", logger: PommeUnifiedLog.ui)
         }
     }
 
@@ -1699,6 +1739,15 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
     }
 
     private func captureFrame(timeout: TimeInterval) async throws -> CGImage {
+        do {
+            return try await captureFrameUnlogged(timeout: timeout)
+        } catch {
+            Self.logFailure(error, operation: "capture")
+            throw error
+        }
+    }
+
+    private func captureFrameUnlogged(timeout: TimeInterval) async throws -> CGImage {
         try VirtualizationPrivateABIPreflight.validateRuntime()
         let resources = try captureResources()
         // Install the request before any initial or changed-display binding so
@@ -2015,7 +2064,24 @@ final class VirtualizationPrivateHeadlessBackend: @unchecked Sendable {
         }
     }
 
+    /// Typed text and key names are never logged, only the operation and
+    /// the number of chords.
     private func dispatchKeyPlan(
+        _ plans: [[HostDisplayInputEvent]],
+        timeout: TimeInterval,
+        operation: String
+    ) async throws -> (width: Int, height: Int) {
+        do {
+            let dimensions = try await dispatchKeyPlanUnlogged(plans, timeout: timeout, operation: operation)
+            PommeUnifiedLog.ui.debug("headless \(operation, privacy: .public) delivered \(plans.count, privacy: .public) chord(s)")
+            return dimensions
+        } catch {
+            Self.logFailure(error, operation: "\(operation) (\(plans.count) chords)")
+            throw error
+        }
+    }
+
+    private func dispatchKeyPlanUnlogged(
         _ plans: [[HostDisplayInputEvent]],
         timeout: TimeInterval,
         operation: String

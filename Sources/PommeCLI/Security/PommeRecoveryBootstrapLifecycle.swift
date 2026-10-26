@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 enum PommeRecoveryBootstrapLifecycleError: PommeDescribedError, Equatable, Sendable {
     case invalidTimeout
@@ -122,9 +123,23 @@ enum PommeRecoveryBootstrapAttempt {
     ) async throws -> Output {
         var primary: Result<Output, Error>
         do { primary = .success(try await operation()) }
-        catch { primary = .failure(error) }
+        catch {
+            // A cleanup failure below replaces this error, so record its
+            // codes now; installer errors can carry guest output.
+            let nsError = error as NSError
+            PommeUnifiedLog.recovery.error("""
+                Recovery bootstrap attempt failed: \
+                code=\(PommeErrorReport(error).code.rawValue, privacy: .public) \
+                type=\(String(reflecting: type(of: error)), privacy: .public) \
+                domain=\(nsError.domain, privacy: .public) domainCode=\(nsError.code, privacy: .public)
+                """)
+            primary = .failure(error)
+        }
         do { try await cleanupAndVerifyAbsent() }
-        catch { throw PommeRecoveryBootstrapLifecycleError.cleanupFailed(PommeRetainedCause(error)) }
+        catch {
+            PommeUnifiedLog.error(error, context: "Recovery bootstrap cleanup", logger: PommeUnifiedLog.recovery)
+            throw PommeRecoveryBootstrapLifecycleError.cleanupFailed(PommeRetainedCause(error))
+        }
         return try primary.get()
     }
 }

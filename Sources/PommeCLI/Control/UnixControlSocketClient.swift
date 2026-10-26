@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 import Synchronization
 
 struct PommeRuntimeIdentity: Hashable, Sendable {
@@ -24,8 +25,16 @@ struct PommeControlSocketClient: Sendable {
         let responseData = try exchange(try ControlWireCodec.encodeLine(request), deadline: deadline)
         let response: PommeControlResponse
         do { response = try ControlWireCodec.decodeResponse(responseData, matching: request.id) }
-        catch { throw incompatibleError(from: responseData) }
+        catch {
+            let incompatible = incompatibleError(from: responseData)
+            PommeUnifiedLog.error(incompatible, context: "control response for \(request.command)", logger: PommeUnifiedLog.helper)
+            throw incompatible
+        }
         guard response.ok, let result = response.result else {
+            PommeUnifiedLog.helper.debug("""
+                helper pid=\(self.identity.pid, privacy: .public) rejected \(request.command, privacy: .public): \
+                code=\(response.error?.code ?? "none", privacy: .public)
+                """)
             throw PommeControlError.clientError(response.error, missing: "control-error: The Pomme helper rejected the request.")
         }
         return result
@@ -36,8 +45,16 @@ struct PommeControlSocketClient: Sendable {
         let data = try exchange(try ControlWireCodec.encodeLine(PommeControlHello(features: [])), deadline: deadline)
         let hello: PommeControlHello
         do { hello = try ControlWireCodec.decodeHello(data) }
-        catch { throw incompatibleError(from: data) }
+        catch {
+            let incompatible = incompatibleError(from: data)
+            PommeUnifiedLog.error(incompatible, context: "control hello with helper pid \(identity.pid)", logger: PommeUnifiedLog.helper)
+            throw incompatible
+        }
         Self.helloCache.withLock { $0[identity] = hello }
+        PommeUnifiedLog.helper.info("""
+            negotiated control protocol with helper pid=\(self.identity.pid, privacy: .public) \
+            features=\(hello.features.map(\.rawValue).joined(separator: ","), privacy: .public)
+            """)
         return hello
     }
 

@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// The boot identity this process proved after its most recent native reboot
 /// following an AMFI NVRAM write. Normal-boot verification may run on that
@@ -50,6 +51,8 @@ extension PommeSecurityWorkflow {
   ) async throws -> JSONValue {
     // Capture this before the first boot this workflow starts.
     let original = try PommeCore.stableVMRunState(reference: reference)
+    PommeUnifiedLog.security.notice(
+      "[\(reference.displayName, privacy: .public)] security workflow \(operation.wireName, privacy: .public) starting: original=\(original.logLabel, privacy: .public) finalState=\(finalState.rawValue, privacy: .public) force=\(force, privacy: .public) bundle=\(reference.bundle.rootURL.path, privacy: .public)")
     let plan = try PommeCore.securityProvisioningPlan(reference: reference)
     // Only `csrutil disable` always needs Recovery, so only it is refused up
     // front on a build whose Recovery automation isn't qualified. Every other
@@ -86,6 +89,10 @@ extension PommeSecurityWorkflow {
     // A rejected prerequisite is terminal only after restoration is proven;
     // it never becomes a receipt for the requested security configuration.
     let retained = try store.loadIfPresent(lease: lease)
+    if let retained {
+      PommeUnifiedLog.security.notice(
+        "[\(reference.displayName, privacy: .public)] retained security journal: operation=\(retained.operation.wireName, privacy: .public) phase=\(retained.phase.rawValue, privacy: .public) generation=\(retained.generation, privacy: .public)")
+    }
     let journal: PommeSecurityWorkflowJournal
     do {
       journal = try store.begin(
@@ -167,6 +174,9 @@ extension PommeSecurityWorkflow {
         }
       } catch {
         let primary = error
+        PommeUnifiedLog.error(
+          error, context: "AMFI preflight \(operation.wireName)",
+          vmName: reference.displayName, logger: PommeUnifiedLog.security)
         // A failed temporary-session cleanup is a barrier to another boot.
         if (error as? PommeRecoverySessionError) == .cleanupFailed()
           || (error as? PommeLiveRecoveryIntegration.Error) == .cleanupFailed()
@@ -361,11 +371,18 @@ extension PommeSecurityWorkflow {
       }
     )
     do {
+      let result: JSONValue
       if case .retainedNormalCheckpoint? = initialAMFIObservation {
-        return try await resumeRetainedAMFINormalCheckpoint(
+        PommeUnifiedLog.security.notice(
+          "[\(reference.displayName, privacy: .public)] resuming the retained normal AMFI checkpoint")
+        result = try await resumeRetainedAMFINormalCheckpoint(
           progress: progress, dependencies: dependencies)
+      } else {
+        result = try await run(progress: progress, dependencies: dependencies)
       }
-      return try await run(progress: progress, dependencies: dependencies)
+      PommeUnifiedLog.security.notice(
+        "[\(reference.displayName, privacy: .public)] security workflow \(operation.wireName, privacy: .public) finished at phase=\(progress.journal.phase.rawValue, privacy: .public)")
+      return result
     } catch {
       throw resumeGuided(error)
     }
@@ -402,6 +419,7 @@ struct PommeSecurityFreshOwnerLoginSequence: Sendable {
         continue
       }
       do { try await perform() } catch {
+        PommeUnifiedLog.error(error, context: "fresh-owner stage \(stage)", logger: PommeUnifiedLog.security)
         log("Fresh-owner stage failed: \(stage). State retained; no automatic retry or failure restart.")
         throw error
       }
@@ -512,36 +530,47 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
         lease: progress.lease)
     }
 
-    if initial.owner?.ownerPreparation == .new
+    let fresh = initial.owner?.ownerPreparation == .new
       || (initial.owner == nil && probe.freshness.isVerifiedFresh)
-    {
+    PommeUnifiedLog.security.notice(
+      "[\(reference.displayName, privacy: .public)] owner preparation branch=\(fresh ? "fresh" : "existing", privacy: .public) journaledOwner=\(initial.owner?.ownerPreparation.rawValue ?? "none", privacy: .public) verifiedFresh=\(probe.freshness.isVerifiedFresh, privacy: .public) legacyAccount=\(legacyAccount != nil, privacy: .public)")
+    if fresh {
       return try await prepareFresh(progress: progress, helper: helper, probe: probe)
     }
 
     let authorization: PommeGuestSecurityCredentials
     var offerSave = false
     var adoptRecovered = false
+    // Only the source's label is logged, never the credential itself.
+    let credentialSource: String
     if let environment = try PommeSecurityOwnerInteraction.environmentOwner(
       ProcessInfo.processInfo.environment)
     {
       authorization = environment
+      credentialSource = "environment"
     } else if let saved = progress.journal.credential {
       let value = try credentials.read(saved)
       authorization = try .init(username: saved.account, password: value.password)
+      credentialSource = "journaled Keychain reference"
     } else if let username = initial.owner?.accountUsername ?? legacyAccount,
       let password = try credentials.readExistingOwnerCredential(
         identity: progress.journal.identity, account: username)
     {
       authorization = try .init(username: username, password: password)
+      credentialSource = "existing Keychain item"
     } else if let recovered = recoverOwnerCredentialFromGuest(
       expecting: initial.owner?.accountUsername ?? legacyAccount)
     {
       authorization = recovered
       adoptRecovered = true
+      credentialSource = "guest automatic-login recovery"
     } else {
       authorization = try interaction.existingOwner(vmName: reference.displayName)
       offerSave = true
+      credentialSource = "interactive prompt"
     }
+    PommeUnifiedLog.security.notice(
+      "[\(reference.displayName, privacy: .public)] existing-owner preparation: credential source=\(credentialSource, privacy: .public)")
     if let owner = progress.journal.owner, owner.accountUsername != authorization.username {
       throw PommeSecurityWorkflowJournalError.immutableRequestMismatch
     }
@@ -582,6 +611,8 @@ struct PommeSecurityLiveOwnerPreparation: Sendable {
     guard let context = try PommeCore.frameworkProvisionedOwner(reference: reference) else {
       return nil
     }
+    PommeUnifiedLog.security.notice(
+      "[\(reference.displayName, privacy: .public)] verifying the framework-provisioned owner")
     try await PommeCore.restoreStableVMRunState(.running(.normal), reference: reference)
     try await normal.authenticate(requirePrivateInput: true)
     let helper = preparation(username: "pomme", progress: progress, priorProvisioningAbsent: false)

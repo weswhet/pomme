@@ -236,16 +236,22 @@ struct PommeTemplateAdoptionRun: Sendable {
             // A lease left by an interrupted attempt must not keep admitting
             // the template's credential through a running helper.
             if try withdrawLease() { try await stopHelper() }
+            PommeUnifiedLog.notice("template agent adoption skipped: the template's credential is missing",
+                                   logger: PommeUnifiedLog.template)
             warn(Self.missingCredentialWarning)
             return nil
         }
+        PommeUnifiedLog.notice("template agent adoption started", logger: PommeUnifiedLog.template)
         try prepare()
         try writeLease()
         do {
             try await install()
             _ = try withdrawLease()
             try recordInstalled()
+            PommeUnifiedLog.notice("template agent adoption installed the clone's credential",
+                                   logger: PommeUnifiedLog.template)
         } catch {
+            PommeUnifiedLog.error(error, context: "template agent adoption", logger: PommeUnifiedLog.template)
             // Best effort: the original error is what the caller reports.
             _ = try? withdrawLease()
             try? await stopHelper()
@@ -288,6 +294,8 @@ struct PommeInstalledAgentProbe: Sendable {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            PommeUnifiedLog.error(error, context: "installed-agent probe in normal macOS",
+                                  logger: PommeUnifiedLog.provisioning)
             log("the normal-boot check failed [code=\(PommeErrorReport(error).code.rawValue)].")
         }
         markProbed()

@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import os
 
 /// The four security mutations that have a durable, resumable transaction.
 /// Status observations deliberately do not create a workflow journal.
@@ -1259,13 +1260,41 @@ struct PommeSecurityWorkflowJournalStore: Sendable {
             try atomicWriter(encoder.encode(journal), journalURL)
             try verifyPublishedJournalFile()
         } catch let error as PommeSecurityWorkflowJournalError {
+            Self.logWriteFailure(error, journal: journal)
             throw error
         } catch {
-            throw PommeSecurityWorkflowJournalError.durabilityFailure(
+            let failure = PommeSecurityWorkflowJournalError.durabilityFailure(
                 operation: "write",
                 code: Self.errnoValue(of: error)
             )
+            Self.logWriteFailure(failure, journal: journal)
+            throw failure
         }
+        // Only stable enum values and flags: the credential reference and
+        // the owner's account name stay out of the unified log.
+        PommeUnifiedLog.security.notice("""
+            [\(journal.identity.vmName, privacy: .public)] security journal: \
+            operation=\(journal.operation.wireName, privacy: .public) \
+            phase=\(journal.phase.rawValue, privacy: .public) \
+            generation=\(journal.generation, privacy: .public) \
+            owner=\(journal.ownerPreparation?.rawValue ?? "none", privacy: .public) \
+            ownerVerified=\(journal.generatedUID != nil, privacy: .public) \
+            credentialRecorded=\(journal.credential != nil, privacy: .public) \
+            volumeBound=\(journal.identity.volumeVUID != nil, privacy: .public) \
+            finalState=\(journal.requestedFinalState.rawValue, privacy: .public)
+            """)
+    }
+
+    private static func logWriteFailure(
+        _ error: PommeSecurityWorkflowJournalError,
+        journal: PommeSecurityWorkflowJournal
+    ) {
+        PommeUnifiedLog.error(
+            error,
+            context: "security journal write (\(journal.operation.wireName) -> \(journal.phase.rawValue))",
+            vmName: journal.identity.vmName,
+            logger: PommeUnifiedLog.security
+        )
     }
 
     /// The errno that best describes a write failure: the POSIX code itself,

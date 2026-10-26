@@ -6,6 +6,7 @@ import Security
 // Remove this when the SDK models these queue-confined APIs with Sendable-aware annotations.
 @preconcurrency import Virtualization
 import Darwin
+import os
 
 actor ExitSignal {
     private var didRequestExit = false
@@ -74,6 +75,7 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
 
     func guestDidStop(_ virtualMachine: VZVirtualMachine) {
         PommeCore.log("Guest stopped the VM.", vmName: vmName)
+        PommeUnifiedLog.runtime.notice("[\(self.vmName, privacy: .public)] VZ delegate: guest stopped the VM")
         let exitSignal = self.exitSignal
         Task {
             await exitSignal.requestExit()
@@ -82,6 +84,7 @@ final class VMDelegate: NSObject, VZVirtualMachineDelegate {
 
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
         PommeCore.log("VM stopped with error: \(error.localizedDescription)", vmName: vmName)
+        PommeUnifiedLog.error(error, context: "VZ delegate: VM stopped with error", vmName: vmName, logger: PommeUnifiedLog.runtime)
         let exitSignal = self.exitSignal
         Task {
             await exitSignal.requestExit()

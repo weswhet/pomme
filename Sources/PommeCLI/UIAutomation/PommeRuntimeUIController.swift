@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import os
 
 /// The narrow backend contract used by the helper's normal and Recovery UI
 /// routes. Implementations must deliver through the VM's private Virtualization
@@ -26,13 +27,30 @@ actor PommeRuntimeUIController {
         self.backend = backend
     }
 
+    /// Records the operation and its outcome. Typed text, key names, and
+    /// coordinates are never logged.
     func perform(_ request: PommeUIControlRequest) async throws -> [String: JSONValue] {
+        let log = PommeUnifiedLog.ui
+        let operation = request.operation.rawValue
         guard !operationInFlight else {
+            log.error("direct UI \(operation, privacy: .public) refused: another operation is in progress")
             throw RunnerError.invalidUICommand("A direct VM UI operation is already in progress.")
         }
         operationInFlight = true
         defer { operationInFlight = false }
 
+        log.info("direct UI \(operation, privacy: .public) timeout=\(request.timeout, privacy: .public)s")
+        do {
+            let result = try await performUnlogged(request)
+            log.info("direct UI \(operation, privacy: .public) succeeded")
+            return result
+        } catch {
+            PommeUnifiedLog.error(error, context: "direct UI \(operation)", logger: log)
+            throw error
+        }
+    }
+
+    private func performUnlogged(_ request: PommeUIControlRequest) async throws -> [String: JSONValue] {
         switch request.operation {
         case .key:
             let key = try validatedKey(from: request.agentPayload)

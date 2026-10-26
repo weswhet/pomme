@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import os
 
 /// Host-side names for one temporary MDM helper invocation. All guest paths
 /// are fixed direct children of the root-owned MDM staging directory; neither
@@ -246,6 +247,9 @@ struct PommeMDMTemporaryHelperResult: Equatable, Sendable {
         }
         let classification: PommeMDMEnrollmentError = errorCode == PommeMDMPrivateHelper.FailureCode.enrollmentOutcomeUnknown.rawValue
             ? .enrollmentOutcomeUnknown : .enrollmentFailed
+        // Both values are closed, allowlisted codes from the helper.
+        PommeUnifiedLog.security.error(
+            "MDM helper failed: errorCode=\(errorCode, privacy: .public) stage=\(stage?.rawValue ?? "none", privacy: .public) beforeIdentityImport=\(beforeImport, privacy: .public)")
         if detailedFailure {
             throw PommeMDMHelperFailure(
                 error: classification, failureStage: stage,
@@ -443,6 +447,8 @@ struct PommeMDMTemporaryHelperHost: PommeMDMTemporaryHelperTransport {
                   requestReceipt.sha256 == PommeMDMTemporaryHelperRequest.digest(of: requestData) else {
                 throw PommeMDMEnrollmentError.invalidTransfer
             }
+            PommeUnifiedLog.security.notice(
+                "MDM helper \(workspace.requestID.uuidString, privacy: .public) launching: mode=\(mode.rawValue, privacy: .public) timeout=\(Int(timeout), privacy: .public)s")
             result = try PommeMDMTemporaryHelperResult.decode(
                 try await dependencies.launch(
                     workspace,
@@ -453,6 +459,9 @@ struct PommeMDMTemporaryHelperHost: PommeMDMTemporaryHelperTransport {
                 detailedFailure: true
             )
         } catch {
+            PommeUnifiedLog.error(
+                error, context: "MDM helper \(workspace.requestID.uuidString) (prepared=\(prepared))",
+                logger: PommeUnifiedLog.security)
             primaryError = error
         }
 

@@ -29,7 +29,7 @@ struct PommeAgentServeLoopTrace: Sendable {
     }
 
     typealias Sink = @Sendable (Event, Double) -> Void
-    private static let logger = Logger(subsystem: "com.github.weswhet.pomme", category: "guest-serve-loop")
+    private static let logger = Logger(subsystem: PommeUnifiedLog.subsystem, category: "guest-serve-loop")
     private let started = ContinuousClock.now
     let sink: Sink
 
@@ -83,7 +83,7 @@ struct PommeSignalBoundaryTrace: Sendable {
     }
 
     typealias Sink = @Sendable (Event, Double) -> Void
-    private static let logger = Logger(subsystem: "com.github.weswhet.pomme", category: "signal-boundary")
+    private static let logger = Logger(subsystem: PommeUnifiedLog.subsystem, category: "signal-boundary")
     private let started = ContinuousClock.now
     let sink: Sink
     private let isStatus: Bool
@@ -153,7 +153,7 @@ struct PommeDesktopStartBoundaryTrace: Sendable {
     }
 
     typealias Sink = @Sendable (Event, Double) -> Void
-    private static let logger = Logger(subsystem: "com.github.weswhet.pomme", category: "desktop-start-boundary")
+    private static let logger = Logger(subsystem: PommeUnifiedLog.subsystem, category: "desktop-start-boundary")
     private let started = ContinuousClock.now
     let sink: Sink
 
@@ -178,6 +178,12 @@ struct PommeDesktopStartBoundaryTrace: Sendable {
     static func hostLog(_ event: Event, _ elapsed: Double) {
         PommeCore.log(message(event, elapsedMilliseconds: elapsed))
     }
+}
+
+extension PommeUnifiedLog {
+    /// The agent daemon inside the guest: launch, host connections, and the
+    /// operations it performs. These messages go to the guest's unified log.
+    static let agentDaemon = Logger(subsystem: subsystem, category: "agent-daemon")
 }
 
 /// Guest-side entrypoint for the launchd daemon.  The host publishes the
@@ -242,8 +248,18 @@ enum PommeAgentDaemon {
         codeIdentity: () -> PommeAgentCodeIdentity? = PommeAgentCodeIdentity.current,
         verifiedCodeURL: URL = URL(fileURLWithPath: PommeAgentVerifiedCodeRecord.path)
     ) -> Int32 {
+        let log = PommeUnifiedLog.agentDaemon
         do {
             let options = try parse(arguments: arguments, executablePath: executablePath)
+            // The token file path and token are never logged.
+            log.notice("""
+                Agent daemon starting: role=\(options.role.rawValue, privacy: .public) \
+                port=\(options.port, privacy: .public) \
+                operation=\(options.allowedOperation ?? "any", privacy: .public) \
+                terminal=\(options.terminalAuthority, privacy: .public) \
+                resident=\(options.residentRecovery, privacy: .public) \
+                pid=\(getpid(), privacy: .public)
+                """)
             // Install the exact-workspace cleanup guard immediately after
             // parsing. Every subsequent validation can fail after a
             // launcher has already created guest artifacts, so the guard must
@@ -263,7 +279,10 @@ enum PommeAgentDaemon {
                 codeIdentity: options.role == .persistent ? codeIdentity() : nil,
                 verifiedCodeURL: verifiedCodeURL,
                 verifiedCodeOwner: recoveryOwner
-            ) else { return Exit.integrity.rawValue }
+            ) else {
+                log.error("Agent daemon stopped: its executable doesn't match the pinned SHA-256")
+                return Exit.integrity.rawValue
+            }
             // Ordinary Recovery consumes its request-bound credential. The
             // resident keeps its image credential for restarts;
             // authentication still requires the fixed VM/session binding.
@@ -301,6 +320,7 @@ enum PommeAgentDaemon {
             while true {
                 let descriptor = try connectForRole(role: options.role, port: options.port,
                                                     residentRecovery: options.residentRecovery)
+                log.info("Agent daemon connected to the host on port \(options.port, privacy: .public)")
                 let lifetime = options.credentialLifetime
                 let connection = try PommeAgentConnection(token: token, lifetime: lifetime,
                                                           expiresAt: terminalAdmissionAuthenticated ? nil : options.oneShotExpiry,
@@ -323,14 +343,18 @@ enum PommeAgentDaemon {
                     terminalAdmissionAuthenticated = true
                 }
                 _ = Darwin.close(descriptor)
+                log.info("Agent daemon disconnected from the host: authenticated=\(connection.isAuthenticated, privacy: .public)")
                 if options.role == .recovery && !options.terminalAuthority {
                     try oneShotCleanup()
+                    log.notice("One-shot Recovery agent finished")
                     return Exit.success.rawValue
                 }
             }
         } catch let error as PommeAgentDaemonError {
+            log.error("Agent daemon stopped: exit=\(error.exit.rawValue, privacy: .public) \(error.errorDescription ?? "", privacy: .public)")
             return error.exit.rawValue
         } catch {
+            PommeUnifiedLog.error(error, context: "Agent daemon", logger: log)
             return Exit.transport.rawValue
         }
     }
@@ -355,6 +379,7 @@ enum PommeAgentDaemon {
            let record = PommeAgentVerifiedCodeRecord.read(at: verifiedCodeURL, expectedOwner: verifiedCodeOwner),
            record.sha256 == options.expectedSHA256,
            record.cdhash == enforced.cdhash {
+            PommeUnifiedLog.agentDaemon.debug("Agent digest accepted from the verified code record")
             return options.expectedSHA256
         }
         let digest = try PommeAgentFileTransaction.sha256(URL(fileURLWithPath: executablePath))
@@ -369,6 +394,7 @@ enum PommeAgentDaemon {
         guard options.role == .persistent,
               PommeAgentUpdateApply.installedDefinitionPins(digest, executablePath: executablePath)
         else { return nil }
+        PommeUnifiedLog.agentDaemon.notice("Agent digest accepted because the installed launchd definition pins it")
         return digest
     }
 
@@ -403,6 +429,7 @@ enum PommeAgentDaemon {
                 guard role == .persistent || (role == .recovery && residentRecovery) else { throw error }
                 // A missing host listener must not restart the daemon and
                 // interrupt an active preference attempt.
+                PommeUnifiedLog.agentDaemon.debug("No host listener on port \(port, privacy: .public); retrying")
                 try pause()
             }
         }
@@ -650,12 +677,18 @@ enum PommeAgentDaemon {
                 return
             }
             let received = scratch.prefix(count)
-            guard buffer.count + received.count <= PommeAgentProtocol.maximumFrameBytes else { return }
+            guard buffer.count + received.count <= PommeAgentProtocol.maximumFrameBytes else {
+                PommeUnifiedLog.agentDaemon.error("Closing the host connection: a frame exceeds the size limit")
+                return
+            }
             buffer.append(contentsOf: received)
             while let newline = buffer.firstIndex(of: 0x0A) {
                 let line = Data(buffer[..<newline]); buffer.removeSubrange(...newline)
                 serveTrace?.emit(.frameReady)
-                guard !line.isEmpty, line.count < PommeAgentProtocol.maximumFrameBytes else { return }
+                guard !line.isEmpty, line.count < PommeAgentProtocol.maximumFrameBytes else {
+                    PommeUnifiedLog.agentDaemon.error("Closing the host connection: an empty or oversized frame")
+                    return
+                }
                 // One fixed classification before authentication/actor admission.
                 // Logging adds observer latency; absence is not proof of a stall.
                 serveTrace?.emit(.decodeEntered)
@@ -666,7 +699,10 @@ enum PommeAgentDaemon {
                     guard !terminalAuthority, connection.permitsStream,
                           let jobID = streamJobID(envelope),
                           let frames = try? await routeStream(envelope, agent: agent)
-                    else { return }
+                    else {
+                        PommeUnifiedLog.agentDaemon.error("Closing the host connection: a stream frame was rejected")
+                        return
+                    }
                     for frame in frames {
                         guard let encoded = try? PommeAgentProtocol.encode(frame.envelope()),
                               writeFrame(encoded)
@@ -703,6 +739,10 @@ enum PommeAgentDaemon {
                         : allowedOperation == nil || request.operation == allowedOperation
                     guard permitted, !operationConsumed
                     else {
+                        PommeUnifiedLog.agentDaemon.error("""
+                            Closing the host connection: this connection doesn't permit \
+                            \(request.operation, privacy: .public) consumed=\(operationConsumed, privacy: .public)
+                            """)
                         let response = await connection.receive(line) { _ in
                             throw PommeAgentOperationError.unsupported("This connection doesn't permit \(request.operation)")
                         }
@@ -728,6 +768,8 @@ enum PommeAgentDaemon {
                             sink: signalTraceSink ?? { _, _ in }, isStatus: true)
                     }
                     handlerEntered = true
+                    // Only the operation name: payloads can carry credentials.
+                    PommeUnifiedLog.agentDaemon.debug("Operation \(request.operation, privacy: .public)")
                     let isStart = request.kind == .request && request.operation == "process.start"
                     if isStart { serveTrace?.emit(.startHandlerEntered) }
                     signalTrace?.emit(.guestHandlerEntered)
@@ -739,6 +781,11 @@ enum PommeAgentDaemon {
                         if allowedOperation != nil && !terminalAuthority { try oneShotCleanup() }
                         return result
                     } catch {
+                        PommeUnifiedLog.agentDaemon.error("""
+                            Operation \(request.operation, privacy: .public) failed: \
+                            code=\(PommeAgentConnection.wireFailure(error).code, privacy: .public) \
+                            type=\(String(reflecting: type(of: error)), privacy: .public)
+                            """)
                         if isStart { serveTrace?.emit(.startHandlerFailed) }
                         desktopStartTrace?.emit(.performFailed)
                         signalTrace?.emit(.guestPerformFailed)

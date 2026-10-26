@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import os
 
 /// The production composition boundary for a single, request-bound Recovery
 /// operation.  Core owns the Virtualization objects and VM bookkeeping; this
@@ -449,6 +450,8 @@ enum PommeLiveRecoveryIntegration {
                         + PommeLiveRecoveryIntegration.credentialAuthenticationReserve
             else { throw Error.invalidDependencies }
             let vmName = Self.loggingVMName(for: reference)
+            PommeUnifiedLog.recovery.notice(
+                "[\(vmName, privacy: .public)] Recovery operation \(operation.wireName, privacy: .public) requested: finalState=\(finalState.rawValue, privacy: .public) payloadBytes=\(payload.count, privacy: .public)")
             PommeCore.log("Recovery bootstrap milestone: requestValidated.", vmName: vmName)
 
             let identity: VMIdentity
@@ -624,6 +627,10 @@ enum PommeLiveRecoveryIntegration {
                     finalState: finalState
                 )
             } catch {
+                PommeUnifiedLog.error(
+                    error,
+                    context: "Recovery operation \(operation.wireName) (sessionOwnsRuntime=\(sessionOwnsRuntime))",
+                    vmName: vmName, logger: PommeUnifiedLog.recovery)
                 // Once the session owns the runtime, `run` has already
                 // attempted authoritative cleanup.  For construction failures
                 // before session ownership, clean only this exact share and
@@ -634,12 +641,20 @@ enum PommeLiveRecoveryIntegration {
                         guard cleanup.isComplete else { throw Error.cleanupFailed() }
                         try await runtime.restoreCapturedState()
                     } catch {
+                        PommeUnifiedLog.error(
+                            error, context: "Recovery construction cleanup",
+                            vmName: vmName, logger: PommeUnifiedLog.recovery)
                         if case Error.cleanupFailed = error { throw error }
                         throw Error.cleanupFailed(PommeRetainedCause(error))
                     }
                 }
                 do { try staging.removeHostArtifacts() }
-                catch { throw Error.cleanupFailed(PommeRetainedCause(error)) }
+                catch {
+                    PommeUnifiedLog.error(
+                        error, context: "Recovery host staging removal",
+                        vmName: vmName, logger: PommeUnifiedLog.recovery)
+                    throw Error.cleanupFailed(PommeRetainedCause(error))
+                }
                 throw error
             }
         }
@@ -710,6 +725,10 @@ enum PommeLiveRecoveryIntegration {
                             )
                         }
                     )
+                    if disposition != .terminalLauncherSubmitted {
+                        PommeUnifiedLog.recovery.error(
+                            "[\(vmName, privacy: .public)] Recovery Terminal interaction ended without a launcher: \(String(describing: disposition), privacy: .public)")
+                    }
                     switch disposition {
                     case .terminalLauncherSubmitted:
                         break

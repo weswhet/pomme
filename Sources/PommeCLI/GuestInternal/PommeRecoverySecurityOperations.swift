@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import os
 
 /// The guest-side Recovery security surface is deliberately smaller than the
 /// normal agent command surface.  It is called only after PommeAgent has
@@ -1065,6 +1066,8 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
         guard let operation = Operation(rawValue: operation) else {
             throw PommeGuestRecoverySecurityError.invalidOperation
         }
+        // Only the operation name: payloads carry the volume owner's credentials.
+        PommeUnifiedLog.agentDaemon.notice("Recovery security operation \(operation.rawValue, privacy: .public) starting")
 
         do {
             switch operation {
@@ -1109,8 +1112,18 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
                 return try amfiEnable(expectedVolumeGroupUUID: request.volumeGroupUUID, credentials: request.credentials)
             }
         } catch let error as PommeGuestRecoverySecurityError {
+            PommeUnifiedLog.agentDaemon.error("""
+                Recovery security operation \(operation.rawValue, privacy: .public) failed: \
+                \(error.recoveryFailureCode.rawValue, privacy: .public)
+                """)
             throw error
         } catch {
+            // The wire reports only commandFailed, so keep the cause here.
+            PommeUnifiedLog.error(
+                error,
+                context: "Recovery security operation \(operation.rawValue)",
+                logger: PommeUnifiedLog.agentDaemon
+            )
             throw PommeGuestRecoverySecurityError.commandFailed
         }
     }

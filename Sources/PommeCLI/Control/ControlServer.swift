@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 import Synchronization
 
 final class PommeControlServer: Sendable {
@@ -41,7 +42,9 @@ final class PommeControlServer: Sendable {
             guard Darwin.listen(fd, 8) == 0 else { try throwPOSIX("listen") }
             listenFD.withLock { $0 = fd }
             queue.async { [self] in acceptLoop() }
+            PommeUnifiedLog.helper.notice("control socket listening at \(self.socketURL.path, privacy: .public) pid=\(getpid(), privacy: .public)")
         } catch {
+            PommeUnifiedLog.error(error, context: "control socket start at \(socketURL.path)", logger: PommeUnifiedLog.helper)
             Darwin.close(fd)
             try? FileManager.default.removeItem(at: socketURL)
             throw error
@@ -52,6 +55,7 @@ final class PommeControlServer: Sendable {
         let fd = listenFD.withLock { value -> Int32 in defer { value = -1 }; return value }
         if fd >= 0 { Darwin.close(fd) }
         try? FileManager.default.removeItem(at: socketURL)
+        PommeUnifiedLog.helper.notice("control socket stopped at \(self.socketURL.path, privacy: .public) wasListening=\(fd >= 0, privacy: .public)")
     }
 
     private func acceptLoop() {
@@ -60,7 +64,10 @@ final class PommeControlServer: Sendable {
             guard currentFD >= 0 else { return }
             let fd = Darwin.accept(currentFD, nil, nil)
             if fd >= 0 {
-                guard peerAuthorizer(fd) else { Darwin.close(fd); continue }
+                guard peerAuthorizer(fd) else {
+                    PommeUnifiedLog.helper.error("control socket rejected a peer that is not the current effective user")
+                    Darwin.close(fd); continue
+                }
                 Thread.detachNewThread { [self] in
                     defer { Darwin.close(fd) }
                     var reader = ControlWireCodec.FrameReader()
@@ -70,8 +77,14 @@ final class PommeControlServer: Sendable {
                     Task { await handleRequest(fd: fd, frame: frame, reader: reader); done.signal() }
                     done.wait()
                 }
-            } else if errno == EBADF || errno == EINVAL { return }
-            else if errno != EINTR { return }
+            } else if errno == EBADF || errno == EINVAL {
+                PommeUnifiedLog.helper.info("control socket accept loop ended: listener closed")
+                return
+            } else if errno != EINTR {
+                let code = errno
+                PommeUnifiedLog.helper.error("control socket accept loop ended: errno=\(code, privacy: .public) \(String(cString: strerror(code)), privacy: .public)")
+                return
+            }
         }
     }
 
@@ -82,6 +95,7 @@ final class PommeControlServer: Sendable {
             try write(PommeControlHello(features: features), to: fd)
         }
         catch {
+            PommeUnifiedLog.error(error, context: "control hello", logger: PommeUnifiedLog.helper)
             let id = requestID(in: frame) ?? UUID()
             try? write(PommeControlResponse.failure(id: id, code: "incompatible-protocol", message: error.localizedDescription, report: PommeErrorReport(error)), to: fd)
         }
@@ -92,19 +106,31 @@ final class PommeControlServer: Sendable {
         let request: PommeControlRequest
         do { request = try ControlWireCodec.decodeRequest(frame) }
         catch {
+            PommeUnifiedLog.error(error, context: "control request decode", logger: PommeUnifiedLog.helper)
             try? write(PommeControlResponse.failure(id: requestID(in: frame) ?? UUID(), code: "invalid-request", message: error.localizedDescription, report: PommeErrorReport(error)), to: fd)
             return
         }
         let routed: PommeVMControlRequest
         do { routed = try PommeVMControlRouter.route(request) }
         catch {
+            PommeUnifiedLog.error(error, context: "control request route \(request.command)", logger: PommeUnifiedLog.helper)
             try? write(PommeControlResponse.failure(id: request.id, code: "invalid-command", message: error.localizedDescription, report: PommeErrorReport(error)), to: fd)
             return
         }
         guard features.contains(routed.requiredFeature) else {
+            PommeUnifiedLog.helper.error(
+                "control request \(request.command, privacy: .public) needs unavailable feature \(routed.requiredFeature.rawValue, privacy: .public)"
+            )
             try? write(PommeControlResponse.failure(id: request.id, code: "feature-unavailable", message: routed.requiredFeature.rawValue), to: fd)
             return
         }
+        // Payloads can carry guest input or credentials, so only the
+        // command name and request ID are logged.
+        let startedAt = Date()
+        PommeUnifiedLog.helper.debug("""
+            control request \(request.command, privacy: .public) id=\(request.id.uuidString.lowercased(), privacy: .public) \
+            streaming=\(request.streaming == true, privacy: .public)
+            """)
         let value: String
         if request.streaming == true {
             guard let streamHandler else {
@@ -114,9 +140,25 @@ final class PommeControlServer: Sendable {
             value = await streamHandler(routed, .init(id: request.id, fileDescriptor: fd, reader: reader))
         } else { value = await handler(routed) }
         let response = response(id: request.id, value: value)
+        let elapsed = Date().timeIntervalSince(startedAt)
+        if response.ok {
+            PommeUnifiedLog.helper.info("control request \(request.command, privacy: .public) succeeded in \(elapsed, format: .fixed(precision: 3), privacy: .public)s")
+        } else {
+            let code = response.error?.code ?? "unknown"
+            let message = PommeUnifiedLog.scrubbed(response.error?.message ?? "")
+            // Callers poll the guest agent while it's expected to be absent,
+            // such as during boot, and log their own final timeout.
+            let level: OSLogType = request.command == "agent.perform" ? .debug : .error
+            PommeUnifiedLog.helper.log(level: level, """
+                control request \(request.command, privacy: .public) failed in \(elapsed, format: .fixed(precision: 3), privacy: .public)s: \
+                code=\(code, privacy: .public) message=\(message, privacy: .public)
+                """)
+        }
         do {
             try write(response, to: fd)
-        } catch { }
+        } catch {
+            PommeUnifiedLog.helper.info("control response for \(request.command, privacy: .public) was not delivered; the client disconnected")
+        }
         // Lifecycle cleanup must also finish when the requesting client
         // disconnects after its operation succeeded. Run this only after the
         // response write attempt, so a successful stop cannot race its reply.

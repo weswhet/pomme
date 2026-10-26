@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Errors raised before an AMFI workflow can publish a durable journal.
 enum PommeSecurityAMFIPreflightError: PommeDescribedError, Equatable, Sendable {
@@ -58,6 +59,8 @@ enum PommeSecurityAMFIPreflight {
       guard failure.failureCode == .snapshotPending,
         PommeSecurityWorkflow.canResumeRetainedAMFINormalCheckpoint(journal)
       else { throw failure }
+      PommeUnifiedLog.security.notice(
+        "AMFI preflight: snapshot pending; taking the retained normal-checkpoint path at phase=\(journal.phase.rawValue, privacy: .public)")
       try await requireSIPDisabled()
       return .retainedNormalCheckpoint
     }
@@ -85,6 +88,8 @@ enum PommeSecurityAMFIPreflight {
       && !state.reconciliationRequired
       && (operation == .amfiDisable || !state.baselinePresent)
 
+    PommeUnifiedLog.security.info(
+      "AMFI preflight \(operation.wireName, privacy: .public): alreadyRequested=\(alreadyRequested, privacy: .public) sipCheckRequired=\(!canSkipSIPCheck, privacy: .public)")
     if !canSkipSIPCheck {
       try await requireSIPDisabled()
     }

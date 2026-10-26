@@ -1,6 +1,7 @@
 import ArgumentParser
 import Darwin
 import Foundation
+import os
 
 /// The update check's record of the newest release, like Codex's
 /// `version.json`. It is a cache: deleting it only causes another check.
@@ -42,7 +43,11 @@ struct PommeUpdateCheckCache: Codable, Equatable, Sendable {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        try? data.write(to: url, options: .atomic)
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            PommeUnifiedLog.error(error, context: "update check cache write")
+        }
     }
 
     mutating func record(feed: PommeReleaseFeed, latest: PommeReleaseVersion?, at date: Date) {
@@ -157,6 +162,10 @@ enum PommeUpdateNotifier {
         let context = Context.live()
         guard isEnabled(context) else { return }
         let decision = decide(context: context, cache: PommeUpdateCheckCache.read(from: cacheURL))
+        PommeUnifiedLog.cli.debug("""
+            update check: installed=\(context.buildInfo.version, privacy: .public) \
+            notice=\(decision.notice != nil, privacy: .public) refresh=\(decision.refresh, privacy: .public)
+            """)
         if let notice = decision.notice {
             FileHandle.standardError.write(Data((notice + "\n").utf8))
         }
@@ -185,13 +194,23 @@ enum PommeUpdateNotifier {
         argv.append(nil)
         defer { argv.dropLast().forEach { free($0) } }
         var pid: pid_t = 0
-        _ = posix_spawn(&pid, executable.path, &actions, &attributes, &argv, environ)
+        let status = posix_spawn(&pid, executable.path, &actions, &attributes, &argv, environ)
+        if status == 0 {
+            PommeUnifiedLog.process.info("started background update check pid=\(pid, privacy: .public)")
+        } else {
+            PommeUnifiedLog.process.error("background update check spawn failed errno=\(status, privacy: .public)")
+        }
     }
 
     /// The `--pomme-update-check` process: looks up the newest release and
     /// records it. A failure leaves the cache as it was.
     static func runBackgroundCheck() async -> Int32 {
-        _ = try? await PommeSelfUpdate.status(dependencies: .live)
+        do {
+            _ = try await PommeSelfUpdate.status(dependencies: .live)
+            PommeUnifiedLog.cli.info("background update check finished")
+        } catch {
+            PommeUnifiedLog.error(error, context: "background update check")
+        }
         return 0
     }
 }

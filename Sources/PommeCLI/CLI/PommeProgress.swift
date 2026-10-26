@@ -16,12 +16,23 @@ struct PommeProgressSink: Sendable {
     fileprivate let receive: @Sendable (PommeProgressEvent) -> Void
 
     func register(vm: String) { receive(.register(vm)) }
-    func step(vm: String?, _ label: String) { receive(.step(vm, label, nil, nil, nil)) }
+    // Steps, warnings, and completions are also recorded in the unified log;
+    // measured updates are not, because downloads report every chunk.
+    func step(vm: String?, _ label: String) {
+        PommeUnifiedLog.notice("step: " + label, vmName: vm)
+        receive(.step(vm, label, nil, nil, nil))
+    }
     func measured(vm: String?, _ label: String, fraction: Double?, completedBytes: Int64? = nil, totalBytes: Int64? = nil) {
         receive(.step(vm, label, fraction, completedBytes, totalBytes))
     }
-    func warning(_ message: String) { receive(.warning(message)) }
-    func complete(vm: String?) { receive(.complete(vm)) }
+    func warning(_ message: String) {
+        PommeUnifiedLog.warning(message)
+        receive(.warning(message))
+    }
+    func complete(vm: String?) {
+        PommeUnifiedLog.notice("complete", vmName: vm)
+        receive(.complete(vm))
+    }
     func suspend() { receive(.suspend) }
     func pause() { receive(.pause) }
     func resume() { receive(.resume) }

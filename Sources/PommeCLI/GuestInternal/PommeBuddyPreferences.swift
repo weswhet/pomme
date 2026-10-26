@@ -67,7 +67,7 @@ struct PommeBuddyPreferencesDiagnostic: Sendable {
     }
 
     static func log(_ diagnostic: Self) {
-        let logger = Logger(subsystem: "com.github.weswhet.pomme", category: "buddy-preferences")
+        let logger = Logger(subsystem: PommeUnifiedLog.subsystem, category: "buddy-preferences")
         if diagnostic.isError { logger.error("\(diagnostic.message, privacy: .public)") }
         else { logger.notice("\(diagnostic.message, privacy: .public)") }
     }

@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 enum VMRunStateSnapshot: Equatable, Sendable {
     case stopped
@@ -27,6 +28,15 @@ enum VMRunStateSnapshot: Equatable, Sendable {
         switch self {
         case .running(.recovery), .paused(previousBootMode: .recovery): true
         default: false
+        }
+    }
+
+    /// A stable label for diagnostics and the unified log.
+    var logLabel: String {
+        switch self {
+        case .stopped: "stopped"
+        case .running(let mode): "running-\(mode.rawValue)"
+        case .paused(let mode): "paused-\(mode.rawValue)"
         }
     }
 
@@ -102,15 +112,20 @@ struct VMStateTransaction: Sendable {
         do { try await afterCleanup() }
         catch { throw VMStateTransactionError.transitionFailed(PommeRetainedCause(error)) }
         let requested = original.resolving(finalState)
+        PommeUnifiedLog.recovery.notice(
+            "Restoring run state after Recovery cleanup: original=\(original.logLabel, privacy: .public) requested=\(requested.logLabel, privacy: .public)")
         do {
             try await port.request(requested)
             guard try await port.prove(requested) else {
                 throw VMStateTransactionError.finalStateUnverified()
             }
         } catch let error as VMStateTransactionError {
+            PommeUnifiedLog.error(error, context: "run state restoration", logger: PommeUnifiedLog.recovery)
             throw error
         } catch {
-            throw VMStateTransactionError.finalStateUnverified(PommeRetainedCause(error))
+            let failure = VMStateTransactionError.finalStateUnverified(PommeRetainedCause(error))
+            PommeUnifiedLog.error(failure, context: "run state restoration", logger: PommeUnifiedLog.recovery)
+            throw failure
         }
         return .init(original: original, requested: requested, verified: true)
     }

@@ -1,4 +1,5 @@
 import Foundation
+import os
 @preconcurrency import Virtualization
 
 /// Errors intentionally name a failed proof rather than exposing guest,
@@ -196,8 +197,10 @@ final class PommeRecoveryRuntimeRootPort: PommeRecoveryRootPort, @unchecked Send
 
         do {
             let role = try recoveryRole(for: request.listenerPort)
+            PommeUnifiedLog.recovery.notice("Recovery session prepare: listener=\(role.logName, privacy: .public) port=\(request.listenerPort, privacy: .public)")
             try attach(role)
             try await effects.startRecovery()
+            PommeUnifiedLog.recovery.info("Recovery session: VM start returned; verifying Recovery boot bindings")
             // Starting a VZ runtime is not proof that it booted the requested
             // Recovery system. Recheck every immutable binding after the
             // asynchronous start, immediately before allowing the launcher to
@@ -208,10 +211,13 @@ final class PommeRecoveryRuntimeRootPort: PommeRecoveryRootPort, @unchecked Send
             guard effects.verifyBootstrapAttachment() else { throw PommeRecoveryRuntimeError.attachmentUnverified }
             try await effects.launchRecoveryAgent()
             lock.withLock { state = .waitingForAuthentication }
+            PommeUnifiedLog.recovery.info("Recovery session: agent launched; waiting up to \(self.authenticationTimeout, privacy: .public)s for authentication")
             try await waitForAuthentication(role: role)
             lock.withLock { state = .connected }
+            PommeUnifiedLog.recovery.notice("Recovery session: \(role.logName, privacy: .public) agent authenticated")
             return try configuration.staging.rootEvidence(listenerReady: true)
         } catch {
+            PommeUnifiedLog.error(error, context: "Recovery session prepare", logger: PommeUnifiedLog.recovery)
             coordinator.teardown()
             lock.withLock { state = .failed }
             throw error
@@ -223,14 +229,23 @@ final class PommeRecoveryRuntimeRootPort: PommeRecoveryRootPort, @unchecked Send
         let current = lock.withLock { state }
         guard current != .cleaned && current != .cleaning else { throw PommeRecoveryRuntimeError.invalidLifecycle }
         lock.withLock { state = .cleaning }
+        PommeUnifiedLog.recovery.notice("Recovery session cleanup started from state \(String(describing: current), privacy: .public)")
 
         // Listener/session closure comes before the helper and staging teardown
         // so an accepted connection cannot outlive its request workspace.
         coordinator.teardown()
         do {
             let cleanup = try await effects.stopReapAndClean()
-            guard cleanup.isComplete else { throw PommeRecoveryRuntimeError.cleanupMismatch }
+            guard cleanup.isComplete else {
+                PommeUnifiedLog.recovery.error("""
+                    Recovery session cleanup incomplete: shareDetached=\(cleanup.shareDetached, privacy: .public) \
+                    stagingRemoved=\(cleanup.stagingArtifactsRemoved, privacy: .public) \
+                    framesCleared=\(cleanup.sensitiveFramesCleared, privacy: .public)
+                    """)
+                throw PommeRecoveryRuntimeError.cleanupMismatch
+            }
             lock.withLock { state = .cleaned }
+            PommeUnifiedLog.recovery.notice("Recovery session cleanup complete")
             return .init(
                 shareRemoved: cleanup.shareDetached,
                 launcherRemoved: cleanup.stagingArtifactsRemoved,
@@ -240,6 +255,7 @@ final class PommeRecoveryRuntimeRootPort: PommeRecoveryRootPort, @unchecked Send
                 unknownStateRejected: cleanup.unknownStateRejected
             )
         } catch {
+            PommeUnifiedLog.error(error, context: "Recovery session cleanup", logger: PommeUnifiedLog.recovery)
             lock.withLock { state = .failed }
             throw error
         }

@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import os
 
 /// Recovery environments that Pomme can place into a durable agent plan. The
 /// descriptor is data, so UIAutomation can select the matching state machine
@@ -127,7 +128,18 @@ enum PommeRecoveryProfileSelector {
     }
 
     static func select(for firmware: IPSWMEFirmware) throws -> PommeCreateRecoveryProfileDescriptor {
-        try descriptor(for: firmware)
+        let log = PommeUnifiedLog.recovery
+        do {
+            let profile = try descriptor(for: firmware)
+            log.info("""
+                Recovery profile for \(firmware.version, privacy: .public) (\(firmware.buildid, privacy: .public)): \
+                \(profile.id, privacy: .public) qualification=\(profile.qualification.rawValue, privacy: .public)
+                """)
+            return profile
+        } catch {
+            PommeUnifiedLog.error(error, context: "Recovery profile selection", logger: log)
+            throw error
+        }
     }
 
     private static func experimentalDescriptor(

@@ -143,7 +143,7 @@ actor PommeRecoveryNavigationScreenshotRecorder {
     } catch is CancellationError {
       throw CancellationError()
     } catch {
-      warn("Recovery debug screenshot capture failed; continuing navigation.")
+      warn("Recovery debug screenshot capture failed; continuing navigation.", error: error)
       return
     }
     try Task.checkCancellation()
@@ -153,7 +153,7 @@ actor PommeRecoveryNavigationScreenshotRecorder {
       png = try encodePNG(image)
     } catch {
       if Task.isCancelled { throw CancellationError() }
-      warn("Recovery debug screenshot PNG encoding failed; continuing navigation.")
+      warn("Recovery debug screenshot PNG encoding failed; continuing navigation.", error: error)
       return
     }
     try Task.checkCancellation()
@@ -170,7 +170,7 @@ actor PommeRecoveryNavigationScreenshotRecorder {
       return
     } catch {
       if Task.isCancelled { throw CancellationError() }
-      warn("Recovery debug screenshot write failed; continuing navigation.")
+      warn("Recovery debug screenshot write failed; continuing navigation.", error: error)
       return
     }
     files.append(destination)
@@ -205,7 +205,7 @@ actor PommeRecoveryNavigationScreenshotRecorder {
       log("Recovery debug screenshots: \(candidate.path)")
       return candidate
     } catch {
-      warn("Recovery debug screenshot directory creation failed; continuing without screenshots.")
+      warn("Recovery debug screenshot directory creation failed; continuing without screenshots.", error: error)
       return nil
     }
   }
@@ -227,9 +227,14 @@ actor PommeRecoveryNavigationScreenshotRecorder {
     return mutableData as Data
   }
 
-  private func warn(_ message: String) {
+  /// The underlying error goes only to the unified log; the warning that
+  /// the CLI renders stays a closed category.
+  private func warn(_ message: String, error: (any Error)? = nil) {
     warningMessages.append(message)
     log("Warning: \(message)")
+    if let error {
+      PommeUnifiedLog.error(error, context: "Recovery debug screenshot", vmName: vmName, logger: PommeUnifiedLog.ui)
+    }
   }
 
   private func writePNG(_ png: Data, to destination: URL) throws {

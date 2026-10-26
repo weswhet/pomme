@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import os
 
 /// Durable, redacted cursor for one host-managed MDM enrollment.  It never
 /// records profile bytes, host paths, account names, credentials, or helper
@@ -728,7 +729,30 @@ struct PommeMDMEnrollmentJournalStore: Sendable {
         do { data = try encoder.encode(journal) }
         catch { throw PommeMDMEnrollmentWorkflowError.unreadableJournal(cause: PommeErrorReport(error)) }
         guard data.count <= Self.maximumBytes else { throw PommeMDMEnrollmentWorkflowError.malformedJournal }
-        try Self.writeAtomically(data, destination: journalURL, bundleURL: bundleURL)
+        do {
+            try Self.writeAtomically(data, destination: journalURL, bundleURL: bundleURL)
+        } catch {
+            PommeUnifiedLog.error(
+                error, context: "MDM journal write (phase \(journal.phase.rawValue))",
+                vmName: journal.identity.vmName, logger: PommeUnifiedLog.security)
+            throw error
+        }
+        // Stable enum values and flags only: no profile bytes, paths,
+        // account names, or helper request bodies.
+        PommeUnifiedLog.security.notice("""
+            [\(journal.identity.vmName, privacy: .public)] MDM journal: \
+            phase=\(journal.phase.rawValue, privacy: .public) \
+            generation=\(journal.generation, privacy: .public) \
+            mode=\(journal.enrollmentMode.rawValue, privacy: .public) \
+            finalSecurity=\(journal.finalSecurity.rawValue, privacy: .public) \
+            pendingChild=\(journal.pendingChild?.wireName ?? "none", privacy: .public) \
+            sipChange=\(journal.sipChangeRequested, privacy: .public) \
+            amfiChange=\(journal.amfiChangeRequested, privacy: .public) \
+            dispatched=\(journal.enrollmentDispatched, privacy: .public) \
+            verified=\(journal.enrollmentVerified, privacy: .public) \
+            helperTerminationUnproven=\(journal.helperTerminationUnproven, privacy: .public) \
+            failure=\(journal.failure?.rawValue ?? "none", privacy: .public)
+            """)
     }
 
     private func readJournalIfPresent() throws -> Data? {

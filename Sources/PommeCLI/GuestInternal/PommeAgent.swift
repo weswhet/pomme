@@ -12,7 +12,7 @@ struct PommeAgentStatusTrace: Sendable {
         case waitpidEntered, waitpidReturned
     }
     typealias Sink = @Sendable (Event, Double) -> Void
-    private static let logger = Logger(subsystem: "com.github.weswhet.pomme", category: "actor-status-boundary")
+    private static let logger = Logger(subsystem: PommeUnifiedLog.subsystem, category: "actor-status-boundary")
     private let started = ContinuousClock.now
     let sink: Sink
 
@@ -35,7 +35,7 @@ struct PommeAgentStartTrace: Sendable {
         case actorAdmitted, actorReturned, actorFailed, startEntered, spawnEntered, spawnReturned
     }
     typealias Sink = @Sendable (Event, Double) -> Void
-    private static let logger = Logger(subsystem: "com.github.weswhet.pomme", category: "actor-start-boundary")
+    private static let logger = Logger(subsystem: PommeUnifiedLog.subsystem, category: "actor-start-boundary")
     private let started = ContinuousClock.now
     let sink: Sink
 
@@ -439,6 +439,12 @@ actor PommeAgent {
         trace?.emit(.spawnReturned)
         let job = Job(id: UUID(), pid: launched.pid, startedAt: Date(), exited: false, status: nil, ptyMaster: launched.ptyMaster, stdin: launched.stdin, stdout: launched.stdout, stderr: launched.stderr, outputEOF: [], detached: detached, stdoutLog: Data(), stderrLog: Data(), stdoutLogTruncated: false, stderrLogTruncated: false, stdoutBytes: 0, stderrBytes: 0)
         jobs[job.id] = job
+        // Never the arguments or environment: they can carry credentials.
+        PommeUnifiedLog.agentDaemon.info("""
+            Job started: job=\(job.id.uuidString, privacy: .public) pid=\(launched.pid, privacy: .public) \
+            executable=\(URL(fileURLWithPath: path).lastPathComponent, privacy: .public) \
+            pty=\(pty, privacy: .public) detached=\(detached, privacy: .public)
+            """)
         observeExit(for: job)
         var result: [String: JSONValue] = [
             "jobID": .string(job.id.uuidString.lowercased()),
@@ -629,9 +635,14 @@ actor PommeAgent {
         case CLD_DUMPED: rawStatus = (info.si_status & 0x7f) | 0x80
         default: return job
         }
+        let firstObservation = !job.exited
         job.exited = true
         job.status = rawStatus
         jobs[id] = job
+        if firstObservation { PommeUnifiedLog.agentDaemon.info("""
+            Job exited: job=\(id.uuidString, privacy: .public) pid=\(job.pid, privacy: .public) \
+            rawStatus=\(rawStatus, privacy: .public)
+            """) }
         trace?.emit(.outputWritersClosedEntered)
         let writersClosed = outputWritersClosed(job)
         trace?.emit(.outputWritersClosedReturned)
@@ -845,6 +856,7 @@ actor PommeAgent {
     private func remoteLogin(_ payload: JSONValue) throws -> JSONValue {
         let values = try object(payload); guard let enabled = bool(values["enabled"]) else { throw PommeAgentOperationError.invalid("remoteLogin.set enabled must be a Boolean") }
         let observed = try remoteLoginTransaction(enabled)
+        PommeUnifiedLog.agentDaemon.notice("Remote Login set: requested=\(enabled, privacy: .public) observed=\(observed, privacy: .public)")
         guard observed == enabled else { throw PommeAgentOperationError.remoteLoginVerificationFailed }
         return .object(["enabled": .bool(observed)])
     }
@@ -859,6 +871,10 @@ actor PommeAgent {
                 requestTimeout: try timeout(values, "timeout")
             ).enroll(profilePath: try string(values, "profilePath"))
             let identifier = (execution.payload["profileIdentifier"] as? String) ?? ""
+            PommeUnifiedLog.agentDaemon.notice("""
+                MDM enrollment finished: exitCode=\(execution.exitCode, privacy: .public) \
+                profile=\(identifier, privacy: .private)
+                """)
             return .object(["completed": .bool(execution.exitCode == 0), "profileIdentifier": .string(identifier)])
         case "approve":
             guard Set(values.keys) == ["action", "profileIdentifier", "timeout"] else {
@@ -867,6 +883,7 @@ actor PommeAgent {
             let execution = try GuestMDMEnrollment(
                 requestTimeout: try timeout(values, "timeout")
             ).markUserApproved(profileIdentifier: try string(values, "profileIdentifier"))
+            PommeUnifiedLog.agentDaemon.notice("MDM user approval finished: exitCode=\(execution.exitCode, privacy: .public)")
             return .object(["completed": .bool(execution.exitCode == 0)])
         default: throw PommeAgentOperationError.invalid("mdm.enrollment action must be enroll or approve")
         }
@@ -900,6 +917,10 @@ actor PommeAgent {
         let journal = try PommeAgentUpdateJournal(phase: .prepared, sourceSHA256: executableSHA256, targetSHA256: target, targetBytes: UInt64(bytes), stagedExecutable: staged.path)
         try PommeAgentJournalStore.write(journal, at: journalPath)
         update = journal; activationPending = true
+        PommeUnifiedLog.agentDaemon.notice("""
+            Agent update prepared: transaction=\(journal.transactionID.uuidString, privacy: .public) \
+            source=\(self.executableSHA256, privacy: .public) target=\(target, privacy: .public)
+            """)
         return .object(["transactionID": .string(journal.transactionID.uuidString.lowercased()), "accepted": .bool(true)])
     }
     private func commitUpdate(_ payload: JSONValue) throws -> JSONValue {
@@ -920,6 +941,7 @@ actor PommeAgent {
         try PommeAgentFileTransaction.commit(stage: stagedURL, destination: executableURL)
         let pending = try staged.changing(.activationPending); try PommeAgentJournalStore.write(pending, at: journalPath)
         update = pending; activationPending = true
+        PommeUnifiedLog.agentDaemon.notice("Agent update committed; activation pending: transaction=\(current.transactionID.uuidString, privacy: .public)")
         return .object(["activationPending": .bool(true)])
     }
     private func finalizeUpdate(_ payload: JSONValue) throws -> JSONValue {
@@ -935,6 +957,7 @@ actor PommeAgent {
         let validated = try current.changing(.hostValidated); try PommeAgentJournalStore.write(validated, at: journalPath)
         try PommeAgentJournalStore.remove(at: journalPath)
         update = nil; activationPending = false
+        PommeUnifiedLog.agentDaemon.notice("Agent update finalized: transaction=\(current.transactionID.uuidString, privacy: .public)")
         return .object(["finalized": .bool(true)])
     }
 

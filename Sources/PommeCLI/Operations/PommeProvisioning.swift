@@ -774,6 +774,10 @@ struct PommeProvisioningOrchestrator: Sendable {
         _ = try await exactOwnership(plan.vm)
         let initial = try signer.make(generation: 1, plan: plan, events: [])
         try repository.create(initial)
+        PommeUnifiedLog.notice(
+            "provisioning journal created: finalState=\(plan.finalState.rawValue) "
+                + "experimentalRecovery=\(plan.experimentalRecovery != nil)",
+            vmName: plan.vm.name, logger: PommeUnifiedLog.provisioning)
         try await resume(expectedPlan: plan)
     }
 
@@ -783,6 +787,10 @@ struct PommeProvisioningOrchestrator: Sendable {
         try journal.plan.validate()
         try PommeProvisioningCoordinator.validate(events: journal.events)
         _ = try await exactOwnership(journal.plan.vm)
+        let lastEvent = journal.events.last.map { "\($0.phase.rawValue)/\($0.kind.rawValue)" } ?? "none"
+        PommeUnifiedLog.notice(
+            "provisioning journal resumed: generation=\(journal.generation) events=\(journal.events.count) last=\(lastEvent)",
+            vmName: journal.plan.vm.name, logger: PommeUnifiedLog.provisioning)
         if let pending = journal.events.last, pending.kind == .intent {
             guard pending.phase == .installRecoveryAgent || pending.phase == .restoreFinalState else {
                 throw PommeProvisioningError.unexpectedEvent
@@ -796,6 +804,9 @@ struct PommeProvisioningOrchestrator: Sendable {
         while let next = try PommeProvisioningCoordinator.nextPhase(in: journal) {
             let intent = try PommeProvisioningCoordinator.appendingIntent(to: journal, phase: next.phase, attempt: next.attempt, signer: signer)
             try repository.commit(intent, replacing: journal.generation)
+            PommeUnifiedLog.notice(
+                "phase intent: \(next.phase.rawValue) attempt=\(next.attempt) generation=\(intent.generation)",
+                vmName: intent.plan.vm.name, logger: PommeUnifiedLog.provisioning)
             journal = intent
             journal = try await executeEffect(
                 phase: next.phase,
@@ -832,8 +843,14 @@ struct PommeProvisioningOrchestrator: Sendable {
                 signer: signer
             )
             try repository.commit(completed, replacing: journal.generation)
+            PommeUnifiedLog.notice(
+                "phase receipt: \(phase.rawValue) attempt=\(attempt) generation=\(completed.generation)",
+                vmName: journal.plan.vm.name, logger: PommeUnifiedLog.provisioning)
             return completed
         } catch {
+            PommeUnifiedLog.error(
+                error, context: "provisioning phase \(phase.rawValue) attempt \(attempt)",
+                vmName: journal.plan.vm.name, logger: PommeUnifiedLog.provisioning)
             PommeCore.log(
                 "provisioning phase \(phase.rawValue) failed "
                     + "[code=\(PommeProvisioningFailureDiagnostic.code(for: error))].",
@@ -885,6 +902,9 @@ struct PommeProvisioningOrchestrator: Sendable {
             to: journal, phase: next.phase, attempt: next.attempt, signer: signer)
         try repository.commit(intent, replacing: journal.generation)
         let vmName = intent.plan.vm.name
+        PommeUnifiedLog.notice(
+            "agent repair intent: \(next.phase.rawValue) attempt=\(next.attempt) finalState=\(finalState.rawValue)",
+            vmName: vmName, logger: PommeUnifiedLog.provisioning)
         var provenWithoutFinalState: PommeAgentRepairFinalStateFailure?
         do {
             var route = PommeAgentRepairRoute.normal
@@ -897,6 +917,8 @@ struct PommeProvisioningOrchestrator: Sendable {
                 provenWithoutFinalState = failure
                 throw failure
             } catch {
+                PommeUnifiedLog.error(error, context: "agent repair in normal macOS", vmName: vmName,
+                                      logger: PommeUnifiedLog.provisioning)
                 PommeCore.warning(
                     "repairing the agent in normal macOS failed "
                         + "[code=\(PommeProvisioningFailureDiagnostic.code(for: error))]; repairing it through Recovery.",
@@ -914,8 +936,13 @@ struct PommeProvisioningOrchestrator: Sendable {
                 to: intent, phase: next.phase, attempt: next.attempt, receiptDigest: receipt,
                 completing: [.verifyNormalAgent], signer: signer)
             try repository.commit(completed, replacing: intent.generation)
+            PommeUnifiedLog.notice(
+                "agent repair receipt: \(next.phase.rawValue) route=\(route.rawValue)",
+                vmName: vmName, logger: PommeUnifiedLog.provisioning)
             return route
         } catch {
+            PommeUnifiedLog.error(error, context: "agent repair phase \(next.phase.rawValue)", vmName: vmName,
+                                  logger: PommeUnifiedLog.provisioning)
             if let failure = provenWithoutFinalState {
                 // The agent is installed and verified in normal macOS; a
                 // Recovery reinstall wouldn't fix the final state. Record the
@@ -971,8 +998,14 @@ struct PommeProvisioningOrchestrator: Sendable {
     /// journals and resume work the same on every route.
     private func installAgent(_ plan: PommeProvisioningPlan) async throws -> String {
         do {
-            if let adopted = try await effects.adoptTemplateAgent(plan) { return adopted }
+            if let adopted = try await effects.adoptTemplateAgent(plan) {
+                PommeUnifiedLog.notice("agent installation: adopted the template's agent",
+                                       vmName: plan.vm.name, logger: PommeUnifiedLog.provisioning)
+                return adopted
+            }
         } catch let error as PommeTemplateAgentAdoptionError where error.isAgentUnavailable {
+            PommeUnifiedLog.error(error, context: "template agent adoption", vmName: plan.vm.name,
+                                  logger: PommeUnifiedLog.provisioning)
             // The template's agent never authenticated, so nothing reached
             // the guest, and the adoption withdrew its lease and stopped the
             // VM. Converge through Recovery instead of failing creation.
@@ -980,7 +1013,13 @@ struct PommeProvisioningOrchestrator: Sendable {
                 "the agent from the template didn't connect in normal macOS; installing it through Recovery.",
                 vmName: plan.vm.name)
         }
-        if let proven = try await effects.probeInstalledAgent(plan) { return proven }
+        if let proven = try await effects.probeInstalledAgent(plan) {
+            PommeUnifiedLog.notice("agent installation: existing agent proven in normal macOS",
+                                   vmName: plan.vm.name, logger: PommeUnifiedLog.provisioning)
+            return proven
+        }
+        PommeUnifiedLog.notice("agent installation: installing through Recovery",
+                               vmName: plan.vm.name, logger: PommeUnifiedLog.provisioning)
         return try await effects.installRecoveryAgent(plan)
     }
 }
