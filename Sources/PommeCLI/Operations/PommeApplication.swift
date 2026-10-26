@@ -329,8 +329,8 @@ enum PommeApplication {
     }
 
     /// `allowGuestShutdown` is false only where the stop precedes a Recovery
-    /// boot: an agent-driven shutdown before one desynchronizes the reviewed
-    /// Recovery navigation route.
+    /// boot that navigates Recovery's screens: an agent-driven shutdown before
+    /// one desynchronizes the reviewed navigation route.
     static func stop(
         name: String,
         force: Bool = false,
@@ -732,8 +732,12 @@ enum PommeApplication {
         let statusResult = try status(name: name)
         let statusMode = BootMode(rawValue: stringValue(statusResult.payload["bootMode"])) ?? .normal
         let selectedMode = mode ?? statusMode
-        // A Recovery boot must not follow an agent-driven shutdown.
-        let stopResult = try stop(name: name, allowGuestShutdown: selectedMode != .recovery, lease: scope)
+        // A Recovery boot must not follow an agent-driven shutdown, unless it
+        // goes through the VM's experimental image and skips navigation.
+        let reference = try namedReference(name)
+        let allowGuestShutdown = selectedMode != .recovery
+            || PommeCore.recoveryBootSkipsNavigation(reference: reference)
+        let stopResult = try stop(name: name, allowGuestShutdown: allowGuestShutdown, lease: scope)
         let bootResult = try boot(name: name, mode: selectedMode, options: options, lease: scope)
 
         let payload = restartPayload(

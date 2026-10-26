@@ -959,10 +959,12 @@ struct PommeCore {
             desired: desired,
             observe: { try stableVMRunState(reference: reference) },
             // A mode change stops only to boot the other mode next; a Recovery
-            // target must not be preceded by an agent-driven shutdown.
+            // target must not be preceded by an agent-driven shutdown unless
+            // its boot skips navigation.
             stop: {
                 try await stopForLiveRecovery(
-                    reference: reference, allowAgentShutdown: desired == .stopped)
+                    reference: reference,
+                    allowAgentShutdown: desired == .stopped || recoveryBootSkipsNavigation(reference: reference))
             },
             start: { _ in
                 try await requestLiveRecoveryFinalState(
@@ -5760,8 +5762,10 @@ struct PommeCore {
         }
         let state = try liveRecoveryRunState(from: payload)
         // This stop exists only to free the VM for the Recovery boot that
-        // immediately follows it, so it keeps the framework stop.
-        try await stopForLiveRecovery(reference: reference, allowAgentShutdown: false)
+        // immediately follows it, so it keeps the framework stop unless that
+        // boot skips navigation.
+        try await stopForLiveRecovery(
+            reference: reference, allowAgentShutdown: recoveryBootSkipsNavigation(reference: reference))
         guard try liveRecoveryRunState(
             from: vmStatusPayload(reference: reference)
         ) == .stopped else {
@@ -5770,13 +5774,30 @@ struct PommeCore {
         return state
     }
 
+    /// Whether the next Recovery boot goes through the VM's prepared
+    /// experimental image, whose embedded agent starts without navigating
+    /// Recovery's screens. Such a boot doesn't depend on the language chooser
+    /// that an agent-driven shutdown skips, so the stop before it can let the
+    /// guest shut down cleanly. Pomme learns that a guest update replaced the
+    /// image only when it next selects a backing, so a VM updated since then
+    /// may still fall back to the standard route after this returns true.
+    static func recoveryBootSkipsNavigation(reference: VMReference) -> Bool {
+        guard let plan = try? loadOwnedProvisioningPlan(reference: reference),
+              (try? experimentalRecoveryHasReceipt(plan)) == true,
+              let receipt = try? PommeExperimentalRecoveryImage.receipt(experimentalRecoveryRequest(plan)),
+              receipt.completed, receipt.recoveryReplaced != true
+        else { return false }
+        return true
+    }
+
     /// `allowAgentShutdown` must be false whenever this stop precedes a
     /// Recovery boot. An agent-driven `shutdown -h now` is far faster than VZ's
     /// power-button request, but a Recovery boot that follows one was observed
     /// to reach Recovery Utilities without presenting the language chooser the
     /// reviewed navigation route expects, which desynchronizes navigation. The
-    /// fast path is therefore limited to stops whose target is a stopped VM;
-    /// every Recovery transition keeps the framework stop.
+    /// fast path is therefore limited to stops whose target is a stopped VM
+    /// and to Recovery boots that skip navigation; every other Recovery
+    /// transition keeps the framework stop.
     private static func stopForLiveRecovery(
         reference: VMReference,
         allowAgentShutdown: Bool
