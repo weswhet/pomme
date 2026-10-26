@@ -1389,8 +1389,14 @@ struct PommeCore {
         let safe = message
             .split(whereSeparator: \.isNewline)
             .joined(separator: " ")
-        // A notice, so that it's kept even when the run ends without an error.
-        PommeUnifiedLog.notice(safe)
+        // A notice, so that it's kept even when the run ends without an
+        // error. Timing probes tagged [DEBUG-...] repeat on every status poll,
+        // so they stay debug messages that only a stream shows.
+        if safe.hasPrefix("[DEBUG-") {
+            PommeUnifiedLog.message(safe, level: .debug)
+        } else {
+            PommeUnifiedLog.notice(safe)
+        }
         writeDiagnostic(safe)
     }
 
