@@ -28,6 +28,9 @@ personally.
   restart the VM. Right after a boot, `diskutil` can return incomplete
   information about the startup volume, so the guest now repeats its read-only
   checks for up to 15 seconds before it refuses.
+- `pomme create` no longer fails with `provisioning-phase-failed` when
+  installing the Pomme agent in Recovery takes longer than 5 seconds, for
+  example on a busy host. The installation now gets 30 seconds.
 
 ## Pomme 0.4.0
 

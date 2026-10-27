@@ -141,6 +141,12 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
     // window as a process launch.
     static let directoryExchangeTimeout: TimeInterval = 30
 
+    // Recovery's bootstrap agent copies and verifies the agent on the Data
+    // volume before it replies. That usually takes 0.4-1.6 seconds, but one
+    // install on a loaded host took more than 5 seconds (October 26 lab),
+    // so it gets the same window as a process launch.
+    static let recoveryInstallExchangeTimeout: TimeInterval = 30
+
     private enum Phase { case disconnected, connecting(PommeAgentVSOCKRole), connected(PommeAgentVSOCKRole), failed(PommeAgentVSOCKRole) }
 
     private let transport: any PommeAgentVSOCKTransport
@@ -166,6 +172,9 @@ final class PommeAgentVSOCKCoordinator: @unchecked Sendable {
         guard let operation else { return defaultTimeout }
         if role == .recoveryRuntime, isRecoverySecurityOperation(operation) {
             return recoverySecurityExchangeTimeout
+        }
+        if role == .recoveryBootstrap, operation == PommeRecoveryOperation.installAgent.wireName {
+            return max(defaultTimeout, recoveryInstallExchangeTimeout)
         }
         if role == .normal, isNormalAMFIOperation(operation) {
             return normalAMFIExchangeTimeout

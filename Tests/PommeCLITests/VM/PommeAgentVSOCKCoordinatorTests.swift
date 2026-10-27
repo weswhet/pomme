@@ -163,6 +163,19 @@ struct PommeAgentVSOCKCoordinatorTests {
         }
     }
 
+    @Test("Only the Recovery bootstrap install gets the longer install budget")
+    func recoveryInstallBudget() {
+        let ordinary: TimeInterval = 5
+        let install = PommeAgentVSOCKCoordinator.recoveryInstallExchangeTimeout
+        #expect(install == 30)
+        #expect(PommeAgentVSOCKCoordinator.exchangeTimeout(
+            for: .recoveryBootstrap, operation: "agent.install", defaultTimeout: ordinary) == install)
+        #expect(PommeAgentVSOCKCoordinator.exchangeTimeout(
+            for: .recoveryBootstrap, operation: "agent.describe", defaultTimeout: ordinary) == ordinary)
+        #expect(PommeAgentVSOCKCoordinator.exchangeTimeout(
+            for: .recoveryRuntime, operation: "agent.install", defaultTimeout: ordinary) == ordinary)
+    }
+
     @Test("Recovery security error envelopes survive the extended exchange budget")
     func recoverySecurityErrorEnvelopeUsesExtendedTimeout() async throws {
         let transport = FakeTransport()
