@@ -317,15 +317,20 @@ VMs cloned from a template inherit the template's disk size.
 **Symptom:** Creation prints a warning like one of the following:
 
 ```text
-Warning: Recovery support for macOS VERSION (BUILD) is experimental. Creation will attempt the observed-screen navigation and stop if it does not match.
+Warning: Recovery support for macOS VERSION (BUILD) is experimental; verify the selected creation method on this build.
 ```
 
 ```text
 Warning: macOS VERSION (BUILD) has not been qualified for Recovery automation; creation will attempt it with observed-screen checks.
 ```
 
+```text
+Warning: macOS VERSION (BUILD) is an unreviewed build for this creation method.
+```
+
 **Cause:** The restore image's version and build aren't in Pomme's reviewed
-Recovery profile list. Pomme still attempts creation, with all of its
+Recovery profile list. The last warning appears with
+`--experimental-recovery`. Pomme still attempts creation, with all of its
 identity, locale, display, and ownership checks.
 
 **Resolution:** No action is needed. If Recovery shows a screen that Pomme
