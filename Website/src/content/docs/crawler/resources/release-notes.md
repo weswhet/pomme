@@ -31,6 +31,14 @@ personally.
 - `pomme create` no longer fails with `provisioning-phase-failed` when
   installing the Pomme agent in Recovery takes longer than 5 seconds, for
   example on a busy host. The installation now gets 30 seconds.
+- `pomme template create --provisioned`, `pomme sip disable`, and the other
+  commands that create the owner account wait up to 30 seconds for macOS to
+  report the new account as a volume owner, as intended. A retry limit ended
+  the wait after about 3 seconds, and a provisioned macOS 26.6.2 template
+  failed with "Pomme couldn't parse the guest's report of the startup
+  volume's owners." When that report still doesn't parse, the unified log
+  now records its layout, without identifiers or other values that could
+  identify an account.
 
 ## Pomme 0.4.0
 

@@ -598,9 +598,12 @@ struct PommeSecurityOwnerPreparation: Sendable {
   // account creation or credentials.
   // This is a retry-admission window. An in-flight read-only collection may
   // finish after its deadline, but no new collection starts after it expires.
+  // The window alone bounds the retries. A separate count of three
+  // one-second retries used to end it after about three seconds, and a
+  // provisioned macOS 26.6.2 template failed every first owner preparation
+  // here (October 26 lab).
   private static let freshOwnerAPFSReobserveRetryWindow: TimeInterval = 30
   private static let freshOwnerAPFSReobserveInterval: TimeInterval = 1
-  private static let freshOwnerAPFSReobserveMaximumRetries = 3
 
   private enum AutoLoginStatus: Equatable {
     case enabled(username: String)
@@ -902,9 +905,7 @@ struct PommeSecurityOwnerPreparation: Sendable {
       } catch let error as PommeSecurityOwnerPreparationError {
         guard case .malformedEvidence(.apfsUsers) = error else { throw error }
         let remaining = deadline - now()
-        guard retries < Self.freshOwnerAPFSReobserveMaximumRetries,
-          remaining > 0
-        else { throw error }
+        guard remaining > 0 else { throw error }
         retries += 1
         try await waitForFreshOwnerAPFS(
           min(Self.freshOwnerAPFSReobserveInterval, remaining))
@@ -1893,10 +1894,17 @@ struct PommeSecurityOwnerPreparation: Sendable {
       kind: .apfsUsers,
       acceptedExitCodes: [0]
     )
-    let apfsUsers = try Self.parseAPFSUsers(
-      apfsOutput,
-      expectedDevice: startupIdentity.rootDevice
-    )
+    let apfsUsers: [PommeSecurityOwnerAPFSUser]
+    do {
+      apfsUsers = try Self.parseAPFSUsers(
+        apfsOutput,
+        expectedDevice: startupIdentity.rootDevice
+      )
+    } catch {
+      PommeUnifiedLog.security.error(
+        "APFS owner evidence didn't parse: \(Self.apfsUsersShape(apfsOutput), privacy: .public)")
+      throw error
+    }
 
     let target = users.first(where: { $0.recordName == identity.username })
     let targetSecureTokenEnabled: Bool?
@@ -2753,6 +2761,28 @@ struct PommeSecurityOwnerPreparation: Sendable {
       homeDirectory: home,
       isKnownSystemAccount: isKnownSystemAccount
     )
+  }
+
+  /// The layout of a `diskutil apfs listUsers` reply for the unified log,
+  /// so a report can show which line didn't parse. Every UUID is replaced,
+  /// and only the Type and Volume Owner values are kept: another field, such
+  /// as a password hint, can carry text that the user wrote.
+  static func apfsUsersShape(_ output: String) -> String {
+    let uuid = try! NSRegularExpression(
+      pattern: "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    )
+    let lines = output.split(separator: "\n", omittingEmptySubsequences: false).prefix(40)
+    return lines.map { line in
+      var text = String(line.prefix(120))
+      if let colon = text.firstIndex(of: ":") {
+        let key = text[..<colon].trimmingCharacters(in: CharacterSet(charactersIn: " |+-\t"))
+        if !["type", "volume owner"].contains(key.lowercased()) {
+          text = String(text[...colon]) + " <value>"
+        }
+      }
+      return uuid.stringByReplacingMatches(
+        in: text, range: NSRange(text.startIndex..<text.endIndex, in: text), withTemplate: "<UUID>")
+    }.joined(separator: "\\n")
   }
 
   private static func parseAPFSUsers(

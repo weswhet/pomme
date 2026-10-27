@@ -790,12 +790,13 @@ struct PommeSecurityOwnerPreparationTests {
     #expect(phases.values.contains { $0 == (.verifyOwner, .receipt) })
   }
 
-  @Test("Persistent malformed post-create APFS evidence fails after bounded retries")
+  @Test("Persistent malformed post-create APFS evidence fails when its window ends")
   func persistentMalformedPostCreateAPFSEvidenceFailsClosed() async throws {
     let fixture = OwnerPreparationFixture()
     fixture.apfsOutputSequence = [
       "No cryptographic users for disk1s1\n",
-    ] + Array(repeating: fixture.ambiguousAPFSUsersPlist, count: 4)
+    ] + Array(repeating: fixture.ambiguousAPFSUsersPlist, count: 40)
+    let clock = MonotonicClock()
     let phases = PhaseRecorder()
     let preparation = PommeSecurityOwnerPreparation(
       identity: .init(expectedVolumeGroupUUID: fixture.volumeGroupUUID),
@@ -803,7 +804,8 @@ struct PommeSecurityOwnerPreparationTests {
       executeGuest: fixture.execute,
       executePrivatePTY: fixture.executePTY, readBuddyPreferencesStatus: fixture.buddyStatus,
       reportPhase: phases.record,
-      waitForFreshOwnerAPFS: { _ in }
+      waitForFreshOwnerAPFS: { interval in clock.advance(to: clock.value + interval) },
+      now: { clock.value }
     )
 
     let probe = try preparation.probe()
@@ -813,9 +815,31 @@ struct PommeSecurityOwnerPreparationTests {
       try await preparation.createOwner(password: "opaque-owner-secret", probe: probe)
     }
 
+    // One observation a second for the whole 30-second window, not three
+    // retries and out.
+    #expect(clock.value == 30)
+    #expect(fixture.apfsOutputSequence.count == 10)
     #expect(fixture.ptyCommands.filter { $0.arguments.first == "-addUser" }.count == 1)
-    #expect(fixture.apfsOutputSequence.isEmpty)
     #expect(!phases.values.contains { $0 == (.verifyOwner, .receipt) })
+  }
+
+  @Test("The logged APFS reply keeps its layout but no UUID or free-text value")
+  func apfsUsersShapeRedactsValues() {
+    let output = """
+      Cryptographic users for disk3s5 (2 found)
+      |
+      +-- 1A2B3C4D-1111-2222-3333-444455556666
+      |   Type: Local Open Directory User
+      |   Volume Owner: Yes
+      |   Hint: my dog's name
+      """
+    let shape = PommeSecurityOwnerPreparation.apfsUsersShape(output)
+    #expect(shape.contains("+-- <UUID>"))
+    #expect(shape.contains("Type: Local Open Directory User"))
+    #expect(shape.contains("Volume Owner: Yes"))
+    #expect(shape.contains("Hint: <value>"))
+    #expect(!shape.contains("dog"))
+    #expect(!shape.contains("1A2B3C4D"))
   }
 
   @Test("Malformed initial APFS evidence is rejected before fresh creation")
