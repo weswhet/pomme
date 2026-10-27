@@ -1335,6 +1335,25 @@ struct PommeAMFICheckpointTests {
         #expect(fixture.nvramWriteCount == 1)
     }
 
+    @Test("Normal environment checks repeat until the guest settles, then give up")
+    func normalEnvironmentChecksRetryWhileSettling() throws {
+        var attempts = 0
+        try PommeGuestRecoverySecurityOperations.retryingUntilSettled(timeout: 5, interval: 0.01) {
+            attempts += 1
+            if attempts < 3 { throw PommeGuestRecoverySecurityError.recoveryEnvironmentUnverified }
+        }
+        #expect(attempts == 3)
+
+        attempts = 0
+        #expect(throws: PommeGuestRecoverySecurityError.startupVolumeMismatch) {
+            try PommeGuestRecoverySecurityOperations.retryingUntilSettled(timeout: 0.2, interval: 0.05) {
+                attempts += 1
+                throw PommeGuestRecoverySecurityError.startupVolumeMismatch
+            }
+        }
+        #expect(attempts > 1)
+    }
+
     @Test("Policy disable preserves every already-enabled native policy switch")
     func policyDisablePreservesNativeSwitchArguments() throws {
         let fixture = try AMFICheckpointFixture(
@@ -1711,7 +1730,8 @@ private final class AMFICheckpointFixture: @unchecked Sendable {
             effectiveUserID: { 0 },
             snapshotStore: store,
             nvramMutationVerified: { true },
-            normalEnvironmentVerifier: normalEnvironmentVerifier
+            normalEnvironmentVerifier: normalEnvironmentVerifier,
+            normalEnvironmentSettleTimeout: 0
         )
     }
 

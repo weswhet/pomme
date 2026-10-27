@@ -1035,7 +1035,8 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
         dataRootResolver: DataRootResolver? = nil,
         nvramMutationVerified: (@Sendable () -> Bool)? = nil,
         recoveryEnvironmentVerifier: RecoveryEnvironmentVerifier? = nil,
-        normalEnvironmentVerifier: NormalEnvironmentVerifier? = nil
+        normalEnvironmentVerifier: NormalEnvironmentVerifier? = nil,
+        normalEnvironmentSettleTimeout: TimeInterval = 15
     ) {
         self.process = process
         self.secretProcess = secretProcess
@@ -1050,10 +1051,12 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
             )
         }
         self.normalEnvironmentVerifier = normalEnvironmentVerifier ?? { expected in
-            try Self.verifyNormalEnvironment(
-                expectedVolumeGroupUUID: expected,
-                process: process
-            )
+            try Self.retryingUntilSettled(timeout: normalEnvironmentSettleTimeout) {
+                try Self.verifyNormalEnvironment(
+                    expectedVolumeGroupUUID: expected,
+                    process: process
+                )
+            }
         }
     }
 
@@ -3568,6 +3571,28 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
     /// System volume (or its APFS snapshot) and must not be a BaseSystem or
     /// disk image.  SIP must already be disabled for this stage.  This guard
     /// intentionally does not infer or alter LocalPolicy sip0/custom bits.
+    /// A normal-boot stage can run a second after the agent starts, before
+    /// Disk Arbitration has settled. `diskutil info` then returns a reply
+    /// that doesn't prove the startup volume, so the read-only checks are
+    /// repeated for a short window before the environment is refused.
+    static func retryingUntilSettled(
+        timeout: TimeInterval,
+        interval: TimeInterval = 0.5,
+        _ body: () throws -> Void
+    ) throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            do {
+                return try body()
+            } catch {
+                guard Date().addingTimeInterval(interval) < deadline else { throw error }
+                PommeUnifiedLog.agentDaemon.notice(
+                    "Normal environment not yet verified; retrying: \(String(describing: error), privacy: .public)")
+                Thread.sleep(forTimeInterval: interval)
+            }
+        }
+    }
+
     private static func verifyNormalEnvironment(
         expectedVolumeGroupUUID: UUID,
         process: @escaping ProcessRunner

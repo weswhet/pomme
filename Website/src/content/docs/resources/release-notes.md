@@ -19,6 +19,11 @@ This page lists changes in each version of Pomme, newest first.
   amfi disable NAME --final-state previous`. The VM keeps its earlier agent
   until the operation finishes, so if the command then fails with
   `security-change-unverified`, run it again.
+- `pomme amfi enable` and `pomme amfi disable` no longer fail with
+  `security-change-unverified` when they continue a few seconds after they
+  restart the VM. Right after a boot, `diskutil` can return incomplete
+  information about the startup volume, so the guest now repeats its read-only
+  checks for up to 15 seconds before it refuses.
 
 ## Pomme 0.4.0
 
