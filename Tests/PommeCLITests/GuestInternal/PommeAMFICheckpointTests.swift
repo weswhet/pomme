@@ -1435,6 +1435,48 @@ struct PommeAMFICheckpointTests {
         #expect(fixture.bootArgumentBytes == fixture.initialBootArgumentBytes)
     }
 
+    @Test("A later policy change doesn't reopen a completed enable")
+    func completedEnableSurvivesPolicyChange() throws {
+        let fixture = try AMFICheckpointFixture(
+            initialSecurityMode: "permissive",
+            standardSIPDisabledProfile: true
+        )
+        defer { fixture.cleanup() }
+        let store = try fixture.store()
+        let operations = fixture.operations(store: store, normalEnvironmentVerifier: { _ in })
+        func cycle() throws {
+            _ = try operations.executeNormalAMFIPolicy(
+                role: .persistent, operation: "amfi.normal.policyDisable", payload: fixture.normalPayload)
+            for operation in ["amfi.normal.disable", "amfi.normal.verifyDisabled", "amfi.normal.enable"] {
+                _ = try operations.executeNormalAMFI(
+                    role: .persistent, operation: operation, payload: fixture.normalPayload)
+            }
+            _ = try operations.executeNormalAMFIPolicy(
+                role: .persistent, operation: "amfi.normal.policyEnable", payload: fixture.normalPayload)
+            _ = try operations.executeNormalAMFI(
+                role: .persistent, operation: "amfi.normal.verifyEnabled", payload: fixture.normalPayload)
+            #expect(try store.loadRecord().phase == .enabledVerified)
+        }
+        try cycle()
+
+        // A SIP enable and disable leaves the same profile with new nonces.
+        fixture.driftPolicyNoncesOnly()
+        let status = try operations.execute(
+            role: .recovery,
+            operation: "amfi.status",
+            payload: .object([
+                "volumeGroupUUID": .string(fixture.groupUUID.uuidString.lowercased()),
+                "includeWorkflowState": .bool(true)
+            ])
+        )
+        #expect(status.objectValue?["baselinePresent"] == .bool(false))
+        #expect(status.objectValue?["reconciliationRequired"] == .bool(false))
+
+        try cycle()
+        #expect(try store.loadRecord().snapshot.localPolicy == fixture.policyCanonicalBytes)
+        #expect(fixture.bootArgumentBytes == fixture.initialBootArgumentBytes)
+    }
+
     @Test("A profile that needs bputil is refused in normal boot before any durable write")
     func nonStandardProfileNeedsRecovery() throws {
         let fixture = try AMFICheckpointFixture(initialSecurityMode: "full")

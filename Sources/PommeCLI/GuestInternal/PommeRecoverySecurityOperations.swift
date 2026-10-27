@@ -1308,8 +1308,8 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
                 }
                 guard let record else { return }
                 // A completed tombstone is replaced by the current baseline
-                // only when it matches exactly. One written from a different
-                // environment's read is left to Recovery instead of failing.
+                // only when its receipts prove the completed enable. One that
+                // doesn't is left to Recovery instead of failing.
                 if record.phase == .enabledVerified {
                     guard (try? enabledTombstoneMatches(record, current: current)) == true else {
                         throw PommeGuestRecoverySecurityError.recoveryRequired
@@ -1561,9 +1561,10 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
             let tombstone: Bool
             if let record, record.phase == .enabledVerified {
                 // A phase label alone is not proof that the final normal
-                // boot was observed.  Keep a drifted tombstone visible as a
-                // retained baseline so host reconciliation cannot mistake it
-                // for a completed transaction.
+                // boot was observed.  Keep a tombstone whose receipts or
+                // NVRAM don't prove it visible as a retained baseline so
+                // host reconciliation cannot mistake it for a completed
+                // transaction.
                 tombstone = (try? enabledTombstoneMatches(record, current: state)) == true
             } else {
                 tombstone = false
@@ -2856,6 +2857,11 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
         )
     }
 
+    /// Whether a completed enable's receipts prove it and the exact
+    /// baseline NVRAM shows that the override is still absent. The policy
+    /// receipt is proven against the policy the restore observed, not the
+    /// current one: a later native policy change, such as a SIP cycle that
+    /// rotates LocalPolicy's nonces, doesn't reopen a finished transaction.
     private func enabledTombstoneMatches(
         _ record: PommeGuestAMFISnapshotRecord,
         current: PommeGuestAMFIState
@@ -2866,7 +2872,8 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
               nvramCheckpoint.action == .restore,
               nvramCheckpoint.receipt,
               nvramCheckpoint.target == record.snapshot.nvram,
-              record.policyCheckpoint?.action == .restore else {
+              let policyCheckpoint = record.policyCheckpoint,
+              policyCheckpoint.action == .restore else {
             return false
         }
         let baseline = try parseSnapshotPolicy(
@@ -2878,9 +2885,14 @@ struct PommeGuestRecoverySecurityOperations: Sendable {
         guard nvramCheckpoint.before == disabledTarget else {
             return false
         }
+        let observed = try parseSnapshotPolicy(
+            policyCheckpoint.observedPolicy,
+            expectedVolumeGroupUUID: record.volumeGroupUUID,
+            strict: true
+        )
         return try policyCheckpointMatches(
             record: record,
-            current: current,
+            current: PommeGuestAMFIState(policy: observed, snapshot: current.snapshot),
             expected: {
                 $0.restorableCanonical == baseline.restorableCanonical
                     && $0.nativeStableIdentityCanonical == baseline.nativeStableIdentityCanonical

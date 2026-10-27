@@ -11,7 +11,18 @@ personally.
 
 ## Pomme 0.4.1 (pre-release)
 
-No changes yet.
+### Fixes
+
+- `pomme amfi disable` no longer fails with `security-operation-pending` when
+  you run it again after `pomme amfi enable` and a SIP change. Pomme required
+  the boot policy to match the one it saw when it finished enabling AMFI, byte
+  for byte, but `pomme sip enable` and `pomme sip disable` rewrite the policy.
+  Pomme now recognizes a finished enable from its own record and the unchanged
+  boot arguments. To finish an operation that already stopped with this error,
+  update Pomme and run the command that the error suggests, such as `pomme
+  amfi disable NAME --final-state previous`. The VM keeps its earlier agent
+  until the operation finishes, so if the command then fails with
+  `security-change-unverified`, run it again.
 
 ## Pomme 0.4.0
 
