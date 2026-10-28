@@ -9,7 +9,14 @@ working. You should too. The entries below are the official record, so the
 System has been told to keep its commentary out of them. It's taking this
 personally.
 
-## Pomme 0.4.1 (pre-release)
+## Pomme 0.4.1
+
+Pomme 0.4.1 fixes failures in `pomme amfi enable`, `pomme amfi disable`,
+`pomme create`, and `pomme template create --provisioned`. Like 0.4.0, it's
+beta software, and it was released before the release qualification matrices
+for Tahoe and Sequoia ran. For what qualification covers, see
+[Supported macOS versions](/crawler/concepts/os-qualification/#release-qualification).
+To update, run `pomme update`.
 
 ### Fixes
 
@@ -37,8 +44,8 @@ personally.
   the wait after about 3 seconds, and a provisioned macOS 26.6.2 template
   failed with "Pomme couldn't parse the guest's report of the startup
   volume's owners." When that report still doesn't parse, the unified log
-  now records its layout, without identifiers or other values that could
-  identify an account.
+  now records its layout but leaves out identifiers and other values that
+  could identify an account.
 
 ## Pomme 0.4.0
 
