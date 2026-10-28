@@ -342,14 +342,19 @@ struct GuestCommandRequest: Sendable {
     /// Payload for the durable terminal-session service.  Terminal sessions
     /// deliberately omit the bounded process timeout and file redirections;
     /// their PTY and replay spool are owned by the guest terminal service.
-    func terminalPayload(shell: Bool = false) -> [String: Any] {
+    func terminalPayload(shell: Bool = false, terminalType: String = PommeGuestTerminalType.current()) -> [String: Any] {
         var payload: [String: Any] = [
             "path": path,
             "arguments": arguments,
             "shell": shell
         ]
         if let cwd { payload["cwd"] = cwd }
-        if !environment.isEmpty { payload["environment"] = environment }
+        // The agent's launchd environment has no TERM, and without one zsh
+        // and other line editors can't erase characters on the screen. An
+        // explicit --env TERM=... still wins.
+        var environment = environment
+        if environment["TERM"] == nil { environment["TERM"] = terminalType }
+        payload["environment"] = environment
         if let user { payload["user"] = user }
         if let uid { payload["uid"] = uid }
         if let group { payload["group"] = group }
@@ -1085,5 +1090,37 @@ struct GuestCommandResult: Sendable {
     private static func optionalBool(_ value: Any?, label: String) throws -> Bool? {
         guard let value else { return nil }
         return try PommeAgentCLIModelSupport.bool(value, label: label)
+    }
+}
+
+/// Chooses the TERM value for a guest terminal session.
+enum PommeGuestTerminalType {
+    /// Every supported macOS release includes this terminal description.
+    static let fallback = "xterm-256color"
+
+    /// The host's TERM when macOS includes a description for it, so the guest
+    /// can look it up too; otherwise ``fallback``. Terminals such as Ghostty
+    /// and kitty install their own descriptions, which a guest won't have.
+    static func current(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        isSystemTerminfo: (String) -> Bool = Self.isSystemTerminfo
+    ) -> String {
+        guard let term = environment["TERM"],
+              !term.isEmpty, term != "dumb",
+              term.utf8.count <= 64,
+              term.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "+-._".contains($0)) }),
+              isSystemTerminfo(term)
+        else {
+            return fallback
+        }
+        return term
+    }
+
+    /// Whether `/usr/share/terminfo` has an entry for `term`. macOS files
+    /// entries under the hexadecimal code of their first character.
+    static func isSystemTerminfo(_ term: String) -> Bool {
+        guard let first = term.utf8.first else { return false }
+        let directory = String(first, radix: 16)
+        return FileManager.default.fileExists(atPath: "/usr/share/terminfo/\(directory)/\(term)")
     }
 }

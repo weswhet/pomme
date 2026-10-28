@@ -27,6 +27,29 @@ struct PommeAgentCLIModelsTests {
         #expect(try GuestCommandRequest.parse(from: control).path == "/bin/sh")
     }
 
+    @Test("Terminal sessions carry a TERM unless the caller sets one")
+    func terminalSessionTerm() throws {
+        let shell = GuestCommandRequest(path: "/bin/sh", arguments: [], timeout: 60, pty: true, environment: ["POMME_TEST": "yes"])
+        let environment = try #require(shell.terminalPayload(shell: true, terminalType: "xterm-256color")["environment"] as? [String: String])
+        #expect(environment == ["POMME_TEST": "yes", "TERM": "xterm-256color"])
+
+        let explicit = GuestCommandRequest(path: "/bin/sh", arguments: [], timeout: 60, pty: true, environment: ["TERM": "vt100"])
+        let kept = try #require(explicit.terminalPayload(terminalType: "xterm-256color")["environment"] as? [String: String])
+        #expect(kept == ["TERM": "vt100"])
+    }
+
+    @Test("The guest TERM is the host's only when macOS describes it")
+    func guestTerminalType() {
+        let system: (String) -> Bool = { ["xterm-256color", "screen-256color"].contains($0) }
+        #expect(PommeGuestTerminalType.current(environment: ["TERM": "screen-256color"], isSystemTerminfo: system) == "screen-256color")
+        #expect(PommeGuestTerminalType.current(environment: ["TERM": "xterm-ghostty"], isSystemTerminfo: system) == "xterm-256color")
+        #expect(PommeGuestTerminalType.current(environment: [:], isSystemTerminfo: system) == "xterm-256color")
+        #expect(PommeGuestTerminalType.current(environment: ["TERM": "dumb"], isSystemTerminfo: { _ in true }) == "xterm-256color")
+        #expect(PommeGuestTerminalType.current(environment: ["TERM": "../78/xterm"], isSystemTerminfo: { _ in true }) == "xterm-256color")
+        #expect(PommeGuestTerminalType.isSystemTerminfo("xterm-256color"))
+        #expect(!PommeGuestTerminalType.isSystemTerminfo("pomme-no-such-terminal"))
+    }
+
     @Test("Identity selectors, PTY, and detached execution are mutually exclusive")
     func processValidation() {
         let conflictingUser = GuestCommandRequest(path: "/bin/true", arguments: [], timeout: 1, user: "root", uid: 0)

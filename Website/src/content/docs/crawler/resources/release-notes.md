@@ -23,6 +23,16 @@ personally.
   `guest-package-install-failed`, and exits with the installer's status. For
   details, see [Install packages](/crawler/guides/install-packages/).
 
+### Fixes
+
+- In `pomme shell` and `pomme exec --pty`, Backspace now erases characters
+  on the screen after you switch to another user, for example with
+  `su - pomme`. The guest terminal had no `TERM`, so zsh redrew each erased
+  character as a space. Pomme now sets `TERM` to the host's terminal type
+  when macOS includes a description of it, and to `xterm-256color`
+  otherwise. To choose a different type, pass `--env TERM=VALUE`. For
+  details, see [Run guest commands](/crawler/guides/run-guest-commands/).
+
 ## Pomme 0.4.1
 
 Pomme 0.4.1 fixes failures in `pomme amfi enable`, `pomme amfi disable`,

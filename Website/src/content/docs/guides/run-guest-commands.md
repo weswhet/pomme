@@ -99,7 +99,10 @@ change how `pomme exec` runs the command:
 
 The command receives the `HOME`, `USER`, `LOGNAME`, and `SHELL` environment
 variables for the account it runs as. Values that you set with `--env` take
-precedence. `PATH` is the guest agent's `PATH`.
+precedence. `PATH` is the guest agent's `PATH`. A command that runs in a
+pseudo-terminal, from `pomme exec --pty` or `pomme shell`, also receives
+`TERM`. Pomme uses the host's `TERM` when macOS includes a description of
+that terminal type, and `xterm-256color` otherwise.
 
 For example, the following command pipes a host file into a command that runs
 as a guest user in that user's home folder:
