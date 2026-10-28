@@ -122,5 +122,6 @@ the keyhole.
 ## Next floor
 
 - [Run commands in a VM](/crawler/guides/run-guest-commands/)
+- [Install loot](/crawler/guides/install-packages/)
 - [`pomme cp` reference](/crawler/reference/cli/pomme-cp/)
 - [`pomme cat` reference](/crawler/reference/cli/pomme-cat/)

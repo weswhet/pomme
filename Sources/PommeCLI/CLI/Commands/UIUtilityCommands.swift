@@ -248,7 +248,7 @@ enum CommandCatalog {
     static let groups: [Group] = [
         Group(name: "vm", commands: ["create", "list|ls", "start", "stop", "restart", "pause", "resume", "delete|rm", "status", "inspect", "snapshot", "template", "firmware"]),
         Group(name: "agent", commands: ["agent status", "agent repair", "agent update"]),
-        Group(name: "guest", commands: ["exec", "shell", "log", "jobs", "sessions", "cp", "cat"]),
+        Group(name: "guest", commands: ["exec", "shell", "log", "jobs", "sessions", "cp", "cat", "install"]),
         Group(name: "security", commands: ["sip", "amfi", "mdm"]),
         Group(name: "access", commands: ["remote-login", "screen-sharing", "ui click|key|key-sequence|keys|type|screenshot"]),
         Group(name: "config", commands: ["config init", "config validate", "config render", "ipsw"]),

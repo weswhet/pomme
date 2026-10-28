@@ -111,5 +111,6 @@ with `pomme cp`.
 ## What's next
 
 - [Run commands in a VM](/guides/run-guest-commands/)
+- [Install packages](/guides/install-packages/)
 - [`pomme cp` reference](/reference/cli/pomme-cp/)
 - [`pomme cat` reference](/reference/cli/pomme-cat/)

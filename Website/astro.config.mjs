@@ -72,6 +72,7 @@ export default defineConfig({
 						'guides/run-guest-commands',
 						'guides/use-terminal-sessions',
 						'guides/transfer-files',
+						'guides/install-packages',
 						'guides/view-guest-logs',
 					],
 				},

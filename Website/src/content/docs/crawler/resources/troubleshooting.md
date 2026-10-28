@@ -94,6 +94,7 @@ Pomme uses the following categories. Think of them as camera angles:
 | `template` | Templates and clones. |
 | `firmware` | `pomme firmware` and boot firmware repair. |
 | `ui` | UI automation in the guest. |
+| `install` | Package installation with `pomme install`. |
 
 macOS keeps notices and errors, and Pomme records its diagnostics and progress
 steps as notices, so they're kept even when a command is interrupted. macOS

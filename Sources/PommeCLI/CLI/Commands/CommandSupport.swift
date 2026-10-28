@@ -82,7 +82,13 @@ struct TimeoutOptions: ParsableArguments {
 
     /// Validates and returns the configured timeout.
     func value() throws -> TimeInterval {
-        let value = timeout ?? Constants.defaultGuestCommandTimeout
+        try value(default: Constants.defaultGuestCommandTimeout)
+    }
+
+    /// Validates and returns the configured timeout, or `fallback` for a
+    /// command whose work takes longer than a typical guest command.
+    func value(default fallback: TimeInterval) throws -> TimeInterval {
+        let value = timeout ?? fallback
         guard value.isFinite, value > 0 else {
             throw ValidationError("--timeout must be greater than zero.")
         }
@@ -93,10 +99,14 @@ struct TimeoutOptions: ParsableArguments {
 /// Resolves explicit VM arguments or the configured environment default.
 enum VMTargetResolver {
     /// Returns validated VM names, falling back to `POMME_VM_NAME` when no names were supplied.
-    static func names(from arguments: [String], allowMultiple: Bool = true) throws -> [String] {
+    static func names(
+        from arguments: [String],
+        allowMultiple: Bool = true,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> [String] {
         let candidates: [String]
         if arguments.isEmpty {
-            guard let configured = ProcessInfo.processInfo.environment["POMME_VM_NAME"], !configured.isEmpty else {
+            guard let configured = environment["POMME_VM_NAME"], !configured.isEmpty else {
                 throw ValidationError("Specify a VM name or set POMME_VM_NAME.")
             }
             candidates = [configured]

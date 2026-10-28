@@ -463,6 +463,7 @@ extension PommeErrorCode {
     static let guestFeatureUnsupported: Self = "guest-feature-unsupported"
     static let guestFileTransferFailed: Self = "guest-file-transfer-failed"
     static let guestJobNotFound: Self = "guest-job-not-found"
+    static let guestPackageInstallFailed: Self = "guest-package-install-failed"
 }
 
 extension PommeErrorCatalog {
@@ -549,6 +550,10 @@ extension PommeErrorCatalog {
         .init(.guestJobNotFound, area: "Guest agent",
               title: "The guest job doesn't exist.",
               cause: "No detached guest job has the ID that you gave. Jobs end when the guest restarts.",
-              resolution: ["Run `pomme jobs list NAME` to see the VM's jobs."])
+              resolution: ["Run `pomme jobs list NAME` to see the VM's jobs."]),
+        .init(.guestPackageInstallFailed, area: "Guest agent",
+              title: "The guest couldn't install the package.",
+              cause: "`/usr/sbin/installer` in the guest exited with a nonzero status while `pomme install` ran it. Its output, printed before the error, gives the reason.",
+              resolution: ["Read the installer output for the reason.", "Run `pomme exec NAME -- /usr/bin/tail -n 50 /var/log/install.log` to see the guest's installation log."])
     ]
 }

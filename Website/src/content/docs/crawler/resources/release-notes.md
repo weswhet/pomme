@@ -9,6 +9,20 @@ working. You should too. The entries below are the official record, so the
 System has been told to keep its commentary out of them. It's taking this
 personally.
 
+## Pomme 0.5.0 (pre-release)
+
+### Features
+
+- `pomme install VM_NAME --pkg PATH` installs a flat macOS installer package
+  from the host in a running VM. Pomme copies the package into a new
+  root-only folder in the guest, runs `/usr/sbin/installer` as `root` with the
+  startup volume as the target, and removes the copy afterwards. Pomme
+  waits up to 30 minutes for the installer unless you pass `--timeout`. If
+  the wait ends first, the installer keeps running in the guest and Pomme
+  leaves the copy in place. A failed installation prints the installer's output, reports
+  `guest-package-install-failed`, and exits with the installer's status. For
+  details, see [Install packages](/crawler/guides/install-packages/).
+
 ## Pomme 0.4.1
 
 Pomme 0.4.1 fixes failures in `pomme amfi enable`, `pomme amfi disable`,

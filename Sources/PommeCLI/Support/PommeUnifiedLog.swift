@@ -43,6 +43,8 @@ enum PommeUnifiedLog {
     static let firmware = Logger(subsystem: subsystem, category: "firmware")
     /// UI automation in the guest.
     static let ui = Logger(subsystem: subsystem, category: "ui")
+    /// Package installation in the guest with `pomme install`.
+    static let install = Logger(subsystem: subsystem, category: "install")
 
     /// Keys whose values are redacted in `key=value` and `key: value` text.
     private static let secretKeyPattern =

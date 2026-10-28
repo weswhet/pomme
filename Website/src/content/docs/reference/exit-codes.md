@@ -21,8 +21,9 @@ The following table describes the exit codes that Pomme itself returns.
 
 ## Guest program exit codes
 
-The `pomme exec` command and `pomme jobs wait` return the exit status of the
-guest program:
+The `pomme exec`, `pomme jobs wait`, and `pomme install` commands return the
+exit status of the guest program. For `pomme install`, that's the exit status
+of `/usr/sbin/installer`:
 
 | Guest result | Host exit code |
 | --- | --- |
