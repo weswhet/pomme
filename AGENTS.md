@@ -33,16 +33,16 @@ when the test is complete, but the source template must remain unchanged. Do
 not add `--provisioned` to these templates:
 that would create an owner and change the security posture.
 
-Since October 24, 2026, the templates live on the external `external` volume at
-`/Volumes/External/pomme/Templates`. Each bundle in
+Since October 28, 2026, the templates live on an external volume that reads
+and writes faster than the one they used before. Each bundle in
 `~/Library/Application Support/pomme/Templates` is a symbolic link to its copy
-there. Don't replace the `Templates` folder itself with a link: Pomme can't list
-the contents of a linked folder. Pomme can't see the templates while `external` is
-unmounted, and `pomme template create` still writes new templates to the
-internal folder. Because
-`clonefile` can't cross volumes, `--from-template` makes a full copy of the
-template's disk on the internal drive, so clones take longer than they did. Keep
-the clones themselves on the internal drive.
+there, so run `readlink` on a bundle to find the volume. Don't replace the
+`Templates` folder itself with a link: Pomme can't list the contents of a
+linked folder. Pomme can't see the templates while that volume is unmounted,
+and `pomme template create` still writes new templates to the internal folder.
+Because `clonefile` can't cross volumes, `--from-template` makes a full copy of
+the template's disk on the internal drive, so clones take longer than they did.
+Keep the clones themselves on the internal drive.
 
 ## Build and sign consistently
 
