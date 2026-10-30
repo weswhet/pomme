@@ -5,7 +5,15 @@ description: Changes in each version of Pomme.
 
 This page lists changes in each version of Pomme, newest first.
 
-## Pomme 0.5.0 (pre-release)
+## Pomme 0.5.0
+
+Pomme 0.5.0 adds `pomme install`, which installs a macOS installer package
+from the host in a running VM, and fixes Backspace in guest terminals after
+you switch users. Like 0.4.1, it's beta software, and it was released before
+the release qualification matrices for Tahoe and Sequoia ran. For what
+qualification covers, see
+[Supported macOS versions](/concepts/os-qualification/#release-qualification).
+To update, run `pomme update`.
 
 ### Features
 
