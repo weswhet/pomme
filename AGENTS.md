@@ -1,5 +1,15 @@
 # Pomme agent instructions
 
+## Keep personal details out of the repository
+
+This repository is public. Never commit personal or local development details
+in any file or commit message: drive and volume names, host names, IP
+addresses, domains, server or container names, paths under your home folder,
+email addresses, credentials or where they're stored, or the UDIDs and serial
+numbers of real or virtual machines. Use placeholders, such as `~/`,
+`mdm.example.com`, `192.0.2.10`, or `<UDID>`, and keep the real values in
+private notes. Search the change for them before you commit.
+
 ## Disposable test VM resources
 
 For future disposable test VMs, explicitly pass `--disk-size 40GB --memory 4GB`
